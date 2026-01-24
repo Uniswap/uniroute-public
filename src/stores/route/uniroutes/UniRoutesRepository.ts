@@ -29,6 +29,7 @@ import {
 } from '../../../core/pool-discovery/TopPoolsSelector';
 import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
+import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -192,7 +193,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           .map(p => {
             const pool = p as V4PoolInfo;
             const liquidity = BigInt(pool.liquidity);
-            if (liquidity === 0n) {
+            // On V4 pools, a liquidity of 0 with no hooks means the pool is inactive.
+            // Hooked pools might have external liquidity, so we keep them.
+            if (liquidity === 0n && pool.hooks === ADDRESS_ZERO) {
               return null;
             }
 
