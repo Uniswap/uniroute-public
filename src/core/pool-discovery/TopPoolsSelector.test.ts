@@ -11,7 +11,10 @@ import {Address} from '../../models/address/Address';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from './interface';
 import {HardcodedChainRepository} from '../../stores/chain/hardcoded/HardcodedChainRepository';
-import {BASE_TOKENS_PER_CHAIN} from '../../lib/tokenUtils';
+import {
+  BASE_TOKENS_PER_CHAIN,
+  WRAPPED_NATIVE_CURRENCY,
+} from '../../lib/tokenUtils';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {poolSelectionConfig} from 'src/lib/config';
@@ -620,6 +623,191 @@ describe('BasicTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
+    });
+
+    it('should always include top 1 WETH and ETH pools for each intermediary token', () => {
+      const intermediaryToken = '0x0000000000000000000000000000000000000003';
+      const intermediaryTokenIds = [intermediaryToken];
+      const selectedPoolIds = new Set<string>();
+
+      const wethAddress =
+        WRAPPED_NATIVE_CURRENCY[ChainId.MAINNET].address.toLowerCase();
+      const ethAddress = ADDRESS_ZERO.toLowerCase();
+
+      // Create pools for the intermediary token with higher TVL than WETH/ETH pools
+      // to ensure they get selected in top N, while WETH/ETH are added separately
+      const intermediaryPool1 = {
+        ...mockV3Pool,
+        id: '0xintermediary1',
+        token0: {id: intermediaryToken},
+        token1: {id: '0x0000000000000000000000000000000000000004'},
+        tvlUSD: 10000,
+      } as V3PoolInfo;
+
+      const intermediaryPool2 = {
+        ...mockV3Pool,
+        id: '0xintermediary2',
+        token0: {id: intermediaryToken},
+        token1: {id: '0x0000000000000000000000000000000000000005'},
+        tvlUSD: 8000,
+      } as V3PoolInfo;
+
+      // Create WETH pool with lower TVL (so it won't be in top N, but will be added separately)
+      const wethPoolHigh = {
+        ...mockV3Pool,
+        id: '0xwethHigh',
+        token0: {id: intermediaryToken},
+        token1: {id: wethAddress},
+        tvlUSD: 5000,
+      } as V3PoolInfo;
+
+      // Create WETH pool with even lower TVL (should not be selected)
+      const wethPoolLow = {
+        ...mockV3Pool,
+        id: '0xwethLow',
+        token0: {id: intermediaryToken},
+        token1: {id: wethAddress},
+        tvlUSD: 1000,
+      } as V3PoolInfo;
+
+      // Create ETH pool with lower TVL (so it won't be in top N, but will be added separately)
+      const ethPool = {
+        ...mockV3Pool,
+        id: '0xethPool',
+        token0: {id: intermediaryToken},
+        token1: {id: ethAddress},
+        tvlUSD: 3000,
+      } as V3PoolInfo;
+
+      const allPools = [
+        intermediaryPool1,
+        intermediaryPool2,
+        wethPoolHigh,
+        wethPoolLow,
+        ethPool,
+      ];
+
+      // Build token pool index
+      const tokenPoolIndex = buildTokenPoolIndex(allPools);
+
+      const result = BasicTopPoolsSelector['getTopNPoolsForIntermediaryToken'](
+        intermediaryTokenIds,
+        selectedPoolIds,
+        tokenPoolIndex,
+        ChainId.MAINNET,
+        poolSelectionConfig
+      );
+
+      // Should include:
+      // 1. Top N pools for intermediary token (intermediaryPool1, intermediaryPool2 - highest TVL)
+      // 2. Top 1 WETH pool (wethPoolHigh - highest WETH TVL, added separately)
+      // 3. Top 1 ETH pool (ethPool - added separately)
+      const resultIds = result.map(p => p.id.toLowerCase());
+      expect(resultIds).toContain('0xintermediary1');
+      expect(resultIds).toContain('0xintermediary2');
+      expect(resultIds).toContain('0xwethhigh'); // Top WETH pool (added separately)
+      expect(resultIds).toContain('0xethpool'); // ETH pool (added separately)
+      // Should NOT include the lower TVL WETH pool
+      expect(resultIds).not.toContain('0xwethlow');
+    });
+
+    it('should handle multiple intermediary tokens and include ETH/WETH pools for each', () => {
+      const intermediaryToken1 = '0x0000000000000000000000000000000000000003';
+      const intermediaryToken2 = '0x0000000000000000000000000000000000000004';
+      const intermediaryTokenIds = [intermediaryToken1, intermediaryToken2];
+      const selectedPoolIds = new Set<string>();
+
+      const wethAddress =
+        WRAPPED_NATIVE_CURRENCY[ChainId.MAINNET].address.toLowerCase();
+      const ethAddress = ADDRESS_ZERO.toLowerCase();
+
+      // Create pools for first intermediary token
+      // Regular pools have higher TVL so they get selected in top N
+      const token1Pool = {
+        ...mockV3Pool,
+        id: '0xtoken1pool',
+        token0: {id: intermediaryToken1},
+        token1: {id: '0x0000000000000000000000000000000000000005'},
+        tvlUSD: 10000,
+      } as V3PoolInfo;
+
+      // WETH/ETH pools have lower TVL so they're added separately
+      const token1WethPool = {
+        ...mockV3Pool,
+        id: '0xtoken1weth',
+        token0: {id: intermediaryToken1},
+        token1: {id: wethAddress},
+        tvlUSD: 2000,
+      } as V3PoolInfo;
+
+      const token1EthPool = {
+        ...mockV3Pool,
+        id: '0xtoken1eth',
+        token0: {id: intermediaryToken1},
+        token1: {id: ethAddress},
+        tvlUSD: 1500,
+      } as V3PoolInfo;
+
+      // Create pools for second intermediary token
+      // Regular pools have higher TVL so they get selected in top N
+      const token2Pool = {
+        ...mockV3Pool,
+        id: '0xtoken2pool',
+        token0: {id: intermediaryToken2},
+        token1: {id: '0x0000000000000000000000000000000000000006'},
+        tvlUSD: 8000,
+      } as V3PoolInfo;
+
+      // WETH/ETH pools have lower TVL so they're added separately
+      const token2WethPool = {
+        ...mockV3Pool,
+        id: '0xtoken2weth',
+        token0: {id: intermediaryToken2},
+        token1: {id: wethAddress},
+        tvlUSD: 3000,
+      } as V3PoolInfo;
+
+      const token2EthPool = {
+        ...mockV3Pool,
+        id: '0xtoken2eth',
+        token0: {id: intermediaryToken2},
+        token1: {id: ethAddress},
+        tvlUSD: 2500,
+      } as V3PoolInfo;
+
+      const allPools = [
+        token1Pool,
+        token1WethPool,
+        token1EthPool,
+        token2Pool,
+        token2WethPool,
+        token2EthPool,
+      ];
+
+      // Build token pool index
+      const tokenPoolIndex = buildTokenPoolIndex(allPools);
+
+      const result = BasicTopPoolsSelector['getTopNPoolsForIntermediaryToken'](
+        intermediaryTokenIds,
+        selectedPoolIds,
+        tokenPoolIndex,
+        ChainId.MAINNET,
+        poolSelectionConfig
+      );
+
+      const resultIds = result.map(p => p.id.toLowerCase());
+
+      // Should include pools for both intermediary tokens
+      expect(resultIds).toContain('0xtoken1pool');
+      expect(resultIds).toContain('0xtoken2pool');
+
+      // Should include WETH pools for both tokens
+      expect(resultIds).toContain('0xtoken1weth');
+      expect(resultIds).toContain('0xtoken2weth');
+
+      // Should include ETH pools for both tokens
+      expect(resultIds).toContain('0xtoken1eth');
+      expect(resultIds).toContain('0xtoken2eth');
     });
   });
 

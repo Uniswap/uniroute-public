@@ -430,6 +430,10 @@ export const OPTIMISM_STACK_CHAINS = [
 export interface IPoolSelectionConfig {
   topNDirectPairs: number; // Pools with both tokenIn and tokenOut
   topNOneHopPairs: number; // Pools with either tokenIn or tokenOut
+
+  // We do this because some platform tokens (e.g. connected to zora) have top TVL pools that are non ETH/WETH pools, so we need to include them
+  // for better connectivity with other long tail tokens.
+  // For more details, see ROUTE-__PLACEHOLDER__ and |TopPoolsSelector.getTopNPoolsForIntermediaryToken| method.
   topNSecondHopPairs: number;
   topNPairs: number; // Top N pools with highest liquidity
   topNWithBaseTokenEach: number; // Top N pools with each base token + tokenIn or tokenOut

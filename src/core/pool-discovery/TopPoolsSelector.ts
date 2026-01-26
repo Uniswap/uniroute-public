@@ -472,7 +472,13 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>
   ): UniPoolInfo[] {
     const secondHopPairs: UniPoolInfo[] = [];
+
+    // Get WETH address (wrapped native currency)
+    const wethAddress = WRAPPED_NATIVE_CURRENCY[chainId]?.address.toLowerCase();
+    const ethAddress = ADDRESS_ZERO.toLowerCase();
+
     for (const tokenId of Array.from(intermediaryTokenIds)) {
+      // Get top N pools for this intermediary token
       const topPoolsForToken = BasicTopPoolsSelector.filterAndAddPools(
         tokenPoolIndex.tokenToPools.get(tokenId) || [],
         () => true, // All pools in the index already contain this token
@@ -480,6 +486,24 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         selectedPoolIds
       );
       secondHopPairs.push(...topPoolsForToken);
+
+      // Always include top 1 ETH and top 1 WETH pool for this intermediary token
+      if (wethAddress) {
+        const topWethPool = BasicTopPoolsSelector.getTopPoolForTokens(
+          selectedPoolIds,
+          wethAddress,
+          tokenId,
+          tokenPoolIndex
+        );
+        secondHopPairs.push(...topWethPool);
+      }
+      const topEthPool = BasicTopPoolsSelector.getTopPoolForTokens(
+        selectedPoolIds,
+        ethAddress,
+        tokenId,
+        tokenPoolIndex
+      );
+      secondHopPairs.push(...topEthPool);
     }
     return secondHopPairs;
   }
