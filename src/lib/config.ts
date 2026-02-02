@@ -300,7 +300,6 @@ export const getUniRouteAsyncConfig = (
     },
     RouteFinder: {
       ...syncConfig.RouteFinder,
-      MaxHops: __PLACEHOLDER__,
       MaxRoutes: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitTimeoutMs: __PLACEHOLDER__,
