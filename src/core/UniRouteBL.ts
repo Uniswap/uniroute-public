@@ -360,6 +360,7 @@ export class UniRouteBL implements IUniRoutedBL {
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
         this.serviceConfig.CachedRoutes.Enabled
       ) {
+        const getCachedRoutesStartTime = Date.now();
         routes = await this.cachedRoutesRepository.getCachedRoutes(
           chain.chainId,
           tokenInCurrencyInfo,
@@ -371,6 +372,12 @@ export class UniRouteBL implements IUniRoutedBL {
           protocols,
           request,
           ctx
+        );
+        await logElapsedTime(
+          'GetCachedRoutes',
+          getCachedRoutesStartTime,
+          ctx,
+          metricTags
         );
         if (routes.length > 0) {
           usedCachedRoutes = true;
@@ -498,6 +505,7 @@ export class UniRouteBL implements IUniRoutedBL {
 
       // Update quotes with gas costs to USD / quote token
       if (this.serviceConfig.GasEstimation.Enabled) {
+        const startGasUpdateTime = Date.now();
         await this.gasConverter.updateQuotesGasDetails(
           chain.chainId,
           tradeType === TradeType.ExactIn
@@ -507,17 +515,30 @@ export class UniRouteBL implements IUniRoutedBL {
           bestQuoteCandidates,
           ctx
         );
+        await logElapsedTime(
+          'UpdateQuotesGasDetails',
+          startGasUpdateTime,
+          ctx,
+          metricTags
+        );
       }
 
       // Select top N best quotes
       let topNQuotes: QuoteSplit[] = [];
       if (bestQuoteCandidates.length > 0) {
+        const getBestQuotesStartTime = Date.now();
         topNQuotes = await this.quoteSelector.getBestQuotes(
           bestQuoteCandidates,
           tradeType,
           this.serviceConfig.Simulation.TopNQuotes,
           metricTags,
           ctx
+        );
+        await logElapsedTime(
+          'SelectorGetBestQuotes',
+          getBestQuotesStartTime,
+          ctx,
+          metricTags
         );
       }
 
@@ -551,10 +572,17 @@ export class UniRouteBL implements IUniRoutedBL {
 
         // Only update pool details if required
         if (this.serviceConfig.ResponseRequirements.NeedsUpToDatePoolsInfo) {
+          const startUpdatePoolsTime = Date.now();
           await updateQuoteSplitWithFreshPoolDetails(
             this.freshPoolDetailsWrapper,
             bestQuote,
             chain,
+            ctx,
+            metricTags
+          );
+          await logElapsedTime(
+            'MainUpdateBestQuotePoolsWithFreshDetails',
+            startUpdatePoolsTime,
             ctx,
             metricTags
           );
