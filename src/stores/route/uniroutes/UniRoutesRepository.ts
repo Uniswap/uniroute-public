@@ -17,6 +17,7 @@ import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Fee, V3Pool} from '../../../models/pool/V3Pool';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {
+  ChainId,
   IUniRouteServiceConfig,
   V2_SUPPORTED,
   V4_SUPPORTED,
@@ -30,6 +31,7 @@ import {
 import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
+import {logElapsedTime} from '../../../lib/helpers';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -110,7 +112,11 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       poolPromises.push(Promise.resolve([]));
     }
 
+    const fetchPoolsStartTime = Date.now();
     const [poolsV2, poolsV3, poolsV4] = await Promise.all(poolPromises);
+    await logElapsedTime('FetchPools', fetchPoolsStartTime, ctx, [
+      `chain:${ChainId[chain.chainId]}`,
+    ]);
 
     // Get cross-liquidity pools if mixed routes are enabled and multiple protocols are requested
     if (
@@ -131,6 +137,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         protocolPoolsMap[UniProtocol.V4] = poolsV4;
       }
 
+      const crossLiquidityStartTime = Date.now();
       const crossLiquidityPools = await this.getCrossLiquidityCandidatePools(
         chain,
         tokenInAddress,
@@ -139,6 +146,12 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         protocols,
         hooksOptions,
         ctx
+      );
+      await logElapsedTime(
+        'CrossLiquidityPools',
+        crossLiquidityStartTime,
+        ctx,
+        [`chain:${ChainId[chain.chainId]}`]
       );
 
       // Add cross-liquidity pools to their respective protocol buckets
@@ -158,6 +171,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     // - we could load latest pool info from poolRepository and then use RouteFinder but
     //   this would be slower and more expensive.
     // We only need to load latest pool info for the route we select in the end.
+    const generateRoutesStartTime = Date.now();
     const allRoutes = this.routeFinder.generateRoutes(
       chain.chainId,
       [
@@ -227,6 +241,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       tokenOutAddress,
       generateMixedRoutes
     );
+    await logElapsedTime('GenerateRoutes', generateRoutesStartTime, ctx, [
+      `chain:${ChainId[chain.chainId]}`,
+    ]);
 
     return allRoutes;
   }
