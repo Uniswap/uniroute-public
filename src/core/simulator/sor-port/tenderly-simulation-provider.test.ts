@@ -26,6 +26,7 @@ import {RouteBasic} from 'src/models/route/RouteBasic';
 import {GasDetails} from 'src/models/gas/GasDetails';
 import {Address} from 'src/models/address/Address';
 import {MethodParameters} from 'src/lib/methodParameters';
+import {EthSimulateV1Simulator} from './eth-simulateV1-provider';
 
 // Mock axios
 vi.mock('axios', () => ({
@@ -627,6 +628,8 @@ describe('tenderly-simulation-provider', () => {
     let provider: JsonRpcProvider;
     let tenderlySimulator: TenderlySimulator;
     let ethEstimateGasSimulator: EthEstimateGasSimulator;
+    let ethSimulateV1Simulator: EthSimulateV1Simulator;
+    let ethSimulateV1ShadowPercentage: number;
     let fallbackSimulator: FallbackTenderlySimulator;
     let ctx: Context;
 
@@ -676,11 +679,19 @@ describe('tenderly-simulation-provider', () => {
         ethEstimateGas: vi.fn(),
       } as unknown as EthEstimateGasSimulator;
 
+      ethSimulateV1Simulator = {
+        ethSimulateV1: vi.fn(),
+      } as unknown as EthSimulateV1Simulator;
+
+      ethSimulateV1ShadowPercentage = 100;
+
       fallbackSimulator = new FallbackTenderlySimulator(
         ChainId.MAINNET,
         provider,
         tenderlySimulator,
-        ethEstimateGasSimulator
+        ethEstimateGasSimulator,
+        ethSimulateV1Simulator,
+        ethSimulateV1ShadowPercentage
       );
 
       ctx = {
@@ -762,6 +773,593 @@ describe('tenderly-simulation-provider', () => {
 
       expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
       expect(ctx.logger.error).toHaveBeenCalled();
+    });
+  });
+
+  describe('EthSimulateV1Simulator', () => {
+    let provider: JsonRpcProvider;
+    let gasConverter: GasConverter;
+    let simulator: EthSimulateV1Simulator;
+    let ctx: Context;
+
+    const USDC_ADDRESS = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+    const WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+    const USER_ADDRESS = '0x1234567890123456789012345678901234567890';
+
+    const createQuoteSplit = (
+      tokenInIsNative = false,
+      methodParameters: MethodParameters = {
+        calldata: '0xswapCalldata',
+        value: '0x0',
+        to: '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD',
+      }
+    ): QuoteSplit => ({
+      quotes: [
+        {
+          route: new RouteBasic(UniProtocol.V3, [], 100),
+          amount: 1000000n,
+          gasDetails: new GasDetails(50000000000n, 150000n, 0.001, 150000n),
+        },
+      ],
+      swapInfo: {
+        tradeType: TradeType.ExactIn,
+        tokenInWrappedAddress: USDC_ADDRESS,
+        tokenOutWrappedAddress: WETH_ADDRESS,
+        tokenInIsNative,
+        tokenOutIsNative: false,
+        inputAmount: 1000000n,
+        priceImpact: 0.01,
+        methodParameters,
+      },
+      tokensInfo: new Map<string, Erc20Token>([
+        [
+          USDC_ADDRESS.toLowerCase(),
+          {
+            address: new Address(USDC_ADDRESS),
+            decimals: 6,
+            symbol: 'USDC',
+            name: 'USD Coin',
+            toSdkToken: vi.fn(),
+          } as unknown as Erc20Token,
+        ],
+        [
+          WETH_ADDRESS.toLowerCase(),
+          {
+            address: new Address(WETH_ADDRESS),
+            decimals: 18,
+            symbol: 'WETH',
+            name: 'Wrapped Ether',
+          } as Erc20Token,
+        ],
+      ]),
+    });
+
+    const swapOptions: SwapOptionsUniversalRouter = {
+      type: SwapType.UNIVERSAL_ROUTER,
+      version: UniversalRouterVersion.V1_2,
+      simulate: {fromAddress: USER_ADDRESS},
+      slippageTolerance: new Percent(5, 100),
+    };
+
+    beforeEach(() => {
+      provider = new JsonRpcProvider();
+      provider.send = vi.fn();
+
+      gasConverter = {
+        getGasCostInQuoteTokenBasedOnGasCostInWei: vi
+          .fn()
+          .mockResolvedValue(2000n),
+      } as unknown as GasConverter;
+
+      simulator = new EthSimulateV1Simulator(
+        ChainId.MAINNET,
+        provider,
+        gasConverter
+      );
+
+      ctx = {
+        logger: {
+          info: vi.fn(),
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+        metrics: {
+          timer: vi.fn(),
+          count: vi.fn(),
+        },
+      } as unknown as Context;
+    });
+
+    afterEach(() => {
+      vi.clearAllMocks();
+    });
+
+    describe('ethSimulateV1', () => {
+      it('should successfully simulate a swap and return correct gas estimate', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {
+                returnData: '0x',
+                logs: [],
+                gasUsed: '50000',
+                status: '0x1',
+              },
+              {
+                returnData: '0x',
+                logs: [],
+                gasUsed: '60000',
+                status: '0x1',
+              },
+              {
+                returnData: '0x',
+                logs: [],
+                gasUsed: '150000',
+                status: '0x1',
+              },
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(provider.send).toHaveBeenCalledWith('eth_simulateV1', [
+          {
+            blockStateCalls: [
+              {
+                calls: expect.arrayContaining([
+                  expect.objectContaining({
+                    from: USER_ADDRESS,
+                    to: USDC_ADDRESS,
+                    data: '0xapprovePermit2Calldata',
+                    value: '0',
+                  }),
+                  expect.objectContaining({
+                    from: USER_ADDRESS,
+                    data: '0xapproveUniversalRouterCalldata',
+                    value: '0',
+                  }),
+                  expect.objectContaining({
+                    from: USER_ADDRESS,
+                    to: '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD',
+                    data: '0xswapCalldata',
+                    value: '0',
+                  }),
+                ]),
+              },
+            ],
+          },
+          'latest',
+        ]);
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+        // 150000 * 1.3 = 195000
+        expect(result.simulationResult?.estimatedGasUsed).toBe(195000n);
+        expect(result.simulationResult?.estimatedGasUsedInQuoteToken).toBe(
+          2000n
+        );
+
+        expect(ctx.metrics.timer).toHaveBeenCalledWith(
+          'UniRpcV2.Simulation.Latency',
+          expect.any(Number),
+          {
+            tags: ['chain:1', 'simType:eth_simulateV1'],
+          }
+        );
+
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          'UniRpcV2.Simulation.Request',
+          1,
+          {
+            tags: ['chain:1', 'status:success', 'simType:eth_simulateV1'],
+          }
+        );
+      });
+
+      it('should use custom gas multiplier when provided', async () => {
+        const customSimulator = new EthSimulateV1Simulator(
+          ChainId.MAINNET,
+          provider,
+          gasConverter,
+          {[ChainId.MAINNET]: 1.5}
+        );
+
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '100000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit();
+        const result = await customSimulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        // 100000 * 1.5 = 150000
+        expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
+      });
+
+      it('should handle native token swaps on mainnet by using BEACON_CHAIN_DEPOSIT_ADDRESS', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '150000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit(true, {
+          calldata: '0xswapCalldata',
+          value: '0x1000000',
+          to: '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD',
+        });
+
+        await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        // Should use BEACON_CHAIN_DEPOSIT_ADDRESS for native swaps on mainnet
+        expect(provider.send).toHaveBeenCalledWith(
+          'eth_simulateV1',
+          expect.arrayContaining([
+            expect.objectContaining({
+              blockStateCalls: [
+                {
+                  calls: expect.arrayContaining([
+                    expect.objectContaining({
+                      from: '0x00000000219ab540356cBB839Cbe05303d7705Fa',
+                      value: '0',
+                    }),
+                  ]),
+                },
+              ],
+            }),
+          ])
+        );
+      });
+
+      it('should use specified block number when provided', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '150000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit();
+        await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx,
+          undefined,
+          12345678
+        );
+
+        expect(provider.send).toHaveBeenCalledWith(
+          'eth_simulateV1',
+          expect.arrayContaining([expect.any(Object), '12345678'])
+        );
+      });
+
+      it('should return FAILED status when simulation returns error in result', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                  data: '0x08c379a0',
+                },
+              },
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(result.simulationResult?.estimatedGasUsed).toBe(0n);
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+          'eth_simulateV1 returned error',
+          expect.objectContaining({
+            error: {
+              code: -32000,
+              message: 'execution reverted',
+              data: '0x08c379a0',
+            },
+          })
+        );
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          'UniRpcV2.Simulation.Request',
+          1,
+          {
+            tags: ['chain:1', 'status:failure', 'simType:eth_simulateV1'],
+          }
+        );
+      });
+
+      it('should return FAILED status when result is empty', async () => {
+        vi.mocked(provider.send).mockResolvedValue([]);
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(result.simulationResult?.description).toBe(
+          'Error simulating transaction via eth_simulateV1'
+        );
+      });
+
+      it('should return FAILED status when result has insufficient calls', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+      });
+
+      it('should return FAILED status and handle exception during RPC call', async () => {
+        vi.mocked(provider.send).mockRejectedValue(
+          new Error('RPC provider error')
+        );
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(result.simulationResult?.description).toBe(
+          'Error simulating transaction via eth_simulateV1'
+        );
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+          'Error simulating with eth_simulateV1',
+          expect.any(Error)
+        );
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          'UniRpcV2.Simulation.Request',
+          1,
+          {
+            tags: ['chain:1', 'status:failure', 'simType:eth_simulateV1'],
+          }
+        );
+      });
+
+      it('should throw error for unsupported swap type', async () => {
+        const quoteSplit = createQuoteSplit();
+        const invalidSwapOptions = {
+          ...swapOptions,
+          type: 'INVALID_TYPE',
+        } as unknown as SwapOptionsUniversalRouter;
+
+        await expect(
+          simulator.ethSimulateV1(
+            USER_ADDRESS,
+            invalidSwapOptions,
+            quoteSplit,
+            ctx
+          )
+        ).rejects.toThrow('Unsupported swap type');
+      });
+
+      it('should log detailed gas information on success', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '45000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '55000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '140000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit();
+        await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(ctx.logger.info).toHaveBeenCalledWith(
+          'Successfully Simulated Approvals + Swap via eth_simulateV1 for Universal Router. Gas used.',
+          {
+            approvePermit2GasUsed: '45000',
+            approveUniversalRouterGasUsed: '55000',
+            swapGasUsed: '140000',
+            swapWithMultiplier: '182000', // 140000 * 1.3
+          }
+        );
+      });
+    });
+
+    describe('simulateTransaction', () => {
+      it('should return NOT_APPROVED status when token is not approved', async () => {
+        // Mock checkTokenApproved to return false
+        vi.spyOn(
+          simulator as unknown as {
+            checkTokenApproved: () => Promise<boolean>;
+          },
+          'checkTokenApproved'
+        ).mockResolvedValue(false);
+
+        const quoteSplit = createQuoteSplit(false);
+        const result = await (
+          simulator as unknown as {
+            simulateTransaction: (
+              fromAddress: string,
+              swapOptions: SwapOptionsUniversalRouter,
+              quoteSplit: QuoteSplit,
+              ctx: Context
+            ) => Promise<QuoteSplit>;
+          }
+        ).simulateTransaction(USER_ADDRESS, swapOptions, quoteSplit, ctx);
+
+        expect(result.simulationResult?.status).toBe(
+          SimulationStatus.NOT_APPROVED
+        );
+        expect(result.simulationResult?.description).toBe(
+          'Token not approved, skipping simulation'
+        );
+        expect(ctx.logger.info).toHaveBeenCalledWith(
+          'Token not approved, skipping simulation'
+        );
+      });
+
+      it('should simulate when token is native', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '150000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const quoteSplit = createQuoteSplit(true);
+        const result = await (
+          simulator as unknown as {
+            simulateTransaction: (
+              fromAddress: string,
+              swapOptions: SwapOptionsUniversalRouter,
+              quoteSplit: QuoteSplit,
+              ctx: Context
+            ) => Promise<QuoteSplit>;
+          }
+        ).simulateTransaction(USER_ADDRESS, swapOptions, quoteSplit, ctx);
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+        expect(provider.send).toHaveBeenCalled();
+      });
+
+      it('should simulate when token is approved', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '150000', status: '0x1'},
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        // Mock checkTokenApproved to return true
+        vi.spyOn(
+          simulator as unknown as {
+            checkTokenApproved: () => Promise<boolean>;
+          },
+          'checkTokenApproved'
+        ).mockResolvedValue(true);
+
+        const quoteSplit = createQuoteSplit(false);
+        const result = await (
+          simulator as unknown as {
+            simulateTransaction: (
+              fromAddress: string,
+              swapOptions: SwapOptionsUniversalRouter,
+              quoteSplit: QuoteSplit,
+              ctx: Context
+            ) => Promise<QuoteSplit>;
+          }
+        ).simulateTransaction(USER_ADDRESS, swapOptions, quoteSplit, ctx);
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+        expect(provider.send).toHaveBeenCalled();
+      });
+    });
+
+    describe('constructor', () => {
+      it('should use default multiplier when not provided', () => {
+        const sim = new EthSimulateV1Simulator(
+          ChainId.MAINNET,
+          provider,
+          gasConverter
+        );
+
+        expect(sim).toBeInstanceOf(EthSimulateV1Simulator);
+      });
+
+      it('should use provided multiplier override', () => {
+        const sim = new EthSimulateV1Simulator(
+          ChainId.MAINNET,
+          provider,
+          gasConverter,
+          {[ChainId.MAINNET]: 2.0, [ChainId.ARBITRUM]: 1.5}
+        );
+
+        expect(sim).toBeInstanceOf(EthSimulateV1Simulator);
+      });
     });
   });
 });
