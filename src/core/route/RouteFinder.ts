@@ -1,11 +1,12 @@
 import {RouteBasic} from '../../models/route/RouteBasic';
 import {UniPool} from '../../models/pool/UniPool';
 import {Address} from '../../models/address/Address';
-import {IUniRouteServiceConfig} from '../../lib/config';
+import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
 import {UniProtocol} from '../../models/pool/UniProtocol';
 import {FAKE_TICK_SPACING, getV4EthWethFakePool} from '../../lib/poolUtils';
 import {ChainId} from '../../lib/config';
 import {V4Pool} from '../../models/pool/V4Pool';
+import {Context as UniContext} from '@uniswap/lib-uni/context';
 
 export interface IRouteFinder<TPool extends UniPool> {
   generateRoutes(
@@ -13,21 +14,23 @@ export interface IRouteFinder<TPool extends UniPool> {
     pools: TPool[],
     tokenIn: Address,
     tokenOut: Address,
-    allowMixedPools: boolean
-  ): RouteBasic<TPool>[];
+    allowMixedPools: boolean,
+    ctx?: UniContext
+  ): Promise<RouteBasic<TPool>[]>;
 }
 
 export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
   constructor(private readonly serviceConfig: IUniRouteServiceConfig) {}
 
   // TODO: https://linear.app/uniswap/issue/ROUTE-410/ (modify for V4 - Support ETH+WETH pools)
-  public generateRoutes(
+  public async generateRoutes(
     chainId: ChainId,
     pools: TPool[],
     tokenIn: Address,
     tokenOut: Address,
-    allowMixedPools: boolean
-  ): RouteBasic<TPool>[] {
+    allowMixedPools: boolean,
+    ctx?: UniContext
+  ): Promise<RouteBasic<TPool>[]> {
     const routes: RouteBasic<TPool>[] = [];
 
     // If mixed pools are allowed and we have V4 pools, add a fake pool for ETH/WETH to allow connectivity.
@@ -38,6 +41,7 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
       pools.push(getV4EthWethFakePool(chainId) as unknown as TPool);
     }
 
+    // First pass: find routes with standard MaxHops
     this.findAllPaths(
       pools,
       tokenIn,
@@ -45,8 +49,72 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
       [],
       new Set(),
       routes,
-      allowMixedPools
+      allowMixedPools,
+      false // useExtendedHops = false
     );
+
+    const normalRoutesCount = routes.length;
+
+    // Extended search: if we found fewer routes than threshold or all routes are 1-hop only (direct pair), consider more hops
+    const {MinRoutesThreshold, MaxHopsExtended, MaxExtendedRoutes, MaxHops} =
+      this.serviceConfig.RouteFinder;
+
+    const allRoutesAreSingleHop =
+      routes.length > 0 && routes.every(route => route.path.length === 1);
+
+    let extendedRoutesCount = 0;
+    let extendedSearchTriggered = false;
+
+    if (
+      (routes.length < MinRoutesThreshold || allRoutesAreSingleHop) &&
+      MaxHopsExtended > MaxHops &&
+      MaxExtendedRoutes > 0
+    ) {
+      extendedSearchTriggered = true;
+      const extendedRoutes: RouteBasic<TPool>[] = [];
+
+      this.findAllPaths(
+        pools,
+        tokenIn,
+        tokenOut,
+        [],
+        new Set(),
+        extendedRoutes,
+        allowMixedPools,
+        true // useExtendedHops = true
+      );
+
+      // Filter to only include routes with more hops than MaxHops (avoid duplicates)
+      // and cap at MaxExtendedRoutes
+      const newRoutes = extendedRoutes
+        .filter(route => route.path.length > MaxHops)
+        .slice(0, MaxExtendedRoutes);
+
+      extendedRoutesCount = newRoutes.length;
+      routes.push(...newRoutes);
+    }
+
+    // Emit metrics if context is available
+    if (ctx) {
+      const metricTags = [`chainId:${chainId}`];
+      await ctx.metrics.count(
+        buildMetricKey('RouteFinder.NormalRoutesCount'),
+        normalRoutesCount,
+        {tags: metricTags}
+      );
+      await ctx.metrics.count(
+        buildMetricKey('RouteFinder.ExtendedSearchTriggered'),
+        extendedSearchTriggered ? 1 : 0,
+        {tags: metricTags}
+      );
+      if (extendedSearchTriggered) {
+        await ctx.metrics.count(
+          buildMetricKey('RouteFinder.ExtendedRoutesCount'),
+          extendedRoutesCount,
+          {tags: metricTags}
+        );
+      }
+    }
 
     return routes;
   }
@@ -58,7 +126,8 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
     currentPath: TPool[],
     visitedTokens: Set<string>,
     routes: RouteBasic<TPool>[],
-    allowMixedPools: boolean
+    allowMixedPools: boolean,
+    useExtendedHops: boolean
   ): void {
     // Special case for routes that contain the fake eth/weth pool, add an extra hop
     const currentRouteContainsFakeV4Pool = currentPath.some(
@@ -66,9 +135,12 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
         pool.protocol === UniProtocol.V4 &&
         (pool as unknown as V4Pool).tickSpacing === FAKE_TICK_SPACING
     );
-    const maxHops = currentRouteContainsFakeV4Pool
-      ? this.serviceConfig.RouteFinder.MaxHops + 1
+    const baseMaxHops = useExtendedHops
+      ? this.serviceConfig.RouteFinder.MaxHopsExtended
       : this.serviceConfig.RouteFinder.MaxHops;
+    const maxHops = currentRouteContainsFakeV4Pool
+      ? baseMaxHops + 1
+      : baseMaxHops;
 
     // Stop if we've exceeded max hops
     if (currentPath.length >= maxHops) {
@@ -128,7 +200,8 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
           currentPath,
           visitedTokens,
           routes,
-          allowMixedPools
+          allowMixedPools,
+          useExtendedHops
         );
       }
 

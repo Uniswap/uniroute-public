@@ -81,6 +81,12 @@ export interface IUniRouteServiceConfig {
     MaxRoutes: number;
     // The max number of hops allowed in a route.
     MaxHops: number;
+    // The extended max hops to use when routes found < MinRoutesThreshold.
+    MaxHopsExtended: number;
+    // Minimum routes threshold - if fewer routes found, extend search to MaxHopsExtended.
+    MinRoutesThreshold: number;
+    // Maximum number of extended routes (with hops > MaxHops) to add.
+    MaxExtendedRoutes: number;
     // The max number of splits allowed.
     MaxSplits: number;
     // The max number of candidate best routes before applying gas estimates.
@@ -166,6 +172,9 @@ export const getUniRouteSyncConfig = (
     },
     RouteFinder: {
       MaxHops: __PLACEHOLDER__,
+      MaxHopsExtended: __PLACEHOLDER__, // Disabled for sync (same as MaxHops)
+      MinRoutesThreshold: __PLACEHOLDER__, // Disabled for sync
+      MaxExtendedRoutes: __PLACEHOLDER__, // Disabled for sync
       MaxRoutes: __PLACEHOLDER__,
       MaxSplits: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
@@ -240,6 +249,9 @@ export const getQuickRouteSyncConfig = (
     },
     RouteFinder: {
       MaxHops: __PLACEHOLDER__,
+      MaxHopsExtended: __PLACEHOLDER__, // Disabled for sync (same as MaxHops)
+      MinRoutesThreshold: __PLACEHOLDER__, // Disabled for sync
+      MaxExtendedRoutes: __PLACEHOLDER__, // Disabled for sync
       MaxRoutes: __PLACEHOLDER__,
       MaxSplits: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
@@ -300,6 +312,9 @@ export const getUniRouteAsyncConfig = (
     },
     RouteFinder: {
       ...syncConfig.RouteFinder,
+      MaxHopsExtended: __PLACEHOLDER__,
+      MinRoutesThreshold: __PLACEHOLDER__,
+      MaxExtendedRoutes: __PLACEHOLDER__,
       MaxRoutes: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitTimeoutMs: __PLACEHOLDER__,

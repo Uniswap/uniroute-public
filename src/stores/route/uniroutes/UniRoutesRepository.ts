@@ -172,7 +172,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     //   this would be slower and more expensive.
     // We only need to load latest pool info for the route we select in the end.
     const generateRoutesStartTime = Date.now();
-    const allRoutes = this.routeFinder.generateRoutes(
+    const allRoutes = await this.routeFinder.generateRoutes(
       chain.chainId,
       [
         ...poolsV2.map(p => {
@@ -239,7 +239,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       ],
       tokenInAddress,
       tokenOutAddress,
-      generateMixedRoutes
+      generateMixedRoutes,
+      ctx
     );
     await logElapsedTime('GenerateRoutes', generateRoutesStartTime, ctx, [
       `chain:${ChainId[chain.chainId]}`,
