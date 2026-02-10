@@ -86,6 +86,7 @@ import {
   getCorrectedQuoteGasAdjusted,
   getPortionAmount,
   getPortionQuoteAmount,
+  getQuoteGasAndPortionAdjusted,
 } from '../lib/portionUtils';
 import {HooksOptions} from '../models/hooks/HooksOptions';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
@@ -1067,6 +1068,12 @@ export class UniRouteBL implements IUniRoutedBL {
       portionQuoteAmount
     );
 
+    const quoteGasAndPortionAdjusted = getQuoteGasAndPortionAdjusted(
+      tradeType,
+      finalQuoteGasAdjusted,
+      portionAmount
+    );
+
     // Log portion correction details
     if (tradeType === TradeType.ExactOut && portionAmount > 0n) {
       ctx.logger.debug('Portion correction applied for ExactOut trade', {
@@ -1095,6 +1102,13 @@ export class UniRouteBL implements IUniRoutedBL {
       tradeType === TradeType.ExactIn ? tokenOut : tokenIn,
       correctedQuoteGasAdjusted.toString()
     );
+
+    const quoteGasAndPortionAdjustedDecimals = quoteGasAndPortionAdjusted
+      ? CurrencyAmount.fromRawAmount(
+          tradeType === TradeType.ExactIn ? tokenOut : tokenIn,
+          quoteGasAndPortionAdjusted.toString()
+        )
+      : undefined;
 
     // Create an array of arrays where each inner array represents pools from one quote
     const allPools = quoteSplit.quotes.map((quote, quoteIndex) => {
@@ -1288,6 +1302,9 @@ export class UniRouteBL implements IUniRoutedBL {
       quoteAmountDecimals: correctedQuoteDecimals.toExact(),
       quoteGasAdjusted: correctedQuoteGasAdjusted.toString(),
       quoteGasAdjustedDecimals: correctedQuoteGasAdjustedDecimals.toExact(),
+      quoteGasAndPortionAdjusted: quoteGasAndPortionAdjusted?.toString(),
+      quoteGasAndPortionAdjustedDecimals:
+        quoteGasAndPortionAdjustedDecimals?.toExact(),
       gasPriceWei: gasPriceWei?.toString(),
       gasUseEstimate: finalGasUseEstimate.toString(),
       gasUseEstimateQuote: finalGasUseEstimateQuote.toString(),
@@ -1333,6 +1350,9 @@ export class UniRouteBL implements IUniRoutedBL {
           quoteAmountDecimals: quoteResponse.quoteAmountDecimals,
           quoteGasAdjusted: quoteResponse.quoteGasAdjusted,
           quoteGasAdjustedDecimals: quoteResponse.quoteGasAdjustedDecimals,
+          quoteGasAndPortionAdjusted: quoteResponse.quoteGasAndPortionAdjusted,
+          quoteGasAndPortionAdjustedDecimals:
+            quoteResponse.quoteGasAndPortionAdjustedDecimals,
           gasPriceWei: quoteResponse.gasPriceWei,
           gasUseEstimate: quoteResponse.gasUseEstimate,
           gasUseEstimateQuote: quoteResponse.gasUseEstimateQuote,

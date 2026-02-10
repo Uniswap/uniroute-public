@@ -634,6 +634,9 @@ describe('UniRouteBL', () => {
       );
       expect(response.route[0].pools[0].amountIn).equals('1000000000000000000');
       expect(response.route[0].pools[0].amountOut).equals('1234567890');
+      // No portion in request, so gas-and-portion adjusted fields are undefined
+      expect(response.quoteGasAndPortionAdjusted).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjustedDecimals).toBeUndefined();
     });
 
     it('should handle error response when no routes found', async () => {
@@ -727,6 +730,8 @@ describe('UniRouteBL', () => {
       // For EXACT_IN, gas should be subtracted from quote amount
       expect(response.quoteAmount).equals('1234567890');
       expect(response.quoteGasAdjusted).equals('1233567890'); // 1234567890 - 1000000
+      expect(response.quoteGasAndPortionAdjusted).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjustedDecimals).toBeUndefined();
     });
 
     it('should correctly adjust gas for EXACT_OUT trade type', async () => {
@@ -785,6 +790,8 @@ describe('UniRouteBL', () => {
       // For EXACT_OUT, gas should be added to quote amount
       expect(response.quoteAmount).equals('1234567890');
       expect(response.quoteGasAdjusted).equals('1235567890'); // 1234567890 + 1000000
+      expect(response.quoteGasAndPortionAdjusted).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjustedDecimals).toBeUndefined();
     });
 
     it('should include portion fields in response when portion parameters are provided', async () => {
@@ -864,6 +871,11 @@ describe('UniRouteBL', () => {
       expect(response.route[0].pools[0].amountOut).equals('1228395051');
       expect(response.route[0].pools[0].amountOut).equals(
         (1234567890n - BigInt(response.portionAmount || 0)).toString()
+      );
+      // EXACT_IN with portion: quoteGasAndPortionAdjusted = quoteGasAdjusted - portionAmount = 1233567890 - 6172839
+      expect(response.quoteGasAndPortionAdjusted).equals('1227395051');
+      expect(response.quoteGasAndPortionAdjustedDecimals).equals(
+        '0.000000001227395051'
       );
     });
 
@@ -998,6 +1010,11 @@ describe('UniRouteBL', () => {
       );
       expect(response.route[1].pools[0].amountOut).equals(
         (493827156n - portionRoute2).toString()
+      );
+      // EXACT_IN with portion: quoteGasAndPortionAdjusted = quoteGasAdjusted - portionAmount = 1233567890 - 6172839
+      expect(response.quoteGasAndPortionAdjusted).equals('1227395051');
+      expect(response.quoteGasAndPortionAdjustedDecimals).equals(
+        '0.000000001227395051'
       );
     });
 
@@ -1230,6 +1247,11 @@ describe('UniRouteBL', () => {
       // 1000000000000000000 + 5000000000000000 = 1005000000000000000
       expect(response.route[0].pools[0].amountOut).equals(
         '1005000000000000000'
+      );
+      // EXACT_OUT with portion: quoteGasAndPortionAdjusted = quoteGasAdjusted (1234567890 + 1000000)
+      expect(response.quoteGasAndPortionAdjusted).equals('1235567890');
+      expect(response.quoteGasAndPortionAdjustedDecimals).equals(
+        '0.00000000123556789'
       );
     });
   });
