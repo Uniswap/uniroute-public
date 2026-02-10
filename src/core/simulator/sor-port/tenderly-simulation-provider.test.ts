@@ -683,7 +683,7 @@ describe('tenderly-simulation-provider', () => {
         ethSimulateV1: vi.fn(),
       } as unknown as EthSimulateV1Simulator;
 
-      ethSimulateV1ShadowPercentage = 100;
+      ethSimulateV1ShadowPercentage = 0;
 
       fallbackSimulator = new FallbackTenderlySimulator(
         ChainId.MAINNET,

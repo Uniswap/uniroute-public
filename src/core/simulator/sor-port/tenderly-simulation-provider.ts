@@ -244,11 +244,13 @@ export class FallbackTenderlySimulator extends Simulator {
         ),
         this.ethSimulateV1ShadowPercentage >= Math.random() * 100 &&
         this.chainId === ChainId.MAINNET
-          ? this.ethSimulateV1Simulator.ethSimulateV1(
+          ? this.ethSimulateV1Simulator.simulateTransaction(
               fromAddress,
               swapOptions,
               quoteSplit,
-              ctx
+              ctx,
+              gasPrice,
+              blockNumber
             )
           : Promise.resolve(null),
       ]);

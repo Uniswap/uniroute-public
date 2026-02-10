@@ -291,7 +291,7 @@ export class EthSimulateV1Simulator extends Simulator {
     };
   }
 
-  protected async simulateTransaction(
+  public async simulateTransaction(
     fromAddress: string,
     swapOptions: SwapOptionsUniversalRouter,
     quoteSplit: QuoteSplit,
