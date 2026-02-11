@@ -176,7 +176,8 @@ export class FallbackTenderlySimulator extends Simulator {
   private tenderlySimulator: TenderlySimulator;
   private ethEstimateGasSimulator: EthEstimateGasSimulator;
   private ethSimulateV1Simulator: EthSimulateV1Simulator;
-  private ethSimulateV1ShadowPercentage: number;
+  private useEthSimulateV1: boolean;
+  private localNodeSupportedChains: ChainId[];
 
   constructor(
     chainId: ChainId,
@@ -184,13 +185,15 @@ export class FallbackTenderlySimulator extends Simulator {
     tenderlySimulator: TenderlySimulator,
     ethEstimateGasSimulator: EthEstimateGasSimulator,
     ethSimulateV1Simulator: EthSimulateV1Simulator,
-    ethSimulateV1ShadowPercentage: number
+    useEthSimulateV1: boolean,
+    localNodeSupportedChains: ChainId[]
   ) {
     super(provider, chainId);
     this.tenderlySimulator = tenderlySimulator;
     this.ethEstimateGasSimulator = ethEstimateGasSimulator;
     this.ethSimulateV1Simulator = ethSimulateV1Simulator;
-    this.ethSimulateV1ShadowPercentage = ethSimulateV1ShadowPercentage;
+    this.useEthSimulateV1 = useEthSimulateV1;
+    this.localNodeSupportedChains = localNodeSupportedChains;
   }
 
   protected async simulateTransaction(
@@ -233,63 +236,33 @@ export class FallbackTenderlySimulator extends Simulator {
     }
 
     try {
-      const [tenderlyResult, ethSimulateV1Result] = await Promise.all([
-        this.tenderlySimulator.simulateTransaction(
+      if (
+        this.useEthSimulateV1 &&
+        this.localNodeSupportedChains.includes(this.chainId)
+      ) {
+        const ethSimulateV1Result =
+          await this.ethSimulateV1Simulator.ethSimulateV1(
+            fromAddress,
+            swapOptions,
+            quoteSplit,
+            ctx,
+            gasPrice,
+            blockNumber
+          );
+
+        return ethSimulateV1Result;
+      } else {
+        const tenderlyResult = await this.tenderlySimulator.simulateTransaction(
           fromAddress,
           swapOptions,
           quoteSplit,
           ctx,
           gasPrice,
           blockNumber
-        ),
-        this.ethSimulateV1ShadowPercentage >= Math.random() * 100 &&
-        this.chainId === ChainId.MAINNET
-          ? this.ethSimulateV1Simulator.simulateTransaction(
-              fromAddress,
-              swapOptions,
-              quoteSplit,
-              ctx,
-              gasPrice,
-              blockNumber
-            )
-          : Promise.resolve(null),
-      ]);
+        );
 
-      if (ethSimulateV1Result) {
-        // only compare both gasUsed when both simulations are successful
-        if (
-          tenderlyResult.simulationResult?.status ===
-            SimulationStatus.SUCCESS &&
-          ethSimulateV1Result.simulationResult?.status ===
-            SimulationStatus.SUCCESS
-        ) {
-          const gasUsedSame =
-            tenderlyResult.simulationResult?.estimatedGasUsed ===
-            ethSimulateV1Result.simulationResult?.estimatedGasUsed;
-
-          if (gasUsedSame) {
-            await ctx.metrics.count(
-              'Tenderly.UniRpcV2.Simulation.GasUsedSame',
-              1
-            );
-          } else {
-            await ctx.metrics.count(
-              'Tenderly.UniRpcV2.Simulation.GasUsedDifferent',
-              1
-            );
-
-            ctx.logger.info(
-              'Gas used is different between Tenderly and eth_simulateV1',
-              {
-                tenderlyResult: tenderlyResult,
-                ethSimulateV1Result: ethSimulateV1Result,
-              }
-            );
-          }
-        }
+        return tenderlyResult;
       }
-
-      return tenderlyResult;
     } catch (err) {
       ctx.logger.error('Failed to simulate via Tenderly', {err: err});
 

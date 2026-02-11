@@ -629,7 +629,8 @@ describe('tenderly-simulation-provider', () => {
     let tenderlySimulator: TenderlySimulator;
     let ethEstimateGasSimulator: EthEstimateGasSimulator;
     let ethSimulateV1Simulator: EthSimulateV1Simulator;
-    let ethSimulateV1ShadowPercentage: number;
+    let useEthSimulateV1: boolean;
+    let localNodeSupportedChains: ChainId[];
     let fallbackSimulator: FallbackTenderlySimulator;
     let ctx: Context;
 
@@ -683,7 +684,8 @@ describe('tenderly-simulation-provider', () => {
         ethSimulateV1: vi.fn(),
       } as unknown as EthSimulateV1Simulator;
 
-      ethSimulateV1ShadowPercentage = 0;
+      useEthSimulateV1 = true;
+      localNodeSupportedChains = [ChainId.MAINNET];
 
       fallbackSimulator = new FallbackTenderlySimulator(
         ChainId.MAINNET,
@@ -691,7 +693,8 @@ describe('tenderly-simulation-provider', () => {
         tenderlySimulator,
         ethEstimateGasSimulator,
         ethSimulateV1Simulator,
-        ethSimulateV1ShadowPercentage
+        useEthSimulateV1,
+        localNodeSupportedChains
       );
 
       ctx = {
@@ -726,6 +729,9 @@ describe('tenderly-simulation-provider', () => {
       vi.mocked(tenderlySimulator.simulateTransaction).mockRejectedValue(
         new Error('timeout')
       );
+      vi.mocked(ethSimulateV1Simulator.ethSimulateV1).mockRejectedValue(
+        new Error('timeout')
+      );
 
       const result = await (
         fallbackSimulator as unknown as {
@@ -757,6 +763,9 @@ describe('tenderly-simulation-provider', () => {
       ).mockResolvedValue(false);
 
       vi.mocked(tenderlySimulator.simulateTransaction).mockRejectedValue(
+        new Error('some other error')
+      );
+      vi.mocked(ethSimulateV1Simulator.ethSimulateV1).mockRejectedValue(
         new Error('some other error')
       );
 
