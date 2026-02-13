@@ -132,13 +132,13 @@ export class EthSimulateV1Simulator extends Simulator {
         from: fromAddress,
         to: quoteSplit.swapInfo!.tokenInWrappedAddress,
         data: approvePermit2Calldata,
-        value: '0',
+        value: '0x0',
       };
       const approveUniversalRouter: SimulateV1Call = {
         from: fromAddress,
         to: permit2Address(this.chainId),
         data: approveUniversalRouterCallData,
-        value: '0',
+        value: '0x0',
       };
       const swap: SimulateV1Call = {
         from: fromAddress,
@@ -146,9 +146,17 @@ export class EthSimulateV1Simulator extends Simulator {
         data: quoteSplit.swapInfo!.methodParameters!.calldata,
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters!.value
-          : '0',
+          : '0x0',
       };
 
+      ctx.logger.debug('eth_simulateV1 call params', {
+        approvePermit2Value: approvePermit2.value,
+        approveURValue: approveUniversalRouter.value,
+        swapValue: swap.value,
+        blockNumberParam: blockNumber
+          ? '0x' + blockNumber.toString(16)
+          : 'latest',
+      });
       ctx.logger.info('Simulating using eth_simulateV1 on Universal Router', {
         addr: fromAddress,
         methodParameters: quoteSplit.swapInfo!.methodParameters,
@@ -166,7 +174,7 @@ export class EthSimulateV1Simulator extends Simulator {
         // Call eth_simulateV1 RPC method
         const result = (await this.provider.send('eth_simulateV1', [
           blockStateCalls,
-          blockNumber?.toString() ?? 'latest',
+          blockNumber ? '0x' + blockNumber.toString(16) : 'latest',
         ])) as Array<ResultCall>;
 
         const simulationLatency = Date.now() - before;

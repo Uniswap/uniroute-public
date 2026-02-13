@@ -929,18 +929,18 @@ describe('tenderly-simulation-provider', () => {
                     from: USER_ADDRESS,
                     to: USDC_ADDRESS,
                     data: '0xapprovePermit2Calldata',
-                    value: '0',
+                    value: '0x0',
                   }),
                   expect.objectContaining({
                     from: USER_ADDRESS,
                     data: '0xapproveUniversalRouterCalldata',
-                    value: '0',
+                    value: '0x0',
                   }),
                   expect.objectContaining({
                     from: USER_ADDRESS,
                     to: '0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD',
                     data: '0xswapCalldata',
-                    value: '0',
+                    value: '0x0',
                   }),
                 ]),
               },
@@ -1041,7 +1041,7 @@ describe('tenderly-simulation-provider', () => {
                   calls: expect.arrayContaining([
                     expect.objectContaining({
                       from: '0x00000000219ab540356cBB839Cbe05303d7705Fa',
-                      value: '0',
+                      value: '0x0',
                     }),
                   ]),
                 },
@@ -1076,7 +1076,7 @@ describe('tenderly-simulation-provider', () => {
 
         expect(provider.send).toHaveBeenCalledWith(
           'eth_simulateV1',
-          expect.arrayContaining([expect.any(Object), '12345678'])
+          expect.arrayContaining([expect.any(Object), '0xbc614e'])
         );
       });
 
