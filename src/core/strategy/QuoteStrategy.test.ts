@@ -37,6 +37,14 @@ import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrappe
 
 // Create a test gas converter that properly sets gasCostInQuoteToken
 class TestGasConverter implements IGasConverter {
+  async prefetchGasPools() {
+    return {
+      nativeAndQuoteTokenV2Pool: null,
+      nativeAndQuoteTokenV3Pool: null,
+      nativeAndQuoteTokenV4Pool: null,
+    };
+  }
+
   async updateQuotesGasDetails(
     chainId: ChainId,
     quoteTokenAddress: string,

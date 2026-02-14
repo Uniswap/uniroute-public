@@ -69,12 +69,23 @@ export class GasConverter implements IGasConverter {
     };
   }
 
+  public async prefetchGasPools(
+    chainId: ChainId,
+    quoteTokenAddress: string,
+    ctx: Context
+  ): Promise<GasPools> {
+    // Use a placeholder Token since fetchGasRelatedPools only needs chainId + address
+    const placeholderToken = new Token(chainId, quoteTokenAddress, 18);
+    return this.fetchGasRelatedPools(chainId, placeholderToken, ctx);
+  }
+
   public async updateQuotesGasDetails(
     chainId: ChainId,
     quoteTokenAddress: string,
     tokensInfo: Map<string, Erc20Token | null>,
     quotes: QuoteSplit[],
-    ctx: Context
+    ctx: Context,
+    prefetchedGasPools?: GasPools
   ): Promise<void> {
     ctx.logger.debug('GasConverter.updateQuotesGasDetails', {
       tokensInfo,
@@ -94,7 +105,9 @@ export class GasConverter implements IGasConverter {
       quoteTokenInfo.symbol,
       quoteTokenInfo.name
     );
-    const gasPools = await this.fetchGasRelatedPools(chainId, quoteToken, ctx);
+    const gasPools =
+      prefetchedGasPools ??
+      (await this.fetchGasRelatedPools(chainId, quoteToken, ctx));
     const {
       nativeAndQuoteTokenV2PoolSDK,
       nativeAndQuoteTokenV3PoolSDK,
