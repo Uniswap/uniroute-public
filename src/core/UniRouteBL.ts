@@ -265,40 +265,42 @@ export class UniRouteBL implements IUniRoutedBL {
         tokenOutCurrencyInfo.wrappedAddress.address
       );
 
-      // Fetch tokens info, block number, and gas pools in parallel.
-      // Gas pools prefetch avoids a sequential fetch later in updateQuotesGasDetails.
-      const getTokensStartTime = Date.now();
-      ctx.logger.debug('Starting getTokens, block number, and gas pools fetch');
-      const [tokensInfo, blockNumber, gasPriceResult, prefetchedGasPools] =
-        await Promise.all([
-          this.tokenHandler.getTokens(
-            chain,
-            [
-              tokenInCurrencyInfo.wrappedAddress,
-              tokenOutCurrencyInfo.wrappedAddress,
-              new Address(WRAPPED_NATIVE_CURRENCY[chain.chainId]!.address),
-              ...(usdGasTokensByChain[chain.chainId] ?? []).map(
-                t => new Address(t.address)
-              ),
-            ],
+      // Fire gas pools prefetch early — runs in background through getTokens,
+      // route discovery, and findBestQuoteCandidates. Only awaited at updateQuotesGasDetails.
+      const gasPoolsPromise = this.serviceConfig.GasEstimation.Enabled
+        ? this.prefetchGasPools(
+            chain.chainId,
+            tradeType,
+            tokenInCurrencyInfo.wrappedAddress.toString(),
+            tokenOutCurrencyInfo.wrappedAddress.toString(),
             ctx
-          ),
-          this.serviceConfig.ResponseRequirements.NeedsBlockNumber
-            ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
-            : Promise.resolve<number>(0),
-          needToFetchGasPrice
-            ? this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
-            : Promise.resolve<BigNumber | undefined>(undefined),
-          this.serviceConfig.GasEstimation.Enabled
-            ? this.prefetchGasPools(
-                chain.chainId,
-                tradeType,
-                tokenInCurrencyInfo.wrappedAddress.toString(),
-                tokenOutCurrencyInfo.wrappedAddress.toString(),
-                ctx
-              )
-            : Promise.resolve<GasPools | undefined>(undefined),
-        ]);
+          )
+        : undefined;
+
+      // Fetch tokens info and block number in parallel
+      // Those are needed for fot detection, gas estimation and quote conversion to USD.
+      const getTokensStartTime = Date.now();
+      ctx.logger.debug('Starting getTokens and block number fetch');
+      const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
+        this.tokenHandler.getTokens(
+          chain,
+          [
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            new Address(WRAPPED_NATIVE_CURRENCY[chain.chainId]!.address),
+            ...(usdGasTokensByChain[chain.chainId] ?? []).map(
+              t => new Address(t.address)
+            ),
+          ],
+          ctx
+        ),
+        this.serviceConfig.ResponseRequirements.NeedsBlockNumber
+          ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
+          : Promise.resolve<number>(0),
+        needToFetchGasPrice
+          ? this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
+          : Promise.resolve<BigNumber | undefined>(undefined),
+      ]);
       // Use gasPriceResult if it is defined and greater than 0, otherwise use undefined
       const gasPrice =
         gasPriceResult !== undefined && gasPriceResult.gt(0)
@@ -520,6 +522,7 @@ export class UniRouteBL implements IUniRoutedBL {
       // Update quotes with gas costs to USD / quote token
       if (this.serviceConfig.GasEstimation.Enabled) {
         const startGasUpdateTime = Date.now();
+        const prefetchedGasPools = await gasPoolsPromise;
         await this.gasConverter.updateQuotesGasDetails(
           chain.chainId,
           tradeType === TradeType.ExactIn
@@ -528,7 +531,7 @@ export class UniRouteBL implements IUniRoutedBL {
           tokensInfo,
           bestQuoteCandidates,
           ctx,
-          prefetchedGasPools ?? undefined
+          prefetchedGasPools
         );
         await logElapsedTime(
           'UpdateQuotesGasDetails',
