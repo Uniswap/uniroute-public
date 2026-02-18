@@ -87,7 +87,7 @@ export abstract class Simulator {
         'User has sufficient balance to simulate. Simulating transaction.'
       );
       try {
-        return this.simulateTransaction(
+        return await this.simulateTransaction(
           fromAddress,
           swapOptions,
           quoteSplit,
