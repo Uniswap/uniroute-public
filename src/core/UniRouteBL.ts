@@ -274,7 +274,13 @@ export class UniRouteBL implements IUniRoutedBL {
             tokenInCurrencyInfo.wrappedAddress.toString(),
             tokenOutCurrencyInfo.wrappedAddress.toString(),
             ctx
-          )
+          ).catch((e: unknown) => {
+            ctx.logger.error('Error prefetching gas pools', {
+              error: e instanceof Error ? e.message : String(e),
+              errorStack: e instanceof Error ? e.stack : undefined,
+            });
+            return undefined;
+          })
         : undefined;
 
       // Fetch tokens info and block number in parallel
