@@ -1868,6 +1868,399 @@ describe('UniRouteBL', () => {
       expect(response.route.length).toBe(1);
       expect(response.route[0].pools.length).toBe(1);
     });
+
+    it('should scale gasUseEstimateQuote proportionally with CHAIN_TO_GAS_LIMIT_MAP when simulation FAILS (EXACT_IN)', async () => {
+      // When simulation fails, populateQuoteResponse overrides:
+      //   finalGasUseEstimate      <- CHAIN_TO_GAS_LIMIT_MAP[chainId]  (200000 for MAINNET)
+      //   finalGasUseEstimateQuote <- gasCostInQuoteToken * finalGasUseEstimate / totalGasUse
+      //                              = 1000000 * 200000 / 150000 = 1333333 (integer division)
+      //   finalGasUseEstimateUSD   <- gasCostInUSD * finalGasUseEstimate / totalGasUse
+      //                              = 0 * 200000 / 150000 = 0 (gasCostInUSD not set in test data)
+      // quoteGasAdjusted is then computed from the scaled finalGasUseEstimateQuote.
+
+      const simulationEnabledConfig = {
+        ...serviceConfigAsync,
+        Simulation: {
+          ...serviceConfigAsync.Simulation,
+          Enabled: true,
+        },
+      };
+
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x1234567890123456789012345678901234567890',
+        slippageTolerance: 20,
+      });
+
+      // gasCostInQuoteToken and gasUse are intentionally different from the chain limit
+      // so we can verify which value ends up in each response field.
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(UniProtocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'), // totalQuoteAmount
+          undefined,
+          {
+            gasUse: BigInt('150000'), // differs from chain limit (200000) to confirm override
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'), // used for quoteGasAdjusted calc before override
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+      expect(response.simulationError).toBe(true);
+
+      // gasUseEstimate must come from CHAIN_TO_GAS_LIMIT_MAP[MAINNET] = 200000
+      // (not 150000 from the quote's gasUse)
+      expect(response.gasUseEstimate).equals('200000');
+
+      // gasUseEstimateQuote scaled: gasCostInQuoteToken * chainLimit / totalGasUse
+      // = 1000000 * 200000 / 150000 = 1333333 (BigInt integer division)
+      expect(response.gasUseEstimateQuote).equals('1333333');
+
+      // gasUseEstimateUSD scaled: 0 (gasCostInUSD not provided in test data)
+      expect(response.gasUseEstimateUSD).equals('0');
+
+      // quoteGasAdjusted uses the scaled finalGasUseEstimateQuote
+      // EXACT_IN: totalQuoteAmount - finalGasUseEstimateQuote = 1234567890 - 1333333 = 1233234557
+      expect(response.quoteGasAdjusted).equals('1233234557');
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should scale gasUseEstimateQuote proportionally with CHAIN_TO_GAS_LIMIT_MAP when simulation FAILS (EXACT_OUT)', async () => {
+      // Same as the EXACT_IN test above, but verifies that quoteGasAdjusted *adds*
+      // the scaled finalGasUseEstimateQuote for EXACT_OUT trades.
+
+      const simulationEnabledConfig = {
+        ...serviceConfigAsync,
+        Simulation: {
+          ...serviceConfigAsync.Simulation,
+          Enabled: true,
+        },
+      };
+
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x1234567890123456789012345678901234567890',
+        slippageTolerance: 20,
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(UniProtocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'), // totalQuoteAmount
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+      expect(response.simulationError).toBe(true);
+
+      // gasUseEstimate overridden to CHAIN_TO_GAS_LIMIT_MAP[MAINNET] = 200000
+      expect(response.gasUseEstimate).equals('200000');
+
+      // gasUseEstimateQuote scaled: 1000000 * 200000 / 150000 = 1333333
+      expect(response.gasUseEstimateQuote).equals('1333333');
+
+      // gasUseEstimateUSD scaled: 0 (gasCostInUSD not provided in test data)
+      expect(response.gasUseEstimateUSD).equals('0');
+
+      // EXACT_OUT: totalQuoteAmount + finalGasUseEstimateQuote = 1234567890 + 1333333 = 1235901223
+      expect(response.quoteGasAdjusted).equals('1235901223');
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should scale gasUseEstimateUSD proportionally with CHAIN_TO_GAS_LIMIT_MAP when simulation FAILS', async () => {
+      // Verifies that gasUseEstimateUSD is also scaled proportionally, not left as the
+      // raw gasCostInUSD from the original gas estimate.
+      // totalGasUse = 150000, chain limit = 200000
+      // finalGasUseEstimateUSD = 1.5 * 200000 / 150000 = 2.0
+
+      const simulationEnabledConfig = {
+        ...serviceConfigAsync,
+        Simulation: {
+          ...serviceConfigAsync.Simulation,
+          Enabled: true,
+        },
+      };
+
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x1234567890123456789012345678901234567890',
+        slippageTolerance: 20,
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(UniProtocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+            gasCostInUSD: 1.5, // $1.50 original estimate
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+      expect(response.gasUseEstimate).equals('200000');
+
+      // gasUseEstimateQuote: 1000000 * 200000 / 150000 = 1333333
+      expect(response.gasUseEstimateQuote).equals('1333333');
+
+      // gasUseEstimateUSD: 1.5 * 200000 / 150000 = 2.0
+      expect(response.gasUseEstimateUSD).equals('2');
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should correctly set gasUseEstimateQuoteDecimals when simulation FAILS', async () => {
+      // gasUseEstimateQuoteDecimals is CurrencyAmount.fromRawAmount(token, finalGasUseEstimateQuote)
+      // TestTokenHandler returns tokens with 18 decimals.
+      // finalGasUseEstimateQuote = 1333333 → toExact() = "0.000000000001333333"
+
+      const simulationEnabledConfig = {
+        ...serviceConfigAsync,
+        Simulation: {
+          ...serviceConfigAsync.Simulation,
+          Enabled: true,
+        },
+      };
+
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x1234567890123456789012345678901234567890',
+        slippageTolerance: 20,
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(UniProtocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+
+      // finalGasUseEstimateQuote = 1333333 (18 decimal token → 0.000000000001333333)
+      expect(response.gasUseEstimateQuote).equals('1333333');
+      expect(response.gasUseEstimateQuoteDecimals).equals(
+        '0.000000000001333333'
+      );
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
   });
 
   describe('deleteCachedRoutes', () => {

@@ -95,6 +95,7 @@ import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
 import {RedisCache} from '@uniswap/lib-cache/redis';
+import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
 
 export class UniRouteBL implements IUniRoutedBL {
   constructor(
@@ -1026,6 +1027,7 @@ export class UniRouteBL implements IUniRoutedBL {
     let finalQuoteGasAdjusted = quoteGasAdjusted;
     let finalGasUseEstimate = totalGasUse;
     let finalGasUseEstimateQuote = gasCostInQuoteToken;
+    let finalGasUseEstimateUSD = gasCostInUSD;
     if (
       quoteSplit.simulationResult?.status === SimulationStatus.SUCCESS &&
       quoteSplit.simulationResult.estimatedGasUsedInQuoteToken !== 0n
@@ -1051,6 +1053,32 @@ export class UniRouteBL implements IUniRoutedBL {
           finalQuoteGasAdjusted: finalQuoteGasAdjusted.toString(),
         }
       );
+    }
+
+    // TODO: ROUTE-1002 -investigate uniroute InsufficienToken tenderly simulation error
+    //       ROUTE-1003 -fix uniroute to port gas estimate heurisitcs from routing
+    if (quoteSplit.simulationResult?.status === SimulationStatus.FAILED) {
+      finalGasUseEstimate = CHAIN_TO_GAS_LIMIT_MAP[chain.chainId].toBigInt();
+
+      // Scale gas quote token and USD estimates proportionally based on the hardcoded chain gas limit
+      if (totalGasUse > 0n) {
+        finalGasUseEstimateQuote =
+          (gasCostInQuoteToken * finalGasUseEstimate) / totalGasUse;
+        finalGasUseEstimateUSD =
+          (gasCostInUSD * Number(finalGasUseEstimate)) / Number(totalGasUse);
+      }
+
+      // TODO: estimatedGasUsedInQuoteToken might go negative (https://linear.app/uniswap/issue/ROUTE-453)
+      if (tradeType === TradeType.ExactIn) {
+        finalQuoteGasAdjusted = totalQuoteAmount - finalGasUseEstimateQuote;
+      } else {
+        finalQuoteGasAdjusted = totalQuoteAmount + finalGasUseEstimateQuote;
+      }
+
+      ctx.logger.debug('Simulation failed - updating quoteGasAdjusted amount', {
+        quoteGasAdjusted: quoteGasAdjusted.toString(),
+        finalQuoteGasAdjusted: finalQuoteGasAdjusted.toString(),
+      });
     }
 
     // Do portion amount calculations
@@ -1329,7 +1357,7 @@ export class UniRouteBL implements IUniRoutedBL {
       gasUseEstimate: finalGasUseEstimate.toString(),
       gasUseEstimateQuote: finalGasUseEstimateQuote.toString(),
       gasUseEstimateQuoteDecimals: finalGasUseEstimateQuoteDecimals.toExact(),
-      gasUseEstimateUSD: gasCostInUSD.toString(),
+      gasUseEstimateUSD: finalGasUseEstimateUSD.toString(),
       routeString,
       route: filteredAllPools.map(pools => new Route({pools})),
       hitsCachedRoutes: usedCachedRoutes,
