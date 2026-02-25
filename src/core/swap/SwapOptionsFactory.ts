@@ -28,6 +28,7 @@ export type SwapOptionsUniversalRouterInput = {
   permitAmount?: string;
   permitSigDeadline?: string;
   simulateFromAddress?: string;
+  permit2Enabled?: boolean;
 };
 
 export class SwapOptionsFactory {
@@ -47,6 +48,7 @@ export class SwapOptionsFactory {
     permitAmount,
     permitSigDeadline,
     simulateFromAddress,
+    permit2Enabled,
   }: SwapOptionsUniversalRouterInput): SwapOptionsUniversalRouter | undefined {
     if (!slippageTolerance) {
       return undefined;
@@ -67,6 +69,7 @@ export class SwapOptionsFactory {
         : undefined,
       recipient: recipient,
       slippageTolerance: parseSlippageTolerance(slippageTolerance),
+      permit2Enabled: permit2Enabled ?? true,
       ...allFeeOptions,
     };
 

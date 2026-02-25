@@ -10,8 +10,16 @@ import {
 } from '../../gen/uniroute/v1/api_pb';
 import {Context} from '@uniswap/lib-uni/context';
 
+export type QuoteOptions = {
+  permit2Enabled?: boolean;
+};
+
 export interface IUniRoutedBL {
-  quote(ctx: Context, request: QuoteRequest): Promise<QuoteResponse>;
+  quote(
+    ctx: Context,
+    request: QuoteRequest,
+    options?: QuoteOptions
+  ): Promise<QuoteResponse>;
   getCachedRoutes(
     ctx: Context,
     request: GetCachedRoutesRequest

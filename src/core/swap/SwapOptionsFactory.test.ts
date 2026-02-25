@@ -273,6 +273,35 @@ describe('SwapOptionsFactory', () => {
       }
     });
 
+    it('should default permit2Enabled to true when not provided', () => {
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_0(baseInput);
+
+      expect(result!.permit2Enabled).toBe(true);
+    });
+
+    it('should set permit2Enabled to false when explicitly provided', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        permit2Enabled: false,
+      };
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
+
+      expect(result!.permit2Enabled).toBe(false);
+    });
+
+    it('should set permit2Enabled to true when explicitly provided', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        permit2Enabled: true,
+      };
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
+
+      expect(result!.permit2Enabled).toBe(true);
+    });
+
     it('should handle full configuration with all options', () => {
       const input: SwapOptionsUniversalRouterInput = {
         chainId: ChainId.MAINNET,

@@ -26,6 +26,7 @@ export type SwapOptionsUniversalRouter = UniversalRouterSwapOptions & {
   type: SwapType.UNIVERSAL_ROUTER;
   version: UniversalRouterVersion;
   simulate?: {fromAddress: string};
+  permit2Enabled?: boolean;
 };
 
 export type SimulationResult = {

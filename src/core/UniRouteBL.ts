@@ -54,7 +54,7 @@ import {V2Pool} from '../models/pool/V2Pool';
 import {V4Pool} from '../models/pool/V4Pool';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
 import {IRoutesRepository} from '../stores/route/IRoutesRepository';
-import {IUniRoutedBL} from './IUniRouteBL';
+import {IUniRoutedBL, QuoteOptions} from './IUniRouteBL';
 import {IGasEstimateProvider} from './gas/estimator/GasEstimateProvider';
 import {QuoteStatus} from '../models/quote/QuoteStatus';
 import {IPoolDiscoverer, UniPoolInfo} from './pool-discovery/interface';
@@ -121,7 +121,11 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>
   ) {}
 
-  async quote(ctx: Context, request: QuoteRequest): Promise<QuoteResponse> {
+  async quote(
+    ctx: Context,
+    request: QuoteRequest,
+    options?: QuoteOptions
+  ): Promise<QuoteResponse> {
     /*
      * Token Pair Journey Through UniRoute System
      * =======================================================
@@ -603,7 +607,8 @@ export class UniRouteBL implements IUniRoutedBL {
         ctx,
         metricTags,
         gasPrice,
-        blockNumber
+        blockNumber,
+        options?.permit2Enabled ?? true
       );
 
       // Finally update best route's pools with latest pool information
@@ -1533,7 +1538,8 @@ export class UniRouteBL implements IUniRoutedBL {
     ctx: Context,
     metricTags: string[],
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    permit2Enabled: boolean = true
   ): Promise<QuoteSplit | undefined> {
     if (topNQuotes.length === 0) {
       return undefined;
@@ -1563,6 +1569,7 @@ export class UniRouteBL implements IUniRoutedBL {
       permitAmount: request.permitAmount,
       permitSigDeadline: request.permitSigDeadline,
       simulateFromAddress: request.simulateFromAddress,
+      permit2Enabled,
     });
 
     if (
