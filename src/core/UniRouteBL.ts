@@ -27,7 +27,9 @@ import {
   ChainId,
   IUniRouteServiceConfig,
   LambdaType,
+  QuoteService,
   needsGasPriceFetching,
+  getUniRouteSyncCacheMissRouteFinderOverrides,
 } from '../lib/config';
 import {Address} from '../models/address/Address';
 import {IChainRepository} from '../stores/chain/IChainRepository';
@@ -431,6 +433,22 @@ export class UniRouteBL implements IUniRoutedBL {
         `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`
       );
 
+      // On sync cache miss with specific protocols, use reduced search space for lower latency.
+      // When !allProtocolsIncluded, cached routes are never used, so every request does fresh route finding.
+      const effectiveConfig =
+        !usedCachedRoutes &&
+        this.serviceConfig.Lambda.Type === LambdaType.Sync &&
+        this.serviceConfig.QuoteService === QuoteService.UniRoute &&
+        !allProtocolsIncluded(protocols)
+          ? {
+              ...this.serviceConfig,
+              RouteFinder: {
+                ...this.serviceConfig.RouteFinder,
+                ...getUniRouteSyncCacheMissRouteFinderOverrides(),
+              },
+            }
+          : this.serviceConfig;
+
       // Make sure all our routes are valid here.
       const unfilteredRoutesLength = routes.length;
       const invalidRoutes: string[] = [];
@@ -482,6 +500,11 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       }
 
+      // Cap routes to effectiveConfig.MaxRoutes (may be reduced on sync cache miss)
+      if (routes.length > effectiveConfig.RouteFinder.MaxRoutes) {
+        routes = routes.slice(0, effectiveConfig.RouteFinder.MaxRoutes);
+      }
+
       // Do some logging
       ctx.logger.debug(`Routes (${routes.length})`, {
         v2Routes: routes
@@ -508,7 +531,7 @@ export class UniRouteBL implements IUniRoutedBL {
           amountIn,
           tradeType,
           protocols,
-          this.serviceConfig,
+          effectiveConfig,
           routes,
           tokensInfo,
           metricTags
@@ -620,6 +643,9 @@ export class UniRouteBL implements IUniRoutedBL {
       metricTags.push(`status:${status}`);
       metricTags.push(
         `simulationStatus:${bestQuote?.simulationResult?.status}`
+      );
+      metricTags.push(
+        `routeFinderConfig:${effectiveConfig !== this.serviceConfig ? 'reduced' : 'original'}`
       );
       await ctx.metrics.count(buildMetricKey('Call'), 1, {
         tags: metricTags,

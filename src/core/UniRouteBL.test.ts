@@ -2,8 +2,10 @@ import {describe, expect, it, beforeEach, vi} from 'vitest';
 import {UniRouteBL} from './UniRouteBL';
 import {
   getUniRouteTestConfig,
+  getUniRouteSyncCacheMissRouteFinderOverrides,
   IUniRouteServiceConfig,
   LambdaType,
+  QuoteService,
 } from '../lib/config';
 import {HardcodedChainRepository} from '../stores/chain/hardcoded/HardcodedChainRepository';
 import {QuoteRequestValidator} from './QuoteRequestValidator';
@@ -3261,6 +3263,281 @@ describe('UniRouteBL', () => {
       await uniRouteBL.quote(ctx, request);
 
       expect(prefetchSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sync cache miss reduced config', () => {
+    const cacheMissOverrides = getUniRouteSyncCacheMissRouteFinderOverrides();
+
+    // Request with a subset of protocols (not all) to trigger reduced config
+    const partialProtocolsRequest = {
+      ...baseRequest,
+      protocols: 'v2,v3',
+      tradeType: 'EXACT_IN',
+    };
+
+    function expectReducedConfig(passedConfig: IUniRouteServiceConfig): void {
+      expect(passedConfig.RouteFinder.MaxRoutes).toBe(
+        cacheMissOverrides.MaxRoutes
+      );
+      expect(passedConfig.RouteFinder.MaxSplits).toBe(
+        cacheMissOverrides.MaxSplits
+      );
+      expect(passedConfig.RouteFinder.RouteSplitPercentage).toBe(
+        cacheMissOverrides.RouteSplitPercentage
+      );
+      expect(passedConfig.RouteFinder.RouteSplitTimeoutMs).toBe(
+        cacheMissOverrides.RouteSplitTimeoutMs
+      );
+      expect(passedConfig.RouteFinder.MaxSplitRoutes).toBe(
+        cacheMissOverrides.MaxSplitRoutes
+      );
+    }
+
+    function expectOriginalConfig(
+      passedConfig: IUniRouteServiceConfig,
+      expectedConfig: IUniRouteServiceConfig
+    ): void {
+      expect(passedConfig.RouteFinder.MaxRoutes).toBe(
+        expectedConfig.RouteFinder.MaxRoutes
+      );
+      expect(passedConfig.RouteFinder.MaxSplits).toBe(
+        expectedConfig.RouteFinder.MaxSplits
+      );
+      expect(passedConfig.RouteFinder.RouteSplitPercentage).toBe(
+        expectedConfig.RouteFinder.RouteSplitPercentage
+      );
+      expect(passedConfig.RouteFinder.RouteSplitTimeoutMs).toBe(
+        expectedConfig.RouteFinder.RouteSplitTimeoutMs
+      );
+      expect(passedConfig.RouteFinder.MaxSplitRoutes).toBe(
+        expectedConfig.RouteFinder.MaxSplitRoutes
+      );
+    }
+
+    it('should use reduced RouteFinder config on sync cache miss with partial protocols', async () => {
+      const request = new QuoteRequest(partialProtocolsRequest);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+      expect(response.hitsCachedRoutes).toBe(false);
+
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      expectReducedConfig(strategySpy.mock.calls[0][7]);
+    });
+
+    it('should use original RouteFinder config on sync cache miss with all protocols', async () => {
+      // baseRequest already has protocols: 'v2,v3,v4,mixed' (all protocols)
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // Sync + cache miss + all protocols = should NOT use reduced config
+      const response = await uniRouteBL.quote(ctx, request);
+      expect(response.hitsCachedRoutes).toBe(false);
+
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      expectOriginalConfig(strategySpy.mock.calls[0][7], serviceConfig);
+    });
+
+    it('should use original RouteFinder config on sync cache hit', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+
+      // First, populate cache via async call
+      const asyncBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+      await asyncBL.quote(ctx, request);
+
+      // Now sync should get a cache hit
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const syncBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await syncBL.quote(ctx, request);
+      expect(response.hitsCachedRoutes).toBe(true);
+
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      expectOriginalConfig(strategySpy.mock.calls[0][7], serviceConfig);
+    });
+
+    it('should use original RouteFinder config on async cache miss with partial protocols', async () => {
+      const request = new QuoteRequest(partialProtocolsRequest);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // Async + cache miss should NOT use reduced config even with partial protocols
+      const response = await uniRouteBL.quote(ctx, request);
+      expect(response.hitsCachedRoutes).toBe(false);
+
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      expectOriginalConfig(strategySpy.mock.calls[0][7], serviceConfigAsync);
+    });
+
+    it('should not apply reduced config for quickroute service', async () => {
+      const quickRouteConfig: IUniRouteServiceConfig = {
+        ...serviceConfig,
+        QuoteService: QuoteService.QuickRoute,
+      };
+
+      const request = new QuoteRequest(partialProtocolsRequest);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const uniRouteBL = new UniRouteBL(
+        quickRouteConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // QuickRoute sync + cache miss + partial protocols should NOT use reduced config
+      const response = await uniRouteBL.quote(ctx, request);
+      expect(response.hitsCachedRoutes).toBe(false);
+
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      expectOriginalConfig(strategySpy.mock.calls[0][7], quickRouteConfig);
     });
   });
 });

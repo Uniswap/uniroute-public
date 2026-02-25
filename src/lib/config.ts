@@ -335,6 +335,17 @@ export const getQuickRouteAsyncConfig = (
   };
 };
 
+/** Reduced RouteFinder overrides for sync cache-miss path (lower latency, smaller search space). */
+export const getUniRouteSyncCacheMissRouteFinderOverrides = (): Partial<
+  IUniRouteServiceConfig['RouteFinder']
+> => ({
+  MaxRoutes: __PLACEHOLDER__,
+  MaxSplits: __PLACEHOLDER__,
+  RouteSplitPercentage: __PLACEHOLDER__,
+  RouteSplitTimeoutMs: __PLACEHOLDER__,
+  MaxSplitRoutes: __PLACEHOLDER__,
+});
+
 export const getUniRouteTestConfig = (
   lambdaType: LambdaType = LambdaType.Sync,
   s3PoolBucketName?: string
