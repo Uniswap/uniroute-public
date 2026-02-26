@@ -7,6 +7,7 @@ import {
 } from '../../../../abis/src/generated/contracts';
 
 import {
+  PROXY_UNIVERSAL_ROUTER_ADDRESS,
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
@@ -112,46 +113,74 @@ export class EthSimulateV1Simulator extends Simulator {
         // so that gas estimate is consistent for UniswapX
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
-      // Do initial onboarding approval of Permit2.
       const erc20Interface = ERC20__factory.createInterface();
-      const approvePermit2Calldata = erc20Interface.encodeFunctionData(
-        'approve',
-        [permit2Address(this.chainId), constants.MaxUint256]
-      );
+      const permit2Enabled = swapOptions.permit2Enabled !== false;
 
-      const permit2Interface = Permit2__factory.createInterface();
-      const approveUniversalRouterCallData =
-        permit2Interface.encodeFunctionData('approve', [
-          quoteSplit.swapInfo!.tokenInWrappedAddress,
-          UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
-          MAX_UINT160,
-          Math.floor(new Date().getTime() / 1000) + 10000000,
-        ]);
+      let approvalCalls: SimulateV1Call[];
+      if (permit2Enabled) {
+        const approvePermit2Calldata = erc20Interface.encodeFunctionData(
+          'approve',
+          [permit2Address(this.chainId), constants.MaxUint256]
+        );
 
-      const approvePermit2: SimulateV1Call = {
-        from: fromAddress,
-        to: quoteSplit.swapInfo!.tokenInWrappedAddress,
-        data: approvePermit2Calldata,
-        value: '0x0',
-      };
-      const approveUniversalRouter: SimulateV1Call = {
-        from: fromAddress,
-        to: permit2Address(this.chainId),
-        data: approveUniversalRouterCallData,
-        value: '0x0',
-      };
+        const permit2Interface = Permit2__factory.createInterface();
+        const approveUniversalRouterCallData =
+          permit2Interface.encodeFunctionData('approve', [
+            quoteSplit.swapInfo!.tokenInWrappedAddress,
+            UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
+            MAX_UINT160,
+            Math.floor(new Date().getTime() / 1000) + 10000000,
+          ]);
+
+        approvalCalls = [
+          {
+            from: fromAddress,
+            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            data: approvePermit2Calldata,
+            value: '0x0',
+          }, // Approve Permit2 Contract
+          {
+            from: fromAddress,
+            to: permit2Address(this.chainId),
+            data: approveUniversalRouterCallData,
+            value: '0x0',
+          }, // Approve Universal Router Contract
+        ];
+      } else {
+        const approveProxyUniversalRouterContractCalldata =
+          erc20Interface.encodeFunctionData('approve', [
+            PROXY_UNIVERSAL_ROUTER_ADDRESS,
+            constants.MaxUint256,
+          ]);
+
+        approvalCalls = [
+          {
+            from: fromAddress,
+            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            data: approveProxyUniversalRouterContractCalldata,
+            value: '0x0',
+          },
+        ]; // Approve Proxy Universal Router Contract
+      }
+
       const swap: SimulateV1Call = {
         from: fromAddress,
-        to: quoteSplit.swapInfo!.methodParameters!.to,
+        to: permit2Enabled
+          ? quoteSplit.swapInfo!.methodParameters!.to
+          : PROXY_UNIVERSAL_ROUTER_ADDRESS,
         data: quoteSplit.swapInfo!.methodParameters!.calldata,
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters!.value
           : '0x0',
       };
 
+      const allCalls = [...approvalCalls, swap];
+      const expectedCallCount = allCalls.length;
+      const swapCallIndex = expectedCallCount - 1;
+
       ctx.logger.debug('eth_simulateV1 call params', {
-        approvePermit2Value: approvePermit2.value,
-        approveURValue: approveUniversalRouter.value,
+        permit2Enabled,
+        approvalCallCount: approvalCalls.length,
         swapValue: swap.value,
         blockNumberParam: blockNumber
           ? '0x' + blockNumber.toString(16)
@@ -160,10 +189,12 @@ export class EthSimulateV1Simulator extends Simulator {
       ctx.logger.info('Simulating using eth_simulateV1 on Universal Router', {
         addr: fromAddress,
         methodParameters: quoteSplit.swapInfo!.methodParameters,
+        permit2Enabled,
+        callCount: expectedCallCount,
       });
       try {
         const blockStateCall: BlockStateCall = {
-          calls: [approvePermit2, approveUniversalRouter, swap],
+          calls: allCalls,
         };
         const blockStateCalls: BlockStateCalls = {
           blockStateCalls: [blockStateCall],
@@ -171,7 +202,6 @@ export class EthSimulateV1Simulator extends Simulator {
 
         const before = Date.now();
 
-        // Call eth_simulateV1 RPC method
         const result = (await this.provider.send('eth_simulateV1', [
           blockStateCalls,
           blockNumber ? '0x' + blockNumber.toString(16) : 'latest',
@@ -184,13 +214,16 @@ export class EthSimulateV1Simulator extends Simulator {
           !result[0] ||
           result.length < 1 ||
           !result[0].calls ||
-          result[0].calls.length < 3 ||
-          'error' in result[0].calls[2]
+          result[0].calls.length < expectedCallCount ||
+          'error' in result[0].calls[swapCallIndex]
         ) {
-          if ('error' in result[0].calls[2]) {
+          if (
+            result?.[0]?.calls?.[swapCallIndex] &&
+            'error' in result[0].calls[swapCallIndex]
+          ) {
             ctx.logger.error('eth_simulateV1 returned error', {
               result,
-              error: (result[0].calls[2] as JsonRpcError).error,
+              error: (result[0].calls[swapCallIndex] as JsonRpcError).error,
             });
           }
 
@@ -213,10 +246,9 @@ export class EthSimulateV1Simulator extends Simulator {
           };
         }
 
-        // swapResult is ReturnData
         estimatedGasUsed = BigInt(
           (
-            Number((result[0].calls[2] as ReturnData).gasUsed) *
+            Number((result[0].calls[swapCallIndex] as ReturnData).gasUsed) *
             estimateMultiplier
           ).toFixed(0)
         );
@@ -237,16 +269,28 @@ export class EthSimulateV1Simulator extends Simulator {
           ],
         });
 
-        ctx.logger.info(
-          'Successfully Simulated Approvals + Swap via eth_simulateV1 for Universal Router. Gas used.',
-          {
-            approvePermit2GasUsed: (result[0].calls[0] as ReturnData).gasUsed,
-            approveUniversalRouterGasUsed: (result[0].calls[1] as ReturnData)
-              .gasUsed,
-            swapGasUsed: (result[0].calls[2] as ReturnData).gasUsed,
-            swapWithMultiplier: estimatedGasUsed.toString(),
-          }
-        );
+        if (permit2Enabled) {
+          ctx.logger.info(
+            'Successfully Simulated Approvals + Swap via eth_simulateV1 for Universal Router. Gas used.',
+            {
+              approvePermit2GasUsed: (result[0].calls[0] as ReturnData).gasUsed,
+              approveUniversalRouterGasUsed: (result[0].calls[1] as ReturnData)
+                .gasUsed,
+              swapGasUsed: (result[0].calls[2] as ReturnData).gasUsed,
+              swapWithMultiplier: estimatedGasUsed.toString(),
+            }
+          );
+        } else {
+          ctx.logger.info(
+            'Successfully Simulated Proxy Universal Router Approval + Swap via eth_simulateV1. Gas used.',
+            {
+              approveProxyContractGasUsed: (result[0].calls[0] as ReturnData)
+                .gasUsed,
+              swapGasUsed: (result[0].calls[1] as ReturnData).gasUsed,
+              swapWithMultiplier: estimatedGasUsed.toString(),
+            }
+          );
+        }
       } catch (e) {
         ctx.logger.error('Error simulating with eth_simulateV1', e);
 

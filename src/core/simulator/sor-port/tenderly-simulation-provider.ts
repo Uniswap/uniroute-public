@@ -14,6 +14,7 @@ import {
 
 import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
 import {
+  PROXY_UNIVERSAL_ROUTER_ADDRESS,
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
@@ -375,47 +376,70 @@ export class TenderlySimulator extends Simulator {
       ) {
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
-      // Do initial onboarding approval of Permit2.
       const erc20Interface = ERC20__factory.createInterface();
-      const approvePermit2Calldata = erc20Interface.encodeFunctionData(
-        'approve',
-        [permit2Address(this.chainId), constants.MaxUint256]
-      );
+      const permit2Enabled = swapOptions.permit2Enabled !== false;
 
-      // We are unsure if the users calldata contains a permit or not. We just
-      // max approve the Universal Router from Permit2 instead, which will cover both cases.
-      const permit2Interface = Permit2__factory.createInterface();
-      const approveUniversalRouterCallData =
-        permit2Interface.encodeFunctionData('approve', [
-          quoteSplit.swapInfo!.tokenInWrappedAddress,
-          UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
-          MAX_UINT160,
-          Math.floor(new Date().getTime() / 1000) + 10000000,
-        ]);
+      let approvalCalls: TenderlySimulationRequest[];
+      if (permit2Enabled) {
+        const approvePermit2Calldata = erc20Interface.encodeFunctionData(
+          'approve',
+          [permit2Address(this.chainId), constants.MaxUint256]
+        );
 
-      const approvePermit2: TenderlySimulationRequest = {
-        network_id: chainId,
-        estimate_gas: true,
-        input: approvePermit2Calldata,
-        to: quoteSplit.swapInfo!.tokenInWrappedAddress,
-        value: '0',
-        from: fromAddress,
-        block_number: blockNumber,
-        simulation_type: TenderlySimulationType.QUICK,
-        save_if_fails: false,
-      };
+        const permit2Interface = Permit2__factory.createInterface();
+        const approveUniversalRouterCallData =
+          permit2Interface.encodeFunctionData('approve', [
+            quoteSplit.swapInfo!.tokenInWrappedAddress,
+            UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
+            MAX_UINT160,
+            Math.floor(new Date().getTime() / 1000) + 10000000,
+          ]);
 
-      const approveUniversalRouter: TenderlySimulationRequest = {
-        network_id: chainId,
-        estimate_gas: true,
-        input: approveUniversalRouterCallData,
-        to: permit2Address(this.chainId),
-        value: '0',
-        from: fromAddress,
-        block_number: blockNumber,
-        simulation_type: TenderlySimulationType.QUICK,
-        save_if_fails: false,
-      };
+        approvalCalls = [
+          {
+            network_id: chainId,
+            estimate_gas: true,
+            input: approvePermit2Calldata,
+            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            value: '0',
+            from: fromAddress,
+            block_number: blockNumber,
+            simulation_type: TenderlySimulationType.QUICK,
+            save_if_fails: false,
+          }, // Approve Permit2 Contract
+          {
+            network_id: chainId,
+            estimate_gas: true,
+            input: approveUniversalRouterCallData,
+            to: permit2Address(this.chainId),
+            value: '0',
+            from: fromAddress,
+            block_number: blockNumber,
+            simulation_type: TenderlySimulationType.QUICK,
+            save_if_fails: false,
+          }, // Approve Universal Router Contract
+        ];
+      } else {
+        const approveProxyUniversalRouterContractCalldata =
+          erc20Interface.encodeFunctionData('approve', [
+            PROXY_UNIVERSAL_ROUTER_ADDRESS,
+            constants.MaxUint256,
+          ]);
+
+        approvalCalls = [
+          {
+            network_id: chainId,
+            estimate_gas: true,
+            input: approveProxyUniversalRouterContractCalldata,
+            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            value: '0',
+            from: fromAddress,
+            block_number: blockNumber,
+            simulation_type: TenderlySimulationType.QUICK,
+            save_if_fails: false,
+          },
+        ]; // Approve Proxy Universal Router Contract
+      }
 
       const swapGasPrice =
         TenderlySimulator.formatGasPriceForTenderly(gasPrice);
@@ -423,7 +447,9 @@ export class TenderlySimulator extends Simulator {
         network_id: chainId,
         input: calldata,
         estimate_gas: true,
-        to: UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
+        to: permit2Enabled
+          ? UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId)
+          : PROXY_UNIVERSAL_ROUTER_ADDRESS,
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters.value
           : '0',
@@ -434,21 +460,18 @@ export class TenderlySimulator extends Simulator {
         gas_price: swapGasPrice,
       };
 
+      const simulationCalls = [...approvalCalls, swap];
+      const expectedCallCount = simulationCalls.length;
+      const swapCallIndex = expectedCallCount - 1;
+
       const before = Date.now();
 
-      // Use Simulation API for chains that don't support Node API (e.g., XLayer)
       const useSimulationApi =
         TENDERLY_SIMULATION_API_ONLY_CHAINS.includes(chainId);
 
       if (useSimulationApi) {
-        // Use Tenderly Simulation API
         const {data: resp, status: httpStatus} =
-          await this.requestSimulationApi(
-            approvePermit2,
-            approveUniversalRouter,
-            swap,
-            ctx
-          );
+          await this.requestSimulationApi(simulationCalls, ctx);
 
         const simulationLatency = Date.now() - before;
 
@@ -469,17 +492,18 @@ export class TenderlySimulator extends Simulator {
           ],
         });
 
-        // Validate tenderly simulation API response body
         if (
           !resp ||
-          resp.simulation_results.length < 3 ||
-          !resp.simulation_results[2].transaction ||
-          resp.simulation_results[2].transaction.error_message
+          resp.simulation_results.length < expectedCallCount ||
+          !resp.simulation_results[swapCallIndex].transaction ||
+          resp.simulation_results[swapCallIndex].transaction.error_message
         ) {
           ctx.logger.error('Failed to Simulate Via Tenderly Simulation API', {
             resp,
             chainId,
-            error: resp?.simulation_results?.[2]?.transaction?.error_message,
+            error:
+              resp?.simulation_results?.[swapCallIndex]?.transaction
+                ?.error_message,
           });
           return {
             ...quoteSplit,
@@ -492,37 +516,46 @@ export class TenderlySimulator extends Simulator {
           };
         }
 
-        // Parse the gas used in the simulation response object, and then pad it so that we overestimate.
         estimatedGasUsed = BigInt(
           (
-            resp.simulation_results[2].transaction.gas * estimateMultiplier
+            resp.simulation_results[swapCallIndex].transaction.gas *
+            estimateMultiplier
           ).toFixed(0)
         );
 
-        ctx.logger.info(
-          'Successfully Simulated Approvals + Swap via Tenderly Simulation API for Universal Router. Gas used.',
-          {
-            approvePermit2GasUsed:
-              resp.simulation_results[0].transaction.gas_used,
-            approveUniversalRouterGasUsed:
-              resp.simulation_results[1].transaction.gas_used,
-            swapGasUsed: resp.simulation_results[2].transaction.gas_used,
-            approvePermit2Gas: resp.simulation_results[0].transaction.gas,
-            approveUniversalRouterGas:
-              resp.simulation_results[1].transaction.gas,
-            swapGas: resp.simulation_results[2].transaction.gas,
-            swapWithMultiplier: estimatedGasUsed.toString(),
-          }
-        );
-      } else {
-        // Use Tenderly Node API
-        const {data: resp, status: httpStatus} =
-          await this.requestNodeSimulation(
-            approvePermit2,
-            approveUniversalRouter,
-            swap,
-            ctx
+        if (permit2Enabled) {
+          ctx.logger.info(
+            'Successfully Simulated Approvals + Swap via Tenderly Simulation API for Universal Router. Gas used.',
+            {
+              approvePermit2GasUsed:
+                resp.simulation_results[0].transaction.gas_used,
+              approveUniversalRouterGasUsed:
+                resp.simulation_results[1].transaction.gas_used,
+              swapGasUsed: resp.simulation_results[2].transaction.gas_used,
+              approvePermit2Gas: resp.simulation_results[0].transaction.gas,
+              approveUniversalRouterGas:
+                resp.simulation_results[1].transaction.gas,
+              swapGas: resp.simulation_results[2].transaction.gas,
+              swapWithMultiplier: estimatedGasUsed.toString(),
+            }
           );
+        } else {
+          ctx.logger.info(
+            'Successfully Simulated Proxy Approval + Swap via Tenderly Simulation API. Gas used.',
+            {
+              approveProxyContractGasUsed:
+                resp.simulation_results[0].transaction.gas_used,
+              swapGasUsed: resp.simulation_results[1].transaction.gas_used,
+              approveProxyContractGas:
+                resp.simulation_results[0].transaction.gas,
+              swapGas: resp.simulation_results[1].transaction.gas,
+              swapWithMultiplier: estimatedGasUsed.toString(),
+            }
+          );
+        }
+      } else {
+        const {data: resp, status: httpStatus} =
+          await this.requestNodeSimulation(simulationCalls, ctx);
 
         const simulationLatency = Date.now() - before;
 
@@ -543,38 +576,26 @@ export class TenderlySimulator extends Simulator {
           ],
         });
 
-        // Validate tenderly response body
         if (
           !resp ||
           !resp.result ||
-          resp.result.length < 3 ||
-          (resp.result[2] as JsonRpcError).error
+          resp.result.length < expectedCallCount ||
+          (resp.result[swapCallIndex] as JsonRpcError).error
         ) {
-          // Logging out the request body for easier debugging on failure.
           try {
             const body = {
               id: 1,
               jsonrpc: '2.0',
               method: 'tenderly_estimateGasBundle',
               params: [
-                [
-                  {
-                    from: approvePermit2.from,
-                    to: approvePermit2.to,
-                    data: approvePermit2.input,
-                  },
-                  {
-                    from: approveUniversalRouter.from,
-                    to: approveUniversalRouter.to,
-                    data: approveUniversalRouter.input,
-                  },
-                  {
-                    from: swap.from,
-                    to: swap.to,
-                    data: swap.input,
-                    gasPrice: swap.gas_price,
-                  },
-                ],
+                simulationCalls.map((call, index) => ({
+                  from: call.from,
+                  to: call.to,
+                  data: call.input,
+                  ...(index === simulationCalls.length - 1 && {
+                    gasPrice: call.gas_price,
+                  }),
+                })),
                 blockNumber,
               ],
             };
@@ -592,9 +613,9 @@ export class TenderlySimulator extends Simulator {
           if (
             resp &&
             resp.result &&
-            resp.result.length >= 3 &&
-            (resp.result[2] as JsonRpcError).error &&
-            (resp.result[2] as JsonRpcError).error.data
+            resp.result.length >= expectedCallCount &&
+            (resp.result[swapCallIndex] as JsonRpcError).error &&
+            (resp.result[swapCallIndex] as JsonRpcError).error.data
           ) {
             return {
               ...quoteSplit,
@@ -604,7 +625,7 @@ export class TenderlySimulator extends Simulator {
                 status: breakDownTenderlySimulationError(
                   quoteSplit.swapInfo!.tokenInWrappedAddress,
                   quoteSplit.swapInfo!.tokenOutWrappedAddress,
-                  (resp.result[2] as JsonRpcError).error.data
+                  (resp.result[swapCallIndex] as JsonRpcError).error.data
                 ),
                 description: 'Error simulating transaction',
               },
@@ -622,25 +643,39 @@ export class TenderlySimulator extends Simulator {
           };
         }
 
-        // Parse the gas used in the simulation response object, and then pad it so that we overestimate.
         estimatedGasUsed = BigInt(
           (
-            Number((resp.result[2] as GasBody).gas) * estimateMultiplier
+            Number((resp.result[swapCallIndex] as GasBody).gas) *
+            estimateMultiplier
           ).toFixed(0)
         );
 
-        ctx.logger.info(
-          'Successfully Simulated Approvals + Swap via Tenderly node endpoint for Universal Router. Gas used.',
-          {
-            approvePermit2GasUsed: (resp.result[0] as GasBody).gasUsed,
-            approveUniversalRouterGasUsed: (resp.result[1] as GasBody).gasUsed,
-            swapGasUsed: (resp.result[2] as GasBody).gasUsed,
-            approvePermit2Gas: (resp.result[0] as GasBody).gas,
-            approveUniversalRouterGas: (resp.result[1] as GasBody).gas,
-            swapGas: (resp.result[2] as GasBody).gas,
-            swapWithMultiplier: estimatedGasUsed.toString(),
-          }
-        );
+        if (permit2Enabled) {
+          ctx.logger.info(
+            'Successfully Simulated Approvals + Swap via Tenderly node endpoint for Universal Router. Gas used.',
+            {
+              approvePermit2GasUsed: (resp.result[0] as GasBody).gasUsed,
+              approveUniversalRouterGasUsed: (resp.result[1] as GasBody)
+                .gasUsed,
+              swapGasUsed: (resp.result[2] as GasBody).gasUsed,
+              approvePermit2Gas: (resp.result[0] as GasBody).gas,
+              approveUniversalRouterGas: (resp.result[1] as GasBody).gas,
+              swapGas: (resp.result[2] as GasBody).gas,
+              swapWithMultiplier: estimatedGasUsed.toString(),
+            }
+          );
+        } else {
+          ctx.logger.info(
+            'Successfully Simulated Proxy Approval + Swap via Tenderly node endpoint. Gas used.',
+            {
+              approveProxyContractGasUsed: (resp.result[0] as GasBody).gasUsed,
+              swapGasUsed: (resp.result[1] as GasBody).gasUsed,
+              approveProxyContractGas: (resp.result[0] as GasBody).gas,
+              swapGas: (resp.result[1] as GasBody).gas,
+              swapWithMultiplier: estimatedGasUsed.toString(),
+            }
+          );
+        }
       }
     } else {
       throw new Error(`Unsupported swap type: ${swapOptions}`);
@@ -690,9 +725,7 @@ export class TenderlySimulator extends Simulator {
   }
 
   private async requestNodeSimulation(
-    approvePermit2: TenderlySimulationRequest,
-    approveUniversalRouter: TenderlySimulationRequest,
-    swap: TenderlySimulationRequest,
+    simulationCalls: TenderlySimulationRequest[],
     ctx: Context
   ): Promise<{data: TenderlyResponseEstimateGasBundle; status: number}> {
     const nodeEndpoint = TENDERLY_NODE_API(
@@ -705,29 +738,20 @@ export class TenderlySimulator extends Simulator {
     // if (swap.block_number !== undefined) {
     //   blockNumber = swap.block_number.toString();
     // }
+    const swap = simulationCalls[simulationCalls.length - 1];
     const body: TenderlyNodeEstimateGasBundleBody = {
       id: 1,
       jsonrpc: '2.0',
       method: 'tenderly_estimateGasBundle',
       params: [
-        [
-          {
-            from: approvePermit2.from,
-            to: approvePermit2.to,
-            data: approvePermit2.input,
-          },
-          {
-            from: approveUniversalRouter.from,
-            to: approveUniversalRouter.to,
-            data: approveUniversalRouter.input,
-          },
-          {
-            from: swap.from,
-            to: swap.to,
-            data: swap.input,
+        simulationCalls.map((call, index) => ({
+          from: call.from,
+          to: call.to,
+          data: call.input,
+          ...(index === simulationCalls.length - 1 && {
             gasPrice: swap.gas_price,
-          },
-        ],
+          }),
+        })),
         blockNumber,
       ],
     };
@@ -779,9 +803,7 @@ export class TenderlySimulator extends Simulator {
   }
 
   private async requestSimulationApi(
-    approvePermit2: TenderlySimulationRequest,
-    approveUniversalRouter: TenderlySimulationRequest,
-    swap: TenderlySimulationRequest,
+    simulationCalls: TenderlySimulationRequest[],
     ctx: Context
   ): Promise<{data: TenderlyResponseUniversalRouter; status: number}> {
     const url = TENDERLY_BATCH_SIMULATE_API(
@@ -791,7 +813,7 @@ export class TenderlySimulator extends Simulator {
     );
 
     const body: TenderlySimulationBody = {
-      simulations: [approvePermit2, approveUniversalRouter, swap],
+      simulations: simulationCalls,
       estimate_gas: true,
     };
 

@@ -21,6 +21,10 @@ export enum SwapType {
   SWAP_ROUTER_02, // Not supported in UniRoute
 }
 
+// TODO(SWAP-2047): Replace with deployed proxy contract address from @uniswap/universal-router-sdk once published
+export const PROXY_UNIVERSAL_ROUTER_ADDRESS =
+  '0x0000000000000000000000000000000000000000';
+
 // Swap options for Universal Router and Permit2.
 export type SwapOptionsUniversalRouter = UniversalRouterSwapOptions & {
   type: SwapType.UNIVERSAL_ROUTER;

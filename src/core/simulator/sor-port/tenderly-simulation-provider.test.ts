@@ -426,6 +426,75 @@ describe('tenderly-simulation-provider', () => {
           )
         ).rejects.toThrow('Unsupported swap type');
       });
+
+      it('should simulate 2-call proxy flow when permit2Enabled is false', async () => {
+        const mockResponse: TenderlyResponseEstimateGasBundle = {
+          id: 1,
+          jsonrpc: '2.0',
+          result: [
+            {gas: '50000', gasUsed: '45000'} as GasBody,
+            {gas: '150000', gasUsed: '140000'} as GasBody,
+          ],
+        };
+
+        mockAxiosInstance.post.mockResolvedValue({
+          data: mockResponse,
+          status: 200,
+        });
+
+        const proxySwapOptions: SwapOptionsUniversalRouter = {
+          ...swapOptions,
+          permit2Enabled: false,
+        };
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.simulateTransaction(
+          USER_ADDRESS,
+          proxySwapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+        expect(result.simulationResult?.estimatedGasUsed).toBe(195000n); // 150000 * 1.3
+      });
+
+      it('should return FAILED for 2-call proxy flow when response has error', async () => {
+        const mockResponse: TenderlyResponseEstimateGasBundle = {
+          id: 1,
+          jsonrpc: '2.0',
+          result: [
+            {gas: '50000', gasUsed: '45000'} as GasBody,
+            {
+              error: {
+                code: -32000,
+                message: 'execution reverted',
+                data: '0x08c379a0...',
+              },
+            },
+          ],
+        };
+
+        mockAxiosInstance.post.mockResolvedValue({
+          data: mockResponse,
+          status: 200,
+        });
+
+        const proxySwapOptions: SwapOptionsUniversalRouter = {
+          ...swapOptions,
+          permit2Enabled: false,
+        };
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.simulateTransaction(
+          USER_ADDRESS,
+          proxySwapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+      });
     });
 
     describe('simulateTransaction with Simulation API (XLayer)', () => {
@@ -1345,6 +1414,89 @@ describe('tenderly-simulation-provider', () => {
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
         expect(provider.send).toHaveBeenCalled();
+      });
+    });
+
+    describe('ethSimulateV1 proxy flow (permit2Enabled: false)', () => {
+      it('should simulate 2-call proxy flow and parse gas from index 1', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {
+                returnData: '0x',
+                logs: [],
+                gasUsed: '50000',
+                status: '0x1',
+              },
+              {
+                returnData: '0x',
+                logs: [],
+                gasUsed: '150000',
+                status: '0x1',
+              },
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const proxySwapOptions: SwapOptionsUniversalRouter = {
+          ...swapOptions,
+          permit2Enabled: false,
+        };
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          proxySwapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+        expect(result.simulationResult?.estimatedGasUsed).toBe(195000n); // 150000 * 1.3
+
+        const sendArgs = vi.mocked(provider.send).mock.calls[0];
+        const blockStateCalls = sendArgs[1][0];
+        expect(blockStateCalls.blockStateCalls[0].calls).toHaveLength(2);
+      });
+
+      it('should return FAILED for 2-call proxy flow when swap has error', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {
+                returnData: '0x',
+                logs: [],
+                gasUsed: '50000',
+                status: '0x1',
+              },
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                },
+              },
+            ],
+          },
+        ];
+
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        const proxySwapOptions: SwapOptionsUniversalRouter = {
+          ...swapOptions,
+          permit2Enabled: false,
+        };
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          proxySwapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
       });
     });
 
