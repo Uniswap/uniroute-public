@@ -140,10 +140,6 @@ export interface IUniRouteServiceConfig {
     // Whether the quote response needs up to date pool info for routes picked
     NeedsUpToDatePoolsInfo: boolean;
   };
-  FeeOnTransfer: {
-    // Whether to adjust V2 quote amounts for fee-on-transfer tokens (buyFeeBps/sellFeeBps)
-    V2AdjustmentEnabled: boolean;
-  };
 }
 
 // Returns the configuration object for uniroute sync service.
@@ -219,9 +215,6 @@ export const getUniRouteSyncConfig = (
     ResponseRequirements: {
       NeedsBlockNumber: true,
       NeedsUpToDatePoolsInfo: true,
-    },
-    FeeOnTransfer: {
-      V2AdjustmentEnabled: true,
     },
   };
 };
@@ -299,9 +292,6 @@ export const getQuickRouteSyncConfig = (
     ResponseRequirements: {
       NeedsBlockNumber: false,
       NeedsUpToDatePoolsInfo: false,
-    },
-    FeeOnTransfer: {
-      V2AdjustmentEnabled: true,
     },
   };
 };
