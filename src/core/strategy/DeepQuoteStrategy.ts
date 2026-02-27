@@ -124,7 +124,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       pctRoutes,
       tradeType,
       ctx,
-      metricTags
+      metricTags,
+      tokensInfo
     );
     await logElapsedTime('FetchQuotes', fetchQuotesStartTime, ctx, metricTags);
 
