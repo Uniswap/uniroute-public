@@ -617,6 +617,30 @@ export class TenderlySimulator extends Simulator {
             (resp.result[swapCallIndex] as JsonRpcError).error &&
             (resp.result[swapCallIndex] as JsonRpcError).error.data
           ) {
+            // ROUTE-106: log error for Insufficient Token error, for incident investigation
+            if (
+              (resp.result[swapCallIndex] as JsonRpcError).error.data ===
+              '0x675cae38'
+            ) {
+              ctx.logger.error(
+                'Error simulating transaction due to Insufficient Token.',
+                {
+                  resp,
+                  chainId,
+                  body: JSON.stringify(simulationCalls),
+                }
+              );
+              // since we have simulation.TopNQuotes = 3, if Tenderly.Simulation.InsufficientToken count is multiple of 3,
+              // it means we exhausted all 3 quotes, for insufficient token error.
+              await ctx.metrics.count(
+                'Tenderly.Simulation.InsufficientToken',
+                1,
+                {
+                  tags: [`chain:${chainId}`],
+                }
+              );
+            }
+
             return {
               ...quoteSplit,
               simulationResult: {
