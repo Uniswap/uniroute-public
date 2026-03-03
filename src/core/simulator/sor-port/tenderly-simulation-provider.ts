@@ -639,6 +639,42 @@ export class TenderlySimulator extends Simulator {
                   tags: [`chain:${chainId}`],
                 }
               );
+
+              const simulationCallsWithSaveIfFails = simulationCalls.map(
+                call => ({
+                  ...call,
+                  save_if_fails: true,
+                })
+              );
+
+              try {
+                const {data: resp, status: httpStatus} =
+                  await this.requestSimulationApi(
+                    simulationCallsWithSaveIfFails,
+                    ctx
+                  );
+
+                ctx.logger.info(
+                  'Successfully simulated transaction with save if fails',
+                  {
+                    resp,
+                    status: httpStatus,
+                  }
+                );
+
+                await ctx.metrics.count(
+                  'Tenderly.Simulation.InsufficientToken.SaveIfFails',
+                  1,
+                  {
+                    tags: [`chain:${chainId}`],
+                  }
+                );
+              } catch (err) {
+                ctx.logger.error(
+                  'Failed to simulate transaction with save if fails',
+                  {err: err}
+                );
+              }
             }
 
             return {

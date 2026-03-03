@@ -427,6 +427,193 @@ describe('tenderly-simulation-provider', () => {
         ).rejects.toThrow('Unsupported swap type');
       });
 
+      describe('InsufficientToken error with save_if_fails', () => {
+        it('should call Simulation API with save_if_fails=true and count SaveIfFails metric on success', async () => {
+          const nodeApiResponse: TenderlyResponseEstimateGasBundle = {
+            id: 1,
+            jsonrpc: '2.0',
+            result: [
+              {gas: '50000', gasUsed: '45000'} as GasBody,
+              {gas: '60000', gasUsed: '55000'} as GasBody,
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                  data: '0x675cae38',
+                },
+              },
+            ],
+          };
+
+          const simApiResponse: TenderlyResponseUniversalRouter = {
+            config: {url: '', method: '', data: ''},
+            simulation_results: [
+              {
+                transaction: {gas: 50000, gas_used: 45000},
+                simulation: {id: '1', status: true},
+              },
+              {
+                transaction: {gas: 60000, gas_used: 55000},
+                simulation: {id: '2', status: true},
+              },
+              {
+                transaction: {gas: 150000, gas_used: 140000},
+                simulation: {id: '3', status: true},
+              },
+            ],
+          };
+
+          mockAxiosInstance.post
+            .mockResolvedValueOnce({data: nodeApiResponse, status: 200})
+            .mockResolvedValueOnce({data: simApiResponse, status: 200});
+
+          const quoteSplit = createQuoteSplit();
+          const result = await simulator.simulateTransaction(
+            USER_ADDRESS,
+            swapOptions,
+            quoteSplit,
+            ctx
+          );
+
+          // Node sim call + save_if_fails Simulation API call
+          expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+
+          // Second call should be to Simulation API
+          const [secondCallUrl, secondCallBody] =
+            mockAxiosInstance.post.mock.calls[1];
+          expect(secondCallUrl).toBe(
+            'https://api.tenderly.co/api/v1/account/test-user/project/test-project/simulate-batch'
+          );
+
+          // All simulation calls in the second request must have save_if_fails: true
+          expect(
+            secondCallBody.simulations.every(
+              (sim: {save_if_fails: boolean}) => sim.save_if_fails === true
+            )
+          ).toBe(true);
+
+          expect(ctx.metrics.count).toHaveBeenCalledWith(
+            'Tenderly.Simulation.InsufficientToken',
+            1,
+            {tags: ['chain:1']}
+          );
+
+          expect(ctx.logger.info).toHaveBeenCalledWith(
+            'Successfully simulated transaction with save if fails',
+            expect.objectContaining({status: 200})
+          );
+
+          expect(ctx.metrics.count).toHaveBeenCalledWith(
+            'Tenderly.Simulation.InsufficientToken.SaveIfFails',
+            1,
+            {tags: ['chain:1']}
+          );
+
+          // The original swap still failed, so result is FAILED
+          expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        });
+
+        it('should log error and skip SaveIfFails metric when Simulation API throws after InsufficientToken error', async () => {
+          const nodeApiResponse: TenderlyResponseEstimateGasBundle = {
+            id: 1,
+            jsonrpc: '2.0',
+            result: [
+              {gas: '50000', gasUsed: '45000'} as GasBody,
+              {gas: '60000', gasUsed: '55000'} as GasBody,
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                  data: '0x675cae38',
+                },
+              },
+            ],
+          };
+
+          const simApiError = new Error('Simulation API unavailable');
+
+          mockAxiosInstance.post
+            .mockResolvedValueOnce({data: nodeApiResponse, status: 200})
+            .mockRejectedValueOnce(simApiError);
+
+          const quoteSplit = createQuoteSplit();
+          const result = await simulator.simulateTransaction(
+            USER_ADDRESS,
+            swapOptions,
+            quoteSplit,
+            ctx
+          );
+
+          expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+
+          expect(ctx.metrics.count).toHaveBeenCalledWith(
+            'Tenderly.Simulation.InsufficientToken',
+            1,
+            {tags: ['chain:1']}
+          );
+
+          // SaveIfFails metric must NOT be counted when the API call fails
+          expect(ctx.metrics.count).not.toHaveBeenCalledWith(
+            'Tenderly.Simulation.InsufficientToken.SaveIfFails',
+            expect.any(Number),
+            expect.any(Object)
+          );
+
+          expect(ctx.logger.error).toHaveBeenCalledWith(
+            'Failed to simulate transaction with save if fails',
+            {err: simApiError}
+          );
+
+          expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        });
+
+        it('should not call Simulation API when error code is not InsufficientToken', async () => {
+          const nodeApiResponse: TenderlyResponseEstimateGasBundle = {
+            id: 1,
+            jsonrpc: '2.0',
+            result: [
+              {gas: '50000', gasUsed: '45000'} as GasBody,
+              {gas: '60000', gasUsed: '55000'} as GasBody,
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                  data: '0x08c379a0',
+                },
+              },
+            ],
+          };
+
+          mockAxiosInstance.post.mockResolvedValueOnce({
+            data: nodeApiResponse,
+            status: 200,
+          });
+
+          const quoteSplit = createQuoteSplit();
+          await simulator.simulateTransaction(
+            USER_ADDRESS,
+            swapOptions,
+            quoteSplit,
+            ctx
+          );
+
+          // Only the node simulation call, no save_if_fails Simulation API call
+          expect(mockAxiosInstance.post).toHaveBeenCalledTimes(1);
+
+          expect(ctx.metrics.count).not.toHaveBeenCalledWith(
+            'Tenderly.Simulation.InsufficientToken',
+            expect.any(Number),
+            expect.any(Object)
+          );
+
+          expect(ctx.metrics.count).not.toHaveBeenCalledWith(
+            'Tenderly.Simulation.InsufficientToken.SaveIfFails',
+            expect.any(Number),
+            expect.any(Object)
+          );
+        });
+      });
+
       it('should simulate 2-call proxy flow when permit2Enabled is false', async () => {
         const mockResponse: TenderlyResponseEstimateGasBundle = {
           id: 1,
