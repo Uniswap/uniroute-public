@@ -25,6 +25,7 @@ export const XLAYER_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const ARBITRUM_GOERLI_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const ARBITRUM_SEPOLIA_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const POLYGON_MUMBAI_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
+export const LINEA_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 
 export const CHAIN_TO_GAS_LIMIT_MAP: {[chainId in ChainId]: BigNumber} = {
   [ChainId.MAINNET]: MAINNET_UPPER_SWAP_GAS_LIMIT,
@@ -59,4 +60,5 @@ export const CHAIN_TO_GAS_LIMIT_MAP: {[chainId in ChainId]: BigNumber} = {
   [ChainId.XLAYER]: XLAYER_UPPER_SWAP_GAS_LIMIT,
   [ChainId.MONAD_TESTNET]: MONAD_UPPER_SWAP_GAS_LIMIT,
   [ChainId.MONAD]: MONAD_UPPER_SWAP_GAS_LIMIT,
+  [ChainId.LINEA]: LINEA_UPPER_SWAP_GAS_LIMIT,
 };
