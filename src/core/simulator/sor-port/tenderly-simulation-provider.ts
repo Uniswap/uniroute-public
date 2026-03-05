@@ -4,7 +4,7 @@ import https from 'https';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {constants} from 'ethers';
 import {permit2Address} from '@uniswap/permit2-sdk';
-import {UNIVERSAL_ROUTER_ADDRESS} from '@uniswap/universal-router-sdk';
+import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
 import axios, {AxiosRequestConfig} from 'axios';
 
 import {
@@ -392,7 +392,7 @@ export class TenderlySimulator extends Simulator {
         const approveUniversalRouterCallData =
           permit2Interface.encodeFunctionData('approve', [
             quoteSplit.swapInfo!.tokenInWrappedAddress,
-            UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
+            getUniversalRouterAddress(swapOptions.version, this.chainId),
             MAX_UINT160,
             Math.floor(new Date().getTime() / 1000) + 10000000,
           ]);
@@ -450,7 +450,7 @@ export class TenderlySimulator extends Simulator {
         input: calldata,
         estimate_gas: true,
         to: permit2Enabled
-          ? UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId)
+          ? getUniversalRouterAddress(swapOptions.version, this.chainId)
           : PROXY_UNIVERSAL_ROUTER_ADDRESS,
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters.value

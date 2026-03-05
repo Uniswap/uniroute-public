@@ -6,7 +6,7 @@ import {ChainId} from '../../../lib/config';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {Erc20Token} from '../../../models/token/Erc20Token';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
-import {WRAPPED_NATIVE_CURRENCY} from '../../../lib/tokenUtils';
+import {WRAPPED_NATIVE_CURRENCY, PATHUSD_TEMPO} from '../../../lib/tokenUtils';
 import {GasDetails} from '../../../models/gas/GasDetails';
 import {Address} from '../../../models/address/Address';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
@@ -178,5 +178,232 @@ describe('GasConverter', () => {
     // Verify metric was recorded
     const metricKey = buildMetricKey('GasConverter.ExceptionThrown');
     expect(ctx.metrics.countStore[metricKey]).toBe(1);
+  });
+
+  describe('gas token decimal scaling', () => {
+    it('should scale gasCostInWei for 6-decimal gas tokens (Tempo/pathUSD)', async () => {
+      const chainId = ChainId.TEMPO;
+      const pathUSD = PATHUSD_TEMPO; // 6 decimals
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          pathUSD.address,
+          new Erc20Token(
+            new Address(pathUSD.address),
+            pathUSD.decimals,
+            'pathUSD',
+            'pathUSD',
+            undefined,
+            1 // priceUSD = $1
+          ),
+        ],
+      ]);
+
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      // 97000 gas * 20 gwei = 1,940,000,000,000,000 wei
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(UniProtocol.V4, []);
+      const quote = new QuoteBasic(route, 10_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      // Quote token = pathUSD (same as gas token), so no pool lookup needed
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        pathUSD.address,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // gasCostInWei = 1.94e15, scaled by 10^(18-6) = 10^12
+      // Expected: 1_940_000_000_000_000 / 1_000_000_000_000 = 1940 raw units
+      // = 0.001940 pathUSD
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(1940n);
+
+      // gasCostInUSD = priceUSD * toExact() = 1 * 0.00194 = 0.00194
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInUSD).toBeCloseTo(
+        0.00194,
+        5
+      );
+    });
+
+    it('should not scale gasCostInWei for 18-decimal gas tokens (Mainnet/WETH)', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!; // 18 decimals
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            2000
+          ),
+        ],
+      ]);
+
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      // 97000 gas * 20 gwei = 1,940,000,000,000,000 wei
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(UniProtocol.V3, []);
+      const quote = new QuoteBasic(route, 1_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      // Quote token = WETH (same as gas token), no pool lookup needed
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        wrappedNative.address,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // No scaling for 18-decimal token: raw wei value passed through directly
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(
+        gasCostInWei
+      );
+    });
+
+    it('should scale gasCostInWei before pool conversion for non-native quote token on Tempo', async () => {
+      const chainId = ChainId.TEMPO;
+      const pathUSD = PATHUSD_TEMPO; // 6 decimals
+      const usdcAddress = '0x20C000000000000000000000b9537d11c60E8b50';
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          pathUSD.address,
+          new Erc20Token(
+            new Address(pathUSD.address),
+            pathUSD.decimals,
+            'pathUSD',
+            'pathUSD',
+            undefined,
+            1
+          ),
+        ],
+        [
+          usdcAddress,
+          new Erc20Token(
+            new Address(usdcAddress),
+            6,
+            'USDC.e',
+            'USD Coin',
+            undefined,
+            1
+          ),
+        ],
+      ]);
+
+      // Mock a V3 pool between pathUSD and USDC.e
+      const mockV3Pool = new V3Pool(
+        new Address(pathUSD.address),
+        new Address(usdcAddress),
+        3000,
+        new Address('0xfbdfb13c871193aa697590a86c70ebceea19ee03'),
+        1_500_000_000n,
+        79228162514264337593543950336n, // 1:1 price
+        0n
+      );
+
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([mockV3Pool]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      // 97000 gas * 20 gwei = 1,940,000,000,000,000 wei
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(UniProtocol.V4, []);
+      const quote = new QuoteBasic(route, 10_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      // Mock getQuoteThroughNativePool to verify the scaled amount is passed
+      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} = await import(
+        '@uniswap/sdk-core'
+      );
+      const expectedScaledAmount = gasCostInWei / BigInt(10 ** 12); // 1940n
+      const mockResult = CurrencyAmountSDK.fromRawAmount(
+        new TokenSDK(chainId, usdcAddress, 6, 'USDC.e'),
+        expectedScaledAmount.toString()
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(getQuoteThroughNativePool).mockReturnValue(mockResult as any);
+
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        usdcAddress,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // Verify getQuoteThroughNativePool was called with the scaled amount (1940),
+      // not the raw wei amount (1,940,000,000,000,000)
+      expect(getQuoteThroughNativePool).toHaveBeenCalled();
+      const callArgs = vi.mocked(getQuoteThroughNativePool).mock.calls[0];
+      const nativeCurrencyAmount = callArgs[1];
+      expect(nativeCurrencyAmount.quotient.toString()).toBe(
+        expectedScaledAmount.toString()
+      );
+    });
+
+    it('should scale gasCostInWei in getGasCostInQuoteTokenBasedOnGasCostInWei for Tempo', async () => {
+      const chainId = ChainId.TEMPO;
+      const pathUSD = PATHUSD_TEMPO;
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          pathUSD.address,
+          new Erc20Token(
+            new Address(pathUSD.address),
+            pathUSD.decimals,
+            'pathUSD',
+            'pathUSD',
+            undefined,
+            1
+          ),
+        ],
+      ]);
+
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      const gasCostInWei = 97000n * 20_000_000_000n; // 1.94e15
+
+      // Quote token = pathUSD (same as gas token)
+      const result =
+        await gasConverter.getGasCostInQuoteTokenBasedOnGasCostInWei(
+          chainId,
+          pathUSD.address,
+          tokensInfo,
+          gasCostInWei,
+          ctx
+        );
+
+      // Should be scaled: 1.94e15 / 1e12 = 1940
+      expect(result).toBe(1940n);
+    });
   });
 });

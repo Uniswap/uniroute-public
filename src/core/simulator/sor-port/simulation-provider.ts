@@ -1,6 +1,6 @@
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {permit2Address} from '@uniswap/permit2-sdk';
-import {UNIVERSAL_ROUTER_ADDRESS} from '@uniswap/universal-router-sdk';
+import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
 
 import {
   SwapOptions as UniversalRouterSwapOptions,
@@ -214,7 +214,7 @@ export abstract class Simulator {
         await permit2Contract.allowance(
           fromAddress,
           tokenInAddress,
-          UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId)
+          getUniversalRouterAddress(swapOptions.version, this.chainId)
         );
 
       const nowTimestampS = Math.round(Date.now() / 1000);

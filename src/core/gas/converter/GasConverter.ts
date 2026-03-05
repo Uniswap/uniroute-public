@@ -11,7 +11,7 @@ import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, ChainId} from '../../../lib/config';
 import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
 import {V3Pool} from '../../../models/pool/V3Pool';
-import {WRAPPED_NATIVE_CURRENCY} from '../../../lib/tokenUtils';
+import {getGasToken} from '../../../lib/tokenUtils';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {IGasConverter} from './IGasConverter';
 import {V2Pool} from '../../../models/pool/V2Pool';
@@ -114,14 +114,21 @@ export class GasConverter implements IGasConverter {
       nativeAndQuoteTokenV4PoolSDK,
     } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx);
 
-    const wrappedNativeCurrency = WRAPPED_NATIVE_CURRENCY[chainId]!;
+    const wrappedNativeCurrency = getGasToken(chainId);
 
     for (const quoteSplit of quotes) {
       for (const quote of quoteSplit.quotes) {
+        // gasCostInWei is always in 18-decimal EVM precision. Scale to gas token decimals
+        // (e.g. pathUSD on Tempo has 6 decimals, so divide by 10^12)
+        const decimalDiff = 18 - wrappedNativeCurrency.decimals;
+        const scaledGasCost =
+          decimalDiff > 0
+            ? quote.gasDetails!.gasCostInWei / BigInt(10 ** decimalDiff)
+            : quote.gasDetails!.gasCostInWei;
         const totalGasCostNativeCurrency =
           CurrencyAmountRaw.fromRawAmount<Token>(
             wrappedNativeCurrency,
-            quote.gasDetails!.gasCostInWei.toString()
+            scaledGasCost.toString()
           );
 
         const gasCostInTermsOfQuoteToken =
@@ -174,10 +181,14 @@ export class GasConverter implements IGasConverter {
       nativeAndQuoteTokenV4PoolSDK,
     } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx);
 
-    const wrappedNativeCurrency = WRAPPED_NATIVE_CURRENCY[chainId]!;
+    const wrappedNativeCurrency = getGasToken(chainId);
+    // gasCostInWei is always in 18-decimal EVM precision. Scale to gas token decimals
+    const decimalDiff = 18 - wrappedNativeCurrency.decimals;
+    const scaledGasCost =
+      decimalDiff > 0 ? gasCostInWei / BigInt(10 ** decimalDiff) : gasCostInWei;
     const totalGasCostNativeCurrency = CurrencyAmountRaw.fromRawAmount<Token>(
       wrappedNativeCurrency,
-      gasCostInWei.toString()
+      scaledGasCost.toString()
     );
 
     const gasCostInTermsOfQuoteToken = await this.convertGasCostToQuoteToken(
@@ -261,7 +272,7 @@ export class GasConverter implements IGasConverter {
     quoteToken: Token,
     ctx: Context
   ): Promise<GasPools> {
-    const wrappedCurrency = WRAPPED_NATIVE_CURRENCY[chainId]!;
+    const wrappedCurrency = getGasToken(chainId);
 
     let nativeAndQuoteTokenPoolPromiseV2: Promise<V2Pool | null> | null = null;
     let nativeAndQuoteTokenPoolPromiseV3: Promise<V3Pool | null> | null = null;

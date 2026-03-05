@@ -1,10 +1,8 @@
 import {ChainId} from '../../lib/config';
 import {parseDeadline, parseSlippageTolerance} from './shared';
 import {PermitSingle} from '@uniswap/permit2-sdk';
-import {
-  UNIVERSAL_ROUTER_ADDRESS,
-  UniversalRouterVersion,
-} from '@uniswap/universal-router-sdk';
+import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {getUniversalRouterAddress} from '../../lib/universalRouterAddress';
 import {
   SwapOptionsUniversalRouter,
   SwapType,
@@ -92,7 +90,10 @@ export class SwapOptionsFactory {
           expiration: permitExpiration,
           nonce: permitNonce,
         },
-        spender: UNIVERSAL_ROUTER_ADDRESS(UniversalRouterVersion.V2_0, chainId),
+        spender: getUniversalRouterAddress(
+          UniversalRouterVersion.V2_0,
+          chainId
+        ),
         sigDeadline: permitSigDeadline,
       };
 

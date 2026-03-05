@@ -20,7 +20,7 @@ import {GasConverter} from '../../gas/converter/GasConverter';
 import {SimulationStatus} from '../ISimulator';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {constants} from 'ethers';
-import {UNIVERSAL_ROUTER_ADDRESS} from '@uniswap/universal-router-sdk';
+import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
 
 // Types for eth_simulateV1 RPC request
 interface BlockStateCalls {
@@ -127,7 +127,7 @@ export class EthSimulateV1Simulator extends Simulator {
         const approveUniversalRouterCallData =
           permit2Interface.encodeFunctionData('approve', [
             quoteSplit.swapInfo!.tokenInWrappedAddress,
-            UNIVERSAL_ROUTER_ADDRESS(swapOptions.version, this.chainId),
+            getUniversalRouterAddress(swapOptions.version, this.chainId),
             MAX_UINT160,
             Math.floor(new Date().getTime() / 1000) + 10000000,
           ]);

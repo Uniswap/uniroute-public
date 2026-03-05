@@ -68,7 +68,7 @@ import {QuoteSplit} from '../models/quote/QuoteSplit';
 import {SwapInfo} from '../models/quote/SwapInfo';
 import {IRouteQuoteAllocator} from './route/RouteQuoteAllocator';
 import {IGasConverter} from './gas/converter/IGasConverter';
-import {WRAPPED_NATIVE_CURRENCY} from '../lib/tokenUtils';
+import {getGasToken} from '../lib/tokenUtils';
 import {GasPools, usdGasTokensByChain} from './gas/gas-helpers';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
@@ -300,7 +300,7 @@ export class UniRouteBL implements IUniRoutedBL {
           [
             tokenInCurrencyInfo.wrappedAddress,
             tokenOutCurrencyInfo.wrappedAddress,
-            new Address(WRAPPED_NATIVE_CURRENCY[chain.chainId]!.address),
+            new Address(getGasToken(chain.chainId).address),
             ...(usdGasTokensByChain[chain.chainId] ?? []).map(
               t => new Address(t.address)
             ),

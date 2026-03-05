@@ -48,7 +48,8 @@ import {
   USDT_MAINNET,
   USDT_MONAD_TESTNET,
   USDT_OPTIMISM,
-  WRAPPED_NATIVE_CURRENCY,
+  PATHUSD_TEMPO,
+  getGasToken,
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
 import {IPoolsRepository} from '../../stores/pool/IPoolsRepository';
@@ -93,6 +94,7 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.SONEIUM]: [USDC_SONEIUM],
   [ChainId.MONAD]: [USDC_MONAD],
   [ChainId.XLAYER]: [USDC_XLAYER],
+  [ChainId.TEMPO]: [PATHUSD_TEMPO],
   [ChainId.LINEA]: [USDC_LINEA],
 };
 
@@ -116,8 +118,8 @@ export const getQuoteThroughNativePool = (
   nativeTokenAmount: CurrencyAmountRaw<Token>,
   nativeTokenPool: V3SDKPool | V4SDKPool | Pair
 ): CurrencyAmountRaw<Token> => {
-  const nativeCurrency = WRAPPED_NATIVE_CURRENCY[chainId];
-  const isToken0 = nativeTokenPool.token0.equals(nativeCurrency);
+  const gasToken = getGasToken(chainId);
+  const isToken0 = nativeTokenPool.token0.equals(gasToken);
   // returns mid price in terms of the native currency (the ratio of token/nativeToken)
   const nativeTokenPrice = isToken0
     ? nativeTokenPool.token0Price
@@ -132,12 +134,12 @@ export async function getHighestLiquidityV2NativePool(
   v2PoolsRepository: IPoolsRepository<V2Pool>,
   ctx: Context
 ): Promise<V2Pool | null> {
-  const nativeCurrency = WRAPPED_NATIVE_CURRENCY[token.chainId as ChainId]!;
+  const gasToken = getGasToken(token.chainId as ChainId);
 
   const pools = await v2PoolsRepository.getPools(
     ctx,
     token.chainId,
-    new Address(nativeCurrency.address),
+    new Address(gasToken.address),
     new Address(token.address)
   );
 
@@ -153,12 +155,12 @@ export async function getHighestLiquidityV3NativePool(
   v3PoolsRepository: IPoolsRepository<V3Pool>,
   ctx: Context
 ): Promise<V3Pool | null> {
-  const nativeCurrency = WRAPPED_NATIVE_CURRENCY[token.chainId as ChainId]!;
+  const gasToken = getGasToken(token.chainId as ChainId);
 
   const pools = await v3PoolsRepository.getPools(
     ctx,
     token.chainId,
-    new Address(nativeCurrency.address),
+    new Address(gasToken.address),
     new Address(token.address)
   );
 
@@ -176,12 +178,12 @@ export async function getHighestLiquidityV4NativePool(
   v4PoolsRepository: IPoolsRepository<V4Pool>,
   ctx: Context
 ): Promise<V4Pool | null> {
-  const nativeCurrency = WRAPPED_NATIVE_CURRENCY[token.chainId as ChainId]!;
+  const gasToken = getGasToken(token.chainId as ChainId);
 
   const pools = await v4PoolsRepository.getPools(
     ctx,
     token.chainId,
-    new Address(nativeCurrency.address),
+    new Address(gasToken.address),
     new Address(token.address)
   );
 

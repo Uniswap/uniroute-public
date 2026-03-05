@@ -38,6 +38,7 @@ export enum ChainId {
   SONEIUM = __PLACEHOLDER__,
   MONAD = __PLACEHOLDER__,
   XLAYER = __PLACEHOLDER__,
+  TEMPO = __PLACEHOLDER__,
   LINEA = __PLACEHOLDER__,
 }
 
@@ -394,6 +395,7 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.UNICHAIN,
   ChainId.SONEIUM,
   ChainId.XLAYER,
+  ChainId.TEMPO,
   ChainId.LINEA,
 ];
 
@@ -414,6 +416,7 @@ export const V2_SUPPORTED = [
   ChainId.BLAST,
   ChainId.WORLDCHAIN,
   ChainId.XLAYER,
+  ChainId.TEMPO,
   ChainId.LINEA,
 ];
 
@@ -436,6 +439,7 @@ export const V4_SUPPORTED = [
   ChainId.ZORA,
   ChainId.BLAST,
   ChainId.XLAYER,
+  ChainId.TEMPO,
   ChainId.LINEA,
 ];
 
@@ -453,6 +457,7 @@ export const MIXED_SUPPORTED = [
   ChainId.ZORA,
   ChainId.SONEIUM,
   ChainId.XLAYER,
+  ChainId.TEMPO,
   ChainId.LINEA,
 ];
 
@@ -512,6 +517,7 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.UNICHAIN]: {...defaultPoolSelectionConfig},
   [ChainId.SONEIUM]: {...defaultPoolSelectionConfig},
   [ChainId.XLAYER]: {...defaultPoolSelectionConfig},
+  [ChainId.TEMPO]: {...defaultPoolSelectionConfig},
   [ChainId.LINEA]: {...defaultPoolSelectionConfig},
 };
 
@@ -540,6 +546,7 @@ export const needsGasPriceFetchingMapping: Record<ChainId, Set<string>> = {
   [ChainId.UNICHAIN]: new Set<string>(),
   [ChainId.SONEIUM]: new Set<string>(),
   [ChainId.XLAYER]: new Set<string>(),
+  [ChainId.TEMPO]: new Set<string>(),
   [ChainId.LINEA]: new Set<string>(),
 };
 

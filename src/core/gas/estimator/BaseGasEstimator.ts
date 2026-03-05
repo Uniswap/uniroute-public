@@ -5,7 +5,7 @@ import {
 } from '../../../lib/config';
 import {IGasEstimator} from './IGasEstimator';
 import {CurrencyAmount, TradeType as SdkTradeType} from '@uniswap/sdk-core';
-import {WRAPPED_NATIVE_CURRENCY} from '../../../lib/tokenUtils';
+import {getGasToken} from '../../../lib/tokenUtils';
 import {GasDetails} from '../../../models/gas/GasDetails';
 import {BaseProvider, JsonRpcProvider} from '@ethersproject/providers';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
@@ -133,7 +133,7 @@ export abstract class BaseGasEstimator implements IGasEstimator {
     const gasUse =
       l1gasFees.gasUsedL1.toBigInt() + l1gasFees.gasUsedL1OnL2.toBigInt();
     const totalGasCostWei = BigInt(gasPriceWei) * gasUse;
-    const weth = WRAPPED_NATIVE_CURRENCY[chainId]!;
+    const weth = getGasToken(chainId);
     const gasCostInEth = CurrencyAmount.fromRawAmount(
       weth,
       totalGasCostWei.toString()

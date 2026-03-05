@@ -1,5 +1,5 @@
 import {BigNumber} from '@ethersproject/bignumber';
-import {ChainId} from '@uniswap/sdk-core';
+import {ChainId} from '../../../lib/config';
 
 export const ZKSYNC_UPPER_SWAP_GAS_LIMIT = BigNumber.from(6000000);
 // CELO high gas limit from SOR https://github.com/Uniswap/smart-order-router/blob/main/src/routers/alpha-router/alpha-router.ts#L670
@@ -22,35 +22,21 @@ export const BASE_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const BASE_SEPOLIA_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const SONIUM_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const XLAYER_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
-export const ARBITRUM_GOERLI_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
-export const ARBITRUM_SEPOLIA_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
-export const POLYGON_MUMBAI_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
+export const TEMPO_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const LINEA_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 
 export const CHAIN_TO_GAS_LIMIT_MAP: {[chainId in ChainId]: BigNumber} = {
   [ChainId.MAINNET]: MAINNET_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.GOERLI]: BigNumber.from(200000),
   [ChainId.SEPOLIA]: BigNumber.from(200000),
   [ChainId.OPTIMISM]: OPTIMISM_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.OPTIMISM_GOERLI]: BigNumber.from(200000),
-  [ChainId.OPTIMISM_SEPOLIA]: BigNumber.from(200000),
-  [ChainId.ARBITRUM_ONE]: ARBITRUM_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.ARBITRUM_GOERLI]: ARBITRUM_GOERLI_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.ARBITRUM_SEPOLIA]: ARBITRUM_SEPOLIA_UPPER_SWAP_GAS_LIMIT,
+  [ChainId.ARBITRUM]: ARBITRUM_UPPER_SWAP_GAS_LIMIT,
   [ChainId.POLYGON]: POLYGON_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.POLYGON_MUMBAI]: POLYGON_MUMBAI_UPPER_SWAP_GAS_LIMIT,
   [ChainId.CELO]: CELO_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.CELO_ALFAJORES]: CELO_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.GNOSIS]: BigNumber.from(200000),
-  [ChainId.MOONBEAM]: BigNumber.from(200000),
   [ChainId.BNB]: BNB_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.AVALANCHE]: BigNumber.from(200000),
-  [ChainId.BASE_GOERLI]: BigNumber.from(200000),
+  [ChainId.AVAX]: BigNumber.from(200000),
   [ChainId.BASE_SEPOLIA]: BASE_SEPOLIA_UPPER_SWAP_GAS_LIMIT,
   [ChainId.BASE]: BASE_UPPER_SWAP_GAS_LIMIT,
   [ChainId.ZORA]: ZORA_UPPER_SWAP_GAS_LIMIT,
-  [ChainId.ZORA_SEPOLIA]: BigNumber.from(200000),
-  [ChainId.ROOTSTOCK]: BigNumber.from(200000),
   [ChainId.BLAST]: BigNumber.from(200000),
   [ChainId.ZKSYNC]: ZKSYNC_UPPER_SWAP_GAS_LIMIT,
   [ChainId.WORLDCHAIN]: WORLDCHAIN_UPPER_SWAP_GAS_LIMIT,
@@ -60,5 +46,6 @@ export const CHAIN_TO_GAS_LIMIT_MAP: {[chainId in ChainId]: BigNumber} = {
   [ChainId.XLAYER]: XLAYER_UPPER_SWAP_GAS_LIMIT,
   [ChainId.MONAD_TESTNET]: MONAD_UPPER_SWAP_GAS_LIMIT,
   [ChainId.MONAD]: MONAD_UPPER_SWAP_GAS_LIMIT,
+  [ChainId.TEMPO]: TEMPO_UPPER_SWAP_GAS_LIMIT,
   [ChainId.LINEA]: LINEA_UPPER_SWAP_GAS_LIMIT,
 };

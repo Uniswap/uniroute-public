@@ -10,7 +10,7 @@ import {
   SINGLE_HOP_OVERHEAD,
   TOKEN_OVERHEAD,
 } from '../gas-costs';
-import {WRAPPED_NATIVE_CURRENCY} from '../../../lib/tokenUtils';
+import {getGasToken} from '../../../lib/tokenUtils';
 import {CurrencyAmount} from '@uniswap/sdk-core';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {UniProtocol} from '../../../models/pool/UniProtocol';
@@ -107,7 +107,7 @@ export class MixedGasEstimator extends BaseGasEstimator {
 
     // Calculate final gas costs
     const baseGasCostWei = BigNumber.from(gasPriceWei).mul(baseGasUse);
-    const wrappedCurrency = WRAPPED_NATIVE_CURRENCY[chainId]!;
+    const wrappedCurrency = getGasToken(chainId);
     const totalGasCostNativeCurrency = CurrencyAmount.fromRawAmount(
       wrappedCurrency,
       baseGasCostWei.toString()

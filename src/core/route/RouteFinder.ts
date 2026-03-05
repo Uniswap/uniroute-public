@@ -38,7 +38,10 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
       allowMixedPools &&
       pools.some(pool => pool.protocol === UniProtocol.V4)
     ) {
-      pools.push(getV4EthWethFakePool(chainId) as unknown as TPool);
+      const fakePool = getV4EthWethFakePool(chainId);
+      if (fakePool) {
+        pools.push(fakePool as unknown as TPool);
+      }
     }
 
     // First pass: find routes with standard MaxHops
