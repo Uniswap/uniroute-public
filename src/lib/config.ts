@@ -38,6 +38,7 @@ export enum ChainId {
   SONEIUM = __PLACEHOLDER__,
   MONAD = __PLACEHOLDER__,
   XLAYER = __PLACEHOLDER__,
+  LINEA = __PLACEHOLDER__,
 }
 
 export interface IUniRouteServiceConfig {
@@ -393,6 +394,7 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.UNICHAIN,
   ChainId.SONEIUM,
   ChainId.XLAYER,
+  ChainId.LINEA,
 ];
 
 export const V2_SUPPORTED = [
@@ -412,6 +414,7 @@ export const V2_SUPPORTED = [
   ChainId.BLAST,
   ChainId.WORLDCHAIN,
   ChainId.XLAYER,
+  ChainId.LINEA,
 ];
 
 export const V4_SUPPORTED = [
@@ -433,6 +436,7 @@ export const V4_SUPPORTED = [
   ChainId.ZORA,
   ChainId.BLAST,
   ChainId.XLAYER,
+  ChainId.LINEA,
 ];
 
 export const MIXED_SUPPORTED = [
@@ -449,6 +453,7 @@ export const MIXED_SUPPORTED = [
   ChainId.ZORA,
   ChainId.SONEIUM,
   ChainId.XLAYER,
+  ChainId.LINEA,
 ];
 
 export const OPTIMISM_STACK_CHAINS = [
@@ -507,6 +512,7 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.UNICHAIN]: {...defaultPoolSelectionConfig},
   [ChainId.SONEIUM]: {...defaultPoolSelectionConfig},
   [ChainId.XLAYER]: {...defaultPoolSelectionConfig},
+  [ChainId.LINEA]: {...defaultPoolSelectionConfig},
 };
 
 // Mapping of chainId to Set of token addresses that require gasPrice to be passed to simulation
@@ -534,6 +540,7 @@ export const needsGasPriceFetchingMapping: Record<ChainId, Set<string>> = {
   [ChainId.UNICHAIN]: new Set<string>(),
   [ChainId.SONEIUM]: new Set<string>(),
   [ChainId.XLAYER]: new Set<string>(),
+  [ChainId.LINEA]: new Set<string>(),
 };
 
 export const needsGasPriceFetching = (
