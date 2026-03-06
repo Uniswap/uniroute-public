@@ -12,6 +12,7 @@ import {Context} from '@uniswap/lib-uni/context';
 
 export type QuoteOptions = {
   permit2Enabled?: boolean;
+  requestSource?: string;
 };
 
 export interface IUniRoutedBL {

@@ -241,6 +241,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
 
+    const requestSource = options?.requestSource?.toLowerCase() || 'unknown';
     const metricTags = [
       `quoteservice:${this.serviceConfig.QuoteService}`,
       `chain:${ChainId[chain.chainId]}`,
@@ -249,6 +250,7 @@ export class UniRouteBL implements IUniRoutedBL {
       `protocols:${protocols.sort().join('_').toLowerCase()}`,
       `strategy:${this.quoteStrategy.name()}`,
       `hooksOptions:${hooksOptions}`,
+      `requestSource:${requestSource}`,
     ];
 
     try {
