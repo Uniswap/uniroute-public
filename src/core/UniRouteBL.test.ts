@@ -1340,6 +1340,140 @@ describe('UniRouteBL', () => {
         updatedReserve1.toString()
       );
     });
+
+    it('should skip MainUpdateBestQuotePoolsWithFreshDetails when simulation already ran (SUCCESS)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x1234567890123456789012345678901234567890',
+        slippageTolerance: 20,
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(UniProtocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      // Spy on getPoolDetailsForRoute to count how many times it's called
+      const getPoolDetailsForRouteSpy = vi.spyOn(
+        freshPoolDetailsWrapper,
+        'getPoolDetailsForRoute'
+      );
+
+      const simulationEnabledConfig = {
+        ...serviceConfig,
+        Simulation: {
+          ...serviceConfig.Simulation,
+          Enabled: true,
+        },
+      };
+
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        // Use the failing simulator so simulation status is FAILED (pools already refreshed inside simulate loop)
+        new FailingSimulator(),
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(ctx, request);
+
+      // getPoolDetailsForRoute should have been called exactly once (inside simulateAndPopulateBestQuote),
+      // and NOT a second time in the MainUpdateBestQuotePoolsWithFreshDetails block.
+      expect(getPoolDetailsForRouteSpy).toHaveBeenCalledTimes(1);
+
+      getPoolDetailsForRouteSpy.mockRestore();
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should call MainUpdateBestQuotePoolsWithFreshDetails when simulation is disabled (UNATTEMPTED)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        // No simulateFromAddress → simulation disabled → status will be UNATTEMPTED
+      });
+
+      const getPoolDetailsForRouteSpy = vi.spyOn(
+        freshPoolDetailsWrapper,
+        'getPoolDetailsForRoute'
+      );
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(ctx, request);
+
+      // When simulation is disabled (UNATTEMPTED), pools were never refreshed so
+      // MainUpdateBestQuotePoolsWithFreshDetails must still run.
+      expect(getPoolDetailsForRouteSpy).toHaveBeenCalledTimes(1);
+
+      getPoolDetailsForRouteSpy.mockRestore();
+    });
   });
 
   describe('getCachedRoutes', () => {

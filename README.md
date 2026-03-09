@@ -1,4 +1,5 @@
 # UniRoute
+<!-- RunsOn verification test marker - will be removed by follow-up PR -->
 
 UniRoute is Uniswap's off-chain routing engine for generating optimized swap quotes across Uniswap V2, V3, and V4 protocols + hooks.
 

@@ -625,8 +625,17 @@ export class UniRouteBL implements IUniRoutedBL {
 
         status = QuoteStatus.Success;
 
-        // Only update pool details if required
-        if (this.serviceConfig.ResponseRequirements.NeedsUpToDatePoolsInfo) {
+        // Only update pool details if required AND simulation hasn't already refreshed them.
+        // When simulation ran (SUCCESS or FAILED), updateQuoteSplitWithFreshPoolDetails was
+        // already called inside simulateAndPopulateBestQuote, so repeating it here is redundant.
+        const poolsAlreadyFresh =
+          bestQuote.simulationResult?.status !== undefined &&
+          bestQuote.simulationResult?.status !== SimulationStatus.UNATTEMPTED;
+
+        if (
+          this.serviceConfig.ResponseRequirements.NeedsUpToDatePoolsInfo &&
+          !poolsAlreadyFresh
+        ) {
           const startUpdatePoolsTime = Date.now();
           await updateQuoteSplitWithFreshPoolDetails(
             this.freshPoolDetailsWrapper,
