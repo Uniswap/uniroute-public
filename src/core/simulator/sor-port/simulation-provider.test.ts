@@ -94,6 +94,7 @@ describe('Simulator', () => {
     ctx = {
       logger: {
         info: vi.fn(),
+        debug: vi.fn(),
         error: vi.fn(),
       },
     } as unknown as Context;

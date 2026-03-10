@@ -241,7 +241,7 @@ export class GasConverter implements IGasConverter {
           nativeAndQuoteTokenV4PoolSDK
         );
       } else {
-        ctx.logger.warn('GasConverter.convertGasCostToQuoteToken', {
+        ctx.logger.debug('GasConverter.convertGasCostToQuoteToken', {
           message: 'No gas pools found for quote token',
           quoteToken,
           chainId,

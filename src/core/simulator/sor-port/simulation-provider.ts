@@ -162,7 +162,7 @@ export abstract class Simulator {
       }
 
       const hasBalance = balance >= neededBalanceAmount;
-      ctx.logger.info('Result of balance check for simulation', {
+      ctx.logger.debug('Result of balance check for simulation', {
         fromAddress,
         balance: balance.toString(),
         neededBalance: neededBalanceAmount.toString(),
