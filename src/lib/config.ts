@@ -171,7 +171,7 @@ export const getUniRouteSyncConfig = (
     CachedRoutes: {
       Enabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
-      RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
@@ -251,7 +251,7 @@ export const getQuickRouteSyncConfig = (
     CachedRoutes: {
       Enabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
-      RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
