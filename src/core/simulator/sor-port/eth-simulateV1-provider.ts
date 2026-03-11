@@ -7,7 +7,6 @@ import {
 } from '../../../../abis/src/generated/contracts';
 
 import {
-  PROXY_UNIVERSAL_ROUTER_ADDRESS,
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
@@ -21,6 +20,10 @@ import {SimulationStatus} from '../ISimulator';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {constants} from 'ethers';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
+import {
+  SWAP_PROXY_ADDRESS,
+  TokenTransferMode,
+} from '@uniswap/universal-router-sdk';
 
 // Types for eth_simulateV1 RPC request
 interface BlockStateCalls {
@@ -114,7 +117,8 @@ export class EthSimulateV1Simulator extends Simulator {
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       const erc20Interface = ERC20__factory.createInterface();
-      const permit2Enabled = swapOptions.permit2Enabled !== false;
+      const permit2Enabled =
+        swapOptions.tokenTransferMode !== TokenTransferMode.ApproveProxy;
 
       let approvalCalls: SimulateV1Call[];
       if (permit2Enabled) {
@@ -149,7 +153,7 @@ export class EthSimulateV1Simulator extends Simulator {
       } else {
         const approveProxyUniversalRouterContractCalldata =
           erc20Interface.encodeFunctionData('approve', [
-            PROXY_UNIVERSAL_ROUTER_ADDRESS,
+            SWAP_PROXY_ADDRESS(this.chainId),
             constants.MaxUint256,
           ]);
 
@@ -167,7 +171,7 @@ export class EthSimulateV1Simulator extends Simulator {
         from: fromAddress,
         to: permit2Enabled
           ? quoteSplit.swapInfo!.methodParameters!.to
-          : PROXY_UNIVERSAL_ROUTER_ADDRESS,
+          : SWAP_PROXY_ADDRESS(this.chainId),
         data: quoteSplit.swapInfo!.methodParameters!.calldata,
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters!.value

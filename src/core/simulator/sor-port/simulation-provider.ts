@@ -3,7 +3,9 @@ import {permit2Address} from '@uniswap/permit2-sdk';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
 
 import {
+  SWAP_PROXY_ADDRESS,
   SwapOptions as UniversalRouterSwapOptions,
+  TokenTransferMode,
   UniversalRouterVersion,
 } from '@uniswap/universal-router-sdk';
 
@@ -21,16 +23,11 @@ export enum SwapType {
   SWAP_ROUTER_02, // Not supported in UniRoute
 }
 
-// TODO(SWAP-2047): Replace with deployed proxy contract address from @uniswap/universal-router-sdk once published
-export const PROXY_UNIVERSAL_ROUTER_ADDRESS =
-  '0x0000000000000000000000000000000000000000';
-
 // Swap options for Universal Router and Permit2.
 export type SwapOptionsUniversalRouter = UniversalRouterSwapOptions & {
   type: SwapType.UNIVERSAL_ROUTER;
   version: UniversalRouterVersion;
   simulate?: {fromAddress: string};
-  permit2Enabled?: boolean;
 };
 
 export type SimulationResult = {
@@ -184,15 +181,34 @@ export abstract class Simulator {
     provider: JsonRpcProvider,
     ctx: Context
   ): Promise<boolean> {
-    // Check token has approved Permit2 more than expected amount.
     const tokenContract = ERC20__factory.connect(tokenInAddress, provider);
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
+      if (swapOptions.tokenTransferMode === TokenTransferMode.ApproveProxy) {
+        const proxyAllowance = (
+          await tokenContract.allowance(
+            fromAddress,
+            SWAP_PROXY_ADDRESS(this.chainId)
+          )
+        ).toBigInt();
+
+        const proxyApproved = proxyAllowance >= inputAmount;
+        ctx.logger.info(
+          `Simulating on UR with ApproveProxy, Proxy approved: ${proxyApproved}.`,
+          {
+            proxyAllowance: proxyAllowance.toString(),
+            inputAmount: inputAmount.toString(),
+            proxyApproved,
+          }
+        );
+        return proxyApproved;
+      }
+
+      // Permit2 flow
       const permit2Allowance = (
         await tokenContract.allowance(fromAddress, permit2Address(this.chainId))
       ).toBigInt();
 
-      // If a permit has been provided we don't need to check if UR has already been allowed.
       if (swapOptions.inputTokenPermit) {
         ctx.logger.info(
           'Permit was provided for simulation on UR, checking that Permit2 has been approved.',
@@ -204,7 +220,6 @@ export abstract class Simulator {
         return permit2Allowance >= inputAmount;
       }
 
-      // Check UR has been approved from Permit2.
       const permit2Contract = Permit2__factory.connect(
         permit2Address(this.chainId),
         provider

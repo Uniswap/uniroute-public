@@ -14,7 +14,6 @@ import {
 
 import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
 import {
-  PROXY_UNIVERSAL_ROUTER_ADDRESS,
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
@@ -28,6 +27,10 @@ import {GasConverter} from '../../gas/converter/GasConverter';
 import {TradeType} from '../../../models/quote/TradeType';
 import {SimulationStatus} from '../ISimulator';
 import {EthSimulateV1Simulator} from './eth-simulateV1-provider';
+import {
+  SWAP_PROXY_ADDRESS,
+  TokenTransferMode,
+} from '@uniswap/universal-router-sdk';
 
 export type GasBody = {
   gas: string;
@@ -381,7 +384,8 @@ export class TenderlySimulator extends Simulator {
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       const erc20Interface = ERC20__factory.createInterface();
-      const permit2Enabled = swapOptions.permit2Enabled !== false;
+      const permit2Enabled =
+        swapOptions.tokenTransferMode !== TokenTransferMode.ApproveProxy;
 
       let approvalCalls: TenderlySimulationRequest[];
       if (permit2Enabled) {
@@ -426,7 +430,7 @@ export class TenderlySimulator extends Simulator {
       } else {
         const approveProxyUniversalRouterContractCalldata =
           erc20Interface.encodeFunctionData('approve', [
-            PROXY_UNIVERSAL_ROUTER_ADDRESS,
+            SWAP_PROXY_ADDRESS(this.chainId),
             constants.MaxUint256,
           ]);
 
@@ -453,7 +457,7 @@ export class TenderlySimulator extends Simulator {
         estimate_gas: true,
         to: permit2Enabled
           ? getUniversalRouterAddress(swapOptions.version, this.chainId)
-          : PROXY_UNIVERSAL_ROUTER_ADDRESS,
+          : SWAP_PROXY_ADDRESS(this.chainId),
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters.value
           : '0',

@@ -1,7 +1,10 @@
 import {ChainId} from '../../lib/config';
 import {parseDeadline, parseSlippageTolerance} from './shared';
 import {PermitSingle} from '@uniswap/permit2-sdk';
-import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {
+  TokenTransferMode,
+  UniversalRouterVersion,
+} from '@uniswap/universal-router-sdk';
 import {getUniversalRouterAddress} from '../../lib/universalRouterAddress';
 import {
   SwapOptionsUniversalRouter,
@@ -62,12 +65,16 @@ export class SwapOptionsFactory {
     const swapParams: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
       version: UniversalRouterVersion.V2_0,
+      chainId,
       deadlineOrPreviousBlockhash: deadline
         ? parseDeadline(deadline)
         : undefined,
       recipient: recipient,
       slippageTolerance: parseSlippageTolerance(slippageTolerance),
-      permit2Enabled: permit2Enabled ?? true,
+      tokenTransferMode:
+        permit2Enabled !== false
+          ? TokenTransferMode.Permit2
+          : TokenTransferMode.ApproveProxy,
       ...allFeeOptions,
     };
 

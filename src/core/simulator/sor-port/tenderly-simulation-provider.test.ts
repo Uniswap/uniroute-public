@@ -17,7 +17,10 @@ import {Context} from '@uniswap/lib-uni/context';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {TradeType} from '../../../models/quote/TradeType';
 import {GasConverter} from '../../gas/converter/GasConverter';
-import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {
+  TokenTransferMode,
+  UniversalRouterVersion,
+} from '@uniswap/universal-router-sdk';
 import {Percent} from '@uniswap/sdk-core';
 import {SimulationStatus} from '../ISimulator';
 import {Erc20Token} from '../../../models/token/Erc20Token';
@@ -140,6 +143,7 @@ describe('tenderly-simulation-provider', () => {
       version: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
+      tokenTransferMode: TokenTransferMode.Permit2,
     };
 
     beforeEach(() => {
@@ -614,7 +618,7 @@ describe('tenderly-simulation-provider', () => {
         });
       });
 
-      it('should simulate 2-call proxy flow when permit2Enabled is false', async () => {
+      it('should simulate 2-call proxy flow with ApproveProxy tokenTransferMode', async () => {
         const mockResponse: TenderlyResponseEstimateGasBundle = {
           id: 1,
           jsonrpc: '2.0',
@@ -631,7 +635,7 @@ describe('tenderly-simulation-provider', () => {
 
         const proxySwapOptions: SwapOptionsUniversalRouter = {
           ...swapOptions,
-          permit2Enabled: false,
+          tokenTransferMode: TokenTransferMode.ApproveProxy,
         };
 
         const quoteSplit = createQuoteSplit();
@@ -669,7 +673,7 @@ describe('tenderly-simulation-provider', () => {
 
         const proxySwapOptions: SwapOptionsUniversalRouter = {
           ...swapOptions,
-          permit2Enabled: false,
+          tokenTransferMode: TokenTransferMode.ApproveProxy,
         };
 
         const quoteSplit = createQuoteSplit();
@@ -899,6 +903,7 @@ describe('tenderly-simulation-provider', () => {
       version: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
+      tokenTransferMode: TokenTransferMode.Permit2,
     };
 
     const createQuoteSplit = (tokenInIsNative = false): QuoteSplit => ({
@@ -1104,6 +1109,7 @@ describe('tenderly-simulation-provider', () => {
       version: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
+      tokenTransferMode: TokenTransferMode.Permit2,
     };
 
     beforeEach(() => {
@@ -1604,7 +1610,7 @@ describe('tenderly-simulation-provider', () => {
       });
     });
 
-    describe('ethSimulateV1 proxy flow (permit2Enabled: false)', () => {
+    describe('ethSimulateV1 proxy flow (ApproveProxy)', () => {
       it('should simulate 2-call proxy flow and parse gas from index 1', async () => {
         const mockResult = [
           {
@@ -1629,7 +1635,7 @@ describe('tenderly-simulation-provider', () => {
 
         const proxySwapOptions: SwapOptionsUniversalRouter = {
           ...swapOptions,
-          permit2Enabled: false,
+          tokenTransferMode: TokenTransferMode.ApproveProxy,
         };
 
         const quoteSplit = createQuoteSplit();
@@ -1672,7 +1678,7 @@ describe('tenderly-simulation-provider', () => {
 
         const proxySwapOptions: SwapOptionsUniversalRouter = {
           ...swapOptions,
-          permit2Enabled: false,
+          tokenTransferMode: TokenTransferMode.ApproveProxy,
         };
 
         const quoteSplit = createQuoteSplit();

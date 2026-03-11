@@ -5,7 +5,10 @@ import {
 } from './SwapOptionsFactory';
 import {ChainId} from '../../lib/config';
 import {TradeType} from '../../models/quote/TradeType';
-import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {
+  TokenTransferMode,
+  UniversalRouterVersion,
+} from '@uniswap/universal-router-sdk';
 import {SwapType} from '../simulator/sor-port/simulation-provider';
 
 describe('SwapOptionsFactory', () => {
@@ -273,14 +276,14 @@ describe('SwapOptionsFactory', () => {
       }
     });
 
-    it('should default permit2Enabled to true when not provided', () => {
+    it('should default to Permit2 tokenTransferMode when permit2Enabled is not provided', () => {
       const result =
         SwapOptionsFactory.createUniversalRouterOptions_2_0(baseInput);
 
-      expect(result!.permit2Enabled).toBe(true);
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
     });
 
-    it('should set permit2Enabled to false when explicitly provided', () => {
+    it('should set ApproveProxy tokenTransferMode when permit2Enabled is false', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,
         permit2Enabled: false,
@@ -288,10 +291,10 @@ describe('SwapOptionsFactory', () => {
 
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
 
-      expect(result!.permit2Enabled).toBe(false);
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.ApproveProxy);
     });
 
-    it('should set permit2Enabled to true when explicitly provided', () => {
+    it('should set Permit2 tokenTransferMode when permit2Enabled is true', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,
         permit2Enabled: true,
@@ -299,7 +302,7 @@ describe('SwapOptionsFactory', () => {
 
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
 
-      expect(result!.permit2Enabled).toBe(true);
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
     });
 
     it('should handle full configuration with all options', () => {
