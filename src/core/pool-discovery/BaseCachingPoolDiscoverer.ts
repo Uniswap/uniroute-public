@@ -171,6 +171,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       retrievedPools = this.filterUnsupportedTokenPools(retrievedPools);
 
       // use topPoolSelector to filter pools - we need to make sure a small number of pools is returned here
+      const filterPoolsStartTime = Date.now();
       retrievedPools = await topPoolSelector.filterPools(
         retrievedPools,
         chainId,
@@ -179,6 +180,15 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         protocol,
         hooksOptions,
         ctx
+      );
+      const filterPoolsElapsed = Date.now() - filterPoolsStartTime;
+      ctx.logger.debug(
+        `[Latency] TopPoolsSelector.filterPools took ${filterPoolsElapsed}ms`
+      );
+      await ctx.metrics.timer(
+        buildMetricKey('TopPoolsSelector.filterPools.Latency'),
+        filterPoolsElapsed,
+        {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
       );
 
       // now we are ready to cache

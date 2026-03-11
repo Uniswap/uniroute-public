@@ -18,6 +18,12 @@ const createMockContext = (): UniContext => {
       gauge: vi.fn().mockResolvedValue(undefined),
       timer: vi.fn().mockResolvedValue(undefined),
     },
+    logger: {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
   } as unknown as UniContext;
 };
 

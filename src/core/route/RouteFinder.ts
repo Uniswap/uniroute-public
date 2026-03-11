@@ -44,6 +44,8 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
       }
     }
 
+    const findAllPathsStartTime = Date.now();
+
     // First pass: find routes with standard MaxHops
     this.findAllPaths(
       pools,
@@ -100,6 +102,15 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
     // Emit metrics if context is available
     if (ctx) {
       const metricTags = [`chainId:${chainId}`];
+      const findAllPathsElapsed = Date.now() - findAllPathsStartTime;
+      ctx.logger.debug(
+        `[Latency] RouteFinder.findAllPaths took ${findAllPathsElapsed}ms`
+      );
+      await ctx.metrics.timer(
+        buildMetricKey('RouteFinder.findAllPaths.Latency'),
+        findAllPathsElapsed,
+        {tags: metricTags}
+      );
       await ctx.metrics.count(
         buildMetricKey('RouteFinder.NormalRoutesCount'),
         normalRoutesCount,
