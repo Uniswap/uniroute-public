@@ -460,5 +460,8 @@ export function getArbitrumBytes(data: string): BigNumber {
   // https://github.com/foliojs/brotli.js/issues/38
   // There are other brotli libraries that do support it, but require async
   // We workaround by using Brotli 1 with a 20% bump in size
+  if (!compressed) {
+    return BigNumber.from(0);
+  }
   return BigNumber.from(compressed.length).mul(120).div(100);
 }
