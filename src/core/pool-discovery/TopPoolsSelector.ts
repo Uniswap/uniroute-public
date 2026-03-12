@@ -13,7 +13,7 @@ import {
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
 import {getApplicableV3FeeAmounts, V3Pool} from '../../models/pool/V3Pool';
@@ -103,7 +103,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     chainId: ChainId,
     tokenIn: Address,
     tokenOut: Address,
-    protocol: UniProtocol,
+    protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
     ctx: Context
   ): Promise<UniPoolInfo[]> {
@@ -124,7 +124,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // Also filter out pools that don't match the hooks options,
     // only if the uniswap protocol is v4
     const filteredPools = filteredUnsupportedPools.filter(pool => {
-      if (protocol === UniProtocol.V4) {
+      if (protocol === Protocol.V4) {
         if (
           hooksOptions === undefined ||
           hooksOptions === HooksOptions.HOOKS_INCLUSIVE
@@ -365,7 +365,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   protected static getDirectPairs(
     pools: UniPoolInfo[],
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     selectedPoolIds: Set<string>,
@@ -390,7 +390,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       selectedPoolIds
     );
 
-    if (protocol === UniProtocol.V3) {
+    if (protocol === Protocol.V3) {
       return directPairs.filter(pool => {
         if (
           RoutingBlockList.isBlockedDirectSwapPool(pool.id, chainId) ||
@@ -592,7 +592,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   }
 
   protected manuallyGenerateDirectPairs = async (
-    protocol: UniProtocol,
+    protocol: Protocol,
     chainId: ChainId,
     tokenInAddress: string,
     tokenOutAddress: string,
@@ -601,7 +601,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   ) => {
     let forceAddedDirectPools: UniPoolInfo[] = [];
     switch (protocol) {
-      case UniProtocol.V2: {
+      case Protocol.V2: {
         const poolAddress = V2Pool.computeAddress(
           new Address(tokenInAddress),
           new Address(tokenOutAddress),
@@ -624,7 +624,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         ];
         break;
       }
-      case UniProtocol.V3: {
+      case Protocol.V3: {
         const v3FactoryAddress = (await this.chainRepository.getChain(chainId))!
           .v3FactoryAddress!;
         forceAddedDirectPools = getApplicableV3FeeAmounts(chainId).map(
@@ -654,7 +654,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         );
         break;
       }
-      case UniProtocol.V4: {
+      case Protocol.V4: {
         if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
           forceAddedDirectPools = getApplicableV4FeesTickspacingsHooks(
             chainId
@@ -702,7 +702,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       selectedPoolIds
     );
 
-    if (protocol === UniProtocol.V3) {
+    if (protocol === Protocol.V3) {
       directPairs = directPairs.filter(pool => {
         if (
           RoutingBlockList.isBlockedDirectSwapPool(pool.id, chainId) ||

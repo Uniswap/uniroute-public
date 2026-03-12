@@ -5,11 +5,11 @@ import {IGasConverter} from '../gas/converter/IGasConverter';
 import {IRouteQuoteAllocator} from '../route/RouteQuoteAllocator';
 import {IQuoteStrategy} from './IQuoteStrategy';
 import {QuoteSplit} from '../../models/quote/QuoteSplit';
-import {UniPool} from '../../models/pool/UniPool';
+import {Pool} from '../../models/pool/Pool';
 import {IUniRouteServiceConfig} from 'src/lib/config';
 import {Chain} from '../../models/chain/Chain';
 import {TradeType} from '../../models/quote/TradeType';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {RouteBasic} from '../../models/route/RouteBasic';
 import {Erc20Token} from '../../models/token/Erc20Token';
@@ -23,7 +23,7 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     protected readonly quoteFetcher: IQuoteFetcher,
     protected readonly gasEstimateProvider: IGasEstimateProvider,
     protected readonly gasConverter: IGasConverter,
-    protected readonly routeQuoteAllocator: IRouteQuoteAllocator<UniPool>,
+    protected readonly routeQuoteAllocator: IRouteQuoteAllocator<Pool>,
     protected readonly quoteSelector: IQuoteSelector,
     protected readonly tokenHandler: ITokenHandler,
     protected readonly arbitrumGasDataProvider: ArbitrumGasDataProvider,
@@ -37,9 +37,9 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     tokenOutCurrencyInfo: CurrencyInfo,
     amount: bigint,
     tradeType: TradeType,
-    protocols: UniProtocol[],
+    protocols: Protocol[],
     serviceConfig: IUniRouteServiceConfig,
-    routes: RouteBasic<UniPool>[],
+    routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[]
   ): Promise<QuoteSplit[]>;

@@ -26,10 +26,8 @@ import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
 import {QuoteBasic} from '../models/quote/QuoteBasic';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {TradeType} from '../models/quote/TradeType';
-import {UniProtocol} from '../models/pool/UniProtocol';
 import {SimpleQuoteSelector} from './quote/selector/SimpleQuoteSelector';
 import {IRoutesRepository} from '../stores/route/IRoutesRepository';
-import {UniPool} from '../models/pool/UniPool';
 import {V2Pool} from '../models/pool/V2Pool';
 import {V4Pool} from '../models/pool/V4Pool';
 import {GasEstimateProvider} from './gas/estimator/GasEstimateProvider';
@@ -66,6 +64,8 @@ import {UsdBucket} from '../stores/route/uniroutes/usdBucketUtils';
 import {Trade} from '@uniswap/router-sdk';
 import {Currency, TradeType as SdkTradeType} from '@uniswap/sdk-core';
 import {BigNumber} from '@ethersproject/bignumber';
+import {Protocol} from '../models/pool/Protocol';
+import {Pool} from '../models/pool/Pool';
 
 class TestTokenHandler implements ITokenHandler {
   public async getToken(
@@ -105,7 +105,7 @@ class TestQuoteFetcher implements IQuoteFetcher {
   ): Promise<QuoteBasic[]> {
     return [
       new QuoteBasic(
-        new RouteBasic(UniProtocol.V2, [
+        new RouteBasic(Protocol.V2, [
           new V2Pool(
             tokenInCurrencyInfo.wrappedAddress,
             tokenOutCurrencyInfo.wrappedAddress,
@@ -121,7 +121,7 @@ class TestQuoteFetcher implements IQuoteFetcher {
   }
 }
 
-class TestRoutesRepository implements IRoutesRepository<UniPool> {
+class TestRoutesRepository implements IRoutesRepository<Pool> {
   public async fetchRoutesForTokens(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chain: Chain,
@@ -130,7 +130,7 @@ class TestRoutesRepository implements IRoutesRepository<UniPool> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenOutAddress: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocols: UniProtocol[],
+    protocols: Protocol[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     generateMixedRoutes: boolean,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -139,7 +139,7 @@ class TestRoutesRepository implements IRoutesRepository<UniPool> {
     skipPoolsForTokensCache: boolean,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: UniContext
-  ): Promise<RouteBasic<UniPool>[]> {
+  ): Promise<RouteBasic<Pool>[]> {
     return [];
   }
 
@@ -148,7 +148,7 @@ class TestRoutesRepository implements IRoutesRepository<UniPool> {
     tokenInCurrencyInfo: CurrencyInfo,
     tokenOutCurrencyInfo: CurrencyInfo,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocols: UniProtocol[],
+    protocols: Protocol[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tradeType: TradeType,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -161,7 +161,7 @@ class TestRoutesRepository implements IRoutesRepository<UniPool> {
     ctx: UniContext
   ): Promise<RouteBasic[]> {
     return [
-      new RouteBasic(UniProtocol.V2, [
+      new RouteBasic(Protocol.V2, [
         new V2Pool(
           tokenInCurrencyInfo.wrappedAddress,
           tokenOutCurrencyInfo.wrappedAddress,
@@ -180,8 +180,8 @@ class TestFreshPoolDetailsWrapper implements IFreshPoolDetailsWrapper {
     quotes: QuoteBasic[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chain: Chain
-  ): Promise<Map<string, UniPool>> {
-    const poolMap = new Map<string, UniPool>();
+  ): Promise<Map<string, Pool>> {
+    const poolMap = new Map<string, Pool>();
     for (const quote of quotes) {
       for (const pool of quote.route.path) {
         poolMap.set(pool.address.toString(), pool);
@@ -194,10 +194,10 @@ class TestFreshPoolDetailsWrapper implements IFreshPoolDetailsWrapper {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    pools: UniPool[],
+    pools: Pool[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chain: Chain
-  ): Promise<Map<string, UniPool>> {
+  ): Promise<Map<string, Pool>> {
     return new Map();
   }
 }
@@ -268,7 +268,7 @@ class MockedQuoteStrategy extends BaseQuoteStrategy {
       {} as IQuoteFetcher,
       {} as GasEstimateProvider,
       {} as IGasConverter,
-      {} as RouteQuoteAllocator<UniPool>,
+      {} as RouteQuoteAllocator<Pool>,
       {} as SimpleQuoteSelector,
       {} as ITokenHandler,
       new ArbitrumGasDataProvider({} as BaseProvider),
@@ -287,11 +287,11 @@ class MockedQuoteStrategy extends BaseQuoteStrategy {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tradeType: TradeType,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocols: UniProtocol[],
+    protocols: Protocol[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     serviceConfig: IUniRouteServiceConfig,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    routes: RouteBasic<UniPool>[],
+    routes: RouteBasic<Pool>[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokensInfo: Map<string, Erc20Token | null>,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -311,7 +311,7 @@ class MockedQuoteStrategy extends BaseQuoteStrategy {
     return [
       new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               tokenInCurrencyInfo.wrappedAddress,
               tokenOutCurrencyInfo.wrappedAddress,
@@ -583,7 +583,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -684,7 +684,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -744,7 +744,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -806,7 +806,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -893,7 +893,7 @@ describe('UniRouteBL', () => {
       const twoRouteQuote = new QuoteSplit([
         new QuoteBasic(
           new RouteBasic(
-            UniProtocol.V2,
+            Protocol.V2,
             [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
@@ -917,7 +917,7 @@ describe('UniRouteBL', () => {
         ),
         new QuoteBasic(
           new RouteBasic(
-            UniProtocol.V4,
+            Protocol.V4,
             [
               new V4Pool(
                 new Address(baseRequest.tokenInAddress),
@@ -1033,7 +1033,7 @@ describe('UniRouteBL', () => {
       const threeRouteQuote = new QuoteSplit([
         new QuoteBasic(
           new RouteBasic(
-            UniProtocol.V2,
+            Protocol.V2,
             [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
@@ -1057,7 +1057,7 @@ describe('UniRouteBL', () => {
         ),
         new QuoteBasic(
           new RouteBasic(
-            UniProtocol.V3,
+            Protocol.V3,
             [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
@@ -1081,7 +1081,7 @@ describe('UniRouteBL', () => {
         ),
         new QuoteBasic(
           new RouteBasic(
-            UniProtocol.V4,
+            Protocol.V4,
             [
               new V4Pool(
                 new Address(baseRequest.tokenInAddress),
@@ -1184,7 +1184,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -1276,8 +1276,8 @@ describe('UniRouteBL', () => {
           quotes: QuoteBasic[],
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           chain: Chain
-        ): Promise<Map<string, UniPool>> {
-          const poolMap = new Map<string, UniPool>();
+        ): Promise<Map<string, Pool>> {
+          const poolMap = new Map<string, Pool>();
           for (const quote of quotes) {
             for (const pool of quote.route.path) {
               if (pool instanceof V2Pool) {
@@ -1300,10 +1300,10 @@ describe('UniRouteBL', () => {
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           ctx: Context,
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          pools: UniPool[],
+          pools: Pool[],
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           chain: Chain
-        ): Promise<Map<string, UniPool>> {
+        ): Promise<Map<string, Pool>> {
           return new Map();
         },
       };
@@ -1352,7 +1352,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -1544,7 +1544,7 @@ describe('UniRouteBL', () => {
       );
 
       // Manually create a dummy route and cache it
-      const dummyRoute = new RouteBasic(UniProtocol.V2, [
+      const dummyRoute = new RouteBasic(Protocol.V2, [
         new V2Pool(
           new Address('0x0000000000000000000000000000000000000000'),
           new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
@@ -1764,7 +1764,7 @@ describe('UniRouteBL', () => {
       // Create a quote with swapInfo that would be captured
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -1875,7 +1875,7 @@ describe('UniRouteBL', () => {
       // Create a quote with swapInfo that would be captured
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -1941,7 +1941,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -2034,7 +2034,7 @@ describe('UniRouteBL', () => {
       // so we can verify which value ends up in each response field.
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -2135,7 +2135,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -2235,7 +2235,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -2329,7 +2329,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -2469,7 +2469,7 @@ describe('UniRouteBL', () => {
       );
 
       // First, manually create a dummy route and cache it
-      const dummyRoute = new RouteBasic(UniProtocol.V2, [
+      const dummyRoute = new RouteBasic(Protocol.V2, [
         new V2Pool(
           new Address('0x0000000000000000000000000000000000000000'),
           new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
@@ -2556,7 +2556,7 @@ describe('UniRouteBL', () => {
       );
 
       // Create a route with fake V4 pool, real V4 pool, and V2 pool
-      const mixedRoute = new RouteBasic(UniProtocol.MIXED, [
+      const mixedRoute = new RouteBasic(Protocol.MIXED, [
         fakeV4Pool,
         realV4Pool,
         v2Pool,
@@ -2637,7 +2637,7 @@ describe('UniRouteBL', () => {
       // Create a quote without swapInfo (priceImpact will be undefined)
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -2696,7 +2696,7 @@ describe('UniRouteBL', () => {
       const singleQuote = new QuoteSplit(
         [
           new QuoteBasic(
-            new RouteBasic(UniProtocol.V2, [
+            new RouteBasic(Protocol.V2, [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
                 new Address(baseRequest.tokenOutAddress),
@@ -2769,7 +2769,7 @@ describe('UniRouteBL', () => {
       const singleQuote = new QuoteSplit(
         [
           new QuoteBasic(
-            new RouteBasic(UniProtocol.V2, [
+            new RouteBasic(Protocol.V2, [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
                 new Address(baseRequest.tokenOutAddress),
@@ -2842,7 +2842,7 @@ describe('UniRouteBL', () => {
       const singleQuote = new QuoteSplit(
         [
           new QuoteBasic(
-            new RouteBasic(UniProtocol.V2, [
+            new RouteBasic(Protocol.V2, [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
                 new Address(baseRequest.tokenOutAddress),
@@ -2915,7 +2915,7 @@ describe('UniRouteBL', () => {
       const quoteAt100 = new QuoteSplit(
         [
           new QuoteBasic(
-            new RouteBasic(UniProtocol.V2, [
+            new RouteBasic(Protocol.V2, [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
                 new Address(baseRequest.tokenOutAddress),
@@ -2980,7 +2980,7 @@ describe('UniRouteBL', () => {
       const quoteAtNeg100 = new QuoteSplit(
         [
           new QuoteBasic(
-            new RouteBasic(UniProtocol.V2, [
+            new RouteBasic(Protocol.V2, [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
                 new Address(baseRequest.tokenOutAddress),
@@ -3047,7 +3047,7 @@ describe('UniRouteBL', () => {
       const quoteAt0 = new QuoteSplit(
         [
           new QuoteBasic(
-            new RouteBasic(UniProtocol.V2, [
+            new RouteBasic(Protocol.V2, [
               new V2Pool(
                 new Address(baseRequest.tokenInAddress),
                 new Address(baseRequest.tokenOutAddress),
@@ -3121,7 +3121,7 @@ describe('UniRouteBL', () => {
       // Create a quote that will be used for building the trade
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),
@@ -3286,7 +3286,7 @@ describe('UniRouteBL', () => {
 
       const singleQuote = new QuoteSplit([
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               new Address(baseRequest.tokenInAddress),
               new Address(baseRequest.tokenOutAddress),

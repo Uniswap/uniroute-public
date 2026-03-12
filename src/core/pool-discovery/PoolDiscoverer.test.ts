@@ -1,7 +1,7 @@
 import {describe, beforeEach, it, expect, vi} from 'vitest';
 import {PoolDiscoverer} from './PoolDiscoverer';
 import {ChainId} from '../../lib/config';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {IPoolDiscoverer, V2PoolInfo, V3PoolInfo, V4PoolInfo} from './interface';
 
@@ -58,7 +58,7 @@ describe('PoolDiscoverer', () => {
 
   it('should delegate to v2PoolDiscoverer for UniProtocol.V2', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V2;
+    const protocol = Protocol.V2;
 
     const pools = await poolDiscoverer.getPools(chainId, protocol, ctx);
 
@@ -72,7 +72,7 @@ describe('PoolDiscoverer', () => {
 
   it('should delegate to v3PoolDiscoverer for UniProtocol.V3', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V3;
+    const protocol = Protocol.V3;
 
     const pools = await poolDiscoverer.getPools(chainId, protocol, ctx);
 
@@ -86,7 +86,7 @@ describe('PoolDiscoverer', () => {
 
   it('should delegate to v4PoolDiscoverer for UniProtocol.V4', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V4;
+    const protocol = Protocol.V4;
 
     const pools = await poolDiscoverer.getPools(chainId, protocol, ctx);
 
@@ -100,7 +100,7 @@ describe('PoolDiscoverer', () => {
 
   it('should throw an error for unsupported protocol', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = 'unsupported-protocol' as UniProtocol;
+    const protocol = 'unsupported-protocol' as Protocol;
 
     await expect(
       poolDiscoverer.getPools(chainId, protocol, ctx)

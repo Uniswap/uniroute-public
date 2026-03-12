@@ -3,7 +3,7 @@ import {BaseGasEstimator} from './BaseGasEstimator';
 import {RouteBasic} from '../../../models/route/RouteBasic';
 import {ChainId, getUniRouteSyncConfig} from '../../../lib/config';
 import {GasDetails} from '../../../models/gas/GasDetails';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {BaseProvider, JsonRpcProvider} from '@ethersproject/providers';
 import {BigNumber} from '@ethersproject/bignumber';
@@ -147,7 +147,7 @@ describe('BaseGasEstimator', () => {
     const ctx = buildTestContext();
     const provider = new JsonRpcProvider() as BaseProvider;
 
-    const dummyRoute = new RouteBasic(UniProtocol.V2, []);
+    const dummyRoute = new RouteBasic(Protocol.V2, []);
     const dummyQuote = new QuoteBasic(
       dummyRoute,
       BigInt(1000),

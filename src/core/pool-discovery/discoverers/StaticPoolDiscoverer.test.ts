@@ -5,7 +5,6 @@ import {
   StaticPoolDiscovererV4,
 } from './StaticPoolDiscoverer';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
 import {V2Pool} from '../../../models/pool/V2Pool';
@@ -21,6 +20,7 @@ import {
 import {ITopPoolsSelector, UniPoolInfo} from '../interface';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
+import {Protocol} from 'src/models/pool/Protocol';
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -33,7 +33,7 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -93,7 +93,7 @@ describe('StaticPoolDiscovererV2', () => {
     const tokenOut = new Address(USDT_MAINNET.address);
     const pools = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
-      UniProtocol.V2,
+      Protocol.V2,
       tokenIn,
       tokenOut,
       topPoolsSelector,
@@ -132,7 +132,7 @@ describe('StaticPoolDiscovererV2', () => {
     const tokenOut = new Address(USDT_MAINNET.address);
     const pools = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
-      UniProtocol.V2,
+      Protocol.V2,
       tokenIn,
       tokenOut,
       topPoolsSelector,
@@ -198,7 +198,7 @@ describe('StaticPoolDiscovererV3', () => {
     const tokenOut = new Address(USDT_MAINNET.address);
     const pools = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
-      UniProtocol.V3,
+      Protocol.V3,
       tokenIn,
       tokenOut,
       topPoolsSelector,
@@ -237,7 +237,7 @@ describe('StaticPoolDiscovererV3', () => {
     const tokenOut = new Address(USDT_MAINNET.address);
     const pools = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
-      UniProtocol.V3,
+      Protocol.V3,
       tokenIn,
       tokenOut,
       topPoolsSelector,
@@ -305,7 +305,7 @@ describe('StaticPoolDiscovererV4', () => {
     const tokenOut = new Address(USDT_MAINNET.address);
     const pools = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
-      UniProtocol.V4,
+      Protocol.V4,
       tokenIn,
       tokenOut,
       topPoolsSelector,
@@ -346,7 +346,7 @@ describe('StaticPoolDiscovererV4', () => {
     const tokenOut = new Address(USDT_MAINNET.address);
     const pools = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
-      UniProtocol.V4,
+      Protocol.V4,
       tokenIn,
       tokenOut,
       topPoolsSelector,

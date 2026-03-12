@@ -1,11 +1,11 @@
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from '../interface';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../../models/address/Address';
 import {IUniRouteServiceConfig} from 'src/lib/config';
+import {Protocol} from 'src/models/pool/Protocol';
 
 export class EmptyPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo> {
   constructor(
@@ -30,7 +30,7 @@ export class EmptyPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo>
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
@@ -41,7 +41,7 @@ export class EmptyPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo>
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenIn: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -76,7 +76,7 @@ export class EmptyPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo>
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V3PoolInfo[]> {
@@ -87,7 +87,7 @@ export class EmptyPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo>
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenIn: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -122,7 +122,7 @@ export class EmptyPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo>
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V4PoolInfo[]> {
@@ -133,7 +133,7 @@ export class EmptyPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo>
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenIn: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars

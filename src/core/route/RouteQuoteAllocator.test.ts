@@ -1,20 +1,20 @@
 import {describe, beforeEach, it, expect} from 'vitest';
 import {IRouteQuoteAllocator, RouteQuoteAllocator} from './RouteQuoteAllocator';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniPool} from '../../models/pool/UniPool';
-import {UniProtocol} from '../../models/pool/UniProtocol';
 import {Address} from '../../models/address/Address';
 import {V2Pool} from '../../models/pool/V2Pool';
+import {Pool} from '../../models/pool/Pool';
+import {Protocol} from '../../models/pool/Protocol';
 
 describe('RouteQuoteAllocator', () => {
-  let routeManager: IRouteQuoteAllocator<UniPool>;
-  let mockRoutes: RouteBasic<UniPool>[];
+  let routeManager: IRouteQuoteAllocator<Pool>;
+  let mockRoutes: RouteBasic<Pool>[];
 
   beforeEach(() => {
     routeManager = new RouteQuoteAllocator();
     // Create unique pools for each route
     mockRoutes = [
-      new RouteBasic(UniProtocol.V2, [
+      new RouteBasic(Protocol.V2, [
         new V2Pool(
           new Address('0x1000000000000000000000000000000000000000'),
           new Address('0x2000000000000000000000000000000000000000'),
@@ -23,7 +23,7 @@ describe('RouteQuoteAllocator', () => {
           0n
         ),
       ]),
-      new RouteBasic(UniProtocol.V2, [
+      new RouteBasic(Protocol.V2, [
         new V2Pool(
           new Address('0x4000000000000000000000000000000000000000'),
           new Address('0x5000000000000000000000000000000000000000'),
@@ -32,7 +32,7 @@ describe('RouteQuoteAllocator', () => {
           0n
         ),
       ]),
-      new RouteBasic(UniProtocol.V2, [
+      new RouteBasic(Protocol.V2, [
         new V2Pool(
           new Address('0x7000000000000000000000000000000000000000'),
           new Address('0x8000000000000000000000000000000000000000'),

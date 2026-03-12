@@ -13,11 +13,11 @@ import {
 import {getGasToken} from '../../../lib/tokenUtils';
 import {CurrencyAmount} from '@uniswap/sdk-core';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
-import {UniPool} from '../../../models/pool/UniPool';
 import {RouteBasic} from '../../../models/route/RouteBasic';
 import {BaseGasEstimator} from './BaseGasEstimator';
 import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
+import {Protocol} from '../../../models/pool/Protocol';
+import {Pool} from '../../../models/pool/Pool';
 
 // V2-specific constants
 const COST_PER_EXTRA_HOP_V2 = BigNumber.from(50000);
@@ -51,19 +51,19 @@ export class MixedGasEstimator extends BaseGasEstimator {
 
       // Prepare variables used in multiple cases
       let hopsGasUse: BigNumber;
-      let sectionRoute: RouteBasic<UniPool>;
+      let sectionRoute: RouteBasic<Pool>;
       let tokenOverhead: BigNumber;
 
       switch (protocol) {
-        case UniProtocol.V2:
+        case Protocol.V2:
           // V2 gas calculation
           baseGasUse = baseGasUse
             .add(COST_PER_EXTRA_HOP_V2.mul(section.length - 1))
             .add(BASE_SWAP_COST_V2);
           break;
 
-        case UniProtocol.V3:
-        case UniProtocol.V4:
+        case Protocol.V3:
+        case Protocol.V4:
           // V3/V4 gas calculation
           hopsGasUse = COST_PER_HOP(chainId).mul(hops);
 
@@ -79,7 +79,7 @@ export class MixedGasEstimator extends BaseGasEstimator {
           tokenOverhead = TOKEN_OVERHEAD(chainId, sectionRoute);
 
           // Count initialized ticks crossed for V3 sections
-          if (protocol === UniProtocol.V3) {
+          if (protocol === Protocol.V3) {
             const sectionTicksCrossed =
               this.getInitializedTicksCrossedForSection(
                 quote.v3QuoterResponseDetails?.initializedTicksCrossedList ||
@@ -121,11 +121,11 @@ export class MixedGasEstimator extends BaseGasEstimator {
     );
   }
 
-  private partitionRouteByProtocol(path: UniPool[]): UniPool[][] {
+  private partitionRouteByProtocol(path: Pool[]): Pool[][] {
     if (path.length === 0) return [];
 
-    const sections: UniPool[][] = [];
-    let currentSection: UniPool[] = [path[0]];
+    const sections: Pool[][] = [];
+    let currentSection: Pool[] = [path[0]];
     let currentProtocol = path[0].protocol;
 
     for (let i = 1; i < path.length; i++) {
@@ -144,14 +144,14 @@ export class MixedGasEstimator extends BaseGasEstimator {
 
   private getInitializedTicksCrossedForSection(
     initializedTicksCrossedList: number[],
-    section: UniPool[]
+    section: Pool[]
   ): number {
     let ticksCrossed = 0;
     let v3PoolCount = 0;
 
     // Count how many V3 pools we've seen before this section
     for (const pool of section) {
-      if (pool.protocol === UniProtocol.V3) {
+      if (pool.protocol === Protocol.V3) {
         // The quoter returns Array<number of calls to crossTick + 1>, so subtract 1
         if (initializedTicksCrossedList[v3PoolCount]) {
           ticksCrossed += Math.max(

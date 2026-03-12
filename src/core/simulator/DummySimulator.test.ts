@@ -5,15 +5,15 @@ import {QuoteSplit} from '../../models/quote/QuoteSplit';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {RouteBasic} from '../../models/route/RouteBasic';
 import {GasDetails} from '../../models/gas/GasDetails';
-import {UniProtocol} from '../../models/pool/UniProtocol';
 import {ChainId} from '../../lib/config';
 import {SwapOptionsUniversalRouter} from './sor-port/simulation-provider';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {Context} from '@uniswap/lib-uni/context';
+import {Protocol} from '../../models/pool/Protocol';
 
 // Helper to create a mock route
 function createMockRoute(): RouteBasic {
-  return new RouteBasic(UniProtocol.V3, [], 100);
+  return new RouteBasic(Protocol.V3, [], 100);
 }
 
 // Helper to create gas details

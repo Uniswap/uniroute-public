@@ -24,12 +24,12 @@ import {
 import {Percent} from '@uniswap/sdk-core';
 import {SimulationStatus} from '../ISimulator';
 import {Erc20Token} from '../../../models/token/Erc20Token';
-import {UniProtocol} from 'src/models/pool/UniProtocol';
 import {RouteBasic} from 'src/models/route/RouteBasic';
 import {GasDetails} from 'src/models/gas/GasDetails';
 import {Address} from 'src/models/address/Address';
 import {MethodParameters} from 'src/lib/methodParameters';
 import {EthSimulateV1Simulator} from './eth-simulateV1-provider';
+import {Protocol} from '../../../models/pool/Protocol';
 
 // Mock axios
 vi.mock('axios', () => ({
@@ -100,7 +100,7 @@ describe('tenderly-simulation-provider', () => {
     ): QuoteSplit => ({
       quotes: [
         {
-          route: new RouteBasic(UniProtocol.V3, [], 100),
+          route: new RouteBasic(Protocol.V3, [], 100),
           amount: 1000000n,
           gasDetails: new GasDetails(50000000000n, 150000n, 0.001, 150000n),
         },
@@ -270,7 +270,7 @@ describe('tenderly-simulation-provider', () => {
         const quoteSplit: QuoteSplit = {
           quotes: [
             {
-              route: new RouteBasic(UniProtocol.V3, [], 100),
+              route: new RouteBasic(Protocol.V3, [], 100),
               amount: 1000000n,
               gasDetails: new GasDetails(50000000000n, 150000n, 0.001, 150000n),
             },
@@ -909,7 +909,7 @@ describe('tenderly-simulation-provider', () => {
     const createQuoteSplit = (tokenInIsNative = false): QuoteSplit => ({
       quotes: [
         {
-          route: new RouteBasic(UniProtocol.V3, [], 100),
+          route: new RouteBasic(Protocol.V3, [], 100),
           amount: 1000000n,
           gasDetails: new GasDetails(50000000000n, 150000n, 0.001, 150000n),
         },
@@ -1066,7 +1066,7 @@ describe('tenderly-simulation-provider', () => {
     ): QuoteSplit => ({
       quotes: [
         {
-          route: new RouteBasic(UniProtocol.V3, [], 100),
+          route: new RouteBasic(Protocol.V3, [], 100),
           amount: 1000000n,
           gasDetails: new GasDetails(50000000000n, 150000n, 0.001, 150000n),
         },

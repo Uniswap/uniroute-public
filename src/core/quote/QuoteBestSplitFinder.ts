@@ -1,6 +1,6 @@
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniPool} from '../../models/pool/UniPool';
+import {Pool} from '../../models/pool/Pool';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {WRAPPED_NATIVE_CURRENCY} from '../../lib/tokenUtils';
@@ -9,7 +9,7 @@ import {buildMetricKey} from '../../lib/config';
 import {IQuoteBestSplitFinder} from './IQuoteBestSplitFinder';
 import {TradeType} from '../../models/quote/TradeType';
 
-export class QuoteBestSplitFinder<TPool extends UniPool>
+export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
 {
   /**

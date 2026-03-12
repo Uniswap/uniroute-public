@@ -1,7 +1,7 @@
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo, UniPoolInfo} from '../interface';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IRedisCache} from '@uniswap/lib-cache';
@@ -38,7 +38,7 @@ interface V4PoolData extends V3PoolData {
 export const S3_POOL_CACHE_KEY = (
   baseKey: string,
   chain: ChainId,
-  protocol: UniProtocol
+  protocol: Protocol
 ) => `${baseKey}-${chain}-${protocol.toUpperCase()}`;
 
 abstract class BaseS3SubgraphPoolDiscoverer<
@@ -73,7 +73,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
   protected override async _getPools(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     ctx: Context
   ): Promise<TPoolInfo[]> {
     const poolCallStartTime = Date.now();
@@ -160,14 +160,14 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       // as we already do similar filtering there
       let filteredPools: TPoolInfo[] = [];
       switch (protocol) {
-        case UniProtocol.V2:
+        case Protocol.V2:
           filteredPools = (poolInfos as V2PoolInfo[]).filter(
             pool =>
               pool.reserve > this.TrackedEthThreshold ||
               this.forceSelectSpecialPools(pool as TPoolInfo, chainId)
           ) as TPoolInfo[];
           break;
-        case UniProtocol.V3:
+        case Protocol.V3:
           // Special treatment for all V3 pools in order to reduce latency due to thousands of pools with very low TVL locked
           // - Include "parseFloat(pool.totalValueLockedETH) === 0" as in certain occasions we have no way of calculating derivedETH so this is 0
           filteredPools = (poolInfos as V3PoolInfo[]).filter(
@@ -177,7 +177,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
               this.forceSelectSpecialPools(pool as TPoolInfo, chainId)
           ) as TPoolInfo[];
           break;
-        case UniProtocol.V4:
+        case Protocol.V4:
           filteredPools = (poolInfos as V4PoolInfo[]).filter(
             pool =>
               parseInt(pool.liquidity) > 0 ||
@@ -224,7 +224,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
   public override async _getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     _tokenIn: Address,
     _tokenOut: Address,
     ctx: Context

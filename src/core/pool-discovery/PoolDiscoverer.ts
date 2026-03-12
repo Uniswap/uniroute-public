@@ -8,7 +8,7 @@ import {
   V4PoolInfo,
 } from './interface';
 import {ChainId} from '../../lib/config';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {Address} from '../../models/address/Address';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 
@@ -26,15 +26,15 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
 
   public async getPools(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     ctx: Context
   ): Promise<UniPoolInfo[]> {
     switch (protocol) {
-      case UniProtocol.V2:
+      case Protocol.V2:
         return this.v2PoolDiscoverer.getPools(chainId, protocol, ctx);
-      case UniProtocol.V3:
+      case Protocol.V3:
         return this.v3PoolDiscoverer.getPools(chainId, protocol, ctx);
-      case UniProtocol.V4:
+      case Protocol.V4:
         return this.v4PoolDiscoverer.getPools(chainId, protocol, ctx);
       default:
         throw new Error(`Unsupported protocol ${protocol}`);
@@ -43,7 +43,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
 
   public async getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     topPoolsSelector: ITopPoolsSelector<UniPoolInfo>,
@@ -54,14 +54,14 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     // Get protocol-specific pools
     let protocolPools: UniPoolInfo[] = [];
     switch (protocol) {
-      case UniProtocol.V2: {
+      case Protocol.V2: {
         const v2Selector: ITopPoolsSelector<V2PoolInfo> = {
           filterPools: async (
             pools: V2PoolInfo[],
             chainId: ChainId,
             tIn: Address,
             tOut: Address,
-            protocol: UniProtocol,
+            protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
             ctx: Context
           ) =>
@@ -87,14 +87,14 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
         );
         break;
       }
-      case UniProtocol.V3: {
+      case Protocol.V3: {
         const v3Selector: ITopPoolsSelector<V3PoolInfo> = {
           filterPools: async (
             pools: V3PoolInfo[],
             chainId: ChainId,
             tIn: Address,
             tOut: Address,
-            protocol: UniProtocol,
+            protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
             ctx: Context
           ) =>
@@ -120,14 +120,14 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
         );
         break;
       }
-      case UniProtocol.V4: {
+      case Protocol.V4: {
         const v4Selector: ITopPoolsSelector<V4PoolInfo> = {
           filterPools: async (
             pools: V4PoolInfo[],
             chainId: ChainId,
             tIn: Address,
             tOut: Address,
-            protocol: UniProtocol,
+            protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
             ctx: Context
           ) =>
@@ -160,7 +160,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     // Always add direct pools for each protocol
     let directPools: UniPoolInfo[] = [];
     switch (protocol) {
-      case UniProtocol.V2:
+      case Protocol.V2:
         directPools = await this.v2DirectPoolDiscoverer.getPoolsForTokens(
           chainId,
           protocol,
@@ -172,7 +172,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           ctx
         );
         break;
-      case UniProtocol.V3:
+      case Protocol.V3:
         directPools = await this.v3DirectPoolDiscoverer.getPoolsForTokens(
           chainId,
           protocol,
@@ -184,7 +184,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           ctx
         );
         break;
-      case UniProtocol.V4:
+      case Protocol.V4:
         if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
           directPools = await this.v4DirectPoolDiscoverer.getPoolsForTokens(
             chainId,

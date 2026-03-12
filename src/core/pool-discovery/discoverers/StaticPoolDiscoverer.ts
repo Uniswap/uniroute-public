@@ -3,7 +3,6 @@ import _ from 'lodash';
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from '../interface';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
 import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
 import {V3Pool} from '../../../models/pool/V3Pool';
 import {Address} from '../../../models/address/Address';
@@ -13,6 +12,7 @@ import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {IUniRouteServiceConfig} from '../../../lib/config';
 import {BASE_TOKENS_PER_CHAIN} from '../../../lib/tokenUtils';
+import {Protocol} from 'src/models/pool/Protocol';
 
 function createUniquePairs(tokens: Address[]): [Address, Address][] {
   const pairs: [Address, Address][] = [];
@@ -63,7 +63,7 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
@@ -74,7 +74,7 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
@@ -83,7 +83,7 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
 
   public override async _getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
@@ -175,7 +175,7 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V3PoolInfo[]> {
@@ -184,7 +184,7 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
 
   protected override async _getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
@@ -278,7 +278,7 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V4PoolInfo[]> {
@@ -287,7 +287,7 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
 
   protected override async _getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context

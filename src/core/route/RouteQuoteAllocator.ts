@@ -1,10 +1,10 @@
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniPool} from '../../models/pool/UniPool';
 import {QuoteSplit} from '../../models/quote/QuoteSplit';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
+import {Pool} from '../../models/pool/Pool';
 
-export interface IRouteQuoteAllocator<TPool extends UniPool> {
+export interface IRouteQuoteAllocator<TPool extends Pool> {
   getAllPercentageRoutes(
     routes: RouteBasic<TPool>[],
     percentageStep: number
@@ -16,7 +16,7 @@ export interface IRouteQuoteAllocator<TPool extends UniPool> {
   ): QuoteSplit[];
 }
 
-export class RouteQuoteAllocator<TPool extends UniPool>
+export class RouteQuoteAllocator<TPool extends Pool>
   implements IRouteQuoteAllocator<TPool>
 {
   /**

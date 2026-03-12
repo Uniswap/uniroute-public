@@ -1,14 +1,14 @@
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniPool} from '../../models/pool/UniPool';
 import {Address} from '../../models/address/Address';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
-import {UniProtocol} from '../../models/pool/UniProtocol';
 import {FAKE_TICK_SPACING, getV4EthWethFakePool} from '../../lib/poolUtils';
 import {ChainId} from '../../lib/config';
 import {V4Pool} from '../../models/pool/V4Pool';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
+import {Pool} from '../../models/pool/Pool';
+import {Protocol} from '../../models/pool/Protocol';
 
-export interface IRouteFinder<TPool extends UniPool> {
+export interface IRouteFinder<TPool extends Pool> {
   generateRoutes(
     chainId: ChainId,
     pools: TPool[],
@@ -19,7 +19,7 @@ export interface IRouteFinder<TPool extends UniPool> {
   ): Promise<RouteBasic<TPool>[]>;
 }
 
-export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
+export class RouteFinder<TPool extends Pool> implements IRouteFinder<TPool> {
   constructor(private readonly serviceConfig: IUniRouteServiceConfig) {}
 
   // TODO: https://linear.app/uniswap/issue/ROUTE-410/ (modify for V4 - Support ETH+WETH pools)
@@ -34,10 +34,7 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
     const routes: RouteBasic<TPool>[] = [];
 
     // If mixed pools are allowed and we have V4 pools, add a fake pool for ETH/WETH to allow connectivity.
-    if (
-      allowMixedPools &&
-      pools.some(pool => pool.protocol === UniProtocol.V4)
-    ) {
+    if (allowMixedPools && pools.some(pool => pool.protocol === Protocol.V4)) {
       const fakePool = getV4EthWethFakePool(chainId);
       if (fakePool) {
         pools.push(fakePool as unknown as TPool);
@@ -146,7 +143,7 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
     // Special case for routes that contain the fake eth/weth pool, add an extra hop
     const currentRouteContainsFakeV4Pool = currentPath.some(
       pool =>
-        pool.protocol === UniProtocol.V4 &&
+        pool.protocol === Protocol.V4 &&
         (pool as unknown as V4Pool).tickSpacing === FAKE_TICK_SPACING
     );
     const baseMaxHops = useExtendedHops
@@ -202,7 +199,7 @@ export class RouteFinder<TPool extends UniPool> implements IRouteFinder<TPool> {
 
         // Check if we have mixed protocols in the path
         const protocols = new Set(pathCopy.map(pool => pool.protocol));
-        const protocol = protocols.size > 1 ? UniProtocol.MIXED : pool.protocol;
+        const protocol = protocols.size > 1 ? Protocol.MIXED : pool.protocol;
 
         routes.push(new RouteBasic(protocol, pathCopy));
       } else {

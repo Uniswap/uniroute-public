@@ -1,5 +1,5 @@
 import {ChainId} from '../../lib/config';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
 import {IPoolDiscoverer, ITopPoolsSelector, UniPoolInfo} from './interface';
@@ -41,7 +41,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // Gets pools from the cache if available, otherwise fetches them from the _getPools implementation.
   public async getPools(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     ctx: Context
   ): Promise<TPool[]> {
     const cacheKey = this.getPoolsCacheKey(chainId, protocol);
@@ -99,14 +99,14 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // To be implemented by the sub-classes.
   protected abstract _getPools(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     ctx: Context
   ): Promise<TPool[]>;
 
   // To be implemented by the sub-classes.
   protected abstract _getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
@@ -116,7 +116,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // Filters the pools based on the given tokens and returns a small number of pools (topPoolSelector logic) before caching them.
   public async getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     topPoolSelector: ITopPoolsSelector<TPool>,
@@ -219,13 +219,13 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     return retrievedPools;
   }
 
-  public getPoolsCacheKey(chainId: ChainId, protocol: UniProtocol) {
+  public getPoolsCacheKey(chainId: ChainId, protocol: Protocol) {
     return `${this.getDiscovererName()}#POOLS#${chainId}#${protocol}`;
   }
 
   public getPoolsForTokensCacheKey(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address
   ) {

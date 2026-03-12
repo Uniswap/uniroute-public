@@ -7,7 +7,6 @@ import {
   IUniRouteServiceConfig,
 } from '../../../lib/config';
 import {GasDetails} from '../../../models/gas/GasDetails';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {BaseProvider, JsonRpcProvider} from '@ethersproject/providers';
 import {Context} from '@uniswap/lib-uni/context';
@@ -19,6 +18,7 @@ import {TradeType} from '../../../models/quote/TradeType';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {BaseGasEstimator} from './BaseGasEstimator';
 import {FreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
+import {Protocol} from '../../../models/pool/Protocol';
 
 class OnDemandGasEstimator extends BaseGasEstimator {
   constructor(private readonly returnValue: bigint) {
@@ -127,10 +127,10 @@ describe('GasEstimateProvider', () => {
       new OnDemandGasEstimator(BigInt(5))
     );
 
-    const dummyRouteV2 = new RouteBasic(UniProtocol.V2, []);
-    const dummyRouteV3 = new RouteBasic(UniProtocol.V3, []);
-    const dummyRouteV4 = new RouteBasic(UniProtocol.V4, []);
-    const dummyRouteMixed = new RouteBasic(UniProtocol.MIXED, []);
+    const dummyRouteV2 = new RouteBasic(Protocol.V2, []);
+    const dummyRouteV3 = new RouteBasic(Protocol.V3, []);
+    const dummyRouteV4 = new RouteBasic(Protocol.V4, []);
+    const dummyRouteMixed = new RouteBasic(Protocol.MIXED, []);
 
     const dummyQuoteV2 = new QuoteBasic(
       dummyRouteV2,
@@ -236,7 +236,7 @@ describe('GasEstimateProvider', () => {
       new OnDemandGasEstimator(BigInt(5))
     );
 
-    const dummyRouteV2 = new RouteBasic(UniProtocol.V2, []);
+    const dummyRouteV2 = new RouteBasic(Protocol.V2, []);
     const dummyQuoteV2 = new QuoteBasic(
       dummyRouteV2,
       BigInt(0),
@@ -278,7 +278,7 @@ describe('GasEstimateProvider', () => {
       new OnDemandGasEstimator(BigInt(5))
     );
 
-    const dummyRouteV3 = new RouteBasic(UniProtocol.V3, []);
+    const dummyRouteV3 = new RouteBasic(Protocol.V3, []);
     const dummyQuoteV3 = new QuoteBasic(
       dummyRouteV3,
       BigInt(0),
@@ -322,7 +322,7 @@ describe('GasEstimateProvider', () => {
       new OnDemandGasEstimator(BigInt(100))
     );
 
-    const dummyRouteV3 = new RouteBasic(UniProtocol.V3, []);
+    const dummyRouteV3 = new RouteBasic(Protocol.V3, []);
     const dummyQuoteV3 = new QuoteBasic(
       dummyRouteV3,
       BigInt(0),

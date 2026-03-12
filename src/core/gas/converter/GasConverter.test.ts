@@ -11,7 +11,7 @@ import {GasDetails} from '../../../models/gas/GasDetails';
 import {Address} from '../../../models/address/Address';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {RouteBasic} from '../../../models/route/RouteBasic';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {buildMetricKey} from '../../../lib/config';
@@ -76,7 +76,7 @@ describe('GasConverter', () => {
     vi.mocked(v3PoolRepository.getPools).mockResolvedValue([]);
 
     const gasDetails = new GasDetails(100000n, 100000n, 100000, 100000n);
-    const route = new RouteBasic(UniProtocol.V3, []);
+    const route = new RouteBasic(Protocol.V3, []);
     const quote = new QuoteBasic(route, 1000000n, undefined, gasDetails);
 
     const quoteSplit = new QuoteSplit([quote]);
@@ -143,7 +143,7 @@ describe('GasConverter', () => {
     vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
 
     const gasDetails = new GasDetails(100000n, 100000n, 100000, 100000n);
-    const route = new RouteBasic(UniProtocol.V3, []);
+    const route = new RouteBasic(Protocol.V3, []);
     const quote = new QuoteBasic(route, 1000000n, undefined, gasDetails);
 
     const quoteSplit = new QuoteSplit([quote]);
@@ -210,7 +210,7 @@ describe('GasConverter', () => {
         0.00194,
         97000n
       );
-      const route = new RouteBasic(UniProtocol.V4, []);
+      const route = new RouteBasic(Protocol.V4, []);
       const quote = new QuoteBasic(route, 10_000_000n, undefined, gasDetails);
       const quoteSplit = new QuoteSplit([quote]);
 
@@ -264,7 +264,7 @@ describe('GasConverter', () => {
         0.00194,
         97000n
       );
-      const route = new RouteBasic(UniProtocol.V3, []);
+      const route = new RouteBasic(Protocol.V3, []);
       const quote = new QuoteBasic(route, 1_000_000n, undefined, gasDetails);
       const quoteSplit = new QuoteSplit([quote]);
 
@@ -335,7 +335,7 @@ describe('GasConverter', () => {
         0.00194,
         97000n
       );
-      const route = new RouteBasic(UniProtocol.V4, []);
+      const route = new RouteBasic(Protocol.V4, []);
       const quote = new QuoteBasic(route, 10_000_000n, undefined, gasDetails);
       const quoteSplit = new QuoteSplit([quote]);
 

@@ -5,7 +5,6 @@ import {
   buildTokenPoolIndex,
 } from './TopPoolsSelector';
 import {ChainId} from '../../lib/config';
-import {UniProtocol} from '../../models/pool/UniProtocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
@@ -18,6 +17,7 @@ import {
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {poolSelectionConfig} from 'src/lib/config';
+import {Protocol} from 'src/models/pool/Protocol';
 
 describe('BasicTopPoolsSelector', () => {
   let chainRepository: IChainRepository;
@@ -261,7 +261,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V2,
+        Protocol.V2,
         undefined,
         ctx
       );
@@ -286,7 +286,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V3,
+        Protocol.V3,
         undefined,
         ctx
       );
@@ -303,7 +303,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V4,
+        Protocol.V4,
         undefined,
         ctx
       );
@@ -318,7 +318,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V2,
+        Protocol.V2,
         undefined,
         ctx
       );
@@ -339,7 +339,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V2,
+        Protocol.V2,
         undefined,
         ctx
       );
@@ -363,7 +363,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V4,
+        Protocol.V4,
         HooksOptions.HOOKS_INCLUSIVE,
         ctx
       );
@@ -391,7 +391,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V4,
+        Protocol.V4,
         HooksOptions.NO_HOOKS,
         ctx
       );
@@ -416,7 +416,7 @@ describe('BasicTopPoolsSelector', () => {
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
-        UniProtocol.V4,
+        Protocol.V4,
         HooksOptions.HOOKS_ONLY,
         ctx
       );
@@ -500,7 +500,7 @@ describe('BasicTopPoolsSelector', () => {
       const result = BasicTopPoolsSelector['getDirectPairs'](
         pools,
         ChainId.MAINNET,
-        UniProtocol.V2,
+        Protocol.V2,
         tokenIn,
         tokenOut,
         selectedPoolIds,
@@ -942,7 +942,7 @@ describe('BasicTopPoolsSelector', () => {
       const selectedPoolIds = new Set<string>();
 
       const result = await selector['manuallyGenerateDirectPairs'](
-        UniProtocol.V2,
+        Protocol.V2,
         ChainId.MAINNET,
         tokenIn.address,
         tokenOut.address,
@@ -962,7 +962,7 @@ describe('BasicTopPoolsSelector', () => {
       const selectedPoolIds = new Set<string>();
 
       const result = await selector['manuallyGenerateDirectPairs'](
-        UniProtocol.V3,
+        Protocol.V3,
         ChainId.MAINNET,
         tokenIn.address,
         tokenOut.address,
@@ -983,7 +983,7 @@ describe('BasicTopPoolsSelector', () => {
 
       await expect(
         selector['manuallyGenerateDirectPairs'](
-          'UNSUPPORTED' as UniProtocol,
+          'UNSUPPORTED' as Protocol,
           ChainId.MAINNET,
           tokenIn.address,
           tokenOut.address,

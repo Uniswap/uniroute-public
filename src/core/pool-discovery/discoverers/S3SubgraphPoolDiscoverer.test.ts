@@ -12,7 +12,7 @@ import {
   IUniRouteServiceConfig,
 } from '../../../lib/config';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {readFileSync} from 'fs';
 import {join} from 'path';
@@ -88,7 +88,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
       // @ts-ignore - protected method access for testing
       const pools = await discoverer._getPools(
         ChainId.MAINNET,
-        UniProtocol.V2,
+        Protocol.V2,
         mockContext
       );
 
@@ -165,7 +165,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
       // @ts-ignore - protected method access for testing
       const pools = await discoverer._getPools(
         ChainId.MAINNET,
-        UniProtocol.V3,
+        Protocol.V3,
         mockContext
       );
 
@@ -214,7 +214,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
       // @ts-ignore - protected method access for testing
       const pools = await discoverer._getPools(
         ChainId.MAINNET,
-        UniProtocol.V4,
+        Protocol.V4,
         mockContext
       );
 
@@ -264,7 +264,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
       // @ts-ignore - protected method access for testing
       const pools = await discoverer._getPools(
         ChainId.MAINNET,
-        UniProtocol.V2,
+        Protocol.V2,
         mockContext
       );
 
@@ -286,7 +286,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
       // @ts-ignore - protected method access for testing
       const pools = await discoverer._getPools(
         ChainId.MAINNET,
-        UniProtocol.V2,
+        Protocol.V2,
         mockContext
       );
 

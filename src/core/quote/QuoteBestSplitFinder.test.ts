@@ -2,16 +2,16 @@ import {describe, beforeEach, it, expect, vi} from 'vitest';
 import {QuoteBestSplitFinder} from './QuoteBestSplitFinder';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniPool} from '../../models/pool/UniPool';
 import {ChainId} from '../../lib/config';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {WRAPPED_NATIVE_CURRENCY} from '../../lib/tokenUtils';
 import {Address} from '../../models/address/Address';
-import {UniProtocol} from '../../models/pool/UniProtocol';
 import {TradeType} from '../../models/quote/TradeType';
+import {Pool} from '../../models/pool/Pool';
+import {Protocol} from '../../models/pool/Protocol';
 
-class MockPool extends UniPool {
+class MockPool extends Pool {
   constructor(
     public readonly token0: Address,
     public readonly token1: Address,
@@ -20,8 +20,8 @@ class MockPool extends UniPool {
     super(token0, token1, address);
   }
 
-  get protocol(): UniProtocol {
-    return UniProtocol.V3;
+  get protocol(): Protocol {
+    return Protocol.V3;
   }
 
   toString(): string {

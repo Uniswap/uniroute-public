@@ -1,4 +1,3 @@
-import {UniProtocol} from '../../../models/pool/UniProtocol';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Pool} from '../../../models/pool/V3Pool';
 import {TradeType} from '../../../models/quote/TradeType';
@@ -9,6 +8,7 @@ import {USDC, WETH, ZeroAddress} from 'tests/constants/Mainnet';
 import {beforeEach, describe, expect, it} from 'vitest';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
+import {Protocol} from '../../../models/pool/Protocol';
 
 describe('SimpleQuoteSelector', () => {
   let quoteSelector: SimpleQuoteSelector;
@@ -40,7 +40,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(0),
           BigInt(0)
         );
-        const route = new RouteBasic<V3Pool>(UniProtocol.V3, [pool]);
+        const route = new RouteBasic<V3Pool>(Protocol.V3, [pool]);
         mockedQuoteFetcher.fetchQuotes.mockResolvedValueOnce([
           new QuoteSplit([{route, amount: BigInt(100)}]),
         ]);
@@ -69,7 +69,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(0),
           BigInt(0)
         );
-        const route = new RouteBasic<V3Pool>(UniProtocol.V3, [pool]);
+        const route = new RouteBasic<V3Pool>(Protocol.V3, [pool]);
         mockedQuoteFetcher.fetchQuotes.mockResolvedValueOnce([
           new QuoteSplit([{route, amount: BigInt(100)}]),
         ]);
@@ -100,7 +100,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(0),
           BigInt(0)
         );
-        const v3Route = new RouteBasic<V3Pool>(UniProtocol.V3, [pool]);
+        const v3Route = new RouteBasic<V3Pool>(Protocol.V3, [pool]);
         const pair = new V2Pool(
           WETH,
           USDC,
@@ -108,7 +108,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(10_000),
           BigInt(10_000)
         );
-        const v2Route = new RouteBasic<V2Pool>(UniProtocol.V2, [pair]);
+        const v2Route = new RouteBasic<V2Pool>(Protocol.V2, [pair]);
 
         mockedQuoteFetcher.fetchQuotes.mockResolvedValueOnce([
           new QuoteSplit([{route: v3Route, amount: BigInt(100)}]),
@@ -141,7 +141,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(0),
           BigInt(0)
         );
-        const v3Route = new RouteBasic<V3Pool>(UniProtocol.V3, [pool]);
+        const v3Route = new RouteBasic<V3Pool>(Protocol.V3, [pool]);
         const pair = new V2Pool(
           WETH,
           USDC,
@@ -149,7 +149,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(10_000),
           BigInt(10_000)
         );
-        const v2Route = new RouteBasic<V2Pool>(UniProtocol.V2, [pair]);
+        const v2Route = new RouteBasic<V2Pool>(Protocol.V2, [pair]);
 
         mockedQuoteFetcher.fetchQuotes.mockResolvedValueOnce([
           new QuoteSplit([{route: v3Route, amount: BigInt(100)}]),
@@ -184,7 +184,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(0),
           BigInt(0)
         );
-        const v3Route = new RouteBasic<V3Pool>(UniProtocol.V3, [pool]);
+        const v3Route = new RouteBasic<V3Pool>(Protocol.V3, [pool]);
         const pair = new V2Pool(
           WETH,
           USDC,
@@ -192,7 +192,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(10_000),
           BigInt(10_000)
         );
-        const v2Route = new RouteBasic<V2Pool>(UniProtocol.V2, [pair]);
+        const v2Route = new RouteBasic<V2Pool>(Protocol.V2, [pair]);
 
         // Both quotes have same gas-adjusted amount (100) but different gas costs
         const quote1 = new QuoteSplit([
@@ -247,7 +247,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(0),
           BigInt(0)
         );
-        const v3Route = new RouteBasic<V3Pool>(UniProtocol.V3, [pool]);
+        const v3Route = new RouteBasic<V3Pool>(Protocol.V3, [pool]);
         const pair = new V2Pool(
           WETH,
           USDC,
@@ -255,7 +255,7 @@ describe('SimpleQuoteSelector', () => {
           BigInt(10_000),
           BigInt(10_000)
         );
-        const v2Route = new RouteBasic<V2Pool>(UniProtocol.V2, [pair]);
+        const v2Route = new RouteBasic<V2Pool>(Protocol.V2, [pair]);
 
         // Both quotes have same gas-adjusted amount (100) but different gas costs
         const quote1 = new QuoteSplit([
@@ -325,7 +325,7 @@ describe('SimpleQuoteSelector', () => {
 
     const quote1 = new QuoteSplit([
       {
-        route: new RouteBasic(UniProtocol.V2, [pool1]),
+        route: new RouteBasic(Protocol.V2, [pool1]),
         amount: BigInt('2000000000'),
         gasDetails: {
           gasCostInQuoteToken: BigInt('200000000'),
@@ -339,7 +339,7 @@ describe('SimpleQuoteSelector', () => {
 
     const quote2 = new QuoteSplit([
       {
-        route: new RouteBasic(UniProtocol.V2, [pool2]),
+        route: new RouteBasic(Protocol.V2, [pool2]),
         amount: BigInt('1900000000'),
         gasDetails: {
           gasCostInQuoteToken: BigInt('99000000'),
@@ -353,7 +353,7 @@ describe('SimpleQuoteSelector', () => {
 
     const quote3 = new QuoteSplit([
       {
-        route: new RouteBasic(UniProtocol.V2, [pool3]),
+        route: new RouteBasic(Protocol.V2, [pool3]),
         amount: BigInt('1800000000'),
         gasDetails: {
           gasCostInQuoteToken: BigInt('50000000'),
@@ -399,7 +399,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 1000 original, 800 gas-adjusted (20% difference - valid, within 30% threshold)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(200),
@@ -414,7 +414,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1000 original, 900 gas-adjusted (10% difference - valid, within 30% threshold)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(100),
@@ -458,7 +458,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 1000 original, 800 gas-adjusted (20% difference - valid)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(200),
@@ -473,7 +473,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1000 original, 900 gas-adjusted (10% difference - valid)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(100),
@@ -519,7 +519,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 1000 original, 500 gas-adjusted (50% difference - invalid)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(500),
@@ -534,7 +534,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1200 original, 600 gas-adjusted (50% difference - invalid)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1200),
             gasDetails: {
               gasCostInQuoteToken: BigInt(600),
@@ -578,7 +578,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 1000 original, 500 gas-adjusted (50% difference - invalid)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(500),
@@ -593,7 +593,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1200 original, 600 gas-adjusted (50% difference - invalid)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1200),
             gasDetails: {
               gasCostInQuoteToken: BigInt(600),
@@ -639,7 +639,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 1000 original, 800 gas-adjusted (20% difference - valid)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(200),
@@ -654,7 +654,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1000 original, 500 gas-adjusted (50% difference - invalid)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(500),
@@ -701,7 +701,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 0 original, 0 gas-adjusted (invalid due to zero original)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(0),
             gasDetails: {
               gasCostInQuoteToken: BigInt(0),
@@ -716,7 +716,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1000 original, 800 gas-adjusted (20% difference - valid)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(200),
@@ -765,7 +765,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote1: 1000 original, 700 gas-adjusted (30% difference - exactly at threshold, should be valid)
         const quote1 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool1]),
+            route: new RouteBasic(Protocol.V2, [pool1]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(300),
@@ -780,7 +780,7 @@ describe('SimpleQuoteSelector', () => {
         // Quote2: 1000 original, 699 gas-adjusted (30.1% difference - just over threshold, should be invalid)
         const quote2 = new QuoteSplit([
           {
-            route: new RouteBasic(UniProtocol.V2, [pool2]),
+            route: new RouteBasic(Protocol.V2, [pool2]),
             amount: BigInt(1000),
             gasDetails: {
               gasCostInQuoteToken: BigInt(301),

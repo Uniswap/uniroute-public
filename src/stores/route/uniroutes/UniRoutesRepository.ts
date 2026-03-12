@@ -1,6 +1,6 @@
 import {Address} from '../../../models/address/Address';
 import {Chain} from '../../../models/chain/Chain';
-import {UniPool} from '../../../models/pool/UniPool';
+import {Pool} from '../../../models/pool/Pool';
 import {RouteBasic} from '../../../models/route/RouteBasic';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {
@@ -11,7 +11,7 @@ import {
   V3PoolInfo,
   V4PoolInfo,
 } from '../../../core/pool-discovery/interface';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {IRouteFinder} from '../../../core/route/RouteFinder';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Fee, V3Pool} from '../../../models/pool/V3Pool';
@@ -35,7 +35,7 @@ import {logElapsedTime} from '../../../lib/helpers';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
-    protected readonly routeFinder: IRouteFinder<UniPool>,
+    protected readonly routeFinder: IRouteFinder<Pool>,
     protected readonly poolDiscoverer: IPoolDiscoverer<UniPoolInfo>,
     protected readonly topPoolsSelector: ITopPoolsSelector<UniPoolInfo>,
     protected readonly serviceConfig: IUniRouteServiceConfig
@@ -47,22 +47,22 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     chain: Chain,
     tokenInAddress: Address,
     tokenOutAddress: Address,
-    protocols: UniProtocol[],
+    protocols: Protocol[],
     generateMixedRoutes: boolean,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
     ctx: UniContext
-  ): Promise<RouteBasic<UniPool>[]> {
+  ): Promise<RouteBasic<Pool>[]> {
     // Only fetch pools for requested protocols
     const poolPromises: Promise<UniPoolInfo[]>[] = [];
     if (
-      protocols.includes(UniProtocol.V2) &&
+      protocols.includes(Protocol.V2) &&
       V2_SUPPORTED.includes(chain.chainId)
     ) {
       poolPromises.push(
         this.poolDiscoverer.getPoolsForTokens(
           chain.chainId,
-          UniProtocol.V2,
+          Protocol.V2,
           tokenInAddress,
           tokenOutAddress,
           this.topPoolsSelector,
@@ -75,11 +75,11 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       poolPromises.push(Promise.resolve([]));
     }
 
-    if (protocols.includes(UniProtocol.V3)) {
+    if (protocols.includes(Protocol.V3)) {
       poolPromises.push(
         this.poolDiscoverer.getPoolsForTokens(
           chain.chainId,
-          UniProtocol.V3,
+          Protocol.V3,
           tokenInAddress,
           tokenOutAddress,
           this.topPoolsSelector,
@@ -93,13 +93,13 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     }
 
     if (
-      protocols.includes(UniProtocol.V4) &&
+      protocols.includes(Protocol.V4) &&
       V4_SUPPORTED.includes(chain.chainId)
     ) {
       poolPromises.push(
         this.poolDiscoverer.getPoolsForTokens(
           chain.chainId,
-          UniProtocol.V4,
+          Protocol.V4,
           tokenInAddress,
           tokenOutAddress,
           this.topPoolsSelector,
@@ -126,15 +126,15 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       generateMixedRoutes &&
       protocols.length > 1
     ) {
-      const protocolPoolsMap: Partial<Record<UniProtocol, UniPoolInfo[]>> = {};
-      if (protocols.includes(UniProtocol.V2)) {
-        protocolPoolsMap[UniProtocol.V2] = poolsV2;
+      const protocolPoolsMap: Partial<Record<Protocol, UniPoolInfo[]>> = {};
+      if (protocols.includes(Protocol.V2)) {
+        protocolPoolsMap[Protocol.V2] = poolsV2;
       }
-      if (protocols.includes(UniProtocol.V3)) {
-        protocolPoolsMap[UniProtocol.V3] = poolsV3;
+      if (protocols.includes(Protocol.V3)) {
+        protocolPoolsMap[Protocol.V3] = poolsV3;
       }
-      if (protocols.includes(UniProtocol.V4)) {
-        protocolPoolsMap[UniProtocol.V4] = poolsV4;
+      if (protocols.includes(Protocol.V4)) {
+        protocolPoolsMap[Protocol.V4] = poolsV4;
       }
 
       const crossLiquidityStartTime = Date.now();
@@ -263,8 +263,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     chain: Chain,
     tokenInAddress: Address,
     tokenOutAddress: Address,
-    protocolPools: Partial<Record<UniProtocol, UniPoolInfo[]>>,
-    protocols: UniProtocol[],
+    protocolPools: Partial<Record<Protocol, UniPoolInfo[]>>,
+    protocols: Protocol[],
     hooksOptions: HooksOptions | undefined,
     ctx: UniContext
   ): Promise<{
@@ -282,30 +282,30 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     const allPoolsPromises: Promise<UniPoolInfo[]>[] = [];
 
     if (
-      protocols.includes(UniProtocol.V2) &&
+      protocols.includes(Protocol.V2) &&
       V2_SUPPORTED.includes(chain.chainId)
     ) {
       allPoolsPromises.push(
-        this.poolDiscoverer.getPools(chain.chainId, UniProtocol.V2, ctx)
+        this.poolDiscoverer.getPools(chain.chainId, Protocol.V2, ctx)
       );
     } else {
       allPoolsPromises.push(Promise.resolve([]));
     }
 
-    if (protocols.includes(UniProtocol.V3)) {
+    if (protocols.includes(Protocol.V3)) {
       allPoolsPromises.push(
-        this.poolDiscoverer.getPools(chain.chainId, UniProtocol.V3, ctx)
+        this.poolDiscoverer.getPools(chain.chainId, Protocol.V3, ctx)
       );
     } else {
       allPoolsPromises.push(Promise.resolve([]));
     }
 
     if (
-      protocols.includes(UniProtocol.V4) &&
+      protocols.includes(Protocol.V4) &&
       V4_SUPPORTED.includes(chain.chainId)
     ) {
       allPoolsPromises.push(
-        this.poolDiscoverer.getPools(chain.chainId, UniProtocol.V4, ctx)
+        this.poolDiscoverer.getPools(chain.chainId, Protocol.V4, ctx)
       );
     } else {
       allPoolsPromises.push(Promise.resolve([]));
@@ -319,13 +319,13 @@ export class UniRoutesRepository extends BaseRoutesRepository {
 
     // Create sets of already selected pool IDs to avoid duplicates
     const selectedV2PoolIds = new Set(
-      protocolPools[UniProtocol.V2]?.map(p => p.id.toLowerCase()) || []
+      protocolPools[Protocol.V2]?.map(p => p.id.toLowerCase()) || []
     );
     const selectedV3PoolIds = new Set(
-      protocolPools[UniProtocol.V3]?.map(p => p.id.toLowerCase()) || []
+      protocolPools[Protocol.V3]?.map(p => p.id.toLowerCase()) || []
     );
     const selectedV4PoolIds = new Set(
-      protocolPools[UniProtocol.V4]?.map(p => p.id.toLowerCase()) || []
+      protocolPools[Protocol.V4]?.map(p => p.id.toLowerCase()) || []
     );
 
     // Build token-to-pool indices for efficient lookups
@@ -335,32 +335,32 @@ export class UniRoutesRepository extends BaseRoutesRepository {
 
     // Find cross-liquidity pools for V2
     if (
-      protocols.includes(UniProtocol.V2) &&
+      protocols.includes(Protocol.V2) &&
       V2_SUPPORTED.includes(chain.chainId)
     ) {
       const v2CrossPools = this.findCrossProtocolMissingPools(
         tokenInAddressLower,
         tokenOutAddressLower,
         v2TokenIndex,
-        UniProtocol.V2,
+        Protocol.V2,
         selectedV2PoolIds,
-        protocolPools[UniProtocol.V3] || [],
-        protocolPools[UniProtocol.V4] || [],
+        protocolPools[Protocol.V3] || [],
+        protocolPools[Protocol.V4] || [],
         ctx
       );
       result.v2Pools.push(...(v2CrossPools as V2PoolInfo[]));
     }
 
     // Find cross-liquidity pools for V3
-    if (protocols.includes(UniProtocol.V3)) {
+    if (protocols.includes(Protocol.V3)) {
       const v3CrossPools = this.findCrossProtocolMissingPools(
         tokenInAddressLower,
         tokenOutAddressLower,
         v3TokenIndex,
-        UniProtocol.V3,
+        Protocol.V3,
         selectedV3PoolIds,
-        protocolPools[UniProtocol.V2] || [],
-        protocolPools[UniProtocol.V4] || [],
+        protocolPools[Protocol.V2] || [],
+        protocolPools[Protocol.V4] || [],
         ctx
       );
       result.v3Pools.push(...(v3CrossPools as V3PoolInfo[]));
@@ -368,17 +368,17 @@ export class UniRoutesRepository extends BaseRoutesRepository {
 
     // Find cross-liquidity pools for V4
     if (
-      protocols.includes(UniProtocol.V4) &&
+      protocols.includes(Protocol.V4) &&
       V4_SUPPORTED.includes(chain.chainId)
     ) {
       const v4CrossPools = this.findCrossProtocolMissingPools(
         tokenInAddressLower,
         tokenOutAddressLower,
         v4TokenIndex,
-        UniProtocol.V4,
+        Protocol.V4,
         selectedV4PoolIds,
-        protocolPools[UniProtocol.V2] || [],
-        protocolPools[UniProtocol.V3] || [],
+        protocolPools[Protocol.V2] || [],
+        protocolPools[Protocol.V3] || [],
         ctx
       );
       result.v4Pools.push(...(v4CrossPools as V4PoolInfo[]));
@@ -404,7 +404,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       tokenToPools: Map<string, UniPoolInfo[]>;
       poolToTokens: Map<string, Set<string>>;
     },
-    protocol: UniProtocol,
+    protocol: Protocol,
     selectedPoolIds: Set<string>,
     otherProtocolPools1: UniPoolInfo[],
     otherProtocolPools2: UniPoolInfo[],

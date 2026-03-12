@@ -1,7 +1,7 @@
 import {QuoteRequest, QuoteResponse} from '../../gen/uniroute/v1/api_pb';
 import {SUPPORTED_CHAINS} from '../lib/config';
 import {EnumUtils} from '../lib/EnumUtils';
-import {UniProtocol} from '../models/pool/UniProtocol';
+import {Protocol} from '../models/pool/Protocol';
 import {isAddress} from 'ethers/lib/utils';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
@@ -58,8 +58,8 @@ export class QuoteRequestValidator {
     // Only mixed protocol is not allowed
     const protocols = request.protocols
       .split(',')
-      .map(p => EnumUtils.stringToEnum(UniProtocol, p));
-    if (protocols.length === 1 && protocols[0] === UniProtocol.MIXED) {
+      .map(p => EnumUtils.stringToEnum(Protocol, p));
+    if (protocols.length === 1 && protocols[0] === Protocol.MIXED) {
       return new QuoteResponse({
         error: {
           code: 400,

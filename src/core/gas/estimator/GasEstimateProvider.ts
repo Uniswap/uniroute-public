@@ -1,7 +1,7 @@
 import {IGasEstimator} from './IGasEstimator';
 import {GasDetails} from '../../../models/gas/GasDetails';
 import {ChainId, IUniRouteServiceConfig} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {Erc20Token} from '../../../models/token/Erc20Token';
@@ -60,7 +60,7 @@ export class GasEstimateProvider implements IGasEstimateProvider {
     const provider = this.rpcProviderMap.get(chainId)!;
 
     switch (quote.route.protocol) {
-      case UniProtocol.V2:
+      case Protocol.V2:
         return this.v2GasEstimator.estimateGas(
           serviceConfig,
           tokenInCurrencyInfo,
@@ -75,7 +75,7 @@ export class GasEstimateProvider implements IGasEstimateProvider {
           ctx,
           l2GasData
         );
-      case UniProtocol.V3:
+      case Protocol.V3:
         return this.v3GasEstimator.estimateGas(
           serviceConfig,
           tokenInCurrencyInfo,
@@ -90,7 +90,7 @@ export class GasEstimateProvider implements IGasEstimateProvider {
           ctx,
           l2GasData
         );
-      case UniProtocol.V4:
+      case Protocol.V4:
         return this.v4GasEstimator.estimateGas(
           serviceConfig,
           tokenInCurrencyInfo,
@@ -105,7 +105,7 @@ export class GasEstimateProvider implements IGasEstimateProvider {
           ctx,
           l2GasData
         );
-      case UniProtocol.MIXED:
+      case Protocol.MIXED:
         return this.mixedGasEstimator.estimateGas(
           serviceConfig,
           tokenInCurrencyInfo,

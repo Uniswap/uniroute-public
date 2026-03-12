@@ -1,7 +1,7 @@
 import {describe, beforeEach, it, expect, vi} from 'vitest';
 import {BaseCachingPoolDiscoverer} from './BaseCachingPoolDiscoverer';
 import {ChainId} from '../../lib/config';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {ITopPoolsSelector, UniPoolInfo} from './interface';
 import {IRedisCache} from '@uniswap/lib-cache';
@@ -19,7 +19,7 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -53,7 +53,7 @@ class TestPoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<UniPoolInfo[]> {
@@ -76,7 +76,7 @@ class TestPoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenIn: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -140,7 +140,7 @@ describe('BaseCachingPoolDiscoverer', () => {
 
   it('should return pools from cache if available', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V2;
+    const protocol = Protocol.V2;
     const cachedPools = [
       {
         id: 'cached-pool',
@@ -167,7 +167,7 @@ describe('BaseCachingPoolDiscoverer', () => {
 
   it('should fetch pools and cache them if not available in cache', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V2;
+    const protocol = Protocol.V2;
     const expectedPools = [
       {
         id: 'test-pool',
@@ -197,7 +197,7 @@ describe('BaseCachingPoolDiscoverer', () => {
 
   it('should return pools for tokens from cache if available', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V2;
+    const protocol = Protocol.V2;
     const tokenIn = new Address('0x1111111111111111111111111111111111111111');
     const tokenOut = new Address('0x2222222222222222222222222222222222222222');
     const cachedPools = [
@@ -237,7 +237,7 @@ describe('BaseCachingPoolDiscoverer', () => {
 
   it('should fetch pools for tokens and cache them if not available in cache', async () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V2;
+    const protocol = Protocol.V2;
     const tokenIn = new Address('0x1111111111111111111111111111111111111111');
     const tokenOut = new Address('0x2222222222222222222222222222222222222222');
     const expectedPools = [
@@ -278,7 +278,7 @@ describe('BaseCachingPoolDiscoverer', () => {
 
   it('should generate different cache keys for different discoverer implementations', () => {
     const chainId = ChainId.MAINNET;
-    const protocol = UniProtocol.V2;
+    const protocol = Protocol.V2;
     const tokenIn = new Address('0x1111111111111111111111111111111111111111');
     const tokenOut = new Address('0x2222222222222222222222222222222222222222');
 

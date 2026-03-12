@@ -10,7 +10,7 @@ import {
 
 import {AAVE_MAINNET, LIDO_MAINNET} from '../../lib/tokenUtils';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {V3Pool} from '../../models/pool/V3Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
 import {ArbitrumGasData} from './gas-data-provider';
@@ -133,7 +133,7 @@ export const SINGLE_HOP_OVERHEAD = (_id: ChainId): BigNumber => {
 export const TOKEN_OVERHEAD = (id: ChainId, route: RouteBasic): BigNumber => {
   let containsAave = false;
   let containsLido = false;
-  if (route.protocol === UniProtocol.V3) {
+  if (route.protocol === Protocol.V3) {
     const pools: V3Pool[] = route.path as V3Pool[];
     containsAave = pools.some((pool: V3Pool) => {
       return (

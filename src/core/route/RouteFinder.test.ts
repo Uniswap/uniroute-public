@@ -1,7 +1,7 @@
 import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {RouteFinder} from './RouteFinder';
-import {UniPool} from '../../models/pool/UniPool';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Pool} from '../../models/pool/Pool';
+import {Protocol} from '../../models/pool/Protocol';
 import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig} from '../../lib/config';
 import {ChainId} from '../../lib/config';
@@ -28,8 +28,8 @@ const createMockContext = (): UniContext => {
 };
 
 describe('RouteFinder', () => {
-  let routeFinder: RouteFinder<UniPool>;
-  let pools: UniPool[];
+  let routeFinder: RouteFinder<Pool>;
+  let pools: Pool[];
   const serviceConfig = {
     ...getUniRouteTestConfig(),
     RouteFinder: {
@@ -63,57 +63,57 @@ describe('RouteFinder', () => {
       {
         token0: token0,
         token1: token1,
-        protocol: UniProtocol.V2,
-      } as UniPool,
+        protocol: Protocol.V2,
+      } as Pool,
       // Mixed protocol path: token0 -> token2 (V2) -> token1 (V3)
       {
         token0: token0,
         token1: token2,
-        protocol: UniProtocol.V2,
-      } as UniPool,
+        protocol: Protocol.V2,
+      } as Pool,
       {
         token0: token2,
         token1: token1,
-        protocol: UniProtocol.V3,
-      } as UniPool,
+        protocol: Protocol.V3,
+      } as Pool,
       // Alternative path through token3
       {
         token0: token0,
         token1: token3,
-        protocol: UniProtocol.V2,
-      } as UniPool,
+        protocol: Protocol.V2,
+      } as Pool,
       {
         token0: token3,
         token1: token1,
-        protocol: UniProtocol.V2,
-      } as UniPool,
+        protocol: Protocol.V2,
+      } as Pool,
       // Longer path: token0 -> token2 -> token3 -> token4 -> token1
       {
         token0: token2,
         token1: token3,
-        protocol: UniProtocol.V3,
-      } as UniPool,
+        protocol: Protocol.V3,
+      } as Pool,
       {
         token0: token3,
         token1: token4,
-        protocol: UniProtocol.V2,
-      } as UniPool,
+        protocol: Protocol.V2,
+      } as Pool,
       {
         token0: token4,
         token1: token1,
-        protocol: UniProtocol.V3,
-      } as UniPool,
+        protocol: Protocol.V3,
+      } as Pool,
       // Dead-end pools (to test handling of invalid paths)
       {
         token0: token3,
         token1: token4,
-        protocol: UniProtocol.V4,
-      } as UniPool,
+        protocol: Protocol.V4,
+      } as Pool,
       {
         token0: token4,
         token1: token2,
-        protocol: UniProtocol.V4,
-      } as UniPool,
+        protocol: Protocol.V4,
+      } as Pool,
     ];
 
     routeFinder = new RouteFinder(serviceConfig);
@@ -257,7 +257,7 @@ describe('RouteFinder', () => {
 
     // Find routes that only use V2 protocol
     const v2Routes = routes.filter(route =>
-      route.path.every(pool => pool.protocol === UniProtocol.V2)
+      route.path.every(pool => pool.protocol === Protocol.V2)
     );
 
     // We should have at least one V2-only route (token0 -> token3 -> token1)
@@ -295,9 +295,9 @@ describe('RouteFinder', () => {
     // This could be token0 -> token2 (V3) -> token3 (V3) -> token4 (V2) -> token1 (V3)
     const hasMixedProtocolRoute = mixedRoutes.some(
       route =>
-        route.path.some(pool => pool.protocol === UniProtocol.V2) &&
-        route.path.some(pool => pool.protocol === UniProtocol.V3) &&
-        route.protocol === UniProtocol.MIXED
+        route.path.some(pool => pool.protocol === Protocol.V2) &&
+        route.path.some(pool => pool.protocol === Protocol.V3) &&
+        route.protocol === Protocol.MIXED
     );
     expect(hasMixedProtocolRoute).toBe(true);
   });
@@ -319,14 +319,14 @@ describe('RouteFinder', () => {
       {
         token0: tokenA,
         token1: ethAddress,
-        protocol: UniProtocol.V4,
-      } as UniPool,
+        protocol: Protocol.V4,
+      } as Pool,
       // WETH to TokenB pool (V4)
       {
         token0: wethAddress,
         token1: tokenB,
-        protocol: UniProtocol.V4,
-      } as UniPool,
+        protocol: Protocol.V4,
+      } as Pool,
     ];
 
     // Generate routes with mixed pools allowed
@@ -345,7 +345,7 @@ describe('RouteFinder', () => {
     const routesWithFakePool = routes.filter(route =>
       route.path.some(
         pool =>
-          pool.protocol === UniProtocol.V4 &&
+          pool.protocol === Protocol.V4 &&
           (pool as unknown as V4Pool).tickSpacing === FAKE_TICK_SPACING &&
           ((pool.token0.address === ethAddress.address &&
             pool.token1.address === wethAddress.address) ||
@@ -368,7 +368,7 @@ describe('RouteFinder', () => {
     expect(completeRoute).toBeDefined();
 
     // Verify that the route is marked as V4 protocol
-    expect(completeRoute?.protocol).toBe(UniProtocol.V4);
+    expect(completeRoute?.protocol).toBe(Protocol.V4);
   });
 
   it('should not use fake ETH/WETH pool when mixed pools are not allowed', async () => {
@@ -388,14 +388,14 @@ describe('RouteFinder', () => {
       {
         token0: tokenA,
         token1: ethAddress,
-        protocol: UniProtocol.V4,
-      } as UniPool,
+        protocol: Protocol.V4,
+      } as Pool,
       // WETH to TokenB pool (V4)
       {
         token0: wethAddress,
         token1: tokenB,
-        protocol: UniProtocol.V4,
-      } as UniPool,
+        protocol: Protocol.V4,
+      } as Pool,
     ];
 
     // Generate routes with mixed pools NOT allowed
@@ -439,10 +439,10 @@ describe('RouteFinder', () => {
       };
 
       // Create a pool network where only a 3-hop path exists between tokenA and tokenD
-      const testPools: UniPool[] = [
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+      const testPools: Pool[] = [
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenD, protocol: Protocol.V2} as Pool,
       ];
 
       const extendedRouteFinder = new RouteFinder(extendedConfig);
@@ -481,11 +481,11 @@ describe('RouteFinder', () => {
       };
 
       // Direct A-B (two pools so we get 2 normal routes, both 1-hop). Plus A-C and C-B for a 2-hop path.
-      const testPools: UniPool[] = [
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V3} as UniPool,
-        {token0: tokenA, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
+      const testPools: Pool[] = [
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V3} as Pool,
+        {token0: tokenA, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenB, protocol: Protocol.V2} as Pool,
       ];
 
       const extendedRouteFinder = new RouteFinder(extendedConfig);
@@ -532,13 +532,13 @@ describe('RouteFinder', () => {
       };
 
       // Create pools with both a 2-hop and 3-hop path
-      const testPools: UniPool[] = [
+      const testPools: Pool[] = [
         // 2-hop path: A -> B -> D
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenD, protocol: Protocol.V2} as Pool,
         // 3-hop path: A -> B -> C -> D
-        {token0: tokenB, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenB, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenD, protocol: Protocol.V2} as Pool,
       ];
 
       const extendedRouteFinder = new RouteFinder(extendedConfig);
@@ -574,16 +574,16 @@ describe('RouteFinder', () => {
       };
 
       // Create multiple 2-hop paths (no direct path)
-      const testPools: UniPool[] = [
+      const testPools: Pool[] = [
         // Path 1: A -> B -> E
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenE, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenE, protocol: Protocol.V2} as Pool,
         // Path 2: A -> C -> E
-        {token0: tokenA, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenE, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenA, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenE, protocol: Protocol.V2} as Pool,
         // Path 3: A -> D -> E
-        {token0: tokenA, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenD, token1: tokenE, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenA, token1: tokenD, protocol: Protocol.V2} as Pool,
+        {token0: tokenD, token1: tokenE, protocol: Protocol.V2} as Pool,
       ];
 
       const extendedRouteFinder = new RouteFinder(extendedConfig);
@@ -621,13 +621,13 @@ describe('RouteFinder', () => {
       };
 
       // Create pools with both 2-hop and 3-hop paths
-      const testPools: UniPool[] = [
+      const testPools: Pool[] = [
         // 2-hop path: A -> B -> D
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenD, protocol: Protocol.V2} as Pool,
         // 3-hop path: A -> B -> C -> D
-        {token0: tokenB, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+        {token0: tokenB, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenD, protocol: Protocol.V2} as Pool,
       ];
 
       const extendedRouteFinder = new RouteFinder(extendedConfig);
@@ -669,10 +669,10 @@ describe('RouteFinder', () => {
       };
 
       // Only a 3-hop path exists
-      const testPools: UniPool[] = [
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+      const testPools: Pool[] = [
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenD, protocol: Protocol.V2} as Pool,
       ];
 
       const noExtendRouteFinder = new RouteFinder(noExtendConfig);
@@ -707,10 +707,10 @@ describe('RouteFinder', () => {
       };
 
       // Create a pool network where only a 3-hop path exists
-      const testPools: UniPool[] = [
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenC, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenC, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+      const testPools: Pool[] = [
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenC, protocol: Protocol.V2} as Pool,
+        {token0: tokenC, token1: tokenD, protocol: Protocol.V2} as Pool,
       ];
 
       const mockCtx = createMockContext();
@@ -763,9 +763,9 @@ describe('RouteFinder', () => {
       };
 
       // Create pools with a 2-hop path (no extension needed)
-      const testPools: UniPool[] = [
-        {token0: tokenA, token1: tokenB, protocol: UniProtocol.V2} as UniPool,
-        {token0: tokenB, token1: tokenD, protocol: UniProtocol.V2} as UniPool,
+      const testPools: Pool[] = [
+        {token0: tokenA, token1: tokenB, protocol: Protocol.V2} as Pool,
+        {token0: tokenB, token1: tokenD, protocol: Protocol.V2} as Pool,
       ];
 
       const mockCtx = createMockContext();

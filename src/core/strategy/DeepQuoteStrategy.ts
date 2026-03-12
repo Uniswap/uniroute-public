@@ -1,5 +1,5 @@
 import {BaseQuoteStrategy} from './BaseQuoteStrategy';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {
   buildMetricKey,
   ChainId,
@@ -16,7 +16,7 @@ import {
   updateQuotesWithFreshPoolDetailsUsingPoolsMap,
 } from '../../lib/helpers';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {UniPool} from '../../models/pool/UniPool';
+import {Pool} from '../../models/pool/Pool';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {Erc20Token} from '../../models/token/Erc20Token';
 import {QuoteBestSplitFinder} from '../quote/QuoteBestSplitFinder';
@@ -63,13 +63,13 @@ import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrappe
  * - Respect maximum execution time
  */
 export class DeepQuoteStrategy extends BaseQuoteStrategy {
-  private readonly quoteBestSplitFinder: QuoteBestSplitFinder<UniPool>;
+  private readonly quoteBestSplitFinder: QuoteBestSplitFinder<Pool>;
 
   constructor(
     quoteFetcher: IQuoteFetcher,
     gasEstimateProvider: IGasEstimateProvider,
     gasConverter: IGasConverter,
-    routeQuoteAllocator: IRouteQuoteAllocator<UniPool>,
+    routeQuoteAllocator: IRouteQuoteAllocator<Pool>,
     quoteSelector: IQuoteSelector,
     tokenHandler: ITokenHandler,
     arbitrumGasDataProvider: ArbitrumGasDataProvider,
@@ -85,7 +85,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       arbitrumGasDataProvider,
       freshPoolDetailsWrapper
     );
-    this.quoteBestSplitFinder = new QuoteBestSplitFinder<UniPool>();
+    this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>();
   }
 
   async findBestQuoteCandidates(
@@ -95,9 +95,9 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     tokenOutCurrencyInfo: CurrencyInfo,
     amount: bigint,
     tradeType: TradeType,
-    protocols: UniProtocol[],
+    protocols: Protocol[],
     serviceConfig: IUniRouteServiceConfig,
-    routes: RouteBasic<UniPool>[],
+    routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[]
   ): Promise<QuoteSplit[]> {

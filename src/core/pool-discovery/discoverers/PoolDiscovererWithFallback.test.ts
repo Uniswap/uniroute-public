@@ -5,7 +5,7 @@ import {
   PoolDiscovererWithFallbackV4,
 } from './PoolDiscovererWithFallback';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {
   getUniRouteTestConfig,
@@ -62,7 +62,7 @@ class TestTopPoolsSelectorV2 implements ITopPoolsSelector<V2PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -82,7 +82,7 @@ class TestTopPoolsSelectorV3 implements ITopPoolsSelector<V3PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -102,7 +102,7 @@ class TestTopPoolsSelectorV4 implements ITopPoolsSelector<V4PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    protocol: UniProtocol,
+    protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -147,7 +147,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(primaryDiscoverer.getPools).mockResolvedValue([mockV2Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V2,
+          Protocol.V2,
           ctx
         );
         expect(pools).toEqual([mockV2Pool]);
@@ -160,7 +160,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(fallbackDiscoverer.getPools).mockResolvedValue([mockV2Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V2,
+          Protocol.V2,
           ctx
         );
         expect(pools).toEqual([mockV2Pool]);
@@ -175,7 +175,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(fallbackDiscoverer.getPools).mockResolvedValue([mockV2Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V2,
+          Protocol.V2,
           ctx
         );
         expect(pools).toEqual([mockV2Pool]);
@@ -190,7 +190,7 @@ describe('PoolDiscovererWithFallback', () => {
         );
         vi.mocked(fallbackDiscoverer.getPools).mockRejectedValue(error);
         await expect(
-          discoverer.getPools(ChainId.MAINNET, UniProtocol.V2, ctx)
+          discoverer.getPools(ChainId.MAINNET, Protocol.V2, ctx)
         ).rejects.toThrow(error);
         expect(primaryDiscoverer.getPools).toHaveBeenCalledTimes(1);
         expect(fallbackDiscoverer.getPools).toHaveBeenCalledTimes(1);
@@ -204,7 +204,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V2,
+          Protocol.V2,
           tokenIn,
           tokenOut,
           topPoolSelector,
@@ -224,7 +224,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V2,
+          Protocol.V2,
           tokenIn,
           tokenOut,
           topPoolSelector,
@@ -246,7 +246,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V2,
+          Protocol.V2,
           tokenIn,
           tokenOut,
           topPoolSelector,
@@ -270,7 +270,7 @@ describe('PoolDiscovererWithFallback', () => {
         await expect(
           discoverer.getPoolsForTokens(
             ChainId.MAINNET,
-            UniProtocol.V2,
+            Protocol.V2,
             tokenIn,
             tokenOut,
             topPoolSelector,
@@ -314,7 +314,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(primaryDiscoverer.getPools).mockResolvedValue([mockV3Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V3,
+          Protocol.V3,
           ctx
         );
         expect(pools).toEqual([mockV3Pool]);
@@ -327,7 +327,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(fallbackDiscoverer.getPools).mockResolvedValue([mockV3Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V3,
+          Protocol.V3,
           ctx
         );
         expect(pools).toEqual([mockV3Pool]);
@@ -342,7 +342,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(fallbackDiscoverer.getPools).mockResolvedValue([mockV3Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V3,
+          Protocol.V3,
           ctx
         );
         expect(pools).toEqual([mockV3Pool]);
@@ -357,7 +357,7 @@ describe('PoolDiscovererWithFallback', () => {
         );
         vi.mocked(fallbackDiscoverer.getPools).mockRejectedValue(error);
         await expect(
-          discoverer.getPools(ChainId.MAINNET, UniProtocol.V3, ctx)
+          discoverer.getPools(ChainId.MAINNET, Protocol.V3, ctx)
         ).rejects.toThrow(error);
         expect(primaryDiscoverer.getPools).toHaveBeenCalledTimes(1);
         expect(fallbackDiscoverer.getPools).toHaveBeenCalledTimes(1);
@@ -371,7 +371,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V3,
+          Protocol.V3,
           tokenIn,
           tokenOut,
           topPoolSelector,
@@ -391,7 +391,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V3,
+          Protocol.V3,
           tokenIn,
           tokenOut,
           topPoolSelector,
@@ -435,7 +435,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(primaryDiscoverer.getPools).mockResolvedValue([mockV4Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V4,
+          Protocol.V4,
           ctx
         );
         expect(pools).toEqual([mockV4Pool]);
@@ -448,7 +448,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(fallbackDiscoverer.getPools).mockResolvedValue([mockV4Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V4,
+          Protocol.V4,
           ctx
         );
         expect(pools).toEqual([mockV4Pool]);
@@ -463,7 +463,7 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(fallbackDiscoverer.getPools).mockResolvedValue([mockV4Pool]);
         const pools = await discoverer.getPools(
           ChainId.MAINNET,
-          UniProtocol.V4,
+          Protocol.V4,
           ctx
         );
         expect(pools).toEqual([mockV4Pool]);
@@ -478,7 +478,7 @@ describe('PoolDiscovererWithFallback', () => {
         );
         vi.mocked(fallbackDiscoverer.getPools).mockRejectedValue(error);
         await expect(
-          discoverer.getPools(ChainId.MAINNET, UniProtocol.V4, ctx)
+          discoverer.getPools(ChainId.MAINNET, Protocol.V4, ctx)
         ).rejects.toThrow(error);
         expect(primaryDiscoverer.getPools).toHaveBeenCalledTimes(1);
         expect(fallbackDiscoverer.getPools).toHaveBeenCalledTimes(1);
@@ -492,7 +492,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V4,
+          Protocol.V4,
           tokenIn,
           tokenOut,
           topPoolSelector,
@@ -512,7 +512,7 @@ describe('PoolDiscovererWithFallback', () => {
         ]);
         const pools = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
-          UniProtocol.V4,
+          Protocol.V4,
           tokenIn,
           tokenOut,
           topPoolSelector,

@@ -7,9 +7,9 @@ import {Address} from '../../models/address/Address';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {RouteBasic} from '../../models/route/RouteBasic';
 import {TradeType} from '../../models/quote/TradeType';
-import {UniProtocol} from '../../models/pool/UniProtocol';
+import {Protocol} from '../../models/pool/Protocol';
 import {SimpleQuoteSelector} from '../quote/selector/SimpleQuoteSelector';
-import {UniPool} from '../../models/pool/UniPool';
+import {Pool} from '../../models/pool/Pool';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {GasEstimateProvider} from '../gas/estimator/GasEstimateProvider';
 import {NoGasEstimator} from '../gas/estimator/IGasEstimator';
@@ -135,7 +135,7 @@ class TestQuoteFetcher implements IQuoteFetcher {
     // Default behavior - return a simple quote
     return [
       new QuoteBasic(
-        new RouteBasic(UniProtocol.V2, [
+        new RouteBasic(Protocol.V2, [
           new V2Pool(
             tokenInCurrencyInfo.wrappedAddress,
             tokenOutCurrencyInfo.wrappedAddress,
@@ -157,7 +157,7 @@ function createStrategy(
     quoteFetcher: IQuoteFetcher,
     gasEstimateProvider: GasEstimateProvider,
     gasConverter: IGasConverter,
-    routeQuoteAllocator: RouteQuoteAllocator<UniPool>,
+    routeQuoteAllocator: RouteQuoteAllocator<Pool>,
     quoteSelector: SimpleQuoteSelector,
     tokenHandler: ITokenHandler,
     arbitrumGasDataProvider: ArbitrumGasDataProvider,
@@ -194,7 +194,7 @@ function runStrategyTests(
     quoteFetcher: IQuoteFetcher,
     gasEstimateProvider: GasEstimateProvider,
     gasConverter: IGasConverter,
-    routeQuoteAllocator: RouteQuoteAllocator<UniPool>,
+    routeQuoteAllocator: RouteQuoteAllocator<Pool>,
     quoteSelector: SimpleQuoteSelector,
     tokenHandler: ITokenHandler,
     arbitrumGasDataProvider: ArbitrumGasDataProvider,
@@ -236,10 +236,10 @@ function runStrategyTests(
         new CurrencyInfo(false, tokenOutAddress),
         amount,
         TradeType.ExactIn,
-        [UniProtocol.V2, UniProtocol.V3, UniProtocol.V4, UniProtocol.MIXED],
+        [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         serviceConfig,
         [
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               tokenInAddress,
               tokenOutAddress,
@@ -266,7 +266,7 @@ function runStrategyTests(
     it('should return quotes sorted by raw amount', async () => {
       const quotes = [
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               tokenInAddress,
               tokenOutAddress,
@@ -279,7 +279,7 @@ function runStrategyTests(
           undefined
         ),
         new QuoteBasic(
-          new RouteBasic(UniProtocol.V2, [
+          new RouteBasic(Protocol.V2, [
             new V2Pool(
               tokenInAddress,
               tokenOutAddress,
@@ -302,11 +302,11 @@ function runStrategyTests(
         new CurrencyInfo(false, tokenOutAddress),
         amount,
         TradeType.ExactIn,
-        [UniProtocol.V2],
+        [Protocol.V2],
         serviceConfig,
         [
-          new RouteBasic(UniProtocol.V2, [quotes[0].route.path[0]]),
-          new RouteBasic(UniProtocol.V2, [quotes[1].route.path[0]]),
+          new RouteBasic(Protocol.V2, [quotes[0].route.path[0]]),
+          new RouteBasic(Protocol.V2, [quotes[1].route.path[0]]),
         ],
         new Map(),
         ['chain:MAINNET', 'tradeType:EXACT_IN']
@@ -338,7 +338,7 @@ function runStrategyTests(
       ); // DAI
       const quotes = [
         new QuoteBasic(
-          new RouteBasic(UniProtocol.MIXED, [
+          new RouteBasic(Protocol.MIXED, [
             new V2Pool(
               tokenInAddress,
               tokenMiddleAddress,
@@ -370,10 +370,10 @@ function runStrategyTests(
         new CurrencyInfo(false, tokenOutAddress),
         amount,
         TradeType.ExactIn,
-        [UniProtocol.V2, UniProtocol.V3, UniProtocol.V4, UniProtocol.MIXED],
+        [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         serviceConfig,
         [
-          new RouteBasic(UniProtocol.MIXED, [
+          new RouteBasic(Protocol.MIXED, [
             quotes[0].route.path[0],
             quotes[0].route.path[1],
           ]),
@@ -389,10 +389,10 @@ function runStrategyTests(
       );
       expect(bestQuoteCandidates[0].quotes[0].route.path.length).equals(2);
       expect(bestQuoteCandidates[0].quotes[0].route.path[0].protocol).equals(
-        UniProtocol.V2
+        Protocol.V2
       );
       expect(bestQuoteCandidates[0].quotes[0].route.path[1].protocol).equals(
-        UniProtocol.V3
+        Protocol.V3
       );
       expect(
         bestQuoteCandidates[0].quotes[0].route.path[0].address.toString()

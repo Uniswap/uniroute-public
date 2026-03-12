@@ -36,10 +36,10 @@ import {IChainRepository} from '../stores/chain/IChainRepository';
 import {TradeType} from '../models/quote/TradeType';
 import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
 import {Chain} from '../models/chain/Chain';
-import {UniPool} from '../models/pool/UniPool';
+import {Pool} from '../models/pool/Pool';
 import {IQuoteSelector} from './quote/selector/IQuoteSelector';
 import {
-  allProtocolsIncluded,
+  onlyUniswapProtocolsIncludedAndMixed,
   convertCurrencyInfoToSdkCurrency,
   erc20TokenToSdkToken,
   fetchAllInvolvedTokens,
@@ -48,7 +48,7 @@ import {
   updateQuoteSplitWithFreshPoolDetails,
 } from '../lib/helpers';
 import {Erc20Token} from '../models/token/Erc20Token';
-import {UniProtocol} from '../models/pool/UniProtocol';
+import {Protocol} from '../models/pool/Protocol';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V2Pool} from '../models/pool/V2Pool';
 import {V4Pool} from '../models/pool/V4Pool';
@@ -109,10 +109,10 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly tokenHandler: ITokenHandler,
     private readonly quoteFetcher: IQuoteFetcher,
     private readonly quoteSelector: IQuoteSelector,
-    private readonly routeQuoteAllocator: IRouteQuoteAllocator<UniPool>,
+    private readonly routeQuoteAllocator: IRouteQuoteAllocator<Pool>,
     private readonly gasEstimateProvider: IGasEstimateProvider,
     private readonly gasConverter: IGasConverter,
-    private readonly routeRepository: IRoutesRepository<UniPool>,
+    private readonly routeRepository: IRoutesRepository<Pool>,
     private readonly cachedRoutesRepository: ICachedRoutesRepository,
     private readonly quoteStrategy: IQuoteStrategy,
     private readonly simulator: ISimulator,
@@ -236,7 +236,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const forceMixed = request.forceMixed;
     const protocols = request.protocols
       .split(',')
-      .map(p => EnumUtils.stringToEnum(UniProtocol, p));
+      .map(p => EnumUtils.stringToEnum(Protocol, p));
     const debugLogs = request.debugLogs;
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
@@ -383,11 +383,11 @@ export class UniRouteBL implements IUniRoutedBL {
       // If QuoteType.Fast, we always try to use cached routes first, even if expired (in which case an async QuoteType.Fresh fetch will be triggered)
       // - we only use cached routes if all protocols are included (i.e. we don't cache specific protocols requests as this would harm our "Global best" caching approach)
       // If QuoteType.Fresh, we force a fresh route fetch.
-      let routes: RouteBasic<UniPool>[] = [];
+      let routes: RouteBasic<Pool>[] = [];
       let usedCachedRoutes: boolean = false;
       if (
         quoteType === QuoteType.Fast &&
-        allProtocolsIncluded(protocols) &&
+        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
         this.serviceConfig.CachedRoutes.Enabled
       ) {
@@ -445,7 +445,7 @@ export class UniRouteBL implements IUniRoutedBL {
         !usedCachedRoutes &&
         this.serviceConfig.Lambda.Type === LambdaType.Sync &&
         this.serviceConfig.QuoteService === QuoteService.UniRoute &&
-        !allProtocolsIncluded(protocols)
+        !onlyUniswapProtocolsIncludedAndMixed(protocols)
           ? {
               ...this.serviceConfig,
               RouteFinder: {
@@ -488,7 +488,7 @@ export class UniRouteBL implements IUniRoutedBL {
 
       if (forceMixed) {
         ctx.logger.debug('Forcing mixed routes');
-        routes = routes.filter(r => r.protocol === UniProtocol.MIXED);
+        routes = routes.filter(r => r.protocol === Protocol.MIXED);
 
         if (routes.length === 0) {
           ctx.logger.debug('No routes found');
@@ -514,16 +514,16 @@ export class UniRouteBL implements IUniRoutedBL {
       // Do some logging
       ctx.logger.debug(`Routes (${routes.length})`, {
         v2Routes: routes
-          .filter(r => r.protocol === UniProtocol.V2)
+          .filter(r => r.protocol === Protocol.V2)
           .map(r => r.toString()),
         v3Routes: routes
-          .filter(r => r.protocol === UniProtocol.V3)
+          .filter(r => r.protocol === Protocol.V3)
           .map(r => r.toString()),
         v4Routes: routes
-          .filter(r => r.protocol === UniProtocol.V4)
+          .filter(r => r.protocol === Protocol.V4)
           .map(r => r.toString()),
         mixedRoutes: routes
-          .filter(r => r.protocol === UniProtocol.MIXED)
+          .filter(r => r.protocol === Protocol.MIXED)
           .map(r => r.toString()),
       });
 
@@ -691,7 +691,7 @@ export class UniRouteBL implements IUniRoutedBL {
       // if this was a cache miss + all protocols searched + the simulation didn't fail + is async call, cache the best quote's route(s)
       if (
         !usedCachedRoutes &&
-        allProtocolsIncluded(protocols) &&
+        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
         this.serviceConfig.Lambda.Type === LambdaType.Async &&
         bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
         this.serviceConfig.CachedRoutes.Enabled
@@ -812,7 +812,7 @@ export class UniRouteBL implements IUniRoutedBL {
             amountIn,
             usdBucket,
             QuoteType.Fresh,
-            [UniProtocol.V2, UniProtocol.V3, UniProtocol.V4, UniProtocol.MIXED], // All protocols
+            [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED], // All protocols
             new QuoteRequest(), // Empty request since we're not doing a full quote
             ctx
           );
@@ -1283,7 +1283,7 @@ export class UniRouteBL implements IUniRoutedBL {
         });
 
         let extraPoolInfo = {};
-        if (p.protocol === UniProtocol.V2) {
+        if (p.protocol === Protocol.V2) {
           const v2Pool = p as V2Pool;
           extraPoolInfo = {
             reserve0: {
@@ -1299,7 +1299,7 @@ export class UniRouteBL implements IUniRoutedBL {
                 : v2Pool.reserve1.toString(),
             },
           };
-        } else if (p.protocol === UniProtocol.V3) {
+        } else if (p.protocol === Protocol.V3) {
           const v3Pool = p as V3Pool;
           extraPoolInfo = {
             liquidity: v3Pool.liquidity.toString(),
@@ -1309,7 +1309,7 @@ export class UniRouteBL implements IUniRoutedBL {
             sqrtPriceX96: v3Pool.sqrtPriceX96.toString(),
             sqrtRatioX96: v3Pool.sqrtPriceX96.toString(),
           };
-        } else if (p.protocol === UniProtocol.V4) {
+        } else if (p.protocol === Protocol.V4) {
           const v4Pool = p as V4Pool;
           extraPoolInfo = {
             liquidity: v4Pool.liquidity.toString(),
@@ -1376,7 +1376,7 @@ export class UniRouteBL implements IUniRoutedBL {
       pools.filter(pool => {
         // Skip fake eth/weth V4 pools with fake tick spacing
         if (
-          pool.type === protocolToPoolTypeString(UniProtocol.V4) &&
+          pool.type === protocolToPoolTypeString(Protocol.V4) &&
           pool.tickSpacing === FAKE_TICK_SPACING.toString()
         ) {
           return false;
@@ -1498,7 +1498,7 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   private constructDebugInfo(
-    routes: RouteBasic<UniPool>[],
+    routes: RouteBasic<Pool>[],
     bestQuoteCandidates: QuoteSplit[]
   ): DebugInfo {
     // Map and sort route candidates by totalQuoteAmount in descending order
@@ -1907,7 +1907,7 @@ export class UniRouteBL implements IUniRoutedBL {
 
   // Used to generate Routes for getCachedRoutesResponse
   private async convertRoutesToProto(
-    routes: RouteBasic<UniPool>[],
+    routes: RouteBasic<Pool>[],
     chain: Chain,
     ctx: Context
   ): Promise<Route[]> {

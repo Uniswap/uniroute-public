@@ -10,7 +10,7 @@ import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId, SUPPORTED_CHAINS} from '../lib/config';
-import {UniProtocol} from '../models/pool/UniProtocol';
+import {Protocol} from '../models/pool/Protocol';
 
 describe('QuoteRequestValidator', () => {
   let validator: QuoteRequestValidator;
@@ -117,7 +117,7 @@ describe('QuoteRequestValidator', () => {
 
     it('should return error when mixed protocol is specified explicitly', async () => {
       const request = createValidRequest();
-      request.protocols = UniProtocol.MIXED;
+      request.protocols = Protocol.MIXED;
 
       const result = await validator.validateInputs(request, ctx);
 

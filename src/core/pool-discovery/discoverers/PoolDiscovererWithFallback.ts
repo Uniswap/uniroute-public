@@ -8,7 +8,7 @@ import {
 } from '../interface';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
+import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IUniRouteServiceConfig} from '../../../lib/config';
@@ -25,7 +25,7 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
 
   public async getPools(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     ctx: Context
   ): Promise<TPoolInfo[]> {
     try {
@@ -71,7 +71,7 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
 
   public async getPoolsForTokens(
     chainId: ChainId,
-    protocol: UniProtocol,
+    protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
     topPoolSelector: ITopPoolsSelector<TPoolInfo>,

@@ -5,7 +5,6 @@ import {V4GasEstimator} from './V4GasEstimator';
 import {MixedGasEstimator} from './MixedGasEstimator';
 import {RouteBasic} from '../../../models/route/RouteBasic';
 import {ChainId} from '../../../lib/config';
-import {UniProtocol} from '../../../models/pool/UniProtocol';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {V2Pool} from '../../../models/pool/V2Pool';
@@ -13,6 +12,7 @@ import {V3Pool} from '../../../models/pool/V3Pool';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {Address} from '../../../models/address/Address';
 import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
+import {Protocol} from '../../../models/pool/Protocol';
 
 describe('GasEstimators', () => {
   const mockProvider = new Map<ChainId, JsonRpcProvider>();
@@ -75,7 +75,7 @@ describe('GasEstimators', () => {
     );
 
     it('should estimate gas for single hop V2 route', async () => {
-      const route = new RouteBasic(UniProtocol.V2, [v2Pool1]);
+      const route = new RouteBasic(Protocol.V2, [v2Pool1]);
       const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
 
       const gasDetails = await v2Estimator.estimateRouteGas(
@@ -89,7 +89,7 @@ describe('GasEstimators', () => {
     });
 
     it('should estimate gas for multi-hop V2 route', async () => {
-      const route = new RouteBasic(UniProtocol.V2, [v2Pool1, v2Pool2]);
+      const route = new RouteBasic(Protocol.V2, [v2Pool1, v2Pool2]);
       const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
 
       const gasDetails = await v2Estimator.estimateRouteGas(
@@ -110,7 +110,7 @@ describe('GasEstimators', () => {
     );
 
     it('should estimate gas for single hop V3 route', async () => {
-      const route = new RouteBasic(UniProtocol.V3, [v3Pool1]);
+      const route = new RouteBasic(Protocol.V3, [v3Pool1]);
       const quote = new QuoteBasic(
         route,
         BigInt(1000),
@@ -136,7 +136,7 @@ describe('GasEstimators', () => {
     );
 
     it('should estimate gas for single hop V4 route', async () => {
-      const route = new RouteBasic(UniProtocol.V4, [v4Pool1]);
+      const route = new RouteBasic(Protocol.V4, [v4Pool1]);
       const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
 
       const gasDetails = await v4Estimator.estimateRouteGas(
@@ -165,7 +165,7 @@ describe('GasEstimators', () => {
     );
 
     it('should estimate gas for mixed V2-V3 route', async () => {
-      const route = new RouteBasic(UniProtocol.MIXED, [v2Pool1, v3Pool2]);
+      const route = new RouteBasic(Protocol.MIXED, [v2Pool1, v3Pool2]);
       const quote = new QuoteBasic(
         route,
         BigInt(1000),
@@ -186,7 +186,7 @@ describe('GasEstimators', () => {
     });
 
     it('should estimate gas for mixed V3-V4 route', async () => {
-      const route = new RouteBasic(UniProtocol.MIXED, [v3Pool1, v4Pool1]);
+      const route = new RouteBasic(Protocol.MIXED, [v3Pool1, v4Pool1]);
       const quote = new QuoteBasic(
         route,
         BigInt(1000),
@@ -208,7 +208,7 @@ describe('GasEstimators', () => {
 
     it('should estimate gas consistently across individual and mixed routes', async () => {
       // Test V2 route alone
-      const v2Route = new RouteBasic(UniProtocol.V2, [v2Pool1]);
+      const v2Route = new RouteBasic(Protocol.V2, [v2Pool1]);
       const v2Quote = new QuoteBasic(
         v2Route,
         BigInt(1000),
@@ -222,7 +222,7 @@ describe('GasEstimators', () => {
       );
 
       // Test V3 route alone
-      const v3Route = new RouteBasic(UniProtocol.V3, [v3Pool2]);
+      const v3Route = new RouteBasic(Protocol.V3, [v3Pool2]);
       const v3Quote = new QuoteBasic(
         v3Route,
         BigInt(1000),
@@ -236,7 +236,7 @@ describe('GasEstimators', () => {
       );
 
       // Test mixed V2-V3 route
-      const mixedRoute = new RouteBasic(UniProtocol.MIXED, [v2Pool1, v3Pool2]);
+      const mixedRoute = new RouteBasic(Protocol.MIXED, [v2Pool1, v3Pool2]);
       const mixedQuote = new QuoteBasic(
         mixedRoute,
         BigInt(1000),
