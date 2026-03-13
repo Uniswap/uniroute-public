@@ -18,6 +18,7 @@ export type SwapOptionsUniversalRouterInput = {
   tradeType: TradeType;
   amountIn: string;
   tokenInWrappedAddress: string;
+  tokenInIsNative?: boolean;
   slippageTolerance?: string;
   portionBips?: number;
   portionRecipient?: string;
@@ -50,6 +51,7 @@ export class SwapOptionsFactory {
     permitSigDeadline,
     simulateFromAddress,
     permit2Disabled,
+    tokenInIsNative,
   }: SwapOptionsUniversalRouterInput): SwapOptionsUniversalRouter | undefined {
     if (!slippageTolerance) {
       return undefined;
@@ -62,6 +64,10 @@ export class SwapOptionsFactory {
       computePortionAmount(amountIn, portionBips)
     );
 
+    // SwapProxy (ApproveProxy) only supports ERC20 input — native ETH cannot be
+    // approved, so fall back to Permit2 mode which handles native via msg.value.
+    const useApproveProxy = permit2Disabled && !tokenInIsNative;
+
     const swapParams: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
       version: UniversalRouterVersion.V2_0,
@@ -71,7 +77,7 @@ export class SwapOptionsFactory {
         : undefined,
       recipient: recipient,
       slippageTolerance: parseSlippageTolerance(slippageTolerance),
-      tokenTransferMode: permit2Disabled
+      tokenTransferMode: useApproveProxy
         ? TokenTransferMode.ApproveProxy
         : TokenTransferMode.Permit2,
       ...allFeeOptions,

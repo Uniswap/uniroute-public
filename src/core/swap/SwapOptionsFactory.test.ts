@@ -294,6 +294,18 @@ describe('SwapOptionsFactory', () => {
       expect(result!.tokenTransferMode).toBe(TokenTransferMode.ApproveProxy);
     });
 
+    it('should fall back to Permit2 when permit2Disabled is true but input is native', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        permit2Disabled: true,
+        tokenInIsNative: true,
+      };
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
+
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
+    });
+
     it('should set Permit2 tokenTransferMode when permit2Disabled is false', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,

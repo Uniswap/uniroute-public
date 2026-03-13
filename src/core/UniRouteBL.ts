@@ -1608,6 +1608,7 @@ export class UniRouteBL implements IUniRoutedBL {
       tradeType: tradeType,
       amountIn: request.amount,
       tokenInWrappedAddress: tokenInCurrencyInfo.wrappedAddress.address,
+      tokenInIsNative: tokenInCurrencyInfo.isNative,
       slippageTolerance: request.slippageTolerance?.toString(),
       portionBips: request.portionBips,
       portionRecipient: request.portionRecipient,
@@ -1725,7 +1726,16 @@ export class UniRouteBL implements IUniRoutedBL {
           );
           ctx.logger.error('Error building swap method parameters', {
             error,
-            quoteSplit: quoteSplit.toString(),
+            quoteSplitRoutes: quoteSplit.quotes.map(q => q.route.toString()),
+            quoteSplitAmounts: quoteSplit.quotes.map(q => q.amount.toString()),
+            swapOptions: JSON.stringify(swapOptions),
+            tradeInputAmount: trade.inputAmount.toExact(),
+            tradeOutputAmount: trade.outputAmount.toExact(),
+            tradeRoutes: trade.swaps.map(s =>
+              s.route.path
+                .map(p => ('address' in p ? p.address : p.symbol))
+                .join(' -> ')
+            ),
           });
           continue;
         }
