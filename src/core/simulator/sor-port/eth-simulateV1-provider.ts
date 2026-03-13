@@ -117,11 +117,11 @@ export class EthSimulateV1Simulator extends Simulator {
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       const erc20Interface = ERC20__factory.createInterface();
-      const permit2Enabled =
-        swapOptions.tokenTransferMode !== TokenTransferMode.ApproveProxy;
+      const useUniversalRouterProxy =
+        swapOptions.tokenTransferMode === TokenTransferMode.ApproveProxy;
 
       let approvalCalls: SimulateV1Call[];
-      if (permit2Enabled) {
+      if (!useUniversalRouterProxy) {
         const approvePermit2Calldata = erc20Interface.encodeFunctionData(
           'approve',
           [permit2Address(this.chainId), constants.MaxUint256]
@@ -169,9 +169,9 @@ export class EthSimulateV1Simulator extends Simulator {
 
       const swap: SimulateV1Call = {
         from: fromAddress,
-        to: permit2Enabled
-          ? quoteSplit.swapInfo!.methodParameters!.to
-          : SWAP_PROXY_ADDRESS(this.chainId),
+        to: useUniversalRouterProxy
+          ? SWAP_PROXY_ADDRESS(this.chainId)
+          : quoteSplit.swapInfo!.methodParameters!.to,
         data: quoteSplit.swapInfo!.methodParameters!.calldata,
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters!.value
@@ -183,7 +183,7 @@ export class EthSimulateV1Simulator extends Simulator {
       const swapCallIndex = expectedCallCount - 1;
 
       ctx.logger.debug('eth_simulateV1 call params', {
-        permit2Enabled,
+        useProxy: useUniversalRouterProxy,
         approvalCallCount: approvalCalls.length,
         swapValue: swap.value,
         blockNumberParam: blockNumber
@@ -193,7 +193,7 @@ export class EthSimulateV1Simulator extends Simulator {
       ctx.logger.info('Simulating using eth_simulateV1 on Universal Router', {
         addr: fromAddress,
         methodParameters: quoteSplit.swapInfo!.methodParameters,
-        permit2Enabled,
+        useProxy: useUniversalRouterProxy,
         callCount: expectedCallCount,
       });
       try {
@@ -273,7 +273,7 @@ export class EthSimulateV1Simulator extends Simulator {
           ],
         });
 
-        if (permit2Enabled) {
+        if (!useUniversalRouterProxy) {
           ctx.logger.info(
             'Successfully Simulated Approvals + Swap via eth_simulateV1 for Universal Router. Gas used.',
             {

@@ -384,11 +384,11 @@ export class TenderlySimulator extends Simulator {
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       const erc20Interface = ERC20__factory.createInterface();
-      const permit2Enabled =
-        swapOptions.tokenTransferMode !== TokenTransferMode.ApproveProxy;
+      const useUniversalRouterProxy =
+        swapOptions.tokenTransferMode === TokenTransferMode.ApproveProxy;
 
       let approvalCalls: TenderlySimulationRequest[];
-      if (permit2Enabled) {
+      if (!useUniversalRouterProxy) {
         const approvePermit2Calldata = erc20Interface.encodeFunctionData(
           'approve',
           [permit2Address(this.chainId), constants.MaxUint256]
@@ -455,9 +455,9 @@ export class TenderlySimulator extends Simulator {
         network_id: chainId,
         input: calldata,
         estimate_gas: true,
-        to: permit2Enabled
-          ? getUniversalRouterAddress(swapOptions.version, this.chainId)
-          : SWAP_PROXY_ADDRESS(this.chainId),
+        to: useUniversalRouterProxy
+          ? SWAP_PROXY_ADDRESS(this.chainId)
+          : getUniversalRouterAddress(swapOptions.version, this.chainId),
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters.value
           : '0',
@@ -531,7 +531,7 @@ export class TenderlySimulator extends Simulator {
           ).toFixed(0)
         );
 
-        if (permit2Enabled) {
+        if (!useUniversalRouterProxy) {
           ctx.logger.info(
             'Successfully Simulated Approvals + Swap via Tenderly Simulation API for Universal Router. Gas used.',
             {
@@ -718,7 +718,7 @@ export class TenderlySimulator extends Simulator {
           ).toFixed(0)
         );
 
-        if (permit2Enabled) {
+        if (!useUniversalRouterProxy) {
           ctx.logger.info(
             'Successfully Simulated Approvals + Swap via Tenderly node endpoint for Universal Router. Gas used.',
             {

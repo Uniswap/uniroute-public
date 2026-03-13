@@ -11,7 +11,7 @@ import {
 import {Context} from '@uniswap/lib-uni/context';
 
 export type QuoteOptions = {
-  permit2Enabled?: boolean;
+  permit2Disabled?: boolean;
   requestSource?: string;
 };
 

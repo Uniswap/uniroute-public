@@ -276,17 +276,17 @@ describe('SwapOptionsFactory', () => {
       }
     });
 
-    it('should default to Permit2 tokenTransferMode when permit2Enabled is not provided', () => {
+    it('should default to Permit2 tokenTransferMode when permit2Disabled is not provided', () => {
       const result =
         SwapOptionsFactory.createUniversalRouterOptions_2_0(baseInput);
 
       expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
     });
 
-    it('should set ApproveProxy tokenTransferMode when permit2Enabled is false', () => {
+    it('should set ApproveProxy tokenTransferMode when permit2Disabled is true', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,
-        permit2Enabled: false,
+        permit2Disabled: true,
       };
 
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
@@ -294,10 +294,10 @@ describe('SwapOptionsFactory', () => {
       expect(result!.tokenTransferMode).toBe(TokenTransferMode.ApproveProxy);
     });
 
-    it('should set Permit2 tokenTransferMode when permit2Enabled is true', () => {
+    it('should set Permit2 tokenTransferMode when permit2Disabled is false', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,
-        permit2Enabled: true,
+        permit2Disabled: false,
       };
 
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);

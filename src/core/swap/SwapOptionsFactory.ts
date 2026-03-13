@@ -29,7 +29,7 @@ export type SwapOptionsUniversalRouterInput = {
   permitAmount?: string;
   permitSigDeadline?: string;
   simulateFromAddress?: string;
-  permit2Enabled?: boolean;
+  permit2Disabled?: boolean;
 };
 
 export class SwapOptionsFactory {
@@ -49,7 +49,7 @@ export class SwapOptionsFactory {
     permitAmount,
     permitSigDeadline,
     simulateFromAddress,
-    permit2Enabled,
+    permit2Disabled,
   }: SwapOptionsUniversalRouterInput): SwapOptionsUniversalRouter | undefined {
     if (!slippageTolerance) {
       return undefined;
@@ -71,10 +71,9 @@ export class SwapOptionsFactory {
         : undefined,
       recipient: recipient,
       slippageTolerance: parseSlippageTolerance(slippageTolerance),
-      tokenTransferMode:
-        permit2Enabled !== false
-          ? TokenTransferMode.Permit2
-          : TokenTransferMode.ApproveProxy,
+      tokenTransferMode: permit2Disabled
+        ? TokenTransferMode.ApproveProxy
+        : TokenTransferMode.Permit2,
       ...allFeeOptions,
     };
 

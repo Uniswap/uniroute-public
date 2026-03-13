@@ -610,7 +610,7 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags,
         gasPrice,
         blockNumber,
-        options?.permit2Enabled ?? true
+        options?.permit2Disabled ?? false
       );
 
       // Finally update best route's pools with latest pool information
@@ -1589,7 +1589,7 @@ export class UniRouteBL implements IUniRoutedBL {
     metricTags: string[],
     gasPrice?: bigint,
     blockNumber?: number,
-    permit2Enabled: boolean = true
+    permit2Disabled: boolean = false
   ): Promise<QuoteSplit | undefined> {
     if (topNQuotes.length === 0) {
       return undefined;
@@ -1619,7 +1619,7 @@ export class UniRouteBL implements IUniRoutedBL {
       permitAmount: request.permitAmount,
       permitSigDeadline: request.permitSigDeadline,
       simulateFromAddress: request.simulateFromAddress,
-      permit2Enabled,
+      permit2Disabled,
     });
 
     if (
