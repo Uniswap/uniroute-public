@@ -1372,8 +1372,8 @@ export class UniRouteBL implements IUniRoutedBL {
     // Filter out V4 pools with fake tick spacing after constructing allPools
     // This is temporary until we remove fake eth/weth connector (once eth/weth hooks are enabled on all chains)
     // TODO: https://linear.app/uniswap/issue/ROUTE-741
-    const filteredAllPools = allPools.map(pools =>
-      pools.filter(pool => {
+    const filteredAllPools = allPools.map((pools, quoteIndex) => {
+      const filtered = pools.filter(pool => {
         // Skip fake eth/weth V4 pools with fake tick spacing
         if (
           pool.type === protocolToPoolTypeString(Protocol.V4) &&
@@ -1382,8 +1382,47 @@ export class UniRouteBL implements IUniRoutedBL {
           return false;
         }
         return true; // Keep this pool
-      })
-    );
+      });
+
+      if (filtered.length === 0) return filtered;
+
+      const quote = quoteSplit.quotes[quoteIndex];
+
+      // If the original first pool was a fake pool (filtered out), the new first
+      // pool won't have amountIn populated — re-assign it here.
+      const firstPool = filtered[0];
+      if (!firstPool.amountIn) {
+        firstPool.amountIn =
+          tradeType === TradeType.ExactIn
+            ? quoteAmountsIn[quoteIndex].toString()
+            : quote.amount.toString();
+      }
+
+      // If the original last pool was a fake pool (filtered out), the new last
+      // pool won't have amountOut populated — re-assign it here.
+      const lastPool = filtered[filtered.length - 1];
+      if (!lastPool.amountOut) {
+        const routePortionAmount = getPortionAmount(
+          fotInDirectSwap,
+          externalTransferFailedInDirectSwap,
+          quote.amount,
+          portionBips,
+          portionRecipient
+        );
+        assert(
+          tradeType === TradeType.ExactIn
+            ? quote.amount >= routePortionAmount
+            : true,
+          'Quote amount must be greater than route portion amount'
+        );
+        lastPool.amountOut =
+          tradeType === TradeType.ExactIn
+            ? (quote.amount - routePortionAmount).toString()
+            : quoteAmountsIn[quoteIndex].toString();
+      }
+
+      return filtered;
+    });
 
     // Finally construct and return the QuoteResponse
     const quoteResponse = new QuoteResponse({

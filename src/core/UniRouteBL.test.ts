@@ -2625,6 +2625,334 @@ describe('UniRouteBL', () => {
         }
       });
     });
+
+    it('should re-assign amountIn to new first pool when fake pool was first (ExactIn)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+
+      const fakeV4Pool = new V4Pool(
+        new Address('0x0000000000000000000000000000000000000000'),
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        0,
+        0, // FAKE_TICK_SPACING
+        '0x0000000000000000000000000000000000000000',
+        0n,
+        '0x0000000000000000000000000000000000000001',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      const realV4Pool = new V4Pool(
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
+        500,
+        10, // real tick spacing
+        '0x0000000000000000000000000000000000000000',
+        1000000n,
+        '0x0000000000000000000000000000000000000002',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      // Route: [fake (index=0, gets amountIn), real (index=1=last, gets amountOut)]
+      // After filter: [real] → real needs amountIn re-assigned by the bug fix
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [fakeV4Pool, realV4Pool]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.route[0].pools.length).toBe(1);
+      const pool = response.route[0].pools[0];
+      expect(pool.type).toBe('v4-pool');
+      expect(pool.tickSpacing).toBe('10');
+      // amountIn re-assigned by bug fix to quoteAmountsIn[0] = request amount
+      expect(pool.amountIn).toBe('1000000000000000000');
+      // amountOut was already set (real was last in original route)
+      expect(pool.amountOut).toBe('1234567890');
+    });
+
+    it('should re-assign amountOut to new last pool when fake pool was last (ExactIn)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+
+      const realV4Pool = new V4Pool(
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
+        500,
+        10,
+        '0x0000000000000000000000000000000000000000',
+        1000000n,
+        '0x0000000000000000000000000000000000000002',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      const fakeV4Pool = new V4Pool(
+        new Address('0x0000000000000000000000000000000000000000'),
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        0,
+        0, // FAKE_TICK_SPACING
+        '0x0000000000000000000000000000000000000000',
+        0n,
+        '0x0000000000000000000000000000000000000001',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      // Route: [real (index=0, gets amountIn), fake (index=1=last, gets amountOut)]
+      // After filter: [real] → real needs amountOut re-assigned by the bug fix
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [realV4Pool, fakeV4Pool]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.route[0].pools.length).toBe(1);
+      const pool = response.route[0].pools[0];
+      expect(pool.type).toBe('v4-pool');
+      expect(pool.tickSpacing).toBe('10');
+      // amountIn was already set (real was first in original route)
+      expect(pool.amountIn).toBe('1000000000000000000');
+      // amountOut re-assigned by bug fix to (quote.amount - portionAmount) = '1234567890'
+      expect(pool.amountOut).toBe('1234567890');
+    });
+
+    it('should re-assign amountIn to new first pool when fake pool was first (ExactOut)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+      });
+
+      const fakeV4Pool = new V4Pool(
+        new Address('0x0000000000000000000000000000000000000000'),
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        0,
+        0, // FAKE_TICK_SPACING
+        '0x0000000000000000000000000000000000000000',
+        0n,
+        '0x0000000000000000000000000000000000000001',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      const realV4Pool = new V4Pool(
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
+        500,
+        10,
+        '0x0000000000000000000000000000000000000000',
+        1000000n,
+        '0x0000000000000000000000000000000000000002',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      // Route: [fake (index=0, gets amountIn=quote.amount), real (index=1=last, gets amountOut=quoteAmountsIn[0])]
+      // After filter: [real] → real needs amountIn re-assigned to quote.amount
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [fakeV4Pool, realV4Pool]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.route[0].pools.length).toBe(1);
+      const pool = response.route[0].pools[0];
+      expect(pool.type).toBe('v4-pool');
+      expect(pool.tickSpacing).toBe('10');
+      // amountIn re-assigned by bug fix to quote.amount (computed input for ExactOut)
+      expect(pool.amountIn).toBe('1234567890');
+      // amountOut was already set (real was last) = quoteAmountsIn[0] = request amount
+      expect(pool.amountOut).toBe('1000000000000000000');
+    });
+
+    it('should re-assign amountOut to new last pool when fake pool was last (ExactOut)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+      });
+
+      const realV4Pool = new V4Pool(
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
+        500,
+        10,
+        '0x0000000000000000000000000000000000000000',
+        1000000n,
+        '0x0000000000000000000000000000000000000002',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      const fakeV4Pool = new V4Pool(
+        new Address('0x0000000000000000000000000000000000000000'),
+        new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'),
+        0,
+        0, // FAKE_TICK_SPACING
+        '0x0000000000000000000000000000000000000000',
+        0n,
+        '0x0000000000000000000000000000000000000001',
+        79228162514264337593543950336n,
+        0n
+      );
+
+      // Route: [real (index=0, gets amountIn=quote.amount), fake (index=1=last, gets amountOut=quoteAmountsIn[0])]
+      // After filter: [real] → real needs amountOut re-assigned to quoteAmountsIn[0]
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [realV4Pool, fakeV4Pool]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.route[0].pools.length).toBe(1);
+      const pool = response.route[0].pools[0];
+      expect(pool.type).toBe('v4-pool');
+      expect(pool.tickSpacing).toBe('10');
+      // amountIn was already set (real was first) = quote.amount (computed input for ExactOut)
+      expect(pool.amountIn).toBe('1234567890');
+      // amountOut re-assigned by bug fix to quoteAmountsIn[0] = request amount
+      expect(pool.amountOut).toBe('1000000000000000000');
+    });
   });
 
   describe('formatPriceImpact', () => {
