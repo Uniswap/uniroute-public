@@ -142,7 +142,7 @@ export const CLAUNCH_HOOK_ON_BASE = '0x2f9354bbb0edef5c2a5c4b78d0c59d73412a28cc'
 export const SEEDIFY_SPARK_HOOK_ON_BASE = '0x2fd54aaf84023eda60bd65edb5914c1a306850cc';
 export const LAUNCHLY_BNB_HOOKS_ADDRESS_ON_BNB = '0xe1b70e28a596972afe25087c062f459a0f4b40cc';
 export const ANSTROM_HOOK_ON_BASE = '0x631352aaa9d6554848af674106bcd8bb9e59a5cf';
-export const UNISWAP_AGG_HOOK_ON_TEMPO = '0x2929d242c6c475f78ea7ce8837c9078bcd9ca088';
+export const UNISWAP_AGG_HOOK_ON_TEMPO = '0x717c31c3ea5f9070297f239fafd63d21afdaa888';
 
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<Record<ChainId, Array<string>>> & Record<number, Array<string>> = {
   [ChainId.MAINNET]: [
