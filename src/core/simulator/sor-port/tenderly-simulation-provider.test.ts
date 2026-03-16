@@ -71,9 +71,10 @@ describe('tenderly-simulation-provider', () => {
       expect(TENDERLY_NOT_SUPPORTED_CHAINS).toContain(ChainId.MONAD_TESTNET);
     });
 
-    it('TENDERLY_SIMULATION_API_ONLY_CHAINS should contain XLayer', () => {
+    it('TENDERLY_SIMULATION_API_ONLY_CHAINS should contain XLayer and Tempo', () => {
       expect(TENDERLY_SIMULATION_API_ONLY_CHAINS).toContain(ChainId.XLAYER);
-      expect(TENDERLY_SIMULATION_API_ONLY_CHAINS).toHaveLength(1);
+      expect(TENDERLY_SIMULATION_API_ONLY_CHAINS).toContain(ChainId.TEMPO);
+      expect(TENDERLY_SIMULATION_API_ONLY_CHAINS).toHaveLength(2);
     });
   });
 

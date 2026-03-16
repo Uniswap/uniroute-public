@@ -27,6 +27,7 @@ import {GasConverter} from '../../gas/converter/GasConverter';
 import {TradeType} from '../../../models/quote/TradeType';
 import {SimulationStatus} from '../ISimulator';
 import {EthSimulateV1Simulator} from './eth-simulateV1-provider';
+import {hasNativeToken} from '../../../lib/tokenUtils';
 import {
   SWAP_PROXY_ADDRESS,
   TokenTransferMode,
@@ -175,7 +176,12 @@ export const TENDERLY_NOT_SUPPORTED_CHAINS = [
 ];
 
 // Chains that don't support Tenderly Node API but support Simulation API
-export const TENDERLY_SIMULATION_API_ONLY_CHAINS = [ChainId.XLAYER];
+// TEMPO: tenderly_estimateGasBundle does not carry state between transactions on Tempob (bug),
+// causing Permit2 approval to not persist into the swap transaction (AllowanceExpired).
+export const TENDERLY_SIMULATION_API_ONLY_CHAINS = [
+  ChainId.XLAYER,
+  ChainId.TEMPO,
+];
 
 // We multiply tenderly gas limit by this to overestimate gas limit
 const DEFAULT_ESTIMATE_MULTIPLIER = 1.3;
@@ -214,16 +220,20 @@ export class FallbackTenderlySimulator extends Simulator {
   ): Promise<QuoteSplit> {
     // Make call to eth estimate gas if possible
     // For erc20s, we must check if the token allowance is sufficient
+    // Skip eth_estimateGas for chains without a native token (e.g. Tempo) —
+    // these chains use an ERC-20 as their gas token, causing eth_estimateGas
+    // to revert with ETH_TRANSFER_FAILED.
     if (
-      quoteSplit.swapInfo!.tokenInIsNative ||
-      (await this.checkTokenApproved(
-        fromAddress,
-        quoteSplit.swapInfo!.tokenInWrappedAddress,
-        quoteSplit.swapInfo!.inputAmount,
-        swapOptions,
-        this.provider,
-        ctx
-      ))
+      hasNativeToken(this.chainId) &&
+      (quoteSplit.swapInfo!.tokenInIsNative ||
+        (await this.checkTokenApproved(
+          fromAddress,
+          quoteSplit.swapInfo!.tokenInWrappedAddress,
+          quoteSplit.swapInfo!.inputAmount,
+          swapOptions,
+          this.provider,
+          ctx
+        )))
     ) {
       ctx.logger.info(
         'Simulating with eth_estimateGas since token is native or approved.'
@@ -246,7 +256,8 @@ export class FallbackTenderlySimulator extends Simulator {
     try {
       if (
         this.useEthSimulateV1 &&
-        this.localNodeSupportedChains.includes(this.chainId)
+        this.localNodeSupportedChains.includes(this.chainId) &&
+        hasNativeToken(this.chainId)
       ) {
         const ethSimulateV1Result =
           await this.ethSimulateV1Simulator.ethSimulateV1(
