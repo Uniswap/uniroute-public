@@ -191,7 +191,7 @@ export class FallbackTenderlySimulator extends Simulator {
   private ethEstimateGasSimulator: EthEstimateGasSimulator;
   private ethSimulateV1Simulator: EthSimulateV1Simulator;
   private useEthSimulateV1: boolean;
-  private localNodeSupportedChains: ChainId[];
+  private ethSimulateV1SupportedChains: ChainId[];
 
   constructor(
     chainId: ChainId,
@@ -200,14 +200,14 @@ export class FallbackTenderlySimulator extends Simulator {
     ethEstimateGasSimulator: EthEstimateGasSimulator,
     ethSimulateV1Simulator: EthSimulateV1Simulator,
     useEthSimulateV1: boolean,
-    localNodeSupportedChains: ChainId[]
+    ethSimulateV1SupportedChains: ChainId[]
   ) {
     super(provider, chainId);
     this.tenderlySimulator = tenderlySimulator;
     this.ethEstimateGasSimulator = ethEstimateGasSimulator;
     this.ethSimulateV1Simulator = ethSimulateV1Simulator;
     this.useEthSimulateV1 = useEthSimulateV1;
-    this.localNodeSupportedChains = localNodeSupportedChains;
+    this.ethSimulateV1SupportedChains = ethSimulateV1SupportedChains;
   }
 
   protected async simulateTransaction(
@@ -256,8 +256,7 @@ export class FallbackTenderlySimulator extends Simulator {
     try {
       if (
         this.useEthSimulateV1 &&
-        this.localNodeSupportedChains.includes(this.chainId) &&
-        hasNativeToken(this.chainId)
+        this.ethSimulateV1SupportedChains.includes(this.chainId)
       ) {
         const ethSimulateV1Result =
           await this.ethSimulateV1Simulator.ethSimulateV1(

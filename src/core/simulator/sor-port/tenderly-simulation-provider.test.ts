@@ -891,7 +891,7 @@ describe('tenderly-simulation-provider', () => {
     let ethEstimateGasSimulator: EthEstimateGasSimulator;
     let ethSimulateV1Simulator: EthSimulateV1Simulator;
     let useEthSimulateV1: boolean;
-    let localNodeSupportedChains: ChainId[];
+    let ethSimulateV1SupportedChains: ChainId[];
     let fallbackSimulator: FallbackTenderlySimulator;
     let ctx: Context;
 
@@ -947,7 +947,7 @@ describe('tenderly-simulation-provider', () => {
       } as unknown as EthSimulateV1Simulator;
 
       useEthSimulateV1 = true;
-      localNodeSupportedChains = [ChainId.MAINNET];
+      ethSimulateV1SupportedChains = [ChainId.MAINNET];
 
       fallbackSimulator = new FallbackTenderlySimulator(
         ChainId.MAINNET,
@@ -956,7 +956,7 @@ describe('tenderly-simulation-provider', () => {
         ethEstimateGasSimulator,
         ethSimulateV1Simulator,
         useEthSimulateV1,
-        localNodeSupportedChains
+        ethSimulateV1SupportedChains
       );
 
       ctx = {
@@ -1012,6 +1012,141 @@ describe('tenderly-simulation-provider', () => {
         1,
         {tags: ['chain:1']}
       );
+    });
+
+    it('should use eth_simulateV1 when chain is in ethSimulateV1SupportedChains and useEthSimulateV1 is true', async () => {
+      const quoteSplit = createQuoteSplit();
+      const simulationResult: QuoteSplit = {
+        ...quoteSplit,
+        simulationResult: {
+          estimatedGasUsed: 150000n,
+          estimatedGasUsedInQuoteToken: 150000n,
+          status: SimulationStatus.SUCCESS,
+        },
+      };
+
+      vi.spyOn(
+        fallbackSimulator as unknown as {
+          checkTokenApproved: () => Promise<boolean>;
+        },
+        'checkTokenApproved'
+      ).mockResolvedValue(false);
+
+      vi.mocked(ethSimulateV1Simulator.ethSimulateV1).mockResolvedValue(
+        simulationResult
+      );
+
+      const result = await (
+        fallbackSimulator as unknown as {
+          simulateTransaction: (
+            fromAddress: string,
+            swapOptions: SwapOptionsUniversalRouter,
+            quoteSplit: QuoteSplit,
+            ctx: Context
+          ) => Promise<QuoteSplit>;
+        }
+      ).simulateTransaction(USER_ADDRESS, swapOptions, quoteSplit, ctx);
+
+      expect(ethSimulateV1Simulator.ethSimulateV1).toHaveBeenCalled();
+      expect(tenderlySimulator.simulateTransaction).not.toHaveBeenCalled();
+      expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+    });
+
+    it('should fall back to Tenderly when chain is NOT in ethSimulateV1SupportedChains even if useEthSimulateV1 is true', async () => {
+      // Create simulator for a chain not in the supported list
+      const unsupportedChainSimulator = new FallbackTenderlySimulator(
+        ChainId.ARBITRUM,
+        provider,
+        tenderlySimulator,
+        ethEstimateGasSimulator,
+        ethSimulateV1Simulator,
+        true, // useEthSimulateV1 is true
+        [ChainId.MAINNET] // but ARBITRUM is not in the list
+      );
+
+      const quoteSplit = createQuoteSplit();
+      const tenderlyResult: QuoteSplit = {
+        ...quoteSplit,
+        simulationResult: {
+          estimatedGasUsed: 150000n,
+          estimatedGasUsedInQuoteToken: 150000n,
+          status: SimulationStatus.SUCCESS,
+        },
+      };
+
+      vi.spyOn(
+        unsupportedChainSimulator as unknown as {
+          checkTokenApproved: () => Promise<boolean>;
+        },
+        'checkTokenApproved'
+      ).mockResolvedValue(false);
+
+      vi.mocked(tenderlySimulator.simulateTransaction).mockResolvedValue(
+        tenderlyResult
+      );
+
+      const result = await (
+        unsupportedChainSimulator as unknown as {
+          simulateTransaction: (
+            fromAddress: string,
+            swapOptions: SwapOptionsUniversalRouter,
+            quoteSplit: QuoteSplit,
+            ctx: Context
+          ) => Promise<QuoteSplit>;
+        }
+      ).simulateTransaction(USER_ADDRESS, swapOptions, quoteSplit, ctx);
+
+      expect(ethSimulateV1Simulator.ethSimulateV1).not.toHaveBeenCalled();
+      expect(tenderlySimulator.simulateTransaction).toHaveBeenCalled();
+      expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+    });
+
+    it('should fall back to Tenderly when useEthSimulateV1 is false even for supported chain', async () => {
+      const disabledSimulator = new FallbackTenderlySimulator(
+        ChainId.MAINNET,
+        provider,
+        tenderlySimulator,
+        ethEstimateGasSimulator,
+        ethSimulateV1Simulator,
+        false, // useEthSimulateV1 is false
+        [ChainId.MAINNET]
+      );
+
+      const quoteSplit = createQuoteSplit();
+      const tenderlyResult: QuoteSplit = {
+        ...quoteSplit,
+        simulationResult: {
+          estimatedGasUsed: 150000n,
+          estimatedGasUsedInQuoteToken: 150000n,
+          status: SimulationStatus.SUCCESS,
+        },
+      };
+
+      vi.spyOn(
+        disabledSimulator as unknown as {
+          checkTokenApproved: () => Promise<boolean>;
+        },
+        'checkTokenApproved'
+      ).mockResolvedValue(false);
+
+      vi.mocked(tenderlySimulator.simulateTransaction).mockResolvedValue(
+        tenderlyResult
+      );
+
+      const result = await (
+        disabledSimulator as unknown as {
+          simulateTransaction: (
+            fromAddress: string,
+            swapOptions: SwapOptionsUniversalRouter,
+            quoteSplit: QuoteSplit,
+            ctx: Context
+          ) => Promise<QuoteSplit>;
+        }
+      ).simulateTransaction(USER_ADDRESS, swapOptions, quoteSplit, ctx);
+
+      expect(ethSimulateV1Simulator.ethSimulateV1).not.toHaveBeenCalled();
+      expect(tenderlySimulator.simulateTransaction).toHaveBeenCalled();
+      expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
     });
 
     it('should return FAILED status when Tenderly simulation throws non-timeout error', async () => {
