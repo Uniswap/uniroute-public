@@ -3,9 +3,9 @@
  * Converted from Lambda handler to plain async function for ECS cron sidecar.
  */
 
-import { Protocol } from '@uniswap/router-sdk';
-import { ChainId } from '@uniswap/sdk-core';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import {Protocol} from '@uniswap/router-sdk';
+import {ChainId} from '@uniswap/sdk-core';
+import {S3Client, PutObjectCommand} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 
 import {
@@ -24,11 +24,11 @@ import {
   v3TrackedEthThreshold,
   ChainProtocol,
 } from './cacheConfig';
-import { S3_POOL_CACHE_KEY } from './util/poolCacheKey';
-import { withTimeout } from './util/withTimeout';
-import { v4HooksPoolsFiltering } from './util/v4HooksPoolsFiltering';
-import { Logger } from './sor-providers/util/log';
-import { IMetric, MetricLoggerUnit } from './sor-providers/util/metric';
+import {S3_POOL_CACHE_KEY} from './util/poolCacheKey';
+import {withTimeout} from './util/withTimeout';
+import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
+import {Logger} from './sor-providers/util/log';
+import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 
 export interface CachePoolsConfig {
   s3Bucket: string;
@@ -52,12 +52,17 @@ async function cachePoolsForChainProtocol(
   logger: Logger,
   metricInstance: IMetric
 ): Promise<void> {
-  const { protocol, chainId, provider, eulerHooksProvider } = chainProtocol;
-  const metricTags = { chainId: String(chainId), protocol: String(protocol) };
+  const {protocol, chainId, provider, eulerHooksProvider} = chainProtocol;
+  const metricTags = {chainId: String(chainId), protocol: String(protocol)};
   logger = prefixedLogger(logger, `[${chainId}_${protocol}]`);
 
-  logger.info(`Getting pools`);
-  metricInstance.putMetric('CachePools.run', 1, MetricLoggerUnit.Count, metricTags);
+  logger.info('Getting pools');
+  metricInstance.putMetric(
+    'CachePools.run',
+    1,
+    MetricLoggerUnit.Count,
+    metricTags
+  );
 
   let pools: any;
   try {
@@ -66,27 +71,37 @@ async function cachePoolsForChainProtocol(
 
     if (protocol === Protocol.V2 && chainId === ChainId.MAINNET) {
       const v2MainnetSubgraphProvider = new V2SubgraphProvider(
-        ChainId.MAINNET, 5, 900000, true, 1000, v2TrackedEthThreshold,
+        ChainId.MAINNET,
+        5,
+        900000,
+        true,
+        1000,
+        v2TrackedEthThreshold,
         0, // wstETH/DOG reserveUSD is 0, but the pool balance is sufficiently high
-        v2SubgraphUrlOverride(ChainId.MAINNET), undefined, logger, metricInstance
+        v2SubgraphUrlOverride(ChainId.MAINNET),
+        undefined,
+        logger,
+        metricInstance
       );
       const additionalPools = await v2MainnetSubgraphProvider.getPools();
-      const filteredPools = additionalPools.filter((pool) => {
-        return pool.id.toLowerCase() === '0x801c868ce08fb5b396e6911eac351beb259d386c';
+      const filteredPools = additionalPools.filter(pool => {
+        return (
+          pool.id.toLowerCase() === '0x801c868ce08fb5b396e6911eac351beb259d386c'
+        );
       });
-      filteredPools.forEach((pool) => pools.push(pool));
+      filteredPools.forEach(pool => pools.push(pool));
 
       const manuallyIncludedPools: V2SubgraphPool[] = [
         {
           id: '0x801c868ce08fb5b396e6911eac351beb259d386c',
-          token0: { id: '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0' },
-          token1: { id: '0xbaac2b4491727d78d2b78815144570b9f2fe8899' },
+          token0: {id: '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0'},
+          token1: {id: '0xbaac2b4491727d78d2b78815144570b9f2fe8899'},
           supply: 706196.651729130972764273,
           reserve: 818.040429522105562858,
           reserveUSD: 5890000,
         },
       ];
-      manuallyIncludedPools.forEach((pool) => pools.push(pool));
+      manuallyIncludedPools.forEach(pool => pools.push(pool));
 
       const filterOutPoolAddresses = [
         '0x029c9f16d219486305716f8c623739f9c75ceabd',
@@ -159,39 +174,57 @@ async function cachePoolsForChainProtocol(
         '0xfaa7e98e633a10e90b71a84200e10562e5302a92',
         '0xfdce1a334e5e33167709c5d9c60798a5b7884576',
         '0xfe2aa6db37531042bc4fdcad1fea3f6616a5bd54',
-      ].map((address) => address.toLowerCase());
+      ].map(address => address.toLowerCase());
 
-      pools = (pools as Array<V2SubgraphPool>).filter((pool: V2SubgraphPool) => {
-        const shouldFilterOut = filterOutPoolAddresses.includes(pool.id.toLowerCase());
-        if (shouldFilterOut) {
-          logger.info(`Filtering out pool ${pool.id}`);
+      pools = (pools as Array<V2SubgraphPool>).filter(
+        (pool: V2SubgraphPool) => {
+          const shouldFilterOut = filterOutPoolAddresses.includes(
+            pool.id.toLowerCase()
+          );
+          if (shouldFilterOut) {
+            logger.info(`Filtering out pool ${pool.id}`);
+          }
+          return !shouldFilterOut;
         }
-        return !shouldFilterOut;
-      });
+      );
     }
 
     if (protocol === Protocol.V3 && chainId === ChainId.MAINNET) {
       const v3MainnetSubgraphProvider = new V3SubgraphProvider(
-        ChainId.MAINNET, 3, 90000, true, v3TrackedEthThreshold,
+        ChainId.MAINNET,
+        3,
+        90000,
+        true,
+        v3TrackedEthThreshold,
         0, // wstETH/USDC totalValueLockedUSDUntracked is 0
-        v3SubgraphUrlOverride(ChainId.MAINNET), undefined, logger, metricInstance
+        v3SubgraphUrlOverride(ChainId.MAINNET),
+        undefined,
+        logger,
+        metricInstance
       );
       const additionalPools = await v3MainnetSubgraphProvider.getPools();
       const filteredPools = additionalPools.filter((pool: V3SubgraphPool) => {
-        return pool.id.toLowerCase() === '0x4622df6fb2d9bee0dcdacf545acdb6a2b2f4f863';
+        return (
+          pool.id.toLowerCase() === '0x4622df6fb2d9bee0dcdacf545acdb6a2b2f4f863'
+        );
       });
-      filteredPools.forEach((pool) => pools.push(pool));
+      filteredPools.forEach(pool => pools.push(pool));
 
-      pools = (pools as Array<V3SubgraphPool>).filter((pool: V3SubgraphPool) => {
-        const shouldFilterOut =
-          pool.token0.id.toLowerCase() === '0xd46ba6d942050d489dbd938a2c909a5d5039a161' ||
-          pool.token1.id.toLowerCase() === '0xd46ba6d942050d489dbd938a2c909a5d5039a161' ||
-          pool.id.toLowerCase() === '0x0f681f10ab1aa1cde04232a199fe3c6f2652a80c';
-        if (shouldFilterOut) {
-          logger.info(`Filtering out pool ${pool.id}`);
+      pools = (pools as Array<V3SubgraphPool>).filter(
+        (pool: V3SubgraphPool) => {
+          const shouldFilterOut =
+            pool.token0.id.toLowerCase() ===
+              '0xd46ba6d942050d489dbd938a2c909a5d5039a161' ||
+            pool.token1.id.toLowerCase() ===
+              '0xd46ba6d942050d489dbd938a2c909a5d5039a161' ||
+            pool.id.toLowerCase() ===
+              '0x0f681f10ab1aa1cde04232a199fe3c6f2652a80c';
+          if (shouldFilterOut) {
+            logger.info(`Filtering out pool ${pool.id}`);
+          }
+          return !shouldFilterOut;
         }
-        return !shouldFilterOut;
-      });
+      );
     }
 
     if (protocol === Protocol.V4) {
@@ -200,10 +233,17 @@ async function cachePoolsForChainProtocol(
       if (eulerHooksProvider) {
         const eulerHooks = await eulerHooksProvider.getHooks();
         if (eulerHooks) {
-          metricInstance.putMetric('eulerHooks.length', eulerHooks.length, MetricLoggerUnit.Count, metricTags);
+          metricInstance.putMetric(
+            'eulerHooks.length',
+            eulerHooks.length,
+            MetricLoggerUnit.Count,
+            metricTags
+          );
           const eulerPools = await Promise.all(
-            eulerHooks.map(async (eulerHook) => {
-              const pool = await eulerHooksProvider.getPoolByHook(eulerHook.hook);
+            eulerHooks.map(async eulerHook => {
+              const pool = await eulerHooksProvider.getPoolByHook(
+                eulerHook.hook
+              );
               logger.info(`eulerHooks pool ${JSON.stringify(pool)}`);
               if (pool) {
                 (pool as V4SubgraphPool).tvlUSD = 1000;
@@ -212,7 +252,7 @@ async function cachePoolsForChainProtocol(
               return pool;
             })
           );
-          eulerPools.forEach((pool) => {
+          eulerPools.forEach(pool => {
             if (pool) {
               manuallyIncludedV4Pools.push(pool as V4SubgraphPool);
             }
@@ -223,72 +263,134 @@ async function cachePoolsForChainProtocol(
       if (chainId === ChainId.UNICHAIN) {
         manuallyIncludedV4Pools.push({
           id: '0xba246b8420b5aeb13e586cd7cbd32279fa7584d7f4cbc9bd356a6bb6200d16a6',
-          feeTier: '0', tickSpacing: '1',
+          feeTier: '0',
+          tickSpacing: '1',
           hooks: '0x730b109bad65152c67ecc94eb8b0968603dba888',
           liquidity: '173747248900',
-          token0: { symbol: 'ETH', id: '0x0000000000000000000000000000000000000000', name: 'Ethereum', decimals: '18' },
-          token1: { symbol: 'WETH', id: '0x4200000000000000000000000000000000000006', name: 'Wrapped Ether', decimals: '18' },
-          tvlETH: 33482, tvlUSD: 60342168,
+          token0: {
+            symbol: 'ETH',
+            id: '0x0000000000000000000000000000000000000000',
+            name: 'Ethereum',
+            decimals: '18',
+          },
+          token1: {
+            symbol: 'WETH',
+            id: '0x4200000000000000000000000000000000000006',
+            name: 'Wrapped Ether',
+            decimals: '18',
+          },
+          tvlETH: 33482,
+          tvlUSD: 60342168,
         } as V4SubgraphPool);
       }
 
       if (chainId === ChainId.OPTIMISM) {
         manuallyIncludedV4Pools.push({
           id: '0xbf3d38951e485c811bb1fc7025fcd1ef60c15fda4c4163458facb9bedfe26f83',
-          feeTier: '0', tickSpacing: '1',
+          feeTier: '0',
+          tickSpacing: '1',
           hooks: '0x480dafdb4d6092ef3217595b75784ec54b52e888',
           liquidity: '173747248900',
-          token0: { symbol: 'ETH', id: '0x0000000000000000000000000000000000000000', name: 'Ethereum', decimals: '18' },
-          token1: { symbol: 'WETH', id: '0x4200000000000000000000000000000000000006', name: 'Wrapped Ether', decimals: '18' },
-          tvlETH: 826, tvlUSD: 1482475,
+          token0: {
+            symbol: 'ETH',
+            id: '0x0000000000000000000000000000000000000000',
+            name: 'Ethereum',
+            decimals: '18',
+          },
+          token1: {
+            symbol: 'WETH',
+            id: '0x4200000000000000000000000000000000000006',
+            name: 'Wrapped Ether',
+            decimals: '18',
+          },
+          tvlETH: 826,
+          tvlUSD: 1482475,
         } as V4SubgraphPool);
       }
 
       if (chainId === ChainId.BASE) {
         manuallyIncludedV4Pools.push({
           id: '0xbb2aefc6c55a0464b944c0478869527ba1a537f05f90a1bb82e1196c6e9403e2',
-          feeTier: '0', tickSpacing: '1',
+          feeTier: '0',
+          tickSpacing: '1',
           hooks: '0xb08211d57032dd10b1974d4b876851a7f7596888',
           liquidity: '173747248900',
-          token0: { symbol: 'ETH', id: '0x0000000000000000000000000000000000000000', name: 'Ethereum', decimals: '18' },
-          token1: { symbol: 'WETH', id: '0x4200000000000000000000000000000000000006', name: 'Wrapped Ether', decimals: '18' },
-          tvlETH: 6992, tvlUSD: 12580000,
+          token0: {
+            symbol: 'ETH',
+            id: '0x0000000000000000000000000000000000000000',
+            name: 'Ethereum',
+            decimals: '18',
+          },
+          token1: {
+            symbol: 'WETH',
+            id: '0x4200000000000000000000000000000000000006',
+            name: 'Wrapped Ether',
+            decimals: '18',
+          },
+          tvlETH: 6992,
+          tvlUSD: 12580000,
         } as V4SubgraphPool);
       }
 
       if (chainId === ChainId.ARBITRUM_ONE) {
         manuallyIncludedV4Pools.push({
           id: '0xc1c777843809a8e77a398fd79ecddcefbdad6a5676003ae2eedf3a33a56589e9',
-          feeTier: '0', tickSpacing: '1',
+          feeTier: '0',
+          tickSpacing: '1',
           hooks: '0x2a4adf825bd96598487dbb6b2d8d882a4eb86888',
           liquidity: '173747248900',
-          token0: { id: '0x0000000000000000000000000000000000000000' },
-          token1: { id: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1' },
-          tvlETH: 23183, tvlUSD: 41820637,
+          token0: {id: '0x0000000000000000000000000000000000000000'},
+          token1: {id: '0x82af49447d8a07e3bd95bd0d56f35241523fbab1'},
+          tvlETH: 23183,
+          tvlUSD: 41820637,
         } as V4SubgraphPool);
       }
 
       if (chainId === ChainId.MAINNET) {
         manuallyIncludedV4Pools.push({
           id: '0xf6f2314ac16a878e2bf8ef01ef0a3487e714d397d87f702b9a08603eb3252e92',
-          feeTier: '0', tickSpacing: '1',
+          feeTier: '0',
+          tickSpacing: '1',
           hooks: '0x57991106cb7aa27e2771beda0d6522f68524a888',
           liquidity: '482843960670027606548690',
-          token0: { symbol: 'ETH', id: '0x0000000000000000000000000000000000000000', name: 'ETH', decimals: '18' },
-          token1: { symbol: 'WETH', id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', name: 'WETH', decimals: '18' },
-          tvlETH: 44000.1795925485023741879813651641809, tvlUSD: 95050000.95363442908526427214106054717,
+          token0: {
+            symbol: 'ETH',
+            id: '0x0000000000000000000000000000000000000000',
+            name: 'ETH',
+            decimals: '18',
+          },
+          token1: {
+            symbol: 'WETH',
+            id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+            name: 'WETH',
+            decimals: '18',
+          },
+          tvlETH: 44000.1795925485023741879813651641809,
+          tvlUSD: 95050000.95363442908526427214106054717,
         } as V4SubgraphPool);
       }
 
       if (chainId === ChainId.MONAD) {
         manuallyIncludedV4Pools.push({
           id: '0xbe86cc52a3300525c410fa1af308193a4a6fa9536f7a29f62b7d0fe018c94e85',
-          feeTier: '0', tickSpacing: '1',
+          feeTier: '0',
+          tickSpacing: '1',
           hooks: '0x3fad8a7205f943528915e67cf94fc792c8fce888',
           liquidity: '482843960670027606548690',
-          token0: { symbol: 'MON', id: '0x0000000000000000000000000000000000000000', name: 'MON', decimals: '18' },
-          token1: { symbol: 'WMON', id: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A', name: 'WMON', decimals: '18' },
-          tvlETH: 44000.1795925485023741879813651641809, tvlUSD: 95050000.95363442908526427214106054717,
+          token0: {
+            symbol: 'MON',
+            id: '0x0000000000000000000000000000000000000000',
+            name: 'MON',
+            decimals: '18',
+          },
+          token1: {
+            symbol: 'WMON',
+            id: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A',
+            name: 'WMON',
+            decimals: '18',
+          },
+          tvlETH: 44000.1795925485023741879813651641809,
+          tvlUSD: 95050000.95363442908526427214106054717,
         } as V4SubgraphPool);
       }
 
@@ -297,60 +399,124 @@ async function cachePoolsForChainProtocol(
         manuallyIncludedV4Pools.push(
           {
             id: '0xe9eeab9794c33dff3dd8d0951cbe2d36619294af5a3a329f38f91f54be0b6d34',
-            feeTier: '10000', tickSpacing: '200',
+            feeTier: '10000',
+            tickSpacing: '200',
             hooks: '0xc5a48b447f01e9ce3ede71e4c1c2038c38bd9000',
             liquidity: '274563705100803912362733',
-            token0: { symbol: 'fid:385955', id: '0x112cf1cc540eadf234158c0e4044c3b5f2a33e5e', name: 'degenfans', decimals: '18' },
-            token1: { symbol: 'MOXIE', id: '0x8c9037d1ef5c6d1f6816278c7aaf5491d24cd527', name: 'Moxie', decimals: '18' },
-            tvlETH: 25.33120577965346308313185954009482, tvlUSD: 56627.5525783346590219799350683533,
+            token0: {
+              symbol: 'fid:385955',
+              id: '0x112cf1cc540eadf234158c0e4044c3b5f2a33e5e',
+              name: 'degenfans',
+              decimals: '18',
+            },
+            token1: {
+              symbol: 'MOXIE',
+              id: '0x8c9037d1ef5c6d1f6816278c7aaf5491d24cd527',
+              name: 'Moxie',
+              decimals: '18',
+            },
+            tvlETH: 25.33120577965346308313185954009482,
+            tvlUSD: 56627.5525783346590219799350683533,
           } as V4SubgraphPool,
           {
             id: '0x6bac01f0a8fb96eeb56e37506f210628714561113c748d43c6de50dc339edfe9',
-            feeTier: '10000', tickSpacing: '200',
+            feeTier: '10000',
+            tickSpacing: '200',
             hooks: '0xc5a48b447f01e9ce3ede71e4c1c2038c38bd9000',
             liquidity: '621568112474979678301274',
-            token0: { symbol: 'base-economy', id: '0x125490489a27d541e39813c08d260debac071bb7', name: 'Base Economy', decimals: '18' },
-            token1: { symbol: 'MOXIE', id: '0x8c9037d1ef5c6d1f6816278c7aaf5491d24cd527', name: 'Moxie', decimals: '18' },
-            tvlETH: 142.7576163222032969740638595951846, tvlUSD: 316322.6881520965844428159264274397,
+            token0: {
+              symbol: 'base-economy',
+              id: '0x125490489a27d541e39813c08d260debac071bb7',
+              name: 'Base Economy',
+              decimals: '18',
+            },
+            token1: {
+              symbol: 'MOXIE',
+              id: '0x8c9037d1ef5c6d1f6816278c7aaf5491d24cd527',
+              name: 'Moxie',
+              decimals: '18',
+            },
+            tvlETH: 142.7576163222032969740638595951846,
+            tvlUSD: 316322.6881520965844428159264274397,
           } as V4SubgraphPool,
           {
             id: '0x31781e65a4bd9ff0161e660f7930beee16026f819cd4d0bc7e17f6c78c29fc27',
-            feeTier: '10000', tickSpacing: '200',
+            feeTier: '10000',
+            tickSpacing: '200',
             hooks: '0xc5a48b447f01e9ce3ede71e4c1c2038c38bd9000',
             liquidity: '482843960670027606548690',
-            token0: { symbol: 'fid:444067', id: '0x15148da22518e40e0d2fabf5d5e6a22269ebcb30', name: 'macster', decimals: '18' },
-            token1: { symbol: 'MOXIE', id: '0x8c9037d1ef5c6d1f6816278c7aaf5491d24cd527', name: 'Moxie', decimals: '18' },
-            tvlETH: 44.1795925485023741879813651641809, tvlUSD: 95050.95363442908526427214106054717,
-          } as V4SubgraphPool,
+            token0: {
+              symbol: 'fid:444067',
+              id: '0x15148da22518e40e0d2fabf5d5e6a22269ebcb30',
+              name: 'macster',
+              decimals: '18',
+            },
+            token1: {
+              symbol: 'MOXIE',
+              id: '0x8c9037d1ef5c6d1f6816278c7aaf5491d24cd527',
+              name: 'Moxie',
+              decimals: '18',
+            },
+            tvlETH: 44.1795925485023741879813651641809,
+            tvlUSD: 95050.95363442908526427214106054717,
+          } as V4SubgraphPool
         );
       }
 
-      manuallyIncludedV4Pools.forEach((pool) => pools.push(pool));
-      pools = v4HooksPoolsFiltering(chainId, pools as Array<V4SubgraphPool>, logger, metricInstance);
+      manuallyIncludedV4Pools.forEach(pool => pools.push(pool));
+      pools = v4HooksPoolsFiltering(
+        chainId,
+        pools as Array<V4SubgraphPool>,
+        logger,
+        metricInstance
+      );
     }
 
-    metricInstance.putMetric('CachePools.getPools.latency', Date.now() - beforeGetPool, MetricLoggerUnit.Milliseconds, metricTags);
+    metricInstance.putMetric(
+      'CachePools.getPools.latency',
+      Date.now() - beforeGetPool,
+      MetricLoggerUnit.Milliseconds,
+      metricTags
+    );
   } catch (err) {
-    metricInstance.putMetric('CachePools.getPools.error', 1, MetricLoggerUnit.Count, metricTags);
-    logger.error(`Failed to get pools`, {err});
+    metricInstance.putMetric(
+      'CachePools.getPools.error',
+      1,
+      MetricLoggerUnit.Count,
+      metricTags
+    );
+    logger.error('Failed to get pools', {err});
     throw err;
   }
 
   if (!pools || pools.length === 0) {
-    metricInstance.putMetric('CachePools.getPools.empty', 1, MetricLoggerUnit.Count, metricTags);
-    logger.info(`No pools found from the subgraph`);
+    metricInstance.putMetric(
+      'CachePools.getPools.empty',
+      1,
+      MetricLoggerUnit.Count,
+      metricTags
+    );
+    logger.info('No pools found from the subgraph');
     return;
   }
 
   const beforeS3 = Date.now();
   const compressedKey = S3_POOL_CACHE_KEY(config.s3CacheKey, chainId, protocol);
-  logger.info(`Got ${pools.length} pools from the subgraph. Saving to ${compressedKey}`);
+  logger.info(
+    `Got ${pools.length} pools from the subgraph. Saving to ${compressedKey}`
+  );
 
   const serializedPools = JSON.stringify(pools);
   const compressedPools = zlib.deflateSync(serializedPools);
 
-  const serializedSizeMB = (Buffer.byteLength(serializedPools, 'utf8') / (1024 * 1024)).toFixed(2);
-  const compressedSizeMB = (Buffer.byteLength(compressedPools) / (1024 * 1024)).toFixed(2);
+  const serializedSizeMB = (
+    Buffer.byteLength(serializedPools, 'utf8') /
+    (1024 * 1024)
+  ).toFixed(2);
+  const compressedSizeMB = (
+    Buffer.byteLength(compressedPools) /
+    (1024 * 1024)
+  ).toFixed(2);
 
   const result = await s3.send(
     new PutObjectCommand({
@@ -360,15 +526,35 @@ async function cachePoolsForChainProtocol(
     })
   );
 
-  metricInstance.putMetric('CachePools.s3.latency', Date.now() - beforeS3, MetricLoggerUnit.Milliseconds, metricTags);
+  metricInstance.putMetric(
+    'CachePools.s3.latency',
+    Date.now() - beforeS3,
+    MetricLoggerUnit.Milliseconds,
+    metricTags
+  );
   logger.info(`Done. Cached to S3 bucket ${config.s3Bucket}`, {result});
 
   logger.info(
     `compression ratio: ${serializedPools.length}:${compressedPools.length} (${serializedSizeMB}MB -> ${compressedSizeMB}MB)`
   );
-  metricInstance.putMetric('CachePools.compression_ratio', serializedPools.length / compressedPools.length, MetricLoggerUnit.None, metricTags);
-  metricInstance.putMetric('CachePools.compressed_size_mb', parseFloat(compressedSizeMB), MetricLoggerUnit.Megabytes, metricTags);
-  metricInstance.putMetric('CachePools.serialized_size_mb', parseFloat(serializedSizeMB), MetricLoggerUnit.Megabytes, metricTags);
+  metricInstance.putMetric(
+    'CachePools.compression_ratio',
+    serializedPools.length / compressedPools.length,
+    MetricLoggerUnit.None,
+    metricTags
+  );
+  metricInstance.putMetric(
+    'CachePools.compressed_size_mb',
+    parseFloat(compressedSizeMB),
+    MetricLoggerUnit.Megabytes,
+    metricTags
+  );
+  metricInstance.putMetric(
+    'CachePools.serialized_size_mb',
+    parseFloat(serializedSizeMB),
+    MetricLoggerUnit.Megabytes,
+    metricTags
+  );
 }
 
 /**
@@ -382,22 +568,32 @@ export async function cacheAllPools(
   batchSize = 5,
   perJobTimeoutMs = 300000
 ): Promise<void> {
-  const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-2' });
+  const s3 = new S3Client({region: process.env.AWS_REGION || 'us-east-2'});
   const cronLogger = prefixedLogger(logger, '[SubgraphCron]');
   const chainProtocols = createChainProtocols(cronLogger, metricInstance);
 
-  cronLogger.info(`Starting pool caching for ${chainProtocols.length} chain+protocol combinations (batch size: ${batchSize}, per-job timeout: ${perJobTimeoutMs}ms)`);
+  cronLogger.info(
+    `Starting pool caching for ${chainProtocols.length} chain+protocol combinations (batch size: ${batchSize}, per-job timeout: ${perJobTimeoutMs}ms)`
+  );
 
   for (let i = 0; i < chainProtocols.length; i += batchSize) {
     const batch = chainProtocols.slice(i, i + batchSize);
     const batchLabel = `batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chainProtocols.length / batchSize)}`;
 
-    cronLogger.info(`Processing ${batchLabel}: ${batch.map((cp) => `${cp.protocol}/${cp.chainId}`).join(', ')}`);
+    cronLogger.info(
+      `Processing ${batchLabel}: ${batch.map(cp => `${cp.protocol}/${cp.chainId}`).join(', ')}`
+    );
 
     const results = await Promise.allSettled(
-      batch.map((cp) =>
+      batch.map(cp =>
         withTimeout(
-          cachePoolsForChainProtocol(cp, s3, config, cronLogger, metricInstance),
+          cachePoolsForChainProtocol(
+            cp,
+            s3,
+            config,
+            cronLogger,
+            metricInstance
+          ),
           perJobTimeoutMs,
           `${cp.chainId}_${cp.protocol}`
         )
@@ -411,7 +607,12 @@ export async function cacheAllPools(
           `[${cp.chainId}_${cp.protocol}] Failed to cache pools`,
           {err: result.reason}
         );
-        metricInstance.putMetric('CachePools.batch.error', 1, MetricLoggerUnit.Count, { chainId: String(cp.chainId), protocol: String(cp.protocol) });
+        metricInstance.putMetric(
+          'CachePools.batch.error',
+          1,
+          MetricLoggerUnit.Count,
+          {chainId: String(cp.chainId), protocol: String(cp.protocol)}
+        );
       }
     });
   }

@@ -3,17 +3,17 @@
  * Base abstract class for V3 and V4 subgraph providers.
  */
 
-import { Protocol } from '@uniswap/router-sdk';
-import { ChainId, Currency, Token } from '@uniswap/sdk-core';
+import {Protocol} from '@uniswap/router-sdk';
+import {ChainId, Currency, Token} from '@uniswap/sdk-core';
 import retry from 'async-retry';
 import Timeout from 'await-timeout';
-import { gql, GraphQLClient } from 'graphql-request';
+import {gql, GraphQLClient} from 'graphql-request';
 import _ from 'lodash';
 
-import { Logger } from './util/log';
-import { IMetric } from './util/metric';
-import { ProviderConfig } from './provider';
-import { V4RawSubgraphPool } from './v4/subgraphProvider';
+import {Logger} from './util/log';
+import {IMetric} from './util/metric';
+import {ProviderConfig} from './provider';
+import {V4RawSubgraphPool} from './v4/subgraphProvider';
 
 export interface ISubgraphProvider<TSubgraphPool> {
   getPools(
@@ -24,7 +24,7 @@ export interface ISubgraphProvider<TSubgraphPool> {
 }
 
 export const PAGE_SIZE = 1000; // 1k is max possible query size from subgraph.
-export const BASE_V4_PAGE_SIZE = 3500; // TheGraph v4 base max pagesize is 3600.
+export const BASE_V4_PAGE_SIZE = 500; // TheGraph v4 base max pagesize is 3600, but ellipfra query page size perf better with smaller page size
 
 export type V3V4SubgraphPool = {
   id: string;
@@ -59,7 +59,7 @@ export type V3V4RawSubgraphPool = {
 
 export abstract class SubgraphProvider<
   TRawSubgraphPool extends V3V4RawSubgraphPool,
-  TSubgraphPool extends V3V4SubgraphPool
+  TSubgraphPool extends V3V4SubgraphPool,
 > {
   private client: GraphQLClient;
 
@@ -80,11 +80,16 @@ export abstract class SubgraphProvider<
   ) {
     this.protocol = protocol;
     this.logger = {
-      info: (msg, ...extra) => logger.info(`[${chainId}_${protocol}] ${msg}`, ...extra),
-      warn: (msg, ...extra) => logger.warn(`[${chainId}_${protocol}] ${msg}`, ...extra),
-      error: (msg, ...extra) => logger.error(`[${chainId}_${protocol}] ${msg}`, ...extra),
-      debug: (msg, ...extra) => logger.debug(`[${chainId}_${protocol}] ${msg}`, ...extra),
-      fatal: (msg, ...extra) => logger.fatal(`[${chainId}_${protocol}] ${msg}`, ...extra),
+      info: (msg, ...extra) =>
+        logger.info(`[${chainId}_${protocol}] ${msg}`, ...extra),
+      warn: (msg, ...extra) =>
+        logger.warn(`[${chainId}_${protocol}] ${msg}`, ...extra),
+      error: (msg, ...extra) =>
+        logger.error(`[${chainId}_${protocol}] ${msg}`, ...extra),
+      debug: (msg, ...extra) =>
+        logger.debug(`[${chainId}_${protocol}] ${msg}`, ...extra),
+      fatal: (msg, ...extra) =>
+        logger.fatal(`[${chainId}_${protocol}] ${msg}`, ...extra),
     };
     if (!this.subgraphUrl) {
       throw new Error(`No subgraph url for chain id: ${this.chainId}`);
@@ -100,8 +105,12 @@ export abstract class SubgraphProvider<
     } else {
       this.client = new GraphQLClient(this.subgraphUrl);
     }
-    if (protocol === Protocol.V4 && this.zoraHooks.size === 0) {
-      throw new Error('Zora hooks param is mandatory for V4');
+    if (
+      protocol === Protocol.V4 &&
+      this.zoraHooks.size === 0 &&
+      chainId === ChainId.BASE
+    ) {
+      throw new Error('Zora hooks param is mandatory for Base V4');
     }
     this.metricTags = {chainId: String(chainId), protocol: String(protocol)};
   }
@@ -120,7 +129,7 @@ export abstract class SubgraphProvider<
       : undefined;
 
     const pageSizeToUse =
-      this.protocol === Protocol.V4 && this.chainId == ChainId.BASE
+      this.protocol === Protocol.V4 && this.chainId === ChainId.BASE
         ? BASE_V4_PAGE_SIZE
         : PAGE_SIZE;
 
@@ -143,7 +152,7 @@ export abstract class SubgraphProvider<
           query getHighTrackedETHPools($pageSize: Int!, $id: String, $threshold: String!) {
             pools(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 totalValueLockedETH_gt: $threshold
@@ -153,7 +162,7 @@ export abstract class SubgraphProvider<
             }
           }
         `,
-        variables: { threshold: this.trackedEthThreshold.toString() },
+        variables: {threshold: this.trackedEthThreshold.toString()},
       },
       // 2. V4: Non-Zora pools with liquidity > 0
       ...(this.protocol === Protocol.V4
@@ -164,7 +173,7 @@ export abstract class SubgraphProvider<
           query getV4NonZoraHighLiquidityPools($pageSize: Int!, $id: String, $zoraHooks: [String!]!) {
             pools(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 liquidity_gt: "0",
@@ -175,7 +184,7 @@ export abstract class SubgraphProvider<
             }
           }
         `,
-              variables: { zoraHooks: Array.from(this.zoraHooks) },
+              variables: {zoraHooks: Array.from(this.zoraHooks)},
             },
             // 3. V4: Zora pools with liquidity > 0 AND TVL > trackedZoraEthThreshold
             {
@@ -184,7 +193,7 @@ export abstract class SubgraphProvider<
           query getV4ZoraHighLiquidityPools($pageSize: Int!, $id: String, $zoraHooks: [String!]!, $zoraThreshold: String!) {
             pools(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 liquidity_gt: "0",
@@ -212,7 +221,7 @@ export abstract class SubgraphProvider<
           query getV3ZeroETHPools($pageSize: Int!, $id: String) {
             pools(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 liquidity_gt: "0",
@@ -305,15 +314,15 @@ export abstract class SubgraphProvider<
 
         try {
           // Fetch pools for each query in parallel
-          const poolPromises = queries.map((queryConfig) =>
+          const poolPromises = queries.map(queryConfig =>
             fetchPoolsForQuery(queryConfig)
           );
           const allPoolsArrays = await Promise.all(poolPromises);
 
           // Merge all results and deduplicate by pool ID
           const poolMap = new Map<string, TRawSubgraphPool>();
-          allPoolsArrays.forEach((pools) => {
-            pools.forEach((pool) => {
+          allPoolsArrays.forEach(pools => {
+            pools.forEach(pool => {
               poolMap.set(pool.id, pool);
             });
           });
@@ -329,7 +338,9 @@ export abstract class SubgraphProvider<
           allPools = await Promise.race([getPoolsPromise, timerPromise]);
           return;
         } catch (err: any) {
-          this.logger.error(`Error fetching ${this.protocol} Subgraph Pools.`, {err});
+          this.logger.error(`Error fetching ${this.protocol} Subgraph Pools.`, {
+            err,
+          });
           throw err;
         } finally {
           timeout.clear();
@@ -345,7 +356,7 @@ export abstract class SubgraphProvider<
             _.includes(err.message, 'indexed up to')
           ) {
             this.metric.putMetric(
-              `SubgraphProvider.getPools.indexError`,
+              'SubgraphProvider.getPools.indexError',
               1,
               undefined,
               this.metricTags
@@ -356,7 +367,7 @@ export abstract class SubgraphProvider<
             );
           }
           this.metric.putMetric(
-            `SubgraphProvider.getPools.timeout`,
+            'SubgraphProvider.getPools.timeout',
             1,
             undefined,
             this.metricTags
@@ -371,7 +382,7 @@ export abstract class SubgraphProvider<
     );
 
     this.metric.putMetric(
-      `SubgraphProvider.getPools.retries`,
+      'SubgraphProvider.getPools.retries',
       retries,
       undefined,
       this.metricTags
@@ -384,18 +395,18 @@ export abstract class SubgraphProvider<
       // - Include "parseFloat(pool.totalValueLockedETH) === 0" as in certain occasions we have no way of calculating derivedETH so this is 0
       poolsSanitized = allPools
         .filter(
-          (pool) =>
+          pool =>
             (parseInt(pool.liquidity) > 0 &&
               parseFloat(pool.totalValueLockedETH) === 0) ||
             parseFloat(pool.totalValueLockedETH) > this.trackedEthThreshold
         )
-        .map((pool) => {
+        .map(pool => {
           return this.mapSubgraphPool(pool);
         });
     } else if (this.protocol === Protocol.V4) {
       // For V4, apply additional filtering as a safety measure even though queries are optimized
       poolsSanitized = allPools
-        .filter((pool) => {
+        .filter(pool => {
           const liquidity = parseInt(pool.liquidity);
           const tvl = parseFloat(pool.totalValueLockedETH);
           const hooks = (pool as unknown as V4RawSubgraphPool).hooks;
@@ -407,16 +418,41 @@ export abstract class SubgraphProvider<
 
           return liquidity > 0 || tvl > this.trackedEthThreshold;
         })
-        .map((pool) => {
+        .map(pool => {
           return this.mapSubgraphPool(pool);
         });
     }
 
-    this.metric.putMetric(`SubgraphProvider.getPools.filter.latency`, Date.now() - beforeFilter, undefined, this.metricTags);
-    this.metric.putMetric(`SubgraphProvider.getPools.filter.length`, poolsSanitized.length, undefined, this.metricTags);
-    this.metric.putMetric(`SubgraphProvider.getPools.filter.percent`, (poolsSanitized.length / allPools.length) * 100, undefined, this.metricTags);
-    this.metric.putMetric(`SubgraphProvider.getPools`, 1, undefined, this.metricTags);
-    this.metric.putMetric(`SubgraphProvider.getPools.latency`, Date.now() - beforeAll, undefined, this.metricTags);
+    this.metric.putMetric(
+      'SubgraphProvider.getPools.filter.latency',
+      Date.now() - beforeFilter,
+      undefined,
+      this.metricTags
+    );
+    this.metric.putMetric(
+      'SubgraphProvider.getPools.filter.length',
+      poolsSanitized.length,
+      undefined,
+      this.metricTags
+    );
+    this.metric.putMetric(
+      'SubgraphProvider.getPools.filter.percent',
+      (poolsSanitized.length / allPools.length) * 100,
+      undefined,
+      this.metricTags
+    );
+    this.metric.putMetric(
+      'SubgraphProvider.getPools',
+      1,
+      undefined,
+      this.metricTags
+    );
+    this.metric.putMetric(
+      'SubgraphProvider.getPools.latency',
+      Date.now() - beforeAll,
+      undefined,
+      this.metricTags
+    );
 
     this.logger.info(
       `Got ${allPools.length} ${this.protocol} pools from the subgraph (after deduplication). ${poolsSanitized.length} after filtering`
