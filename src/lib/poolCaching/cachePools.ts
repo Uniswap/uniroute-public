@@ -65,10 +65,12 @@ async function cachePoolsForChainProtocol(
     metricTags
   );
 
-  let pools: any;
+  let pools: Array<V2SubgraphPool | V3SubgraphPool | V4SubgraphPool> = [];
   try {
     const beforeGetPool = Date.now();
-    pools = await provider.getPools();
+    pools = (await provider.getPools()) as Array<
+      V2SubgraphPool | V3SubgraphPool | V4SubgraphPool
+    >;
 
     if (protocol === Protocol.V2 && chainId === ChainId.MAINNET) {
       const v2MainnetSubgraphProvider = new V2SubgraphProvider(
@@ -97,8 +99,8 @@ async function cachePoolsForChainProtocol(
           id: '0x801c868ce08fb5b396e6911eac351beb259d386c',
           token0: {id: '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0'},
           token1: {id: '0xbaac2b4491727d78d2b78815144570b9f2fe8899'},
-          supply: 706196.651729130972764273,
-          reserve: 818.040429522105562858,
+          supply: Number('706196.651729130972764273'),
+          reserve: Number('818.040429522105562858'),
           reserveUSD: 5890000,
         },
       ];
@@ -378,8 +380,8 @@ async function cachePoolsForChainProtocol(
             name: 'WETH',
             decimals: '18',
           },
-          tvlETH: 44000.1795925485023741879813651641809,
-          tvlUSD: 95050000.95363442908526427214106054717,
+          tvlETH: Number('44000.1795925485023741879813651641809'),
+          tvlUSD: Number('95050000.95363442908526427214106054717'),
         } as V4SubgraphPool);
       }
 
@@ -402,8 +404,8 @@ async function cachePoolsForChainProtocol(
             name: 'WMON',
             decimals: '18',
           },
-          tvlETH: 44000.1795925485023741879813651641809,
-          tvlUSD: 95050000.95363442908526427214106054717,
+          tvlETH: Number('44000.1795925485023741879813651641809'),
+          tvlUSD: Number('95050000.95363442908526427214106054717'),
         } as V4SubgraphPool);
       }
 
@@ -428,8 +430,8 @@ async function cachePoolsForChainProtocol(
               name: 'Moxie',
               decimals: '18',
             },
-            tvlETH: 25.33120577965346308313185954009482,
-            tvlUSD: 56627.5525783346590219799350683533,
+            tvlETH: Number('25.33120577965346308313185954009482'),
+            tvlUSD: Number('56627.5525783346590219799350683533'),
           } as V4SubgraphPool,
           {
             id: '0x6bac01f0a8fb96eeb56e37506f210628714561113c748d43c6de50dc339edfe9',
@@ -449,8 +451,8 @@ async function cachePoolsForChainProtocol(
               name: 'Moxie',
               decimals: '18',
             },
-            tvlETH: 142.7576163222032969740638595951846,
-            tvlUSD: 316322.6881520965844428159264274397,
+            tvlETH: Number('142.7576163222032969740638595951846'),
+            tvlUSD: Number('316322.6881520965844428159264274397'),
           } as V4SubgraphPool,
           {
             id: '0x31781e65a4bd9ff0161e660f7930beee16026f819cd4d0bc7e17f6c78c29fc27',
@@ -470,8 +472,8 @@ async function cachePoolsForChainProtocol(
               name: 'Moxie',
               decimals: '18',
             },
-            tvlETH: 44.1795925485023741879813651641809,
-            tvlUSD: 95050.95363442908526427214106054717,
+            tvlETH: Number('44.1795925485023741879813651641809'),
+            tvlUSD: Number('95050.95363442908526427214106054717'),
           } as V4SubgraphPool
         );
       }
