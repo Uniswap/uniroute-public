@@ -192,8 +192,8 @@ describe('cacheConfig', () => {
       expect(ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING.size).toBe(16);
     });
 
-    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE contains all Zora hooks plus 4 Clanker Base hooks', () => {
-      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE.size).toBe(ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING.size + 4);
+    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE contains all Zora hooks plus 4 Clanker and 2 Doppler Base hooks', () => {
+      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE.size).toBe(ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING.size + 6);
     });
 
     it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_UNICHAIN contains 2 Clanker Unichain hooks', () => {
