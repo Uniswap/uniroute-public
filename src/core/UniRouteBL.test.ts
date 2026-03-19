@@ -347,7 +347,6 @@ describe('UniRouteBL', () => {
     cachedRoutesRepository = new CachedRoutesBucketedRepositoryECS(
       redisCache,
       serviceConfig,
-      'test-lambda-name',
       new NoOpMessageQueue()
     );
   });
