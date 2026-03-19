@@ -9,6 +9,10 @@ import { Logger } from '../util/log';
 import { IMetric } from '../util/metric';
 import { ProviderConfig } from '../provider';
 import { SubgraphProvider } from '../subgraphProvider';
+import { UNISWAP_AGG_HOOK_ON_TEMPO } from '../../util/hooksAddressesAllowlist';
+
+// TEMPO is not yet in sdk-core — define locally until sdk-core is upgraded
+const CHAIN_ID_TEMPO = 4217 as ChainId;
 
 export interface V4SubgraphPool {
   id: string; // v4 pool id is the internal PoolId from pool manager
@@ -77,6 +81,8 @@ export class V4SubgraphProvider
   extends SubgraphProvider<V4RawSubgraphPool, V4SubgraphPool>
   implements IV4SubgraphProvider
 {
+  private v4ChainId: ChainId;
+
   constructor(
     chainId: ChainId,
     retries = 2,
@@ -106,17 +112,27 @@ export class V4SubgraphProvider
       logger!,
       metric!
     );
+    this.v4ChainId = chainId;
   }
 
   protected override mapSubgraphPool(
     rawPool: V4RawSubgraphPool
   ): V4SubgraphPool {
+    // Tempo agg hook pools report liquidity as 0 from the subgraph.
+    // Use ethTVL as liquidity so they are not filtered out at runtime.
+    const isTempoAggHook =
+      this.v4ChainId === CHAIN_ID_TEMPO &&
+      rawPool.hooks.toLowerCase() === UNISWAP_AGG_HOOK_ON_TEMPO.toLowerCase();
+    const liquidity = isTempoAggHook
+      ? rawPool.totalValueLockedETH
+      : rawPool.liquidity;
+
     return {
       id: rawPool.id,
       feeTier: rawPool.feeTier,
       tickSpacing: rawPool.tickSpacing,
       hooks: rawPool.hooks,
-      liquidity: rawPool.liquidity,
+      liquidity,
       token0: {
         symbol: rawPool.token0.symbol,
         id: rawPool.token0.id,
