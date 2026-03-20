@@ -31,13 +31,14 @@ import {
 import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
-import {logElapsedTime} from '../../../lib/helpers';
+import {isOnlyExternalProtocol, logElapsedTime} from '../../../lib/helpers';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
     protected readonly routeFinder: IRouteFinder<Pool>,
     protected readonly poolDiscoverer: IPoolDiscoverer<UniPoolInfo>,
     protected readonly topPoolsSelector: ITopPoolsSelector<UniPoolInfo>,
+    protected readonly topAggHooksPoolsSelector: ITopPoolsSelector<UniPoolInfo>,
     protected readonly serviceConfig: IUniRouteServiceConfig
   ) {
     super(serviceConfig);
@@ -112,8 +113,53 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       poolPromises.push(Promise.resolve([]));
     }
 
+    // External protocols (StableSwap, FluidDex, etc.) are V4 hook-based pools.
+    // Fetch them separately and merge into the V4 pool bucket for routing.
+    const externalProtocolExists = isOnlyExternalProtocol(protocols);
+    if (externalProtocolExists && V4_SUPPORTED.includes(chain.chainId)) {
+      // Build a selector that pre-filters the pool universe to only AGG_HOOKS pools before
+      // applying the standard top-N selection logic.
+      // Without this, BasicTopPoolsSelector would fill up topNDirectPairs with high-TVL
+      // no-hook V4 pools, leaving no quota for agg hook pools (StableSwap, FluidDex, etc.).
+      //
+      // We also set skipPoolsForTokensCache=true here because this selector is different
+      // from the one used for regular Protocol.V4 fetches (which share the same cache key).
+      // Using the cache would either pollute the regular V4 cache with AGG_HOOKS-only results,
+      // or return wrong (full V4) results for external protocol fetches.
+      poolPromises.push(
+        this.poolDiscoverer.getPoolsForTokens(
+          chain.chainId,
+          // we need to fetch V4 pools for external protocols, because
+          // 1) S3SubgraphPoolDiscoverer downloads agg hooked pools as V4 pools
+          // 2) BaseCachingPoolDiscoverer needs to maintain the cache key cardinality of Protocol.V4 only
+          // Also in case of multiple external protocols being passed from the request,
+          // we should serve all the agg hooked pools from non-cached routes repository.
+          // The way to do this is to fetch V4 pools for all agg hook protocols from S3SubgraphPoolDiscoverer.
+          Protocol.V4,
+          tokenInAddress,
+          tokenOutAddress,
+          this.topAggHooksPoolsSelector,
+          hooksOptions,
+          true, // always skip per-token-pair cache to avoid polluting Protocol.V4 cache
+          ctx
+        )
+      );
+    } else {
+      poolPromises.push(Promise.resolve([]));
+    }
+
     const fetchPoolsStartTime = Date.now();
-    const [poolsV2, poolsV3, poolsV4] = await Promise.all(poolPromises);
+    const [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] =
+      await Promise.all(poolPromises);
+
+    // Deduplicate by pool ID: if both Protocol.V4 and an external protocol are requested,
+    // rawPoolsV4 already contains agg hook pools and rawExternalPools is a filtered subset
+    // of those same pools, so a naive spread would produce duplicates.
+    const poolsV4Map = new Map<string, UniPoolInfo>();
+    for (const pool of rawPoolsV4) poolsV4Map.set(pool.id, pool);
+    for (const pool of rawExternalPools) poolsV4Map.set(pool.id, pool);
+    const poolsV4 = Array.from(poolsV4Map.values());
+
     await logElapsedTime('FetchPools', fetchPoolsStartTime, ctx, [
       `chain:${ChainId[chain.chainId]}`,
     ]);
@@ -215,22 +261,27 @@ export class UniRoutesRepository extends BaseRoutesRepository {
               return null;
             }
 
+            const token0 = new Address(pool.token0.id);
+            const token1 = new Address(pool.token1.id);
+            const tickSpacing = parseInt(pool.tickSpacing);
+            const hooksLower = pool.hooks.toLowerCase();
+
             // If the pool is a dynamic fee pool, we need to update the fee tier
             const fee = applyDynamicFeeIfNeeded(
               parseInt(pool.feeTier),
               pool.id,
-              new Address(pool.token0.id),
-              new Address(pool.token1.id),
-              parseInt(pool.tickSpacing),
-              pool.hooks
+              token0,
+              token1,
+              tickSpacing,
+              hooksLower
             );
 
             return new V4Pool(
-              new Address(pool.token0.id),
-              new Address(pool.token1.id),
+              token0,
+              token1,
               fee,
-              parseInt(pool.tickSpacing),
-              pool.hooks,
+              tickSpacing,
+              hooksLower,
               liquidity,
               pool.id,
               BigInt(0),

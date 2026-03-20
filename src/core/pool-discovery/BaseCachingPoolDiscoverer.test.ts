@@ -276,6 +276,33 @@ describe('BaseCachingPoolDiscoverer', () => {
     });
   });
 
+  it('should throw when getPools is called with an unsupported protocol', async () => {
+    const chainId = ChainId.MAINNET;
+
+    await expect(
+      poolDiscoverer.getPools(chainId, Protocol.CURVESTABLESWAP, ctx)
+    ).rejects.toThrow('Unsupported protocol');
+  });
+
+  it('should throw when getPoolsForTokens is called with an unsupported protocol', async () => {
+    const chainId = ChainId.MAINNET;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    await expect(
+      poolDiscoverer.getPoolsForTokens(
+        chainId,
+        Protocol.FLUIDDEXT1,
+        tokenIn,
+        tokenOut,
+        topPoolSelector,
+        undefined,
+        false,
+        ctx
+      )
+    ).rejects.toThrow('Unsupported protocol');
+  });
+
   it('should generate different cache keys for different discoverer implementations', () => {
     const chainId = ChainId.MAINNET;
     const protocol = Protocol.V2;

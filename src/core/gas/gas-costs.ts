@@ -125,7 +125,6 @@ export const COST_PER_HOP = (id: ChainId): BigNumber => {
   }
 };
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 export const SINGLE_HOP_OVERHEAD = (_id: ChainId): BigNumber => {
   return BigNumber.from(15000);
 };

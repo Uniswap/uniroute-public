@@ -15,7 +15,10 @@ vi.mock('graphql-request', () => {
   });
   return {
     gql: vi.fn((strings: TemplateStringsArray, ...vals: any[]) =>
-      strings.reduce((acc: string, str: string, i: number) => acc + str + (vals[i] ?? ''), '')
+      strings.reduce(
+        (acc: string, str: string, i: number) => acc + str + (vals[i] ?? ''),
+        ''
+      )
     ),
     GraphQLClient: MockGraphQLClient,
   };
@@ -23,7 +26,7 @@ vi.mock('graphql-request', () => {
 
 // ---- mock ethers.Contract while keeping real utils (formatUnits, BigNumber, etc.) ----
 const mockPseudoTVL = vi.fn();
-vi.mock('ethers', async (importOriginal) => {
+vi.mock('ethers', async importOriginal => {
   const actual = await importOriginal<typeof import('ethers')>();
   // Must use regular function so it can be called with `new`
   const MockContract = vi.fn(function MockContract(this: any) {
@@ -47,8 +50,10 @@ function makeProvider(hookAddresses = [MOCK_HOOK]) {
     ChainId.MAINNET,
     hookAddresses,
     mockEthersProvider,
-    2, 30000, true,
-    MOCK_URL,
+    2,
+    30000,
+    true,
+    MOCK_URL
   );
 }
 
@@ -91,8 +96,8 @@ function makeBundleResponse(ethPriceUSD = '2000'): any {
 // Pattern: page1 → given pools, page2 → empty (stops pagination), then bundle.
 function setupSinglePageMocks(pools: any[], ethPriceUSD = '2000') {
   mockRequest
-    .mockResolvedValueOnce({pools})          // page 1
-    .mockResolvedValueOnce({pools: []})      // page 2 → empty, pagination stops
+    .mockResolvedValueOnce({pools}) // page 1
+    .mockResolvedValueOnce({pools: []}) // page 2 → empty, pagination stops
     .mockResolvedValueOnce(makeBundleResponse(ethPriceUSD)); // bundle
 }
 
@@ -109,24 +114,28 @@ describe('AggHooksSubgraphProvider', () => {
 
   describe('constructor', () => {
     it('throws when no subgraph URL exists for the chain and no override is given', () => {
-      expect(() =>
-        new AggHooksSubgraphProvider(
-          99999 as ChainId,
-          [MOCK_HOOK],
-          mockEthersProvider,
-        )
+      expect(
+        () =>
+          new AggHooksSubgraphProvider(
+            99999 as ChainId,
+            [MOCK_HOOK],
+            mockEthersProvider
+          )
       ).toThrow('No subgraph url for chain id: 99999');
     });
 
     it('does not throw when a subgraphUrlOverride is provided', () => {
-      expect(() =>
-        new AggHooksSubgraphProvider(
-          99999 as ChainId,
-          [MOCK_HOOK],
-          mockEthersProvider,
-          2, 30000, true,
-          MOCK_URL,
-        )
+      expect(
+        () =>
+          new AggHooksSubgraphProvider(
+            99999 as ChainId,
+            [MOCK_HOOK],
+            mockEthersProvider,
+            2,
+            30000,
+            true,
+            MOCK_URL
+          )
       ).not.toThrow();
     });
 
@@ -135,14 +144,15 @@ describe('AggHooksSubgraphProvider', () => {
         ChainId.MAINNET,
         [MOCK_HOOK],
         mockEthersProvider,
-        2, 30000, true,
+        2,
+        30000,
+        true,
         MOCK_URL,
-        'my-secret-token',
+        'my-secret-token'
       );
-      expect(vi.mocked(GraphQLClient)).toHaveBeenCalledWith(
-        MOCK_URL,
-        {headers: {authorization: 'Bearer my-secret-token'}}
-      );
+      expect(vi.mocked(GraphQLClient)).toHaveBeenCalledWith(MOCK_URL, {
+        headers: {authorization: 'Bearer my-secret-token'},
+      });
     });
 
     it('creates GraphQLClient without extra headers when no bearerToken is given', () => {
@@ -150,8 +160,10 @@ describe('AggHooksSubgraphProvider', () => {
         ChainId.MAINNET,
         [MOCK_HOOK],
         mockEthersProvider,
-        2, 30000, true,
-        MOCK_URL,
+        2,
+        30000,
+        true,
+        MOCK_URL
       );
       expect(vi.mocked(GraphQLClient)).toHaveBeenCalledWith(MOCK_URL);
     });
@@ -162,7 +174,7 @@ describe('AggHooksSubgraphProvider', () => {
   describe('getPools', () => {
     it('returns an empty array when the subgraph returns no pools', async () => {
       mockRequest
-        .mockResolvedValueOnce({pools: []})   // page 1 → empty, loop exits immediately
+        .mockResolvedValueOnce({pools: []}) // page 1 → empty, loop exits immediately
         .mockResolvedValueOnce(makeBundleResponse());
 
       const pools = await makeProvider().getPools();
@@ -177,7 +189,7 @@ describe('AggHooksSubgraphProvider', () => {
       // tvlETH = 2.0, tvlUSD = 2.0 * 2000 = 4000
       mockPseudoTVL.mockResolvedValueOnce([
         '1000000000000000000', // 1e18
-        '2000000000',          // 2e9 (2000 USDC)
+        '2000000000', // 2e9 (2000 USDC)
       ]);
 
       const pools = await makeProvider().getPools();
@@ -199,7 +211,10 @@ describe('AggHooksSubgraphProvider', () => {
     });
 
     it('handles multiple pools independently — one succeeds, one fails', async () => {
-      setupSinglePageMocks([makeRawPool('0xpool1'), makeRawPool('0xpool2')], '2000');
+      setupSinglePageMocks(
+        [makeRawPool('0xpool1'), makeRawPool('0xpool2')],
+        '2000'
+      );
 
       // pool1: succeeds → 1 ETH from token0 only
       mockPseudoTVL.mockResolvedValueOnce(['1000000000000000000', '0']);
@@ -253,8 +268,10 @@ describe('AggHooksSubgraphProvider', () => {
         ChainId.MAINNET,
         [upperHook],
         mockEthersProvider,
-        2, 30000, true,
-        MOCK_URL,
+        2,
+        30000,
+        true,
+        MOCK_URL
       );
 
       mockRequest
@@ -268,7 +285,8 @@ describe('AggHooksSubgraphProvider', () => {
     });
 
     it('passes the pool id to pseudoTotalValueLocked on the hook contract', async () => {
-      const poolId = '0xdeadbeef0000000000000000000000000000000000000000000000000000cafe';
+      const poolId =
+        '0xdeadbeef0000000000000000000000000000000000000000000000000000cafe';
       setupSinglePageMocks([makeRawPool(poolId)]);
       mockPseudoTVL.mockResolvedValueOnce(['0', '0']);
 

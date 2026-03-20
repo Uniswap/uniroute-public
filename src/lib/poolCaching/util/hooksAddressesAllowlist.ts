@@ -22,12 +22,12 @@ export const STABLE_SWAP_NG = [
 
 // https://files.slack.com/files-pri/T093HD8U2FM-F0AHWBWGK9V/deployed-fluiddext1.json
 export const FLUID_DEX_1 = [
-  '0xF1a243d762B98103f442A909936DA72e6436a088',
-  '0xF102d4205Da05cc312e8B7C15e57367345BDa088',
-  '0xf129BC86AbBD6a71d9AE3fDa0fF55B7711b2a088',
-  '0xF171F45c8C7923b97F5eAD86e5254a705dF9e088',
-  '0xf1C776133d1209B2E7Fb6100A0eF8Bbdc258a088',
-  '0xf1C24a53160934214679D59B08481B861080e088',
+  '0xf1abe2961CCf73B55be164054E7ADC985a52A888',
+  '0xf1E16488795901174365Eb84103f20bD28096888',
+  '0xF13da3a346A7A4aB222BaD3bD5E48Fd89e1d6888',
+  '0xf143f8c995846BdA830D1E3ba98D631079EDe888',
+  '0xF1AF4F57cE366c02a4aE85cbdf0D97aF6406E888',
+  '0xF13ff2F4255408936a73E1734cB0e9831491A888',
 ];
 
 export const AGG_HOOKS_ON_MAINNET = [
@@ -35,6 +35,15 @@ export const AGG_HOOKS_ON_MAINNET = [
   ...STABLE_SWAP_NG,
   ...FLUID_DEX_1,
 ];
+
+/**
+ * Per-chain map of aggregator hook addresses.
+ * Add a new entry here when agg hook support expands to additional chains.
+ */
+export const AGG_HOOKS_PER_CHAIN: Partial<Record<ChainId, string[]>> &
+  Record<number, string[]> = {
+  [ChainId.MAINNET]: AGG_HOOKS_ON_MAINNET,
+};
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
@@ -204,8 +213,7 @@ export const DELI_HOOK_CONSTANT_PRODUCT_ON_BASE =
 
 export const FINDEX_HOOK_ON_OPTIMISM =
   '0xb35297543d357ef62df204d8c3bd0e96038cf440';
-export const FINDEX_HOOK_ON_BSC =
-  '0x85c2be3c314d90316f88b559fe087265f09c7440';
+export const FINDEX_HOOK_ON_BSC = '0x85c2be3c314d90316f88b559fe087265f09c7440';
 export const ACTION_HOOK_ON_MAINNET =
   '0x00bbc6fc07342cf80d14b60695cf0e1aa8de00cc';
 export const M0_ALLOWLIST_HOOKS_ADDRESS_ON_MAINNET =
@@ -297,8 +305,7 @@ export const ADAPTIVE_BURN_HOOK_ON_BASE =
   '0x5798a5e371346c8e4af1dbc166549d360e008044';
 export const LAUNCHLY_HOOK_ON_BASE =
   '0xa62A40569a2b8ccA3A5557734BCAEc54441500CC';
-export const DRXGAI_HOOK_ON_BASE =
-  '0x66E51DEab56975Bb1c64413bd3AB01FA95B82acc';
+export const DRXGAI_HOOK_ON_BASE = '0x66E51DEab56975Bb1c64413bd3AB01FA95B82acc';
 
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>

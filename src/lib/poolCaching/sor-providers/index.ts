@@ -37,6 +37,12 @@ export {
   type IEulerSwapHooksSubgraphProvider,
 } from './v4/eulerSwapHooksSubgraphProvider';
 
+// V4 AGG Hooks
+export {
+  AggHooksSubgraphProvider,
+  type IAggHooksSubgraphProvider,
+} from './v4/aggHooksSubgraphProvider';
+
 // Base class and types
 export {
   SubgraphProvider,
@@ -46,12 +52,6 @@ export {
   PAGE_SIZE,
   BASE_V4_PAGE_SIZE,
 } from './subgraphProvider';
-
-// V4 AGG Hooks
-export {
-  AggHooksSubgraphProvider,
-  type IAggHooksSubgraphProvider,
-} from './v4/aggHooksSubgraphProvider';
 
 // Provider config
 export {type ProviderConfig, type LocalCacheEntry} from './provider';

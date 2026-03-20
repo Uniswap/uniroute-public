@@ -293,4 +293,47 @@ describe('S3SubgraphPoolDiscoverer', () => {
       expect(pools).toEqual([]);
     });
   });
+
+  describe('External Protocol Pool Discovery', () => {
+    let discoverer: S3SubgraphPoolDiscovererV4;
+    let getPoolsCache: IRedisCache<string, string>;
+    let getPoolsForTokensCache: IRedisCache<string, string>;
+
+    beforeEach(() => {
+      getPoolsCache = {
+        get: vi.fn().mockResolvedValue(undefined),
+        set: vi.fn().mockResolvedValue(undefined),
+      } as unknown as IRedisCache<string, string>;
+
+      getPoolsForTokensCache = {
+        get: vi.fn().mockResolvedValue(undefined),
+        set: vi.fn().mockResolvedValue(undefined),
+      } as unknown as IRedisCache<string, string>;
+
+      discoverer = new S3SubgraphPoolDiscovererV4(
+        mockConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        new Set<string>(),
+        s3Client
+      );
+    });
+
+    // External (agg hook) protocols are no longer accepted by S3SubgraphPoolDiscoverer.
+    // UniRoutesRepository always passes Protocol.V4 when fetching pools for external protocols.
+    it.each([
+      Protocol.CURVESTABLESWAPNG,
+      Protocol.FLUIDDEXT1,
+      Protocol.FLUIDDEXLITE,
+    ])(
+      'should throw for external protocol %s since UniRoutesRepository passes Protocol.V4 instead',
+      async protocol => {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore - protected method access for testing
+        await expect(discoverer._getPools(ChainId.MAINNET, protocol, mockContext)).rejects.toThrow(
+          'Unsupported protocol'
+        );
+      }
+    );
+  });
 });

@@ -573,6 +573,131 @@ describe('UniRouteBL', () => {
     });
   });
 
+  // Regression: Bug 2 — external protocol (e.g. STABLESWAPNG) cache save was guarded by
+  // `quoteType === QuoteType.Fast` which is always true for FAST quotes, so it saved in
+  // sync mode too. The correct guard is `LambdaType.Async`.
+  describe('external protocol caching behavior', () => {
+    it('should NOT cache routes for external protocol in sync mode (second call still misses)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        protocols: Protocol.CURVESTABLESWAPNG,
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig, // LambdaType.Sync — must NOT save
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const firstResponse = await uniRouteBL.quote(ctx, request);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // Sync must NOT save routes — second call should still miss cache
+      const secondResponse = await uniRouteBL.quote(ctx, request);
+      expect(secondResponse.hitsCachedRoutes).toBe(false);
+    });
+
+    it('should cache routes for external protocol in async mode (second call hits cache)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        protocols: Protocol.CURVESTABLESWAPNG,
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync, // LambdaType.Async — must save
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // First call: cache is empty → miss
+      const firstResponse = await uniRouteBL.quote(ctx, request);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // Async saves routes after first call → second call hits the external protocol cache
+      const secondResponse = await uniRouteBL.quote(ctx, request);
+      expect(secondResponse.hitsCachedRoutes).toBe(true);
+    });
+
+    it('should use a separate cache namespace for external protocol vs Uniswap protocols', async () => {
+      // First populate the standard Uniswap cache
+      const uniswapRequest = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        // protocols defaults to 'v2,v3,v4,mixed'
+      });
+      const externalRequest = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        protocols: Protocol.CURVESTABLESWAPNG,
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // Populate the Uniswap cache
+      await uniRouteBL.quote(ctx, uniswapRequest);
+
+      // The external protocol request must NOT get a cache hit from the Uniswap cache
+      const externalFirstResponse = await uniRouteBL.quote(ctx, externalRequest);
+      expect(externalFirstResponse.hitsCachedRoutes).toBe(false);
+
+      // After the above call, the external protocol cache is populated
+      // The second external protocol call must hit the external cache, not the Uniswap one
+      const externalSecondResponse = await uniRouteBL.quote(ctx, externalRequest);
+      expect(externalSecondResponse.hitsCachedRoutes).toBe(true);
+    });
+  });
+
   describe('response formatting', () => {
     it('should correctly format single route response', async () => {
       const request = new QuoteRequest({
@@ -1555,6 +1680,7 @@ describe('UniRouteBL', () => {
 
       // Cache the route using the repository directly
       await cachedRoutesRepository.saveCachedRoutes(
+        [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         dummyRoute,
         1, // chainId
         new Address('0x0000000000000000000000000000000000000000'),
@@ -2479,6 +2605,7 @@ describe('UniRouteBL', () => {
       ]);
 
       await cachedRoutesRepository.saveCachedRoutes(
+        [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         dummyRoute,
         1, // chainId
         new Address('0x0000000000000000000000000000000000000000'),

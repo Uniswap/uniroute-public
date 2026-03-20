@@ -333,7 +333,11 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
 
           pool.tvlETH = tvl0ETH + tvl1ETH;
           pool.tvlUSD = pool.tvlETH * ethPriceUSD;
-          pool.liquidity = pool.tvlUSD.toString();
+          // Repurpose liquidity as a TVL proxy so these pools pass the
+          // `parseInt(pool.liquidity) > 0` filter in S3SubgraphPoolDiscoverer.
+          // These pools hold liquidity externally via the hook contract, so on-chain
+          // liquidity is always 0. Do NOT use this value for slippage math.
+          pool.liquidity = Math.floor(pool.tvlUSD).toString();
 
           this.logger?.info(
             `AGG hooks pool ${rawPool.id} pseudoTVL: ${pool.tvlETH} ETH / ${pool.tvlUSD} USD`,

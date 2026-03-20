@@ -46,6 +46,7 @@ import {
   logElapsedTime,
   protocolToPoolTypeString,
   updateQuoteSplitWithFreshPoolDetails,
+  isOnlyExternalProtocol,
 } from '../lib/helpers';
 import {Erc20Token} from '../models/token/Erc20Token';
 import {Protocol} from '../models/pool/Protocol';
@@ -369,7 +370,8 @@ export class UniRouteBL implements IUniRoutedBL {
       let usedCachedRoutes: boolean = false;
       if (
         quoteType === QuoteType.Fast &&
-        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
+        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
+          isOnlyExternalProtocol(protocols)) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
         this.serviceConfig.CachedRoutes.Enabled
       ) {
@@ -671,7 +673,8 @@ export class UniRouteBL implements IUniRoutedBL {
       // if this was a cache miss + all protocols searched + the simulation didn't fail + is async call, cache the best quote's route(s)
       if (
         !usedCachedRoutes &&
-        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
+        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
+          isOnlyExternalProtocol(protocols)) &&
         this.serviceConfig.Lambda.Type === LambdaType.Async &&
         bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
         this.serviceConfig.CachedRoutes.Enabled
@@ -679,6 +682,7 @@ export class UniRouteBL implements IUniRoutedBL {
         await Promise.all(
           bestQuote!.quotes.map(quote =>
             this.cachedRoutesRepository.saveCachedRoutes(
+              protocols,
               quote.route,
               chain.chainId,
               tokenInCurrencyInfo.isNative

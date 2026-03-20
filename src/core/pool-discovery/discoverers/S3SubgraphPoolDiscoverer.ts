@@ -57,7 +57,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       getPoolsCache,
       getPoolsForTokensCache,
       unsupportedTokens,
-      'BaseS3SubgraphPoolDiscoverer'
+      'BaseS3SubgraphPoolDiscoverer',
+      [Protocol.V2, Protocol.V3, Protocol.V4]
     );
   }
 
@@ -76,6 +77,11 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protocol: Protocol,
     ctx: Context
   ): Promise<TPoolInfo[]> {
+    // Guard before try/catch so programming errors propagate instead of being swallowed
+    if (!this.supportedProtocols.includes(protocol)) {
+      throw new Error(`Unsupported protocol: ${protocol}`);
+    }
+
     const poolCallStartTime = Date.now();
     const metricTags = [`chain:${ChainId[chainId]}`, `protocol:${protocol}`];
     let success = false;
@@ -241,9 +247,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
    * @returns - Whether to force select the pool.
    */
   protected forceSelectSpecialPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _pool: TPoolInfo,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
     _chainId: ChainId
   ): boolean {
     return false;

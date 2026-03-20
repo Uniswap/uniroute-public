@@ -1,9 +1,15 @@
 import {describe, beforeEach, it, expect, vi} from 'vitest';
 import {
+  AggHooksTopPoolsSelector,
   BasicTopPoolsSelector,
   getPoolTVL,
   buildTokenPoolIndex,
 } from './TopPoolsSelector';
+import {
+  AGG_HOOKS_ON_MAINNET,
+  FLUID_DEX_LITE,
+  STABLE_SWAP_NG,
+} from 'src/lib/poolCaching/util/hooksAddressesAllowlist';
 import {ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
@@ -990,6 +996,283 @@ describe('BasicTopPoolsSelector', () => {
           selectedPoolIds
         )
       ).rejects.toThrow('Unsupported protocol UNSUPPORTED');
+    });
+  });
+});
+
+// Pick one address from each family so tests are readable and deterministic
+const AGG_HOOK_FLUID_LITE = FLUID_DEX_LITE[0].toLowerCase(); // 0xf37c...
+const AGG_HOOK_STABLE_SWAP = STABLE_SWAP_NG[0].toLowerCase(); // 0xc24c...
+const NON_AGG_HOOK = '0x1234567890123456789012345678901234567890';
+
+function makeAggV4Pool(
+  id: string,
+  token0Id: string,
+  token1Id: string,
+  hooks = AGG_HOOK_FLUID_LITE,
+  tvlUSD = 5000
+): V4PoolInfo {
+  return {
+    id,
+    token0: {id: token0Id},
+    token1: {id: token1Id},
+    hooks,
+    feeTier: '3000',
+    tickSpacing: '60',
+    liquidity: '10000',
+    tvlETH: tvlUSD,
+    tvlUSD,
+  } as V4PoolInfo;
+}
+
+describe('AggHooksTopPoolsSelector', () => {
+  const TOKEN_IN = '0x0000000000000000000000000000000000000001';
+  const TOKEN_OUT = '0x0000000000000000000000000000000000000002';
+  const TOKEN_OTHER = '0x0000000000000000000000000000000000000003';
+
+  const tokenIn = new Address(TOKEN_IN);
+  const tokenOut = new Address(TOKEN_OUT);
+
+  let selector: AggHooksTopPoolsSelector;
+  let ctx: Context;
+
+  beforeEach(() => {
+    selector = new AggHooksTopPoolsSelector(poolSelectionConfig);
+    ctx = {logger: {debug: vi.fn()}} as unknown as Context;
+  });
+
+  it('sanity: AGG_HOOKS_ON_MAINNET contains the addresses used in these tests', () => {
+    const lower = AGG_HOOKS_ON_MAINNET.map(h => h.toLowerCase());
+    expect(lower).toContain(AGG_HOOK_FLUID_LITE);
+    expect(lower).toContain(AGG_HOOK_STABLE_SWAP);
+    expect(lower).not.toContain(NON_AGG_HOOK);
+  });
+
+  describe('agg hooks pre-filter', () => {
+    it('should return a direct pair when the pool has an agg hook address', async () => {
+      const pool = makeAggV4Pool('0xagg_direct', TOKEN_IN, TOKEN_OUT);
+      const result = await selector.filterPools(
+        [pool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('0xagg_direct');
+    });
+
+    it('should exclude pools whose hook address is not in AGG_HOOKS_ON_MAINNET', async () => {
+      const nonAggPool = makeAggV4Pool(
+        '0xnon_agg',
+        TOKEN_IN,
+        TOKEN_OUT,
+        NON_AGG_HOOK
+      );
+      const result = await selector.filterPools(
+        [nonAggPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(0);
+    });
+
+    it('should exclude regular V4 pools with ADDRESS_ZERO hooks', async () => {
+      const regularPool = makeAggV4Pool(
+        '0xzero_hooks',
+        TOKEN_IN,
+        TOKEN_OUT,
+        ADDRESS_ZERO
+      );
+      const result = await selector.filterPools(
+        [regularPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(0);
+    });
+
+    it('should accept pools from multiple agg hook families in a single call', async () => {
+      const fluidPool = makeAggV4Pool(
+        '0xfluid',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_FLUID_LITE
+      );
+      const stablePool = makeAggV4Pool(
+        '0xstable',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_STABLE_SWAP,
+        4000
+      );
+      const result = await selector.filterPools(
+        [fluidPool, stablePool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(2);
+      expect(result.map(p => p.id)).toContain('0xfluid');
+      expect(result.map(p => p.id)).toContain('0xstable');
+    });
+  });
+
+  describe('only builds direct pairs', () => {
+    it('should not include tokenIn-only or tokenOut-only pools', async () => {
+      const directPool = makeAggV4Pool('0xdirect', TOKEN_IN, TOKEN_OUT);
+      const tokenInOnlyPool = makeAggV4Pool(
+        '0xin_only',
+        TOKEN_IN,
+        TOKEN_OTHER
+      );
+      const tokenOutOnlyPool = makeAggV4Pool(
+        '0xout_only',
+        TOKEN_OTHER,
+        TOKEN_OUT
+      );
+
+      const result = await selector.filterPools(
+        [directPool, tokenInOnlyPool, tokenOutOnlyPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('0xdirect');
+    });
+
+    it('should return empty array when no agg pools match tokenIn/tokenOut directly', async () => {
+      const unrelatedPool = makeAggV4Pool(
+        '0xunrelated',
+        TOKEN_IN,
+        TOKEN_OTHER
+      );
+      const result = await selector.filterPools(
+        [unrelatedPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(0);
+    });
+
+    it('should return empty array when no pools are provided', async () => {
+      const result = await selector.filterPools(
+        [],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(0);
+    });
+  });
+
+  describe('hooksOptions filtering', () => {
+    it('should return agg hook pools when hooksOptions is undefined', async () => {
+      const pool = makeAggV4Pool('0xpool', TOKEN_IN, TOKEN_OUT);
+      const result = await selector.filterPools(
+        [pool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+      expect(result).toHaveLength(1);
+    });
+
+    it('should return agg hook pools when hooksOptions is HOOKS_INCLUSIVE', async () => {
+      const pool = makeAggV4Pool('0xpool', TOKEN_IN, TOKEN_OUT);
+      const result = await selector.filterPools(
+        [pool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        HooksOptions.HOOKS_INCLUSIVE,
+        ctx
+      );
+      expect(result).toHaveLength(1);
+    });
+
+    it('should return agg hook pools when hooksOptions is HOOKS_ONLY (all agg pools have non-zero hooks)', async () => {
+      const pool = makeAggV4Pool('0xpool', TOKEN_IN, TOKEN_OUT);
+      const result = await selector.filterPools(
+        [pool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        HooksOptions.HOOKS_ONLY,
+        ctx
+      );
+      expect(result).toHaveLength(1);
+    });
+
+    it('should return no pools when hooksOptions is NO_HOOKS (all agg pools have non-zero hooks)', async () => {
+      const pool = makeAggV4Pool('0xpool', TOKEN_IN, TOKEN_OUT);
+      const result = await selector.filterPools(
+        [pool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        HooksOptions.NO_HOOKS,
+        ctx
+      );
+      expect(result).toHaveLength(0);
+    });
+  });
+
+  describe('unsupported token filtering', () => {
+    it('should exclude pools whose tokens are on the routing block list', async () => {
+      // 0xd233d1f6fd11640081abb8db125f722b5dc729dc is a real unsupported token on MAINNET
+      const unsupportedToken = '0xd233d1f6fd11640081abb8db125f722b5dc729dc';
+      const badPool = makeAggV4Pool(
+        '0xbad',
+        unsupportedToken,
+        TOKEN_OUT,
+        AGG_HOOK_FLUID_LITE
+      );
+      const goodPool = makeAggV4Pool('0xgood', TOKEN_IN, TOKEN_OUT);
+
+      const result = await selector.filterPools(
+        [badPool, goodPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('0xgood');
     });
   });
 });

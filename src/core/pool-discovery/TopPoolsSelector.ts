@@ -24,6 +24,7 @@ import {
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
+import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 // Token-to-pool index for faster lookups
 interface TokenPoolIndex {
@@ -311,7 +312,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return allPools;
   }
 
-  protected static filterUnsupportedPools(
+  public static filterUnsupportedPools(
     pools: UniPoolInfo[],
     chainId: ChainId
   ): UniPoolInfo[] {
@@ -362,7 +363,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     );
   }
 
-  protected static getDirectPairs(
+  public static getDirectPairs(
     pools: UniPoolInfo[],
     chainId: ChainId,
     protocol: Protocol,
@@ -717,4 +718,105 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 
     return directPairs;
   };
+}
+
+/**
+ * Top pools selector for aggregator hook pools (e.g. FluidDex, StableSwapNG).
+ *
+ * Unlike BasicTopPoolsSelector, this only builds direct pairs — agg hook pools
+ * are always direct-swap pools (tokenIn ↔ tokenOut), so there is no need for
+ * one-hop, second-hop, or global top-N selection.
+ *
+ * The pool universe is pre-filtered to AGG_HOOKS_LOWER_SET before any selection
+ * logic runs, ensuring that high-TVL no-hook V4 pools cannot crowd out the quota
+ * reserved for agg hook pools.
+ */
+export class AggHooksTopPoolsSelector
+  implements ITopPoolsSelector<UniPoolInfo>
+{
+  constructor(
+    private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>
+  ) {}
+
+  public async filterPools(
+    pools: UniPoolInfo[],
+    chainId: ChainId,
+    tokenIn: Address,
+    tokenOut: Address,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined,
+    ctx: Context
+  ): Promise<UniPoolInfo[]> {
+    // 1. Restrict to agg hook pools only before any selection logic runs.
+    const aggHooksLowerSet = new Set(
+      (AGG_HOOKS_PER_CHAIN[chainId] ?? []).map(h => h.toLowerCase())
+    );
+    const aggHooksPools = pools.filter(pool =>
+      aggHooksLowerSet.has((pool as V4PoolInfo).hooks.toLowerCase())
+    );
+
+    ctx.logger.debug('AggHooksTopPoolsSelector filtering agg hook pools', {
+      chainId,
+      protocol,
+      totalPools: pools.length,
+      aggHooksPools: aggHooksPools.length,
+    });
+
+    // 2. Drop pools whose tokens are on the routing block list.
+    const filteredUnsupportedPools =
+      BasicTopPoolsSelector.filterUnsupportedPools(aggHooksPools, chainId);
+
+    // 3. Filter out pools that don't match the hooks options, only if the uniswap protocol is v4.
+    const filteredPools = filteredUnsupportedPools.filter(pool => {
+      if (protocol === Protocol.V4) {
+        if (
+          hooksOptions === undefined ||
+          hooksOptions === HooksOptions.HOOKS_INCLUSIVE
+        ) {
+          return true;
+        }
+
+        if (hooksOptions === HooksOptions.HOOKS_ONLY) {
+          return (pool as V4PoolInfo).hooks !== ADDRESS_ZERO;
+        }
+        if (hooksOptions === HooksOptions.NO_HOOKS) {
+          return (pool as V4PoolInfo).hooks === ADDRESS_ZERO;
+        }
+      }
+      return true;
+    });
+
+    ctx.logger.debug('AggHooksTopPoolsSelector filtering pools', {
+      chainId,
+      protocol,
+      totalPools: pools.length,
+      aggHooksPools: aggHooksPools.length,
+      filteredUnsupportedPools: filteredUnsupportedPools.length,
+      filteredPools: filteredPools.length,
+    });
+
+    // 4. Build token-to-pool index for O(1) intersection lookup.
+    const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
+    const selectedPoolIds = new Set<string>();
+
+    // 5. Only direct pairs — agg hook pools serve tokenIn ↔ tokenOut swaps directly.
+    const directPairs = BasicTopPoolsSelector.getDirectPairs(
+      filteredPools,
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      selectedPoolIds,
+      tokenPoolIndex,
+      this.poolSelectionConfig
+    );
+
+    ctx.logger.debug('AggHooksTopPoolsSelector selected pools', {
+      chainId,
+      protocol,
+      directPairs: directPairs.length,
+    });
+
+    return directPairs;
+  }
 }

@@ -21,8 +21,22 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
     protected unsupportedTokens: Set<string>,
-    protected discovererName: string
+    protected discovererName: string,
+    protected supportedProtocols: Protocol[] = [
+      Protocol.V2,
+      Protocol.V3,
+      Protocol.V4,
+      Protocol.MIXED,
+    ]
   ) {}
+
+  private assertSupportedProtocol(protocol: Protocol): void {
+    if (!this.supportedProtocols.includes(protocol)) {
+      throw new Error(
+        `[${this.discovererName}] Unsupported protocol: ${protocol}. Supported protocols: ${this.supportedProtocols.join(', ')}`
+      );
+    }
+  }
 
   // To be implemented by subclasses to provide a unique name for this discoverer implementation.
   // This name will be used as a prefix in cache keys to avoid conflicts between different implementations.
@@ -44,6 +58,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     protocol: Protocol,
     ctx: Context
   ): Promise<TPool[]> {
+    this.assertSupportedProtocol(protocol);
     const cacheKey = this.getPoolsCacheKey(chainId, protocol);
     let status = 'hit';
 
@@ -124,6 +139,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     skipPoolsForTokensCache: boolean,
     ctx: Context
   ): Promise<TPool[]> {
+    this.assertSupportedProtocol(protocol);
     ctx.logger.debug(
       `[${this.discovererName}] Getting pools for tokens: ${tokenIn.toString()} and ${tokenOut.toString()} on chainId=${chainId}, protocol=${protocol}`
     );
