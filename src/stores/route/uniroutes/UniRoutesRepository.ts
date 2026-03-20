@@ -206,7 +206,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         ...poolsV4
           .map(p => {
             const pool = p as V4PoolInfo;
-            const liquidity = BigInt(pool.liquidity);
+            // Guard against liquidity being decimals.
+            // This happens as part of one incident https://uniswapteam.slack.com/archives/C08TV5WJL07/p1773971483144129
+            const liquidity = BigInt(Math.floor(Number(pool.liquidity)));
             // On V4 pools, a liquidity of 0 with no hooks means the pool is inactive.
             // Hooked pools might have external liquidity, so we keep them.
             if (liquidity === 0n && pool.hooks === ADDRESS_ZERO) {
