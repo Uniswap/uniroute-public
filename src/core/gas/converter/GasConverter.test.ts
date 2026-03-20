@@ -108,7 +108,7 @@ describe('GasConverter', () => {
       'DAI',
       'Dai Stablecoin',
       undefined,
-      1
+      undefined // no priceUSD — forces pool-based fallback
     );
 
     const tokensInfo = new Map<string, Erc20Token | null>([
@@ -307,7 +307,7 @@ describe('GasConverter', () => {
             'USDC.e',
             'USD Coin',
             undefined,
-            1
+            undefined // no priceUSD — forces pool-based fallback
           ),
         ],
       ]);
@@ -404,6 +404,474 @@ describe('GasConverter', () => {
 
       // Should be scaled: 1.94e15 / 1e12 = 1940
       expect(result).toBe(1940n);
+    });
+  });
+
+  describe('USD pricing path', () => {
+    it('should derive gasCostInQuoteToken from USD prices when both are available', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const usdcAddress = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            2000 // priceUSD
+          ),
+        ],
+        [
+          usdcAddress,
+          new Erc20Token(
+            new Address(usdcAddress),
+            6,
+            'USDC',
+            'USD Coin',
+            undefined,
+            1 // priceUSD
+          ),
+        ],
+      ]);
+
+      // 97000 gas * 20 gwei = 1,940,000,000,000,000 wei
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(Protocol.V3, []);
+      const quote = new QuoteBasic(route, 1_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        usdcAddress,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // gasCostInUSD = 2000 * 0.00194 = 3.88
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInUSD).toBeCloseTo(
+        3.88,
+        5
+      );
+
+      // gasCostInQuoteToken = (3.88 / 1) * 10^6 = 3_880_000
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(
+        3880000n
+      );
+
+      // Pool repos should NOT have been called
+      expect(v2PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v3PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v4PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(getQuoteThroughNativePool).not.toHaveBeenCalled();
+    });
+
+    it('should derive gasCostInQuoteToken for non-stablecoin quote token', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const linkAddress = '0x514910771AF9Ca656af840dff83E8264EcF986CA';
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            2000
+          ),
+        ],
+        [
+          linkAddress,
+          new Erc20Token(
+            new Address(linkAddress),
+            18,
+            'LINK',
+            'Chainlink Token',
+            undefined,
+            15 // priceUSD
+          ),
+        ],
+      ]);
+
+      // 97000 gas * 20 gwei
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(Protocol.V3, []);
+      const quote = new QuoteBasic(route, 1_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        linkAddress,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // gasCostInUSD = 2000 * 0.00194 = 3.88
+      // gasCostInQuoteToken = (3.88 / 15) * 10^18 ≈ 2.586e17
+      // Use the same computation path as the implementation to avoid floating point divergence
+      const gasCostInUSD = quoteSplit.quotes[0].gasDetails?.gasCostInUSD!;
+      const expected = BigInt(Math.floor((gasCostInUSD / 15) * 10 ** 18));
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(
+        expected
+      );
+
+      // Pool repos should NOT have been called
+      expect(v2PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v3PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v4PoolRepository.getPools).not.toHaveBeenCalled();
+    });
+
+    it('should use USD pricing in getGasCostInQuoteTokenBasedOnGasCostInWei when prices available', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const usdcAddress = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            2000
+          ),
+        ],
+        [
+          usdcAddress,
+          new Erc20Token(
+            new Address(usdcAddress),
+            6,
+            'USDC',
+            'USD Coin',
+            undefined,
+            1
+          ),
+        ],
+      ]);
+
+      const gasCostInWei = 97000n * 20_000_000_000n;
+
+      const result =
+        await gasConverter.getGasCostInQuoteTokenBasedOnGasCostInWei(
+          chainId,
+          usdcAddress,
+          tokensInfo,
+          gasCostInWei,
+          ctx
+        );
+
+      // gasCostInUSD = 2000 * 0.00194 = 3.88
+      // result = (3.88 / 1) * 10^6 = 3_880_000
+      expect(result).toBe(3880000n);
+
+      // Pool repos should NOT have been called
+      expect(v2PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v3PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v4PoolRepository.getPools).not.toHaveBeenCalled();
+    });
+
+    it('should use USD pricing for 6-decimal gas token (Tempo) with non-native quote token', async () => {
+      const chainId = ChainId.TEMPO;
+      const pathUSD = PATHUSD_TEMPO; // 6 decimals
+      const usdcAddress = '0x20C000000000000000000000b9537d11c60E8b50';
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          pathUSD.address,
+          new Erc20Token(
+            new Address(pathUSD.address),
+            pathUSD.decimals,
+            'pathUSD',
+            'pathUSD',
+            undefined,
+            1 // priceUSD
+          ),
+        ],
+        [
+          usdcAddress,
+          new Erc20Token(
+            new Address(usdcAddress),
+            6,
+            'USDC.e',
+            'USD Coin',
+            undefined,
+            1 // priceUSD
+          ),
+        ],
+      ]);
+
+      // 97000 gas * 20 gwei = 1,940,000,000,000,000 wei
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(Protocol.V4, []);
+      const quote = new QuoteBasic(route, 10_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        usdcAddress,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // gasCostInUSD = 1 * 0.00194 = 0.00194
+      // gasCostInQuoteToken = (0.00194 / 1) * 10^6 = 1940
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(1940n);
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInUSD).toBeCloseTo(
+        0.00194,
+        5
+      );
+
+      // Pool repos should NOT have been called
+      expect(v2PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v3PoolRepository.getPools).not.toHaveBeenCalled();
+      expect(v4PoolRepository.getPools).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pool-based fallback when USD pricing unavailable', () => {
+    it('should fall back to pool-based conversion when quoteToken has no priceUSD', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const quoteTokenAddress =
+        '0x6B175474E89094C44Da98b954EedeAC495271d0F'; // DAI
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            2000 // nativeToken HAS priceUSD
+          ),
+        ],
+        [
+          quoteTokenAddress,
+          new Erc20Token(
+            new Address(quoteTokenAddress),
+            18,
+            'DAI',
+            'Dai Stablecoin',
+            undefined,
+            undefined // quoteToken has NO priceUSD
+          ),
+        ],
+      ]);
+
+      // Mock a V3 pool between WETH and DAI
+      const mockV3Pool = new V3Pool(
+        new Address(wrappedNative.address),
+        new Address(quoteTokenAddress),
+        3000,
+        new Address('0x1234567890123456789012345678901234567890'),
+        1000000n,
+        79228162514264337593543950336n,
+        0n
+      );
+
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([mockV3Pool]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} =
+        await import('@uniswap/sdk-core');
+      const mockQuoteResult = CurrencyAmountSDK.fromRawAmount(
+        new TokenSDK(chainId, quoteTokenAddress, 18, 'DAI'),
+        '5000000000000000000' // 5 DAI
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(getQuoteThroughNativePool).mockReturnValue(
+        mockQuoteResult as any
+      );
+
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(Protocol.V3, []);
+      const quote = new QuoteBasic(route, 1_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        quoteTokenAddress,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // Should have used pool-based conversion
+      expect(v3PoolRepository.getPools).toHaveBeenCalled();
+      expect(getQuoteThroughNativePool).toHaveBeenCalled();
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(
+        5000000000000000000n
+      );
+    });
+
+    it('should fall back to pool-based conversion when nativeToken has no priceUSD', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const usdcAddress = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            undefined // nativeToken has NO priceUSD
+          ),
+        ],
+        [
+          usdcAddress,
+          new Erc20Token(
+            new Address(usdcAddress),
+            6,
+            'USDC',
+            'USD Coin',
+            undefined,
+            1 // quoteToken HAS priceUSD
+          ),
+        ],
+      ]);
+
+      const mockV3Pool = new V3Pool(
+        new Address(wrappedNative.address),
+        new Address(usdcAddress),
+        3000,
+        new Address('0x1234567890123456789012345678901234567890'),
+        1000000n,
+        79228162514264337593543950336n,
+        0n
+      );
+
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([mockV3Pool]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} =
+        await import('@uniswap/sdk-core');
+      const mockQuoteResult = CurrencyAmountSDK.fromRawAmount(
+        new TokenSDK(chainId, usdcAddress, 6, 'USDC'),
+        '3880000' // 3.88 USDC
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(getQuoteThroughNativePool).mockReturnValue(
+        mockQuoteResult as any
+      );
+
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const gasDetails = new GasDetails(
+        20_000_000_000n,
+        gasCostInWei,
+        0.00194,
+        97000n
+      );
+      const route = new RouteBasic(Protocol.V3, []);
+      const quote = new QuoteBasic(route, 1_000_000n, undefined, gasDetails);
+      const quoteSplit = new QuoteSplit([quote]);
+
+      await gasConverter.updateQuotesGasDetails(
+        chainId,
+        usdcAddress,
+        tokensInfo,
+        [quoteSplit],
+        ctx
+      );
+
+      // Should have used pool-based conversion
+      expect(v3PoolRepository.getPools).toHaveBeenCalled();
+      expect(getQuoteThroughNativePool).toHaveBeenCalled();
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(
+        3880000n
+      );
+
+      // gasCostInUSD should be 0 since nativeToken has no priceUSD
+      expect(quoteSplit.quotes[0].gasDetails?.gasCostInUSD).toBe(0);
+    });
+
+    it('should fall back in getGasCostInQuoteTokenBasedOnGasCostInWei when quoteToken has no priceUSD', async () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const quoteTokenAddress =
+        '0x6B175474E89094C44Da98b954EedeAC495271d0F'; // DAI
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            'WETH',
+            'Wrapped Ether',
+            undefined,
+            2000
+          ),
+        ],
+        [
+          quoteTokenAddress,
+          new Erc20Token(
+            new Address(quoteTokenAddress),
+            18,
+            'DAI',
+            'Dai Stablecoin',
+            undefined,
+            undefined // no priceUSD
+          ),
+        ],
+      ]);
+
+      // No pools found — should return 0n
+      vi.mocked(v3PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
+      vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
+
+      const gasCostInWei = 97000n * 20_000_000_000n;
+
+      const result =
+        await gasConverter.getGasCostInQuoteTokenBasedOnGasCostInWei(
+          chainId,
+          quoteTokenAddress,
+          tokensInfo,
+          gasCostInWei,
+          ctx
+        );
+
+      // Fallback used, no pools found → 0n
+      expect(result).toBe(0n);
+
+      // Pool repos SHOULD have been called
+      expect(v3PoolRepository.getPools).toHaveBeenCalled();
     });
   });
 });

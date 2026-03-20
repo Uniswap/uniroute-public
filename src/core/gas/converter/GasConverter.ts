@@ -69,23 +69,12 @@ export class GasConverter implements IGasConverter {
     };
   }
 
-  public async prefetchGasPools(
-    chainId: ChainId,
-    quoteTokenAddress: string,
-    ctx: Context
-  ): Promise<GasPools> {
-    // Use a placeholder Token since fetchGasRelatedPools only needs chainId + address
-    const placeholderToken = new Token(chainId, quoteTokenAddress, 18);
-    return this.fetchGasRelatedPools(chainId, placeholderToken, ctx);
-  }
-
   public async updateQuotesGasDetails(
     chainId: ChainId,
     quoteTokenAddress: string,
     tokensInfo: Map<string, Erc20Token | null>,
     quotes: QuoteSplit[],
-    ctx: Context,
-    prefetchedGasPools?: GasPools
+    ctx: Context
   ): Promise<void> {
     ctx.logger.debug('GasConverter.updateQuotesGasDetails', {
       tokensInfo,
@@ -105,16 +94,33 @@ export class GasConverter implements IGasConverter {
       quoteTokenInfo.symbol,
       quoteTokenInfo.name
     );
-    const gasPools =
-      prefetchedGasPools ??
-      (await this.fetchGasRelatedPools(chainId, quoteToken, ctx));
-    const {
-      nativeAndQuoteTokenV2PoolSDK,
-      nativeAndQuoteTokenV3PoolSDK,
-      nativeAndQuoteTokenV4PoolSDK,
-    } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx);
-
     const wrappedNativeCurrency = getGasToken(chainId);
+    const wrappedNativeTokenInfo = tokensInfo.get(
+      wrappedNativeCurrency.address
+    )!;
+
+    // If both USD prices are available, we can derive gasCostInQuoteToken from USD prices
+    // without needing to fetch ETH/quoteToken pools
+    const canUseUsdPricing =
+      wrappedNativeTokenInfo?.priceUSD && quoteTokenInfo?.priceUSD;
+
+    // Only fetch gas pools if USD pricing is not available for the quote token
+    let nativeAndQuoteTokenV2PoolSDK: Pair | null = null;
+    let nativeAndQuoteTokenV3PoolSDK: V3SDKPool | null = null;
+    let nativeAndQuoteTokenV4PoolSDK: V4SDKPool | null = null;
+
+    if (!canUseUsdPricing) {
+      const gasPools = await this.fetchGasRelatedPools(
+        chainId,
+        quoteToken,
+        ctx
+      );
+      ({
+        nativeAndQuoteTokenV2PoolSDK,
+        nativeAndQuoteTokenV3PoolSDK,
+        nativeAndQuoteTokenV4PoolSDK,
+      } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx));
+    }
 
     for (const quoteSplit of quotes) {
       for (const quote of quoteSplit.quotes) {
@@ -131,30 +137,40 @@ export class GasConverter implements IGasConverter {
             scaledGasCost.toString()
           );
 
-        const gasCostInTermsOfQuoteToken =
-          await this.convertGasCostToQuoteToken(
-            chainId,
-            totalGasCostNativeCurrency,
-            quoteToken,
-            wrappedNativeCurrency,
-            nativeAndQuoteTokenV2PoolSDK,
-            nativeAndQuoteTokenV3PoolSDK,
-            nativeAndQuoteTokenV4PoolSDK,
-            ctx
-          );
-
-        quote.gasDetails!.gasCostInQuoteToken = gasCostInTermsOfQuoteToken
-          ? BigInt(gasCostInTermsOfQuoteToken.quotient.toString())
-          : 0n;
-
-        // Also populate the gas cost in USD
-        const wrappedNativeTokenInfo = tokensInfo.get(
-          wrappedNativeCurrency.address
-        )!;
+        // Compute gasCostInUSD first (needed for USD-based quote token conversion)
         quote.gasDetails!.gasCostInUSD = wrappedNativeTokenInfo?.priceUSD
           ? wrappedNativeTokenInfo.priceUSD *
             Number(totalGasCostNativeCurrency.toExact())
           : 0;
+
+        if (canUseUsdPricing) {
+          // Derive gasCostInQuoteToken from USD prices:
+          // gasCostInQuoteToken = (gasCostInUSD / quoteToken.priceUSD) * 10^quoteToken.decimals
+          const gasCostInQuoteTokenDecimal =
+            quote.gasDetails!.gasCostInUSD / quoteTokenInfo.priceUSD!;
+          quote.gasDetails!.gasCostInQuoteToken = BigInt(
+            Math.floor(
+              gasCostInQuoteTokenDecimal * 10 ** quoteTokenInfo.decimals
+            )
+          );
+        } else {
+          // Fallback: use pool-based conversion when USD pricing is not available
+          const gasCostInTermsOfQuoteToken =
+            await this.convertGasCostToQuoteToken(
+              chainId,
+              totalGasCostNativeCurrency,
+              quoteToken,
+              wrappedNativeCurrency,
+              nativeAndQuoteTokenV2PoolSDK,
+              nativeAndQuoteTokenV3PoolSDK,
+              nativeAndQuoteTokenV4PoolSDK,
+              ctx
+            );
+
+          quote.gasDetails!.gasCostInQuoteToken = gasCostInTermsOfQuoteToken
+            ? BigInt(gasCostInTermsOfQuoteToken.quotient.toString())
+            : 0n;
+        }
       }
     }
   }
@@ -167,6 +183,33 @@ export class GasConverter implements IGasConverter {
     ctx: Context
   ): Promise<bigint> {
     const quoteTokenInfo = tokensInfo.get(quoteTokenAddress)!;
+    const wrappedNativeCurrency = getGasToken(chainId);
+    const wrappedNativeTokenInfo = tokensInfo.get(
+      wrappedNativeCurrency.address
+    )!;
+
+    // gasCostInWei is always in 18-decimal EVM precision. Scale to gas token decimals
+    const decimalDiff = 18 - wrappedNativeCurrency.decimals;
+    const scaledGasCost =
+      decimalDiff > 0 ? gasCostInWei / BigInt(10 ** decimalDiff) : gasCostInWei;
+    const totalGasCostNativeCurrency = CurrencyAmountRaw.fromRawAmount<Token>(
+      wrappedNativeCurrency,
+      scaledGasCost.toString()
+    );
+
+    // If both USD prices are available, derive from USD pricing directly
+    if (wrappedNativeTokenInfo?.priceUSD && quoteTokenInfo?.priceUSD) {
+      const gasCostInUSD =
+        wrappedNativeTokenInfo.priceUSD *
+        Number(totalGasCostNativeCurrency.toExact());
+      const gasCostInQuoteTokenDecimal =
+        gasCostInUSD / quoteTokenInfo.priceUSD;
+      return BigInt(
+        Math.floor(gasCostInQuoteTokenDecimal * 10 ** quoteTokenInfo.decimals)
+      );
+    }
+
+    // Fallback: use pool-based conversion
     const quoteToken = new Token(
       chainId,
       quoteTokenAddress,
@@ -180,16 +223,6 @@ export class GasConverter implements IGasConverter {
       nativeAndQuoteTokenV3PoolSDK,
       nativeAndQuoteTokenV4PoolSDK,
     } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx);
-
-    const wrappedNativeCurrency = getGasToken(chainId);
-    // gasCostInWei is always in 18-decimal EVM precision. Scale to gas token decimals
-    const decimalDiff = 18 - wrappedNativeCurrency.decimals;
-    const scaledGasCost =
-      decimalDiff > 0 ? gasCostInWei / BigInt(10 ** decimalDiff) : gasCostInWei;
-    const totalGasCostNativeCurrency = CurrencyAmountRaw.fromRawAmount<Token>(
-      wrappedNativeCurrency,
-      scaledGasCost.toString()
-    );
 
     const gasCostInTermsOfQuoteToken = await this.convertGasCostToQuoteToken(
       chainId,

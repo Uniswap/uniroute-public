@@ -3604,93 +3604,16 @@ describe('UniRouteBL', () => {
     });
   });
 
-  describe('prefetchGasPools error handling', () => {
-    it('should log error and continue quote when prefetchGasPools rejects', async () => {
+  describe('gas estimation', () => {
+    it('should not call updateQuotesGasDetails when GasEstimation is disabled', async () => {
       const request = new QuoteRequest({
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
 
-      const singleQuote = new QuoteSplit([
-        new QuoteBasic(
-          new RouteBasic(Protocol.V2, [
-            new V2Pool(
-              new Address(baseRequest.tokenInAddress),
-              new Address(baseRequest.tokenOutAddress),
-              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
-              BigInt('1000000000000'),
-              BigInt('1000000000000')
-            ),
-          ]),
-          BigInt('1234567890'),
-          undefined
-        ),
-      ]);
-
-      // Gas converter where prefetchGasPools rejects
-      const throwingGasConverter: IGasConverter = {
-        prefetchGasPools: vi
-          .fn()
-          .mockRejectedValue(new Error('Gas pool fetch failed')),
-        updateQuotesGasDetails: vi.fn().mockResolvedValue(undefined),
-      };
-
-      // Use a config with GasEstimation enabled to trigger prefetchGasPools
-      const gasEnabledConfig = {
-        ...serviceConfig,
-        GasEstimation: {Enabled: true},
-      };
-
-      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
-      const testCtx = buildTestContext();
-      testCtx.fetcher = ctx.fetcher;
-      const errorSpy = vi.spyOn(testCtx.logger, 'error');
-
-      const uniRouteBL = new UniRouteBL(
-        gasEnabledConfig,
-        redisCache,
-        chainRepository,
-        poolDiscoverer,
-        freshPoolDetailsWrapper,
-        tokenHandler,
-        quoteFetcher,
-        quoteSelector,
-        routeQuoteAllocator,
-        gasEstimateProvider,
-        throwingGasConverter,
-        routeRepository,
-        cachedRoutesRepository,
-        mockedQuoteStrategy,
-        dummySimulator,
-        quoteRequestValidator,
-        tokenProvider,
-        mockedRpcProviderMap
-      );
-
-      // Quote should complete successfully despite prefetchGasPools failing
-      const response = await uniRouteBL.quote(testCtx, request);
-      expect(response.error).toBeUndefined();
-      expect(response.quoteAmount).equals('1234567890');
-
-      // Error should be logged
-      expect(errorSpy).toHaveBeenCalledWith(
-        'Error prefetching gas pools',
-        expect.objectContaining({error: 'Gas pool fetch failed'})
-      );
-    });
-
-    it('should not call prefetchGasPools when GasEstimation is disabled', async () => {
-      const request = new QuoteRequest({
-        ...baseRequest,
-        tradeType: 'EXACT_IN',
-      });
-
-      const prefetchSpy = vi
-        .fn()
-        .mockRejectedValue(new Error('Should not be called'));
+      const updateGasSpy = vi.fn().mockResolvedValue(undefined);
       const gasConverter: IGasConverter = {
-        prefetchGasPools: prefetchSpy,
-        updateQuotesGasDetails: vi.fn().mockResolvedValue(undefined),
+        updateQuotesGasDetails: updateGasSpy,
       };
 
       // Config with GasEstimation disabled
@@ -3723,7 +3646,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(ctx, request);
 
-      expect(prefetchSpy).not.toHaveBeenCalled();
+      expect(updateGasSpy).not.toHaveBeenCalled();
     });
   });
 

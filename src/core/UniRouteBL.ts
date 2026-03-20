@@ -69,7 +69,7 @@ import {SwapInfo} from '../models/quote/SwapInfo';
 import {IRouteQuoteAllocator} from './route/RouteQuoteAllocator';
 import {IGasConverter} from './gas/converter/IGasConverter';
 import {getGasToken} from '../lib/tokenUtils';
-import {GasPools, usdGasTokensByChain} from './gas/gas-helpers';
+import {usdGasTokensByChain} from './gas/gas-helpers';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
 import {ISimulator, SimulationStatus} from './simulator/ISimulator';
@@ -273,24 +273,6 @@ export class UniRouteBL implements IUniRoutedBL {
         tokenInCurrencyInfo.wrappedAddress.address,
         tokenOutCurrencyInfo.wrappedAddress.address
       );
-
-      // Fire gas pools prefetch early — runs in background through getTokens,
-      // route discovery, and findBestQuoteCandidates. Only awaited at updateQuotesGasDetails.
-      const gasPoolsPromise = this.serviceConfig.GasEstimation.Enabled
-        ? this.prefetchGasPools(
-            chain.chainId,
-            tradeType,
-            tokenInCurrencyInfo.wrappedAddress.toString(),
-            tokenOutCurrencyInfo.wrappedAddress.toString(),
-            ctx
-          ).catch((e: unknown) => {
-            ctx.logger.error('Error prefetching gas pools', {
-              error: e instanceof Error ? e.message : String(e),
-              errorStack: e instanceof Error ? e.stack : undefined,
-            });
-            return undefined;
-          })
-        : undefined;
 
       // Fetch tokens info and block number in parallel
       // Those are needed for fot detection, gas estimation and quote conversion to USD.
@@ -558,7 +540,6 @@ export class UniRouteBL implements IUniRoutedBL {
       // Update quotes with gas costs to USD / quote token
       if (this.serviceConfig.GasEstimation.Enabled) {
         const startGasUpdateTime = Date.now();
-        const prefetchedGasPools = await gasPoolsPromise;
         await this.gasConverter.updateQuotesGasDetails(
           chain.chainId,
           tradeType === TradeType.ExactIn
@@ -566,8 +547,7 @@ export class UniRouteBL implements IUniRoutedBL {
             : tokenInCurrencyInfo.wrappedAddress.toString(),
           tokensInfo,
           bestQuoteCandidates,
-          ctx,
-          prefetchedGasPools
+          ctx
         );
         await logElapsedTime(
           'UpdateQuotesGasDetails',
@@ -2025,20 +2005,4 @@ export class UniRouteBL implements IUniRoutedBL {
     return Math.max(-100, Math.min(100, priceImpact)).toString();
   }
 
-  /**
-   * Start prefetching gas-related pools (ETH/quoteToken) early so they're
-   * available by the time updateQuotesGasDetails needs them.
-   * Only requires chainId + quote token address, no token metadata needed.
-   */
-  private prefetchGasPools(
-    chainId: ChainId,
-    tradeType: TradeType,
-    tokenInAddress: string,
-    tokenOutAddress: string,
-    ctx: Context
-  ): Promise<GasPools> {
-    const quoteTokenAddress =
-      tradeType === TradeType.ExactIn ? tokenOutAddress : tokenInAddress;
-    return this.gasConverter.prefetchGasPools(chainId, quoteTokenAddress, ctx);
-  }
 }
