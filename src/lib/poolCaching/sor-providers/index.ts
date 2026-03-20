@@ -47,15 +47,12 @@ export {
   BASE_V4_PAGE_SIZE,
 } from './subgraphProvider';
 
-// V4 AGG Hooks
-export {
-  AggHooksSubgraphProvider,
-  type IAggHooksSubgraphProvider,
-} from './v4/aggHooksSubgraphProvider';
-
 // Provider config
-export {type ProviderConfig, type LocalCacheEntry} from './provider';
+export { type ProviderConfig, type LocalCacheEntry } from './provider';
 
 // Logger and metrics (types only — no globals)
-export {type Logger} from './util/log';
-export {MetricLoggerUnit, IMetric} from './util/metric';
+export { type Logger } from './util/log';
+export {
+  MetricLoggerUnit,
+  IMetric,
+} from './util/metric';

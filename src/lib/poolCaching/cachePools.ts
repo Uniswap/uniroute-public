@@ -52,8 +52,7 @@ async function cachePoolsForChainProtocol(
   logger: Logger,
   metricInstance: IMetric
 ): Promise<void> {
-  const {protocol, chainId, provider, eulerHooksProvider, aggHooksProvider} =
-    chainProtocol;
+  const {protocol, chainId, provider, eulerHooksProvider} = chainProtocol;
   const metricTags = {chainId: String(chainId), protocol: String(protocol)};
   logger = prefixedLogger(logger, `[${chainId}_${protocol}]`);
 
@@ -259,18 +258,6 @@ async function cachePoolsForChainProtocol(
             }
           });
         }
-      }
-
-      if (aggHooksProvider) {
-        const aggHooksPools = await aggHooksProvider.getPools();
-        logger.debug(`aggHooksPools ${JSON.stringify(aggHooksPools)}`);
-        metricInstance.putMetric(
-          'aggHooks.pools.length',
-          aggHooksPools.length,
-          MetricLoggerUnit.Count,
-          metricTags
-        );
-        aggHooksPools.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
 
       if (chainId === ChainId.UNICHAIN) {
