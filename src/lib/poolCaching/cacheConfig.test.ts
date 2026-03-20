@@ -16,7 +16,7 @@ import {
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 import type {Logger} from './sor-providers/util/log';
-import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {IMetric} from './sor-providers/util/metric';
 
 const mockLogger: Logger = {
   info: vi.fn(),
@@ -29,12 +29,7 @@ const mockLogger: Logger = {
 class MockMetric extends IMetric {
   setProperty(_key: string, _value: unknown): void {}
   putDimensions(_dimensions: Record<string, string>): void {}
-  putMetric(
-    _key: string,
-    _value: number,
-    _unit?: MetricLoggerUnit,
-    _tags?: Record<string, string>
-  ): void {}
+  putMetric(_key: string, _value: number, _unit?: any, _tags?: Record<string, string>): void {}
 }
 
 const mockMetric = new MockMetric();
@@ -62,7 +57,7 @@ describe('cacheConfig', () => {
 
     it('contains V2, V3, and V4 protocols', () => {
       const protocols = createChainProtocols(mockLogger, mockMetric);
-      const protocolTypes = new Set(protocols.map(p => p.protocol));
+      const protocolTypes = new Set(protocols.map((p) => p.protocol));
       expect(protocolTypes.has(Protocol.V2)).toBe(true);
       expect(protocolTypes.has(Protocol.V3)).toBe(true);
       expect(protocolTypes.has(Protocol.V4)).toBe(true);
@@ -71,12 +66,12 @@ describe('cacheConfig', () => {
     it('V4 entries on MAINNET and UNICHAIN have eulerHooksProvider', () => {
       const protocols = createChainProtocols(mockLogger, mockMetric);
       const v4Mainnet = protocols.find(
-        p => p.protocol === Protocol.V4 && p.chainId === ChainId.MAINNET
+        (p) => p.protocol === Protocol.V4 && p.chainId === ChainId.MAINNET
       );
       expect(v4Mainnet?.eulerHooksProvider).toBeDefined();
 
       const v4Unichain = protocols.find(
-        p => p.protocol === Protocol.V4 && p.chainId === ChainId.UNICHAIN
+        (p) => p.protocol === Protocol.V4 && p.chainId === ChainId.UNICHAIN
       );
       expect(v4Unichain?.eulerHooksProvider).toBeDefined();
     });
@@ -84,7 +79,7 @@ describe('cacheConfig', () => {
     it('V4 entries without euler hooks do not have eulerHooksProvider', () => {
       const protocols = createChainProtocols(mockLogger, mockMetric);
       const v4Base = protocols.find(
-        p => p.protocol === Protocol.V4 && p.chainId === ChainId.BASE
+        (p) => p.protocol === Protocol.V4 && p.chainId === ChainId.BASE
       );
       expect(v4Base?.eulerHooksProvider).toBeUndefined();
     });
