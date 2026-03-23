@@ -5,41 +5,13 @@
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
-// https://files.slack.com/files-pri/T093HD8U2FM-F0AJ5DLCV19/deployed-fluiddexlite.json
-export const FLUID_DEX_LITE = [
-  '0xF37c11667d10BbC39C7712a5409c19Ced7EBa088',
-  '0xf3F1249CF3149c722B17Da63513483722e852088',
-];
+export const FLUID_DEX_LITE = [];
 
-// https://files.slack.com/files-pri/T093HD8U2FM-F0AK63QSADN/deployed-stableswapng.json
-export const STABLE_SWAP_NG = [
-  '0xc24cf69d2f636db53b57342709bdcb01fbd3a088',
-  '0xC266B69C82000aB0C706E94Ac2F745322858E088',
-  '0xc24ffd8935b9562b01e318e3e9f425bfc5152088',
-  '0xc284c5426546a2b1c88fb84bf2ef3ca3fbb36088',
-  '0xc244ac77d35f4d442f0a321bce8432e1d519e088',
-];
+export const STABLE_SWAP_NG = [];
 
-//files.slack.com/files-pri/T093HD8U2FM-F0AMS5DD403/deployed-stableswap.json
-export const STABLE_SWAP = ['0xC130D2f28679Bc6695dc3FA4D6332f13AC63e888'];
+export const STABLE_SWAP = [];
 
-// https://files.slack.com/files-pri/T093HD8U2FM-F0AHWBWGK9V/deployed-fluiddext1.json
-//files.slack.com/files-pri/T093HD8U2FM-F0ANSQUASGG/deployed-fluiddext1.json
-export const FLUID_DEX_1 = [
-  '0xf1abe2961CCf73B55be164054E7ADC985a52A888',
-  '0xf1E16488795901174365Eb84103f20bD28096888',
-  '0xF13da3a346A7A4aB222BaD3bD5E48Fd89e1d6888',
-  '0xf143f8c995846BdA830D1E3ba98D631079EDe888',
-  '0xF1AF4F57cE366c02a4aE85cbdf0D97aF6406E888',
-  '0xF13ff2F4255408936a73E1734cB0e9831491A888',
-  // below agg hooks have settable protocol fees
-  '0xf1794BB6f46C3774fEBFa4eA399DB35E30d82888',
-  '0xF12a84e8Aa6191B489591B22288a73065F6Ee888',
-  '0xf1557659b81c262DbA5cFa40e79fAAaB5c4a2888',
-  '0xF1dD8207950EAEE2b23094ad81cE0287C42e6888',
-  '0xf1755f05f866DC50B1c1D80B8107250bE8192888',
-  '0xf15933A0194489C9A9990CA9b5898c687F48A888',
-];
+export const FLUID_DEX_1 = [];
 
 export const AGG_HOOKS_ON_MAINNET = [
   ...FLUID_DEX_LITE,
@@ -47,7 +19,6 @@ export const AGG_HOOKS_ON_MAINNET = [
   ...STABLE_SWAP,
   ...FLUID_DEX_1,
 ];
-
 /**
  * Per-chain map of aggregator hook addresses.
  * Add a new entry here when agg hook support expands to additional chains.
@@ -317,8 +288,7 @@ export const ADAPTIVE_BURN_HOOK_ON_BASE =
   '0x5798a5e371346c8e4af1dbc166549d360e008044';
 export const LAUNCHLY_HOOK_ON_BASE =
   '0xa62A40569a2b8ccA3A5557734BCAEc54441500CC';
-export const DRXGAI_HOOK_ON_BASE =
-  '0x66E51DEab56975Bb1c64413bd3AB01FA95B82acc';
+export const DRXGAI_HOOK_ON_BASE = '0x66E51DEab56975Bb1c64413bd3AB01FA95B82acc';
 export const UPEG_HOOK_ON_MAINNET =
   '0xe54082DfBf044B6a8F584bdDdb90a22d5613C440';
 
