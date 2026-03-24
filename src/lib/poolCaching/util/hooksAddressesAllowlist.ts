@@ -4,21 +4,8 @@
 
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+import {AGG_HOOKS_ON_MAINNET} from './aggHooksAddressesAllowlist';
 
-export const FLUID_DEX_LITE = [];
-
-export const STABLE_SWAP_NG = [];
-
-export const STABLE_SWAP = [];
-
-export const FLUID_DEX_1 = [];
-
-export const AGG_HOOKS_ON_MAINNET = [
-  ...FLUID_DEX_LITE,
-  ...STABLE_SWAP_NG,
-  ...STABLE_SWAP,
-  ...FLUID_DEX_1,
-];
 /**
  * Per-chain map of aggregator hook addresses.
  * Add a new entry here when agg hook support expands to additional chains.
@@ -266,10 +253,8 @@ export const DORY_BURN_AND_MINT_POWER_HOOK_ON_ARBITRUM =
   '0x6b70fef40d3925881251c018164dbcec6bc94040';
 export const ZOO_FINANCE_LNT_VATH_ATH_HOOKS_ADDRESS_ON_ARBITRUM =
   '0xbf4b4a83708474528a93c123f817e7f2a0637a88';
-export const BUY_HOOK_V1_ON_BNB =
-  '0xabf1f4421f2c4893a7fa9b411c59ddf248508080';
-export const BUY_HOOK_V2_ON_BNB =
-  '0x21f4ee7f81ba98f613f54486d5362ec533b00080';
+export const BUY_HOOK_V1_ON_BNB = '0xabf1f4421f2c4893a7fa9b411c59ddf248508080';
+export const BUY_HOOK_V2_ON_BNB = '0x21f4ee7f81ba98f613f54486d5362ec533b00080';
 export const BASEMEME_HOOK_ADDRESS_ON_BASE =
   '0x755776c51399f7ee15d47ddaf47347d26f5ca840';
 export const AI_PROTOCOL_SWAP_FEE_HOOK_V1_ON_BASE =

@@ -50,8 +50,8 @@ import {
   CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
   DOPPLER_HOOKS_ADDRESS_ON_BASE,
   DOPPLER_HOOKS_ADDRESS_ON_BASE_V2,
-  AGG_HOOKS_ON_MAINNET,
 } from './util/hooksAddressesAllowlist';
+import {AGG_HOOKS_ON_MAINNET} from './util/aggHooksAddressesAllowlist';
 
 // Zora hooks addresses for V4 filtering - MUST be lowercase
 export const ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING = new Set([
