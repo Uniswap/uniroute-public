@@ -3,15 +3,15 @@
  * V2 subgraph provider - standalone implementation (does not extend base SubgraphProvider).
  */
 
-import { ChainId, Token } from '@uniswap/sdk-core';
+import {ChainId, Token} from '@uniswap/sdk-core';
 import retry from 'async-retry';
 import Timeout from 'await-timeout';
-import { gql, GraphQLClient } from 'graphql-request';
+import {gql, GraphQLClient} from 'graphql-request';
 import _ from 'lodash';
 
-import { Logger } from '../util/log';
-import { IMetric } from '../util/metric';
-import { ProviderConfig } from '../provider';
+import {Logger} from '../util/log';
+import {IMetric} from '../util/metric';
+import {ProviderConfig} from '../provider';
 
 export interface V2SubgraphPool {
   id: string;
@@ -41,7 +41,7 @@ type RawV2SubgraphPool = {
   reserveUSD: string;
 };
 
-const SUBGRAPH_URL_BY_CHAIN: { [chainId in ChainId]?: string } = {
+const SUBGRAPH_URL_BY_CHAIN: {[chainId in ChainId]?: string} = {
   [ChainId.MAINNET]:
     'https://api.thegraph.com/subgraphs/name/ianlapham/uniswap-v2-dev',
 };
@@ -85,9 +85,12 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
       this.logger = {
         info: (msg, ...extra) => orig.info(`[${chainId}_V2] ${msg}`, ...extra),
         warn: (msg, ...extra) => orig.warn(`[${chainId}_V2] ${msg}`, ...extra),
-        error: (msg, ...extra) => orig.error(`[${chainId}_V2] ${msg}`, ...extra),
-        debug: (msg, ...extra) => orig.debug(`[${chainId}_V2] ${msg}`, ...extra),
-        fatal: (msg, ...extra) => orig.fatal(`[${chainId}_V2] ${msg}`, ...extra),
+        error: (msg, ...extra) =>
+          orig.error(`[${chainId}_V2] ${msg}`, ...extra),
+        debug: (msg, ...extra) =>
+          orig.debug(`[${chainId}_V2] ${msg}`, ...extra),
+        fatal: (msg, ...extra) =>
+          orig.fatal(`[${chainId}_V2] ${msg}`, ...extra),
       };
     }
     const subgraphUrl =
@@ -140,7 +143,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getFEIPoolsToken0($pageSize: Int!, $id: String, $feiToken: String!) {
             pairs(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 token0: $feiToken
@@ -156,7 +159,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             }
           }
         `,
-        variables: { feiToken: FEI },
+        variables: {feiToken: FEI},
       },
       {
         name: 'FEI pools (token1)',
@@ -164,7 +167,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getFEIPoolsToken1($pageSize: Int!, $id: String, $feiToken: String!) {
             pairs(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 token1: $feiToken
@@ -180,7 +183,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             }
           }
         `,
-        variables: { feiToken: FEI },
+        variables: {feiToken: FEI},
       },
       // 2. Virtual pair pools (only for BASE chain) - split into two queries
       ...(this.chainId === ChainId.BASE
@@ -191,7 +194,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             query getVirtualPoolsToken0($pageSize: Int!, $id: String, $virtualToken: String!) {
               pairs(
                 first: $pageSize
-                ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+                ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
                 where: {
                   id_gt: $id,
                   token0: $virtualToken
@@ -207,7 +210,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
               }
             }
           `,
-              variables: { virtualToken: virtualTokenAddress },
+              variables: {virtualToken: virtualTokenAddress},
             },
             {
               name: 'Virtual pair pools (token1)',
@@ -215,7 +218,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             query getVirtualPoolsToken1($pageSize: Int!, $id: String, $virtualToken: String!) {
               pairs(
                 first: $pageSize
-                ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+                ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
                 where: {
                   id_gt: $id,
                   token1: $virtualToken
@@ -231,7 +234,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
               }
             }
           `,
-              variables: { virtualToken: virtualTokenAddress },
+              variables: {virtualToken: virtualTokenAddress},
             },
           ]
         : []),
@@ -242,7 +245,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getHighTrackedReservePools($pageSize: Int!, $id: String, $threshold: String!) {
             pairs(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 trackedReserveETH_gt: $threshold
@@ -258,7 +261,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             }
           }
         `,
-        variables: { threshold: this.trackedEthThreshold.toString() },
+        variables: {threshold: this.trackedEthThreshold.toString()},
       },
       // 4. High untracked USD pools
       {
@@ -267,7 +270,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getHighUSDReservePools($pageSize: Int!, $id: String, $threshold: String!) {
             pairs(
               first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ``}
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 reserveUSD_gt: $threshold
@@ -283,7 +286,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             }
           }
         `,
-        variables: { threshold: this.untrackedUsdThreshold.toString() },
+        variables: {threshold: this.untrackedUsdThreshold.toString()},
       },
     ];
 
@@ -295,6 +298,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
         const timeout = new Timeout();
 
         const fetchPoolsForQuery = async (
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           queryConfig: any
         ): Promise<RawV2SubgraphPool[]> => {
           let lastId = '';
@@ -348,6 +352,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
               },
               {
                 retries: this.retries,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 onRetry: (err: any, retry: number) => {
                   retries += 1;
                   this.logger?.error(
@@ -394,15 +399,15 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
 
         try {
           // Fetch pools for each query in parallel
-          const poolPromises = queries.map((queryConfig) =>
+          const poolPromises = queries.map(queryConfig =>
             fetchPoolsForQuery(queryConfig)
           );
           const allPoolsArrays = await Promise.all(poolPromises);
 
           // Merge all results and deduplicate by pool ID
           const poolMap = new Map<string, RawV2SubgraphPool>();
-          allPoolsArrays.forEach((pools) => {
-            pools.forEach((pool) => {
+          allPoolsArrays.forEach(pools => {
+            pools.forEach(pool => {
               poolMap.set(pool.id, pool);
             });
           });
@@ -417,6 +422,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           });
           allPools = await Promise.race([getPoolsPromise, timerPromise]);
           return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (err: any) {
           this.logger?.error('Error fetching V2 Subgraph Pools.', {err});
           throw err;
@@ -426,6 +432,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
       },
       {
         retries: this.retries,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onRetry: (err: any, retry: number) => {
           outerRetries += 1;
           if (
@@ -434,7 +441,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             _.includes(err.message, 'indexed up to')
           ) {
             this.metric?.putMetric(
-              `SubgraphProvider.getPools.indexError`,
+              'SubgraphProvider.getPools.indexError',
               1,
               undefined,
               this.metricTags
@@ -445,7 +452,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             );
           }
           this.metric?.putMetric(
-            `SubgraphProvider.getPools.timeout`,
+            'SubgraphProvider.getPools.timeout',
             1,
             undefined,
             this.metricTags
@@ -460,7 +467,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
     );
 
     this.metric?.putMetric(
-      `SubgraphProvider.getPools.retries`,
+      'SubgraphProvider.getPools.retries',
       outerRetries,
       undefined,
       this.metricTags
@@ -469,16 +476,16 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
     // Apply the same filtering logic to ensure consistency
     const beforeFilter = Date.now();
     const poolsSanitized: V2SubgraphPool[] = allPools
-      .filter((pool) => {
+      .filter(pool => {
         return (
-          pool.token0.id == FEI ||
-          pool.token1.id == FEI ||
+          pool.token0.id === FEI ||
+          pool.token1.id === FEI ||
           this.isVirtualPairBaseV2Pool(pool) ||
           parseFloat(pool.trackedReserveETH) > this.trackedEthThreshold ||
           parseFloat(pool.reserveUSD) > this.untrackedUsdThreshold
         );
       })
-      .map((pool) => {
+      .map(pool => {
         return {
           id: pool.id.toLowerCase(),
           token0: {
@@ -493,11 +500,36 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
         };
       });
 
-    this.metric?.putMetric(`SubgraphProvider.getPools.filter.latency`, Date.now() - beforeFilter, undefined, this.metricTags);
-    this.metric?.putMetric(`SubgraphProvider.getPools.untracked.length`, poolsSanitized.length, undefined, this.metricTags);
-    this.metric?.putMetric(`SubgraphProvider.getPools.untracked.percent`, (poolsSanitized.length / allPools.length) * 100, undefined, this.metricTags);
-    this.metric?.putMetric(`SubgraphProvider.getPools`, 1, undefined, this.metricTags);
-    this.metric?.putMetric(`SubgraphProvider.getPools.latency`, Date.now() - beforeAll, undefined, this.metricTags);
+    this.metric?.putMetric(
+      'SubgraphProvider.getPools.filter.latency',
+      Date.now() - beforeFilter,
+      undefined,
+      this.metricTags
+    );
+    this.metric?.putMetric(
+      'SubgraphProvider.getPools.untracked.length',
+      poolsSanitized.length,
+      undefined,
+      this.metricTags
+    );
+    this.metric?.putMetric(
+      'SubgraphProvider.getPools.untracked.percent',
+      (poolsSanitized.length / allPools.length) * 100,
+      undefined,
+      this.metricTags
+    );
+    this.metric?.putMetric(
+      'SubgraphProvider.getPools',
+      1,
+      undefined,
+      this.metricTags
+    );
+    this.metric?.putMetric(
+      'SubgraphProvider.getPools.latency',
+      Date.now() - beforeAll,
+      undefined,
+      this.metricTags
+    );
 
     this.logger?.info(
       `Got ${allPools.length} V2 pools from the subgraph (after deduplication). ${poolsSanitized.length} after filtering`

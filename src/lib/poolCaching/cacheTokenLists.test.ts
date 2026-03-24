@@ -9,6 +9,7 @@ vi.mock('@aws-sdk/client-s3', () => ({
     send = sendMock;
   },
   PutObjectCommand: class MockPutObjectCommand {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(public readonly input: any) {}
   },
 }));

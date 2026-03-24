@@ -8,7 +8,7 @@ import {IMetric} from '../sor-providers/util/metric';
 import {
   ZORA_CREATOR_HOOK_ON_BASE_v1,
   ZORA_POST_HOOK_ON_BASE_v1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1,
+  ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1 as _ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1,
   ZORA_POST_HOOK_ON_BASE_v2_4_0,
   CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
   CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
@@ -27,7 +27,13 @@ const mockLogger: Logger = {
 class MockMetric extends IMetric {
   setProperty(_key: string, _value: unknown): void {}
   putDimensions(_dimensions: Record<string, string>): void {}
-  putMetric(_key: string, _value: number, _unit?: any, _tags?: Record<string, string>): void {}
+  putMetric(
+    _key: string,
+    _value: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _unit?: any,
+    _tags?: Record<string, string>
+  ): void {}
 }
 
 const mockMetric = new MockMetric();
@@ -39,8 +45,18 @@ function createPool(overrides: Partial<V4SubgraphPool> = {}): V4SubgraphPool {
     tickSpacing: '60',
     hooks: ADDRESS_ZERO,
     liquidity: '1000000',
-    token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'TokenA', decimals: '18'},
-    token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'TokenB', decimals: '18'},
+    token0: {
+      id: '0x0000000000000000000000000000000000000001',
+      symbol: 'A',
+      name: 'TokenA',
+      decimals: '18',
+    },
+    token1: {
+      id: '0x0000000000000000000000000000000000000002',
+      symbol: 'B',
+      name: 'TokenB',
+      decimals: '18',
+    },
     tvlETH: 10,
     tvlUSD: 20000,
     ...overrides,
@@ -50,7 +66,12 @@ function createPool(overrides: Partial<V4SubgraphPool> = {}): V4SubgraphPool {
 describe('v4HooksPoolsFiltering', () => {
   it('returns pools with ADDRESS_ZERO hooks', () => {
     const pools = [createPool({hooks: ADDRESS_ZERO, tvlETH: 5})];
-    const result = v4HooksPoolsFiltering(ChainId.MAINNET, pools, mockLogger, mockMetric);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      pools,
+      mockLogger,
+      mockMetric
+    );
     expect(result.length).toBe(1);
   });
 
@@ -59,30 +80,64 @@ describe('v4HooksPoolsFiltering', () => {
       createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: i + 1,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'A', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'B', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'A',
+          name: 'A',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'B',
+          name: 'B',
+          decimals: '18',
+        },
         feeTier: '3000',
       })
     );
-    const result = v4HooksPoolsFiltering(ChainId.MAINNET, pools, mockLogger, mockMetric);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      pools,
+      mockLogger,
+      mockMetric
+    );
     expect(result.length).toBe(15);
   });
 
   it('returns empty array for empty input', () => {
-    const result = v4HooksPoolsFiltering(ChainId.MAINNET, [], mockLogger, mockMetric);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [],
+      mockLogger,
+      mockMetric
+    );
     expect(result).toEqual([]);
   });
 
   it('handles pools with non-allowlisted hooks that have no swap permissions', () => {
     const pool = createPool({hooks: ADDRESS_ZERO, tvlETH: 100});
-    const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [pool],
+      mockLogger,
+      mockMetric
+    );
     expect(result.length).toBe(1);
   });
 
   it('filters pools by routability - non-routable pools excluded from top TVL', () => {
     const nonRoutableHook = '0x0000000000000000000000000000000000000080';
-    const pool = createPool({hooks: nonRoutableHook, tvlETH: 100, feeTier: '3000'});
-    const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+    const pool = createPool({
+      hooks: nonRoutableHook,
+      tvlETH: 100,
+      feeTier: '3000',
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [pool],
+      mockLogger,
+      mockMetric
+    );
     expect(result.length).toBe(0);
   });
 
@@ -90,16 +145,41 @@ describe('v4HooksPoolsFiltering', () => {
     const topTvlPool = createPool({
       hooks: ADDRESS_ZERO,
       tvlETH: 100,
-      token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'A', decimals: '18'},
-      token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'B', decimals: '18'},
+      token0: {
+        id: '0x0000000000000000000000000000000000000001',
+        symbol: 'A',
+        name: 'A',
+        decimals: '18',
+      },
+      token1: {
+        id: '0x0000000000000000000000000000000000000002',
+        symbol: 'B',
+        name: 'B',
+        decimals: '18',
+      },
     });
     const allowlistedPool = createPool({
       hooks: ADDRESS_ZERO,
       tvlETH: 0.5,
-      token0: {id: '0x0000000000000000000000000000000000000099', symbol: 'X', name: 'X', decimals: '18'},
-      token1: {id: '0x0000000000000000000000000000000000000098', symbol: 'Y', name: 'Y', decimals: '18'},
+      token0: {
+        id: '0x0000000000000000000000000000000000000099',
+        symbol: 'X',
+        name: 'X',
+        decimals: '18',
+      },
+      token1: {
+        id: '0x0000000000000000000000000000000000000098',
+        symbol: 'Y',
+        name: 'Y',
+        decimals: '18',
+      },
     });
-    const result = v4HooksPoolsFiltering(ChainId.MAINNET, [topTvlPool, allowlistedPool], mockLogger, mockMetric);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [topTvlPool, allowlistedPool],
+      mockLogger,
+      mockMetric
+    );
     expect(result.length).toBe(2);
   });
 
@@ -111,7 +191,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 0.0005,
         tvlUSD: 1,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // The pool is excluded from the priority queue (shouldNotAddV4Pool = true),
       // but it gets re-added via the allowlisted hooks path since ZORA hooks are in HOOKS_ADDRESSES_ALLOWLIST.
       // The pool should still appear in the result because of the allowlist.
@@ -124,7 +209,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 5,
         tvlUSD: 10000,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -134,7 +224,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 0.0001,
         tvlUSD: 0,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // Excluded from priority queue but re-added via allowlist
       expect(result.length).toBe(1);
     });
@@ -145,7 +240,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 1,
         tvlUSD: 2000,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -157,7 +257,12 @@ describe('v4HooksPoolsFiltering', () => {
       });
       // On MAINNET the Zora TVL filter does not apply (requires chainId === BASE).
       // However, the hook may still be excluded by the routability check if it has swap permissions.
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // The hook address has swap permissions, so it is non-routable on any chain
       expect(result.length).toBe(0);
     });
@@ -168,7 +273,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 0.0001,
         tvlUSD: 0,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // Excluded from priority queue due to low TVL, but re-added via allowlist
       expect(result.length).toBe(1);
     });
@@ -182,7 +292,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 0.0005,
         tvlUSD: 1,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // Excluded from priority queue but re-added via allowlist since Clanker hooks are allowlisted on BASE
       expect(result.length).toBe(1);
     });
@@ -193,7 +308,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 5,
         tvlUSD: 10000,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -203,7 +323,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 0,
         tvlUSD: 0,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // Excluded from priority queue but re-added via allowlist
       expect(result.length).toBe(1);
     });
@@ -214,7 +339,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 2,
         tvlUSD: 4000,
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -224,7 +354,12 @@ describe('v4HooksPoolsFiltering', () => {
         tvlETH: 0.001,
         tvlUSD: 0,
       });
-      const result = v4HooksPoolsFiltering(ChainId.UNICHAIN, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.UNICHAIN,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // Excluded from priority queue but re-added via allowlist
       expect(result.length).toBe(1);
     });
@@ -236,10 +371,25 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: ADDRESS_ZERO, symbol: 'ETH', name: 'Ethereum', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'B', decimals: '18'},
+        token0: {
+          id: ADDRESS_ZERO,
+          symbol: 'ETH',
+          name: 'Ethereum',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'B',
+          name: 'B',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -247,10 +397,25 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'A', decimals: '18'},
-        token1: {id: ADDRESS_ZERO, symbol: 'ETH', name: 'Ethereum', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'A',
+          name: 'A',
+          decimals: '18',
+        },
+        token1: {
+          id: ADDRESS_ZERO,
+          symbol: 'ETH',
+          name: 'Ethereum',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -258,11 +423,26 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: ADDRESS_ZERO, symbol: 'ETH', name: 'Ethereum', decimals: '18'},
-        token1: {id: ADDRESS_ZERO, symbol: 'ETH', name: 'Ethereum', decimals: '18'},
+        token0: {
+          id: ADDRESS_ZERO,
+          symbol: 'ETH',
+          name: 'Ethereum',
+          decimals: '18',
+        },
+        token1: {
+          id: ADDRESS_ZERO,
+          symbol: 'ETH',
+          name: 'Ethereum',
+          decimals: '18',
+        },
       });
       // This may fail in Token construction but the catch block handles it
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBeGreaterThanOrEqual(0);
     });
   });
@@ -273,10 +453,25 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'A', decimals: 'invalid'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'B', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'A',
+          name: 'A',
+          decimals: 'invalid',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'B',
+          name: 'B',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // The catch block should handle the NaN decimals and still process the pool
       expect(result.length).toBe(1);
       expect(mockLogger.error).toHaveBeenCalledWith(
@@ -288,10 +483,25 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'A', decimals: '-1'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'B', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'A',
+          name: 'A',
+          decimals: '-1',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'B',
+          name: 'B',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -300,10 +510,25 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: ADDRESS_ZERO, symbol: 'ETH', name: 'Ethereum', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'B', name: 'B', decimals: 'bad'},
+        token0: {
+          id: ADDRESS_ZERO,
+          symbol: 'ETH',
+          name: 'Ethereum',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'B',
+          name: 'B',
+          decimals: 'bad',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
 
@@ -312,10 +537,25 @@ describe('v4HooksPoolsFiltering', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'A', name: 'A', decimals: 'bad'},
-        token1: {id: ADDRESS_ZERO, symbol: 'ETH', name: 'Ethereum', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'A',
+          name: 'A',
+          decimals: 'bad',
+        },
+        token1: {
+          id: ADDRESS_ZERO,
+          symbol: 'ETH',
+          name: 'Ethereum',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
     });
   });
@@ -333,7 +573,12 @@ describe('v4HooksPoolsFiltering', () => {
         feeTier: '2000000',
         tvlETH: 100,
       });
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(0);
     });
   });
@@ -346,10 +591,25 @@ describe('v4HooksPoolsFiltering', () => {
         hooks: ADDRESS_ZERO,
         tvlETH: 0,
         tvlUSD: 0,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'ETH', name: 'ETH', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'WETH', name: 'WETH', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'ETH',
+          name: 'ETH',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'WETH',
+          name: 'WETH',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.OPTIMISM, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.OPTIMISM,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
       expect(pool.tvlETH).toBe(826);
       expect(pool.tvlUSD).toBe(1482475);
@@ -361,10 +621,25 @@ describe('v4HooksPoolsFiltering', () => {
         hooks: ADDRESS_ZERO,
         tvlETH: 0,
         tvlUSD: 0,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'ETH', name: 'ETH', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'WETH', name: 'WETH', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'ETH',
+          name: 'ETH',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'WETH',
+          name: 'WETH',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.UNICHAIN, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.UNICHAIN,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
       expect(pool.tvlETH).toBe(33482);
       expect(pool.tvlUSD).toBe(60342168);
@@ -376,10 +651,25 @@ describe('v4HooksPoolsFiltering', () => {
         hooks: ADDRESS_ZERO,
         tvlETH: 0,
         tvlUSD: 0,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'ETH', name: 'ETH', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'WETH', name: 'WETH', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'ETH',
+          name: 'ETH',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'WETH',
+          name: 'WETH',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
       expect(pool.tvlETH).toBe(6992);
       expect(pool.tvlUSD).toBe(12580000);
@@ -391,10 +681,25 @@ describe('v4HooksPoolsFiltering', () => {
         hooks: ADDRESS_ZERO,
         tvlETH: 0,
         tvlUSD: 0,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'ETH', name: 'ETH', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'WETH', name: 'WETH', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'ETH',
+          name: 'ETH',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'WETH',
+          name: 'WETH',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.ARBITRUM_ONE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.ARBITRUM_ONE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
       expect(pool.tvlETH).toBe(23183);
       expect(pool.tvlUSD).toBe(41820637);
@@ -406,10 +711,25 @@ describe('v4HooksPoolsFiltering', () => {
         hooks: ADDRESS_ZERO,
         tvlETH: 0,
         tvlUSD: 0,
-        token0: {id: '0x0000000000000000000000000000000000000001', symbol: 'flETH', name: 'flETH', decimals: '18'},
-        token1: {id: '0x0000000000000000000000000000000000000002', symbol: 'FLNCH', name: 'FLNCH', decimals: '18'},
+        token0: {
+          id: '0x0000000000000000000000000000000000000001',
+          symbol: 'flETH',
+          name: 'flETH',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x0000000000000000000000000000000000000002',
+          symbol: 'FLNCH',
+          name: 'FLNCH',
+          decimals: '18',
+        },
       });
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       expect(result.length).toBe(1);
       expect(pool.tvlETH).toBe(1000);
       expect(pool.tvlUSD).toBe(5500000);
@@ -441,12 +761,27 @@ describe('v4HooksPoolsFiltering', () => {
         createPool({
           hooks: ADDRESS_ZERO,
           tvlETH: (i + 1) * 10,
-          token0: {id: '0x000000000000000000000000000000000000000a', symbol: 'X', name: 'X', decimals: '18'},
-          token1: {id: '0x000000000000000000000000000000000000000b', symbol: 'Y', name: 'Y', decimals: '18'},
+          token0: {
+            id: '0x000000000000000000000000000000000000000a',
+            symbol: 'X',
+            name: 'X',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x000000000000000000000000000000000000000b',
+            symbol: 'Y',
+            name: 'Y',
+            decimals: '18',
+          },
           feeTier: '500',
         })
       );
-      const result = v4HooksPoolsFiltering(ChainId.MAINNET, pools, mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        pools,
+        mockLogger,
+        mockMetric
+      );
       // All 12 appear: 10 from priority queue + 2 re-added via allowlist (ADDRESS_ZERO is allowlisted)
       expect(result.length).toBe(12);
     });
@@ -460,41 +795,83 @@ describe('v4HooksPoolsFiltering', () => {
         createPool({
           hooks: ADDRESS_ZERO,
           tvlETH: (i + 1) * 100,
-          token0: {id: '0x000000000000000000000000000000000000000a', symbol: 'X', name: 'X', decimals: '18'},
-          token1: {id: '0x000000000000000000000000000000000000000b', symbol: 'Y', name: 'Y', decimals: '18'},
+          token0: {
+            id: '0x000000000000000000000000000000000000000a',
+            symbol: 'X',
+            name: 'X',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x000000000000000000000000000000000000000b',
+            symbol: 'Y',
+            name: 'Y',
+            decimals: '18',
+          },
           feeTier: '500',
         })
       );
 
       // Pick an allowlisted hook for BASE
-      const allowlistedHookAddress = (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ?? [])[1]; // FLAUNCH_POSM_V1_ON_BASE
+      const allowlistedHookAddress = (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ??
+        [])[1]; // FLAUNCH_POSM_V1_ON_BASE
       // This pool has different token pair so it won't be in the same group
       const allowlistedPool = createPool({
         hooks: allowlistedHookAddress!,
         tvlETH: 0.01,
-        token0: {id: '0x000000000000000000000000000000000000cc01', symbol: 'C', name: 'C', decimals: '18'},
-        token1: {id: '0x000000000000000000000000000000000000cc02', symbol: 'D', name: 'D', decimals: '18'},
+        token0: {
+          id: '0x000000000000000000000000000000000000cc01',
+          symbol: 'C',
+          name: 'C',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x000000000000000000000000000000000000cc02',
+          symbol: 'D',
+          name: 'D',
+          decimals: '18',
+        },
         feeTier: '3000',
       });
 
       const allPools = [...groupPools, allowlistedPool];
-      const result = v4HooksPoolsFiltering(ChainId.BASE, allPools, mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        allPools,
+        mockLogger,
+        mockMetric
+      );
       // Should include all 10 group pools + the allowlisted pool
       expect(result.length).toBe(11);
     });
 
     it('does not duplicate allowlisted pool already in top TVL set', () => {
       // A pool with allowlisted hook that is ALSO in the top TVL set
-      const allowlistedHookAddress = (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ?? [])[1]!;
+      const allowlistedHookAddress = (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ??
+        [])[1]!;
       const pool = createPool({
         hooks: allowlistedHookAddress,
         tvlETH: 500,
-        token0: {id: '0x000000000000000000000000000000000000cc01', symbol: 'C', name: 'C', decimals: '18'},
-        token1: {id: '0x000000000000000000000000000000000000cc02', symbol: 'D', name: 'D', decimals: '18'},
+        token0: {
+          id: '0x000000000000000000000000000000000000cc01',
+          symbol: 'C',
+          name: 'C',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x000000000000000000000000000000000000cc02',
+          symbol: 'D',
+          name: 'D',
+          decimals: '18',
+        },
         feeTier: '3000',
       });
 
-      const result = v4HooksPoolsFiltering(ChainId.BASE, [pool], mockLogger, mockMetric);
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
       // Should only appear once
       expect(result.length).toBe(1);
     });

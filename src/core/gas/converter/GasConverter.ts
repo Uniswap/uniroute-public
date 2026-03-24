@@ -202,8 +202,7 @@ export class GasConverter implements IGasConverter {
       const gasCostInUSD =
         wrappedNativeTokenInfo.priceUSD *
         Number(totalGasCostNativeCurrency.toExact());
-      const gasCostInQuoteTokenDecimal =
-        gasCostInUSD / quoteTokenInfo.priceUSD;
+      const gasCostInQuoteTokenDecimal = gasCostInUSD / quoteTokenInfo.priceUSD;
       return BigInt(
         Math.floor(gasCostInQuoteTokenDecimal * 10 ** quoteTokenInfo.decimals)
       );

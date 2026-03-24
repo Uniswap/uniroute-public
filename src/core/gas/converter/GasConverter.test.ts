@@ -527,6 +527,7 @@ describe('GasConverter', () => {
       // gasCostInUSD = 2000 * 0.00194 = 3.88
       // gasCostInQuoteToken = (3.88 / 15) * 10^18 ≈ 2.586e17
       // Use the same computation path as the implementation to avoid floating point divergence
+      // eslint-disable-next-line @typescript-eslint/no-non-null-asserted-optional-chain
       const gasCostInUSD = quoteSplit.quotes[0].gasDetails?.gasCostInUSD!;
       const expected = BigInt(Math.floor((gasCostInUSD / 15) * 10 ** 18));
       expect(quoteSplit.quotes[0].gasDetails?.gasCostInQuoteToken).toBe(
@@ -657,8 +658,7 @@ describe('GasConverter', () => {
     it('should fall back to pool-based conversion when quoteToken has no priceUSD', async () => {
       const chainId = ChainId.MAINNET;
       const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
-      const quoteTokenAddress =
-        '0x6B175474E89094C44Da98b954EedeAC495271d0F'; // DAI
+      const quoteTokenAddress = '0x6B175474E89094C44Da98b954EedeAC495271d0F'; // DAI
       const tokensInfo = new Map<string, Erc20Token | null>([
         [
           wrappedNative.address,
@@ -699,14 +699,16 @@ describe('GasConverter', () => {
       vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
       vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
 
-      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} =
-        await import('@uniswap/sdk-core');
+      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} = await import(
+        '@uniswap/sdk-core'
+      );
       const mockQuoteResult = CurrencyAmountSDK.fromRawAmount(
         new TokenSDK(chainId, quoteTokenAddress, 18, 'DAI'),
         '5000000000000000000' // 5 DAI
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       vi.mocked(getQuoteThroughNativePool).mockReturnValue(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         mockQuoteResult as any
       );
 
@@ -780,14 +782,16 @@ describe('GasConverter', () => {
       vi.mocked(v2PoolRepository.getPools).mockResolvedValue([]);
       vi.mocked(v4PoolRepository.getPools).mockResolvedValue([]);
 
-      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} =
-        await import('@uniswap/sdk-core');
+      const {CurrencyAmount: CurrencyAmountSDK, Token: TokenSDK} = await import(
+        '@uniswap/sdk-core'
+      );
       const mockQuoteResult = CurrencyAmountSDK.fromRawAmount(
         new TokenSDK(chainId, usdcAddress, 6, 'USDC'),
         '3880000' // 3.88 USDC
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
       vi.mocked(getQuoteThroughNativePool).mockReturnValue(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         mockQuoteResult as any
       );
 
@@ -824,8 +828,7 @@ describe('GasConverter', () => {
     it('should fall back in getGasCostInQuoteTokenBasedOnGasCostInWei when quoteToken has no priceUSD', async () => {
       const chainId = ChainId.MAINNET;
       const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
-      const quoteTokenAddress =
-        '0x6B175474E89094C44Da98b954EedeAC495271d0F'; // DAI
+      const quoteTokenAddress = '0x6B175474E89094C44Da98b954EedeAC495271d0F'; // DAI
       const tokensInfo = new Map<string, Erc20Token | null>([
         [
           wrappedNative.address,

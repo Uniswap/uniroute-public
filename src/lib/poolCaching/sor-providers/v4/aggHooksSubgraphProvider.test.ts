@@ -10,10 +10,12 @@ const MOCK_HOOK = '0xabcdef0000000000000000000000000000000001';
 const mockRequest = vi.fn();
 vi.mock('graphql-request', () => {
   // Must use regular function (not arrow) so it can be called with `new`
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MockGraphQLClient = vi.fn(function MockGraphQLClient(this: any) {
     this.request = mockRequest;
   });
   return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     gql: vi.fn((strings: TemplateStringsArray, ...vals: any[]) =>
       strings.reduce(
         (acc: string, str: string, i: number) => acc + str + (vals[i] ?? ''),
@@ -29,6 +31,7 @@ const mockPseudoTVL = vi.fn();
 vi.mock('ethers', async importOriginal => {
   const actual = await importOriginal<typeof import('ethers')>();
   // Must use regular function so it can be called with `new`
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MockContract = vi.fn(function MockContract(this: any) {
     this.pseudoTotalValueLocked = mockPseudoTVL;
   });
@@ -41,6 +44,7 @@ vi.mock('ethers', async importOriginal => {
 });
 
 // minimal stand-in for ethers.providers.BaseProvider (not called in our tests)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockEthersProvider = {} as any;
 
 // ---- helpers ----
@@ -62,6 +66,7 @@ function makeProvider(hookAddresses = [MOCK_HOOK]) {
  * token0: WETH (18 decimals, derivedETH=1.0)
  * token1: USDC (6 decimals, derivedETH=0.0005)
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function makeRawPool(id: string, hooks = MOCK_HOOK): any {
   return {
     id,
@@ -88,12 +93,14 @@ function makeRawPool(id: string, hooks = MOCK_HOOK): any {
   };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function makeBundleResponse(ethPriceUSD = '2000'): any {
   return {bundle: {ethPriceUSD}};
 }
 
 // Set up mock calls for a scenario with exactly `pools` in the first page.
 // Pattern: page1 → given pools, page2 → empty (stops pagination), then bundle.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function setupSinglePageMocks(pools: any[], ethPriceUSD = '2000') {
   mockRequest
     .mockResolvedValueOnce({pools}) // page 1
@@ -322,6 +329,7 @@ describe('AggHooksSubgraphProvider', () => {
         },
       });
       // derivedETH must NOT be present on the returned pool tokens
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((pools[0]!.token0 as any).derivedETH).toBeUndefined();
     });
 

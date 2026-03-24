@@ -2008,5 +2008,4 @@ export class UniRouteBL implements IUniRoutedBL {
     if (priceImpact === undefined) return '0';
     return Math.max(-100, Math.min(100, priceImpact)).toString();
   }
-
 }

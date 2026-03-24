@@ -2,13 +2,13 @@
  * Ported from @uniswap/smart-order-router/src/providers/v3/subgraph-provider.ts
  */
 
-import { Protocol } from '@uniswap/router-sdk';
-import { ChainId, Token } from '@uniswap/sdk-core';
+import {Protocol} from '@uniswap/router-sdk';
+import {ChainId, Token} from '@uniswap/sdk-core';
 
-import { Logger } from '../util/log';
-import { IMetric } from '../util/metric';
-import { ProviderConfig } from '../provider';
-import { SubgraphProvider } from '../subgraphProvider';
+import {Logger} from '../util/log';
+import {IMetric} from '../util/metric';
+import {ProviderConfig} from '../provider';
+import {SubgraphProvider} from '../subgraphProvider';
 
 export interface V3SubgraphPool {
   id: string;
@@ -41,7 +41,7 @@ export type V3RawSubgraphPool = {
   totalValueLockedUSDUntracked: string;
 };
 
-const SUBGRAPH_URL_BY_CHAIN: { [chainId in ChainId]?: string } = {
+const SUBGRAPH_URL_BY_CHAIN: {[chainId in ChainId]?: string} = {
   [ChainId.MAINNET]:
     'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3',
   [ChainId.OPTIMISM]:

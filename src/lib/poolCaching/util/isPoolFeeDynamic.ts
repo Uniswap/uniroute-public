@@ -2,8 +2,8 @@
  * Ported from @uniswap/smart-order-router/src/providers/v4/pool-provider.ts
  */
 
-import { Currency } from '@uniswap/sdk-core';
-import { DYNAMIC_FEE_FLAG, Pool } from '@uniswap/v4-sdk';
+import {Currency} from '@uniswap/sdk-core';
+import {DYNAMIC_FEE_FLAG, Pool} from '@uniswap/v4-sdk';
 
 export function isPoolFeeDynamic(
   tokenA: Currency,

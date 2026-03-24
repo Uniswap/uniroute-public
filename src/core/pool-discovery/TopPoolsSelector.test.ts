@@ -5,7 +5,7 @@ import {
   getPoolTVL,
   buildTokenPoolIndex,
 } from './TopPoolsSelector';
-import {AGG_HOOKS_ON_MAINNET} from 'src/lib/poolCaching/util/hooksAddressesAllowlist';
+import {AGG_HOOKS_ON_MAINNET as _AGG_HOOKS_ON_MAINNET} from 'src/lib/poolCaching/util/hooksAddressesAllowlist';
 import {ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';

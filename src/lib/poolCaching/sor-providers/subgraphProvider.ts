@@ -246,6 +246,7 @@ export abstract class SubgraphProvider<
         const timeout = new Timeout();
 
         const fetchPoolsForQuery = async (
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           queryConfig: any
         ): Promise<TRawSubgraphPool[]> => {
           let lastId = '';
@@ -337,6 +338,7 @@ export abstract class SubgraphProvider<
           });
           allPools = await Promise.race([getPoolsPromise, timerPromise]);
           return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (err: any) {
           this.logger.error(`Error fetching ${this.protocol} Subgraph Pools.`, {
             err,
@@ -348,6 +350,7 @@ export abstract class SubgraphProvider<
       },
       {
         retries: this.retries,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onRetry: (err: any, retry: number) => {
           retries += 1;
           if (

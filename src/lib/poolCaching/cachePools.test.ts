@@ -12,14 +12,16 @@ vi.mock('@aws-sdk/client-s3', () => ({
     send = sendMock;
   },
   PutObjectCommand: class MockPutObjectCommand {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(public readonly input: any) {}
   },
 }));
 
 // We need a mutable reference so each test can override the return value
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mockChainProtocols: any[] = [];
 
-vi.mock('./cacheConfig', async (importOriginal) => {
+vi.mock('./cacheConfig', async importOriginal => {
   const original = await importOriginal<typeof import('./cacheConfig')>();
   return {
     ...original,
@@ -29,6 +31,7 @@ vi.mock('./cacheConfig', async (importOriginal) => {
 
 // Mock v4HooksPoolsFiltering to pass through pools (avoids importing full dependency chain)
 vi.mock('./util/v4HooksPoolsFiltering', () => ({
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   v4HooksPoolsFiltering: (_chainId: any, pools: any[]) => pools,
 }));
 
@@ -72,7 +75,13 @@ function createMockLogger(): Logger {
 class MockMetric extends IMetric {
   setProperty(_key: string, _value: unknown): void {}
   putDimensions(_dimensions: Record<string, string>): void {}
-  putMetric(_key: string, _value: number, _unit?: any, _tags?: Record<string, string>): void {}
+  putMetric(
+    _key: string,
+    _value: number,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    _unit?: any,
+    _tags?: Record<string, string>
+  ): void {}
 }
 
 function makePool(id: string, token0Id: string, token1Id: string) {
@@ -98,7 +107,12 @@ function makeV3Pool(id: string, token0Id: string, token1Id: string) {
   };
 }
 
-function makeV4Pool(id: string, hooks: string, token0Id: string, token1Id: string) {
+function makeV4Pool(
+  id: string,
+  hooks: string,
+  token0Id: string,
+  token1Id: string
+) {
   return {
     id,
     feeTier: '3000',
@@ -129,11 +143,15 @@ describe('cacheAllPools', () => {
   });
 
   it('completes successfully with empty chainProtocols', async () => {
-    await expect(cacheAllPools(mockLogger, mockMetric, config)).resolves.toBeUndefined();
+    await expect(
+      cacheAllPools(mockLogger, mockMetric, config)
+    ).resolves.toBeUndefined();
   });
 
   it('completes with custom batch size', async () => {
-    await expect(cacheAllPools(mockLogger, mockMetric, config, 3)).resolves.toBeUndefined();
+    await expect(
+      cacheAllPools(mockLogger, mockMetric, config, 3)
+    ).resolves.toBeUndefined();
   });
 
   // --- V2 MAINNET special case ---
@@ -142,7 +160,11 @@ describe('cacheAllPools', () => {
       const pools = [
         makePool('0xabc123', '0x1111', '0x2222'),
         // Include a pool address that should be filtered out
-        makePool('0x029c9f16d219486305716f8c623739f9c75ceabd', '0x3333', '0x4444'),
+        makePool(
+          '0x029c9f16d219486305716f8c623739f9c75ceabd',
+          '0x3333',
+          '0x4444'
+        ),
       ];
       mockChainProtocols = [
         {
@@ -170,9 +192,17 @@ describe('cacheAllPools', () => {
       const pools = [
         makeV3Pool('0xgoodpool', '0x1111', '0x2222'),
         // Pool with filtered token0
-        makeV3Pool('0xbadtoken', '0xd46ba6d942050d489dbd938a2c909a5d5039a161', '0x2222'),
+        makeV3Pool(
+          '0xbadtoken',
+          '0xd46ba6d942050d489dbd938a2c909a5d5039a161',
+          '0x2222'
+        ),
         // Pool with filtered pool id
-        makeV3Pool('0x0f681f10ab1aa1cde04232a199fe3c6f2652a80c', '0x1111', '0x2222'),
+        makeV3Pool(
+          '0x0f681f10ab1aa1cde04232a199fe3c6f2652a80c',
+          '0x1111',
+          '0x2222'
+        ),
       ];
       mockChainProtocols = [
         {
@@ -187,8 +217,11 @@ describe('cacheAllPools', () => {
 
       expect(sendMock).toHaveBeenCalled();
       // Should log filtering messages for the 2 filtered pools
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const filterCalls = (mockLogger.info as any).mock.calls.filter(
-        (c: any[]) => typeof c[0] === 'string' && c[0].includes('Filtering out pool')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (c: any[]) =>
+          typeof c[0] === 'string' && c[0].includes('Filtering out pool')
       );
       expect(filterCalls.length).toBe(2);
     });
@@ -198,7 +231,12 @@ describe('cacheAllPools', () => {
   describe('V4 protocol', () => {
     it('processes V4 UNICHAIN pools with manually included ETH/WETH pool', async () => {
       const pools = [
-        makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222'),
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
       ];
       mockChainProtocols = [
         {
@@ -214,7 +252,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 OPTIMISM pools with manually included ETH/WETH pool', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -229,7 +274,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 BASE pools with manually included ETH/WETH and graduation hooks', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -245,7 +297,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 ARBITRUM_ONE pools with manually included ETH/WETH pool', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -260,7 +319,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 MAINNET pools with manually included ETH/WETH pool', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -275,7 +341,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 MONAD pools with manually included MON/WMON pool', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -290,8 +363,20 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 with eulerHooksProvider that returns hooks and pools', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
-      const eulerPool = makeV4Pool('0xeuler', '0x0000000000000000000000000000000000000000', '0xaaaa', '0xbbbb');
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
+      const eulerPool = makeV4Pool(
+        '0xeuler',
+        '0x0000000000000000000000000000000000000000',
+        '0xaaaa',
+        '0xbbbb'
+      );
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -310,7 +395,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 with eulerHooksProvider that returns null pool for a hook', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -329,7 +421,14 @@ describe('cacheAllPools', () => {
     });
 
     it('processes V4 with eulerHooksProvider that returns null hooks', async () => {
-      const pools = [makeV4Pool('0xsomeid', '0x0000000000000000000000000000000000000000', '0x1111', '0x2222')];
+      const pools = [
+        makeV4Pool(
+          '0xsomeid',
+          '0x0000000000000000000000000000000000000000',
+          '0x1111',
+          '0x2222'
+        ),
+      ];
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
@@ -390,12 +489,16 @@ describe('cacheAllPools', () => {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
           timeout: 90000,
-          provider: {getPools: vi.fn().mockRejectedValue(new Error('subgraph down'))},
+          provider: {
+            getPools: vi.fn().mockRejectedValue(new Error('subgraph down')),
+          },
         },
       ];
 
       // Should not throw because Promise.allSettled is used
-      await expect(cacheAllPools(mockLogger, mockMetric, config)).resolves.toBeUndefined();
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toBeUndefined();
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to cache pools'),
         expect.anything()
@@ -433,7 +536,11 @@ describe('cacheAllPools', () => {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
           timeout: 90000,
-          provider: {getPools: vi.fn().mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')])},
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
         },
         {
           protocol: Protocol.V3,
@@ -445,11 +552,17 @@ describe('cacheAllPools', () => {
           protocol: Protocol.V2,
           chainId: ChainId.ARBITRUM_ONE,
           timeout: 90000,
-          provider: {getPools: vi.fn().mockResolvedValue([makePool('0xbbb', '0x3333', '0x4444')])},
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xbbb', '0x3333', '0x4444')]),
+          },
         },
       ];
 
-      await expect(cacheAllPools(mockLogger, mockMetric, config, 2)).resolves.toBeUndefined();
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config, 2)
+      ).resolves.toBeUndefined();
       // First batch: polygon V2 succeeds, polygon V3 fails
       // Second batch: arbitrum V2 succeeds
       expect(sendMock).toHaveBeenCalledTimes(2);
@@ -464,7 +577,11 @@ describe('cacheAllPools', () => {
         protocol: Protocol.V2,
         chainId,
         timeout: 90000,
-        provider: {getPools: vi.fn().mockResolvedValue([makePool('0x' + chainId, '0x1111', '0x2222')])},
+        provider: {
+          getPools: vi
+            .fn()
+            .mockResolvedValue([makePool('0x' + chainId, '0x1111', '0x2222')]),
+        },
       });
       mockChainProtocols = [
         makeEntry(ChainId.MAINNET),

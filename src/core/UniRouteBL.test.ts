@@ -688,12 +688,18 @@ describe('UniRouteBL', () => {
       await uniRouteBL.quote(ctx, uniswapRequest);
 
       // The external protocol request must NOT get a cache hit from the Uniswap cache
-      const externalFirstResponse = await uniRouteBL.quote(ctx, externalRequest);
+      const externalFirstResponse = await uniRouteBL.quote(
+        ctx,
+        externalRequest
+      );
       expect(externalFirstResponse.hitsCachedRoutes).toBe(false);
 
       // After the above call, the external protocol cache is populated
       // The second external protocol call must hit the external cache, not the Uniswap one
-      const externalSecondResponse = await uniRouteBL.quote(ctx, externalRequest);
+      const externalSecondResponse = await uniRouteBL.quote(
+        ctx,
+        externalRequest
+      );
       expect(externalSecondResponse.hitsCachedRoutes).toBe(true);
     });
   });

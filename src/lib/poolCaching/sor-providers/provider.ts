@@ -2,7 +2,7 @@
  * Ported from @uniswap/smart-order-router/src/providers/provider.ts
  */
 
-import { UniversalRouterVersion } from '@uniswap/universal-router-sdk';
+import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 
 export type ProviderConfig = {
   /**

@@ -230,6 +230,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
           rawPools = resolved.pools;
           ethPriceUSD = resolved.ethPriceUSD;
           return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (err: any) {
           this.logger?.error(
             `Error fetching ${this.protocol} AGG Hooks Subgraph Pools.`,
@@ -242,6 +243,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
       },
       {
         retries: this.retries,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onRetry: (err: any, retry: number) => {
           retries += 1;
           if (
@@ -349,6 +351,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
             undefined,
             this.metricTags
           );
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (err: any) {
           this.logger?.warn(
             `Failed pseudoTotalValueLocked for pool ${rawPool.id} hook ${rawPool.hooks}; keeping subgraph TVL`,

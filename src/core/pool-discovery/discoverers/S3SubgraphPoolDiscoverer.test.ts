@@ -328,11 +328,10 @@ describe('S3SubgraphPoolDiscoverer', () => {
     ])(
       'should throw for external protocol %s since UniRoutesRepository passes Protocol.V4 instead',
       async protocol => {
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore - protected method access for testing
-        await expect(discoverer._getPools(ChainId.MAINNET, protocol, mockContext)).rejects.toThrow(
-          'Unsupported protocol'
-        );
+        await expect(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (discoverer as any)._getPools(ChainId.MAINNET, protocol, mockContext)
+        ).rejects.toThrow('Unsupported protocol');
       }
     );
   });

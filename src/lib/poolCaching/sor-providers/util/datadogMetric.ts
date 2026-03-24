@@ -67,7 +67,12 @@ export class DatadogPoolCachingMetric extends IMetric {
     Object.assign(this.dimensions, dimensions);
   }
 
-  putMetric(key: string, value: number, unit?: MetricLoggerUnit, extraTags?: Record<string, string>): void {
+  putMetric(
+    key: string,
+    value: number,
+    unit?: MetricLoggerUnit,
+    extraTags?: Record<string, string>
+  ): void {
     // Normalize key for Datadog: replace dots with underscores in the metric-specific part
     // but keep the pool_caching prefix clean
     const metricName = `pool_caching.${key.replace(/\./g, '_')}`;

@@ -3,7 +3,11 @@ import {DatadogPoolCachingMetric} from './datadogMetric';
 import {MetricLoggerUnit} from './metric';
 import type {IMetrics} from '@uniswap/lib-observability';
 
-function createMockMetrics(): IMetrics & {calls: Record<string, Array<{name: string; val: number; opts: any}>>} {
+function createMockMetrics(): IMetrics & {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  calls: Record<string, Array<{name: string; val: number; opts: any}>>;
+} {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const calls: Record<string, Array<{name: string; val: number; opts: any}>> = {
     count: [],
     hist: [],
@@ -97,15 +101,24 @@ describe('DatadogPoolCachingMetric', () => {
   it('normalizes dots in metric keys to underscores', () => {
     const mock = createMockMetrics();
     const metric = new DatadogPoolCachingMetric(mock);
-    metric.putMetric('CachePools.getPools.latency', 100, MetricLoggerUnit.Milliseconds);
-    expect(mock.calls.timer[0]!.name).toBe('pool_caching.CachePools_getPools_latency');
+    metric.putMetric(
+      'CachePools.getPools.latency',
+      100,
+      MetricLoggerUnit.Milliseconds
+    );
+    expect(mock.calls.timer[0]!.name).toBe(
+      'pool_caching.CachePools_getPools_latency'
+    );
   });
 
   it('merges extraTags into tags', () => {
     const mock = createMockMetrics();
     const metric = new DatadogPoolCachingMetric(mock);
     metric.putDimensions({env: 'prod'});
-    metric.putMetric('CachePools.getPools.error', 1, MetricLoggerUnit.Count, {chainId: '1', protocol: 'V3'});
+    metric.putMetric('CachePools.getPools.error', 1, MetricLoggerUnit.Count, {
+      chainId: '1',
+      protocol: 'V3',
+    });
     expect(mock.calls.count[0]!.opts).toEqual({
       tags: ['env:prod', 'chainId:1', 'protocol:V3'],
     });

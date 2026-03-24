@@ -2,13 +2,13 @@
  * Ported from @uniswap/smart-order-router/src/providers/v4/subgraph-provider.ts
  */
 
-import { Protocol } from '@uniswap/router-sdk';
-import { ChainId, Currency } from '@uniswap/sdk-core';
+import {Protocol} from '@uniswap/router-sdk';
+import {ChainId, Currency} from '@uniswap/sdk-core';
 
-import { Logger } from '../util/log';
-import { IMetric } from '../util/metric';
-import { ProviderConfig } from '../provider';
-import { SubgraphProvider } from '../subgraphProvider';
+import {Logger} from '../util/log';
+import {IMetric} from '../util/metric';
+import {ProviderConfig} from '../provider';
+import {SubgraphProvider} from '../subgraphProvider';
 
 export interface V4SubgraphPool {
   id: string; // v4 pool id is the internal PoolId from pool manager
@@ -55,7 +55,7 @@ export type V4RawSubgraphPool = {
   totalValueLockedUSDUntracked: string;
 };
 
-export const SUBGRAPH_URL_BY_CHAIN: { [chainId in ChainId]?: string } = {
+export const SUBGRAPH_URL_BY_CHAIN: {[chainId in ChainId]?: string} = {
   [ChainId.SEPOLIA]: '',
 };
 

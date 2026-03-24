@@ -38,5 +38,10 @@ export abstract class IMetric {
 
   abstract putDimensions(dimensions: Record<string, string>): void;
 
-  abstract putMetric(key: string, value: number, unit?: MetricLoggerUnit, tags?: Record<string, string>): void;
+  abstract putMetric(
+    key: string,
+    value: number,
+    unit?: MetricLoggerUnit,
+    tags?: Record<string, string>
+  ): void;
 }
