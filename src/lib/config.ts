@@ -1,4 +1,5 @@
 import {getEnv} from './otherUtils';
+import {parsePositiveIntEnvOrDefault} from './envParsing';
 
 export const UniRouteServiceName = 'uniroute';
 
@@ -13,6 +14,20 @@ export enum LambdaType {
 }
 
 export const DefaultSlippageToleranceForAsync = __PLACEHOLDER__;
+
+const DEFAULT_ALL_POOLS_CACHE_ENTRY_TTL_SECONDS = __PLACEHOLDER__ * __PLACEHOLDER__;
+const DEFAULT_TOKEN_IN_OUT_POOLS_CACHE_ENTRY_TTL_SECONDS = __PLACEHOLDER__ * __PLACEHOLDER__;
+
+const getPoolDiscoveryCacheTtls = () => ({
+  allPoolsCacheEntryTtlSeconds: parsePositiveIntEnvOrDefault(
+    'POOL_DISCOVERY_ALL_POOLS_CACHE_TTL_SECONDS',
+    DEFAULT_ALL_POOLS_CACHE_ENTRY_TTL_SECONDS
+  ),
+  tokenInOutPoolsCacheEntryTtlSeconds: parsePositiveIntEnvOrDefault(
+    'POOL_DISCOVERY_TOKEN_IN_OUT_POOLS_CACHE_TTL_SECONDS',
+    DEFAULT_TOKEN_IN_OUT_POOLS_CACHE_ENTRY_TTL_SECONDS
+  ),
+});
 
 // TODO: use this ChainId enum for now
 // Once all monorepo projects switch to PartialChainIdMap<T> from @uniswap/lib-sharedconfig/chainConfig
@@ -152,6 +167,11 @@ export interface IUniRouteServiceConfig {
 export const getUniRouteSyncConfig = (
   s3PoolBucketName?: string
 ): IUniRouteServiceConfig => {
+  const {
+    allPoolsCacheEntryTtlSeconds,
+    tokenInOutPoolsCacheEntryTtlSeconds,
+  } = getPoolDiscoveryCacheTtls();
+
   return {
     QuoteService: QuoteService.UniRoute,
     UniRpcTimeoutInMilliseconds: __PLACEHOLDER__,
@@ -165,8 +185,8 @@ export const getUniRouteSyncConfig = (
       Namespace: undefined,
       RedisTimeoutInMilliseconds: __PLACEHOLDER__,
       TokenCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
-      AllPoolsCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
-      TokenInOutPoolsCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
+      TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
     },
     CachedRoutes: {
       Enabled: true,
@@ -232,6 +252,11 @@ export const getUniRouteSyncConfig = (
 export const getQuickRouteSyncConfig = (
   s3PoolBucketName?: string
 ): IUniRouteServiceConfig => {
+  const {
+    allPoolsCacheEntryTtlSeconds,
+    tokenInOutPoolsCacheEntryTtlSeconds,
+  } = getPoolDiscoveryCacheTtls();
+
   return {
     QuoteService: QuoteService.QuickRoute,
     UniRpcTimeoutInMilliseconds: __PLACEHOLDER__,
@@ -245,8 +270,8 @@ export const getQuickRouteSyncConfig = (
       Namespace: 'quickroute-',
       RedisTimeoutInMilliseconds: __PLACEHOLDER__,
       TokenCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
-      AllPoolsCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
-      TokenInOutPoolsCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
+      TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
     },
     CachedRoutes: {
       Enabled: true,
