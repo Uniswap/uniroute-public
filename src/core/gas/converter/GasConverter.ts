@@ -239,6 +239,35 @@ export class GasConverter implements IGasConverter {
       : 0n;
   }
 
+  public getGasCostInUSDBasedOnGasCostInWei(
+    chainId: ChainId,
+    tokensInfo: Map<string, Erc20Token | null>,
+    gasCostInWei: bigint
+  ): number {
+    const wrappedNativeCurrency = getGasToken(chainId);
+    const wrappedNativeTokenInfo = tokensInfo.get(
+      wrappedNativeCurrency.address
+    );
+
+    if (!wrappedNativeTokenInfo?.priceUSD) {
+      return 0;
+    }
+
+    // gasCostInWei is always in 18-decimal EVM precision. Scale to gas token decimals
+    const decimalDiff = 18 - wrappedNativeCurrency.decimals;
+    const scaledGasCost =
+      decimalDiff > 0 ? gasCostInWei / BigInt(10 ** decimalDiff) : gasCostInWei;
+    const totalGasCostNativeCurrency = CurrencyAmountRaw.fromRawAmount<Token>(
+      wrappedNativeCurrency,
+      scaledGasCost.toString()
+    );
+
+    return (
+      wrappedNativeTokenInfo.priceUSD *
+      Number(totalGasCostNativeCurrency.toExact())
+    );
+  }
+
   private async convertGasCostToQuoteToken(
     chainId: ChainId,
     totalGasCostNativeCurrency: CurrencyAmountRaw<Token>,

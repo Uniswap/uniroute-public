@@ -29,10 +29,15 @@ export class DummySimulator implements ISimulator {
       (sum, q) => sum + (q.gasDetails?.gasUse ?? 0n),
       0n
     );
+    const estimatedGasUsedInUSD = quote.quotes.reduce(
+      (sum, q) => sum + (q.gasDetails?.gasCostInUSD ?? 0),
+      0
+    );
 
     return new QuoteSplit(quote.quotes, undefined, {
       estimatedGasUsed: estimatedGasUsed,
       estimatedGasUsedInQuoteToken: gasCostInQuoteToken,
+      estimatedGasUsedInUSD: estimatedGasUsedInUSD,
       status: SimulationStatus.SUCCESS,
       description: 'Simulation completed successfully',
     });

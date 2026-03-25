@@ -234,6 +234,7 @@ class FailingSimulator implements ISimulator {
       simulationResult: {
         estimatedGasUsed: 0n,
         estimatedGasUsedInQuoteToken: 0n,
+        estimatedGasUsedInUSD: 0,
         status: SimulationStatus.FAILED,
         description: 'Simulation failed for testing',
       },
@@ -3631,12 +3632,18 @@ describe('UniRouteBL', () => {
           );
 
           // Preserve tokensInfo and swapInfo from input quote
+          const estimatedGasUsedInUSD = quoteSplit.quotes.reduce(
+            (sum, q) => sum + (q.gasDetails?.gasCostInUSD ?? 0),
+            0
+          );
+
           return new QuoteSplit(
             quoteSplit.quotes,
             quoteSplit.swapInfo,
             {
               estimatedGasUsed: estimatedGasUsed,
               estimatedGasUsedInQuoteToken: gasCostInQuoteToken,
+              estimatedGasUsedInUSD: estimatedGasUsedInUSD,
               status: SimulationStatus.SUCCESS,
               description: 'Simulation completed successfully',
             },

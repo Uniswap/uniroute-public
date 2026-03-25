@@ -58,6 +58,7 @@ class TestSimulator extends Simulator {
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
           status: SimulationStatus.NOT_APPROVED,
           description: 'Token not approved',
         },
@@ -69,6 +70,7 @@ class TestSimulator extends Simulator {
       simulationResult: {
         estimatedGasUsed: 100n,
         estimatedGasUsedInQuoteToken: 100n,
+        estimatedGasUsedInUSD: 0.5,
         status: SimulationStatus.SUCCESS,
         description: 'Test simulation succeeded',
       },

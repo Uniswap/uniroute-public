@@ -294,6 +294,7 @@ export class FallbackTenderlySimulator extends Simulator {
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
           status: SimulationStatus.FAILED,
           description: 'Error simulating transaction',
         },
@@ -359,6 +360,7 @@ export class TenderlySimulator extends Simulator {
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
           status: SimulationStatus.NOT_SUPPORTED,
           description: msg,
         },
@@ -528,6 +530,7 @@ export class TenderlySimulator extends Simulator {
             simulationResult: {
               estimatedGasUsed: 0n,
               estimatedGasUsedInQuoteToken: 0n,
+              estimatedGasUsedInUSD: 0,
               status: SimulationStatus.FAILED,
               description: 'Error simulating transaction via Simulation API',
             },
@@ -700,6 +703,7 @@ export class TenderlySimulator extends Simulator {
               simulationResult: {
                 estimatedGasUsed: 0n,
                 estimatedGasUsedInQuoteToken: 0n,
+                estimatedGasUsedInUSD: 0,
                 status: breakDownTenderlySimulationError(
                   quoteSplit.swapInfo!.tokenInWrappedAddress,
                   quoteSplit.swapInfo!.tokenOutWrappedAddress,
@@ -715,6 +719,7 @@ export class TenderlySimulator extends Simulator {
             simulationResult: {
               estimatedGasUsed: 0n,
               estimatedGasUsedInQuoteToken: 0n,
+              estimatedGasUsedInUSD: 0,
               status: SimulationStatus.FAILED,
               description: 'Error simulating transaction',
             },
@@ -767,20 +772,27 @@ export class TenderlySimulator extends Simulator {
 
     // Use gas price from first quote since it should be the same for all quotes
     const gasPriceWei = quoteSplit.quotes[0]!.gasDetails!.gasPriceInWei;
+    const gasCostInWei = estimatedGasUsed * gasPriceWei;
     const gasCostInQuoteToken =
       await this.gasConverter.getGasCostInQuoteTokenBasedOnGasCostInWei(
         chainId,
         quoteTokenAddress,
         quoteSplit.tokensInfo!,
-        estimatedGasUsed * gasPriceWei,
+        gasCostInWei,
         ctx
       );
+    const gasCostInUSD = this.gasConverter.getGasCostInUSDBasedOnGasCostInWei(
+      chainId,
+      quoteSplit.tokensInfo!,
+      gasCostInWei
+    );
 
     return {
       ...quoteSplit,
       simulationResult: {
         estimatedGasUsed: estimatedGasUsed,
         estimatedGasUsedInQuoteToken: gasCostInQuoteToken,
+        estimatedGasUsedInUSD: gasCostInUSD,
         status: SimulationStatus.SUCCESS,
         description: 'Simulation succeeded via Tenderly',
       },

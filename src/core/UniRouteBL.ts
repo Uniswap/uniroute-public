@@ -1071,6 +1071,8 @@ export class UniRouteBL implements IUniRoutedBL {
       finalGasUseEstimate = quoteSplit.simulationResult.estimatedGasUsed;
       finalGasUseEstimateQuote =
         quoteSplit.simulationResult.estimatedGasUsedInQuoteToken;
+      finalGasUseEstimateUSD =
+        quoteSplit.simulationResult.estimatedGasUsedInUSD;
 
       ctx.logger.debug(
         'Simulation succeeded - updating quoteGasAdjusted amount',
@@ -1857,6 +1859,7 @@ export class UniRouteBL implements IUniRoutedBL {
           simulationResult: {
             estimatedGasUsed: 0n,
             estimatedGasUsedInQuoteToken: 0n,
+            estimatedGasUsedInUSD: 0,
             status: SimulationStatus.FAILED,
             description: 'All simulation attempts failed',
           },
@@ -1893,6 +1896,7 @@ export class UniRouteBL implements IUniRoutedBL {
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
           status: SimulationStatus.UNATTEMPTED,
           description: 'Simulation skipped',
         },

@@ -71,6 +71,7 @@ export class EthEstimateGasSimulator extends Simulator {
           simulationResult: {
             estimatedGasUsed: 0n,
             estimatedGasUsedInQuoteToken: 0n,
+            estimatedGasUsedInUSD: 0,
             status: SimulationStatus.FAILED,
             description: 'Error estimating gas',
           },
@@ -94,20 +95,29 @@ export class EthEstimateGasSimulator extends Simulator {
 
     // Use gas price from first quote since it should be the same for all quotes
     const gasPriceWei = quoteSplit.quotes[0]!.gasDetails!.gasPriceInWei;
+    const gasCostInWei = estimatedGasUsed
+      .mul(BigNumber.from(gasPriceWei))
+      .toBigInt();
     const gasCostInQuoteToken =
       await this.gasConverter.getGasCostInQuoteTokenBasedOnGasCostInWei(
         this.chainId,
         quoteTokenAddress,
         quoteSplit.tokensInfo!,
-        estimatedGasUsed.mul(BigNumber.from(gasPriceWei)).toBigInt(),
+        gasCostInWei,
         ctx
       );
+    const gasCostInUSD = this.gasConverter.getGasCostInUSDBasedOnGasCostInWei(
+      this.chainId,
+      quoteSplit.tokensInfo!,
+      gasCostInWei
+    );
 
     return {
       ...quoteSplit,
       simulationResult: {
         estimatedGasUsed: estimatedGasUsed.toBigInt(),
         estimatedGasUsedInQuoteToken: gasCostInQuoteToken,
+        estimatedGasUsedInUSD: gasCostInUSD,
         status: SimulationStatus.SUCCESS,
         description: 'Simulation succeeded via eth_estimateGas',
       },
@@ -159,6 +169,7 @@ export class EthEstimateGasSimulator extends Simulator {
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
           status: SimulationStatus.NOT_APPROVED,
           description: 'Token not approved, skipping simulation',
         },

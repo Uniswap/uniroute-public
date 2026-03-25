@@ -877,4 +877,102 @@ describe('GasConverter', () => {
       expect(v3PoolRepository.getPools).toHaveBeenCalled();
     });
   });
+
+  describe('getGasCostInUSDBasedOnGasCostInWei', () => {
+    it('should return USD cost when native token has priceUSD', () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            wrappedNative.symbol || 'WETH',
+            wrappedNative.name || 'Wrapped Ether',
+            undefined,
+            2000 // priceUSD
+          ),
+        ],
+      ]);
+
+      // 97000 gas * 20 gwei = 1_940_000_000_000_000 wei = 0.00194 ETH
+      // gasCostInUSD = 2000 * 0.00194 = 3.88
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const result = gasConverter.getGasCostInUSDBasedOnGasCostInWei(
+        chainId,
+        tokensInfo,
+        gasCostInWei
+      );
+
+      expect(result).toBeCloseTo(3.88, 1);
+    });
+
+    it('should return 0 when native token has no priceUSD', () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            wrappedNative.symbol || 'WETH',
+            wrappedNative.name || 'Wrapped Ether',
+            undefined,
+            undefined // no priceUSD
+          ),
+        ],
+      ]);
+
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const result = gasConverter.getGasCostInUSDBasedOnGasCostInWei(
+        chainId,
+        tokensInfo,
+        gasCostInWei
+      );
+
+      expect(result).toBe(0);
+    });
+
+    it('should return 0 when native token info is missing from tokensInfo', () => {
+      const chainId = ChainId.MAINNET;
+      const tokensInfo = new Map<string, Erc20Token | null>();
+
+      const gasCostInWei = 97000n * 20_000_000_000n;
+      const result = gasConverter.getGasCostInUSDBasedOnGasCostInWei(
+        chainId,
+        tokensInfo,
+        gasCostInWei
+      );
+
+      expect(result).toBe(0);
+    });
+
+    it('should handle zero gasCostInWei', () => {
+      const chainId = ChainId.MAINNET;
+      const wrappedNative = WRAPPED_NATIVE_CURRENCY[chainId]!;
+      const tokensInfo = new Map<string, Erc20Token | null>([
+        [
+          wrappedNative.address,
+          new Erc20Token(
+            new Address(wrappedNative.address),
+            wrappedNative.decimals,
+            wrappedNative.symbol || 'WETH',
+            wrappedNative.name || 'Wrapped Ether',
+            undefined,
+            2000
+          ),
+        ],
+      ]);
+
+      const result = gasConverter.getGasCostInUSDBasedOnGasCostInWei(
+        chainId,
+        tokensInfo,
+        0n
+      );
+
+      expect(result).toBe(0);
+    });
+  });
 });

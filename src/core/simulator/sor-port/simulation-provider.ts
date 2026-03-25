@@ -104,6 +104,7 @@ export abstract class Simulator {
           simulationResult: {
             estimatedGasUsed: 0n,
             estimatedGasUsedInQuoteToken: 0n,
+            estimatedGasUsedInUSD: 0,
             status: SimulationStatus.FAILED,
             description: 'Error simulating transaction',
           },
@@ -116,6 +117,7 @@ export abstract class Simulator {
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
           status: SimulationStatus.INSUFFICIENT_BALANCE,
           description: 'User does not have sufficient balance to simulate.',
         },

@@ -19,6 +19,7 @@ export enum SimulationStatus {
 export interface SimulationResult {
   estimatedGasUsed: bigint;
   estimatedGasUsedInQuoteToken: bigint;
+  estimatedGasUsedInUSD: number;
   status: SimulationStatus;
   description?: string;
 }

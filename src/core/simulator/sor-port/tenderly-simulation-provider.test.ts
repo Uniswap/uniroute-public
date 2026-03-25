@@ -153,6 +153,7 @@ describe('tenderly-simulation-provider', () => {
         getGasCostInQuoteTokenBasedOnGasCostInWei: vi
           .fn()
           .mockResolvedValue(1000n),
+        getGasCostInUSDBasedOnGasCostInWei: vi.fn().mockReturnValue(3.88),
       } as unknown as GasConverter;
 
       mockAxiosInstance = {
@@ -265,6 +266,7 @@ describe('tenderly-simulation-provider', () => {
         expect(result.simulationResult?.status).toBe(
           SimulationStatus.NOT_SUPPORTED
         );
+        expect(result.simulationResult?.estimatedGasUsedInUSD).toBe(0);
       });
 
       it('should throw error when no calldata provided', async () => {
@@ -345,6 +347,17 @@ describe('tenderly-simulation-provider', () => {
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
         expect(result.simulationResult?.estimatedGasUsed).toBe(195000n); // 150000 * 1.3
+        expect(result.simulationResult?.estimatedGasUsedInQuoteToken).toBe(
+          1000n
+        );
+        expect(result.simulationResult?.estimatedGasUsedInUSD).toBe(3.88);
+        expect(
+          gasConverter.getGasCostInUSDBasedOnGasCostInWei
+        ).toHaveBeenCalledWith(
+          ChainId.MAINNET,
+          quoteSplit.tokensInfo,
+          195000n * 50000000000n // estimatedGasUsed * gasPriceWei
+        );
         expect(ctx.metrics.timer).toHaveBeenCalledWith(
           'Tenderly.Simulation.Latency',
           expect.any(Number),
@@ -379,6 +392,7 @@ describe('tenderly-simulation-provider', () => {
         );
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(result.simulationResult?.estimatedGasUsedInUSD).toBe(0);
         expect(ctx.logger.error).toHaveBeenCalled();
       });
 
@@ -1021,6 +1035,7 @@ describe('tenderly-simulation-provider', () => {
         simulationResult: {
           estimatedGasUsed: 150000n,
           estimatedGasUsedInQuoteToken: 150000n,
+          estimatedGasUsedInUSD: 3.88,
           status: SimulationStatus.SUCCESS,
         },
       };
@@ -1070,6 +1085,7 @@ describe('tenderly-simulation-provider', () => {
         simulationResult: {
           estimatedGasUsed: 150000n,
           estimatedGasUsedInQuoteToken: 150000n,
+          estimatedGasUsedInUSD: 3.88,
           status: SimulationStatus.SUCCESS,
         },
       };
@@ -1118,6 +1134,7 @@ describe('tenderly-simulation-provider', () => {
         simulationResult: {
           estimatedGasUsed: 150000n,
           estimatedGasUsedInQuoteToken: 150000n,
+          estimatedGasUsedInUSD: 3.88,
           status: SimulationStatus.SUCCESS,
         },
       };
@@ -1256,6 +1273,7 @@ describe('tenderly-simulation-provider', () => {
         getGasCostInQuoteTokenBasedOnGasCostInWei: vi
           .fn()
           .mockResolvedValue(2000n),
+        getGasCostInUSDBasedOnGasCostInWei: vi.fn().mockReturnValue(3.88),
       } as unknown as GasConverter;
 
       simulator = new EthSimulateV1Simulator(
