@@ -66,6 +66,8 @@ import {Currency, TradeType as SdkTradeType} from '@uniswap/sdk-core';
 import {BigNumber} from '@ethersproject/bignumber';
 import {Protocol} from '../models/pool/Protocol';
 import {Pool} from '../models/pool/Pool';
+import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
 
 class TestTokenHandler implements ITokenHandler {
   public async getToken(
@@ -1931,6 +1933,13 @@ describe('UniRouteBL', () => {
         )
         .mockImplementation(mockBuildSwapMethodParameters);
 
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: request.simulateFromAddress},
+        } as any);
+
       // Use the custom config that enables simulation
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
@@ -1953,7 +1962,9 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
 
       // Should return a successful response (not an error)
       expect(response.error).toBeUndefined();
@@ -1979,6 +1990,7 @@ describe('UniRouteBL', () => {
       expect(response.route[0].pools.length).toBe(1);
 
       // Clean up spies
+      swapOptionsSpy.mockRestore();
       buildTradeSpy.mockRestore();
       buildSwapMethodParametersSpy.mockRestore();
     });
@@ -2034,6 +2046,13 @@ describe('UniRouteBL', () => {
       // DON'T mock buildTrade - let it fail naturally
       // This will cause buildTrade to throw an error, so firstSwapInfo won't be populated
 
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: request.simulateFromAddress},
+        } as any);
+
       // Use the custom config that enables simulation
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
@@ -2056,12 +2075,15 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
 
       // Should return an error response (404) because buildTrade failed and no fallback is available
       expect(response.error).toBeDefined();
       expect(response.error?.code).equals(404);
       expect(response.error?.message).contains('No valid quotes found');
+      swapOptionsSpy.mockRestore();
     });
 
     it('should return populated quote with Failed status when simulation is disabled but quote building fails', async () => {
@@ -2200,6 +2222,13 @@ describe('UniRouteBL', () => {
         )
         .mockImplementation(mockBuildSwapMethodParameters);
 
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: request.simulateFromAddress},
+        } as any);
+
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
         redisCache,
@@ -2221,7 +2250,9 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
 
       expect(response.simulationStatus).equals(SimulationStatus.FAILED);
       expect(response.simulationError).toBe(true);
@@ -2241,6 +2272,7 @@ describe('UniRouteBL', () => {
       // EXACT_IN: totalQuoteAmount - finalGasUseEstimateQuote = 1234567890 - 1333333 = 1233234557
       expect(response.quoteGasAdjusted).equals('1233234557');
 
+      swapOptionsSpy.mockRestore();
       buildTradeSpy.mockRestore();
       buildSwapMethodParametersSpy.mockRestore();
     });
@@ -2301,6 +2333,13 @@ describe('UniRouteBL', () => {
         )
         .mockImplementation(mockBuildSwapMethodParameters);
 
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: request.simulateFromAddress},
+        } as any);
+
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
         redisCache,
@@ -2322,7 +2361,9 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
 
       expect(response.simulationStatus).equals(SimulationStatus.FAILED);
       expect(response.simulationError).toBe(true);
@@ -2339,6 +2380,7 @@ describe('UniRouteBL', () => {
       // EXACT_OUT: totalQuoteAmount + finalGasUseEstimateQuote = 1234567890 + 1333333 = 1235901223
       expect(response.quoteGasAdjusted).equals('1235901223');
 
+      swapOptionsSpy.mockRestore();
       buildTradeSpy.mockRestore();
       buildSwapMethodParametersSpy.mockRestore();
     });
@@ -2402,6 +2444,13 @@ describe('UniRouteBL', () => {
         )
         .mockImplementation(mockBuildSwapMethodParameters);
 
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: request.simulateFromAddress},
+        } as any);
+
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
         redisCache,
@@ -2423,7 +2472,9 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
 
       expect(response.simulationStatus).equals(SimulationStatus.FAILED);
       expect(response.gasUseEstimate).equals('200000');
@@ -2434,6 +2485,7 @@ describe('UniRouteBL', () => {
       // gasUseEstimateUSD: 1.5 * 200000 / 150000 = 2.0
       expect(response.gasUseEstimateUSD).equals('2');
 
+      swapOptionsSpy.mockRestore();
       buildTradeSpy.mockRestore();
       buildSwapMethodParametersSpy.mockRestore();
     });
@@ -2495,6 +2547,13 @@ describe('UniRouteBL', () => {
         )
         .mockImplementation(mockBuildSwapMethodParameters);
 
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: request.simulateFromAddress},
+        } as any);
+
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
         redisCache,
@@ -2516,7 +2575,9 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
 
       expect(response.simulationStatus).equals(SimulationStatus.FAILED);
 
@@ -2526,8 +2587,294 @@ describe('UniRouteBL', () => {
         '0.000000000001333333'
       );
 
+      swapOptionsSpy.mockRestore();
       buildTradeSpy.mockRestore();
       buildSwapMethodParametersSpy.mockRestore();
+    });
+  });
+
+  describe('universalRouterVersion option', () => {
+    // Base simulation config & request reused across tests
+    const simulationEnabledConfig = {
+      ...getUniRouteTestConfig(LambdaType.Async),
+      Simulation: {
+        TopNQuotes: 3,
+        Enabled: true,
+      },
+    };
+
+    const simulationRequest = new QuoteRequest({
+      ...{
+        tokenInAddress: 'ETH',
+        tokenInChainId: 1,
+        tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+        tokenOutChainId: 1,
+        amount: '1000000000000000000',
+        quoteType: 'FAST',
+        protocols: 'v2,v3,v4,mixed',
+      },
+      tradeType: 'EXACT_IN',
+      simulateFromAddress: '0x1234567890123456789012345678901234567890',
+      recipient: '0x1234567890123456789012345678901234567890',
+      slippageTolerance: 20,
+    });
+
+    it('should skip simulation when universalRouterVersion is V1_2, even if simulateFromAddress is set', async () => {
+      let simulateCalled = false;
+      const trackingSimulator: ISimulator = {
+        simulate: async (...args: Parameters<ISimulator['simulate']>) => {
+          simulateCalled = true;
+          return (dummySimulator as ISimulator).simulate(...args);
+        },
+      };
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        trackingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, simulationRequest, {
+        universalRouterVersion: UniversalRouterVersion.V1_2,
+      });
+
+      expect(response.error).toBeUndefined();
+      // swapOptions is undefined for V1_2, so simulation block is never entered
+      expect(simulateCalled).toBe(false);
+      expect(response.simulationStatus).equals(SimulationStatus.UNATTEMPTED);
+    });
+
+    it('should default to V2_0 and run simulation when universalRouterVersion is absent and simulateFromAddress is set', async () => {
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+        .mockReturnValue({
+          simulate: {fromAddress: simulationRequest.simulateFromAddress},
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // No universalRouterVersion in options → defaults to V2_0 → simulation runs
+      const response = await uniRouteBL.quote(ctx, simulationRequest, {});
+
+      expect(response.error).toBeUndefined();
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+
+      swapOptionsSpy.mockRestore();
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should run simulation when universalRouterVersion is V2_0 and simulateFromAddress is set', async () => {
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: simulationRequest.simulateFromAddress},
+        } as any);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, simulationRequest, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
+
+      expect(response.error).toBeUndefined();
+      // swapOptions is created for V2_0 → simulation block is entered → FailingSimulator fires
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+
+      swapOptionsSpy.mockRestore();
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should run simulation when universalRouterVersion is V2_1_1 and simulateFromAddress is set', async () => {
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_1_1')
+
+        .mockReturnValue({
+          simulate: {fromAddress: simulationRequest.simulateFromAddress},
+        } as any);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, simulationRequest, {
+        universalRouterVersion: UniversalRouterVersion.V2_1_1,
+      });
+
+      expect(response.error).toBeUndefined();
+      // swapOptions is created for V2_1_1 → simulation block is entered → FailingSimulator fires
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+
+      swapOptionsSpy.mockRestore();
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should skip simulation when universalRouterVersion is V2_1_1 but simulateFromAddress is not set', async () => {
+      let simulateCalled = false;
+      const trackingSimulator: ISimulator = {
+        simulate: async (...args: Parameters<ISimulator['simulate']>) => {
+          simulateCalled = true;
+          return (dummySimulator as ISimulator).simulate(...args);
+        },
+      };
+
+      const requestWithoutSimulate = new QuoteRequest({
+        ...{
+          tokenInAddress: 'ETH',
+          tokenInChainId: 1,
+          tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          tokenOutChainId: 1,
+          amount: '1000000000000000000',
+          quoteType: 'FAST',
+          protocols: 'v2,v3,v4,mixed',
+        },
+        tradeType: 'EXACT_IN',
+        recipient: '0x1234567890123456789012345678901234567890',
+        slippageTolerance: 20,
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        mockedQuoteStrategy,
+        trackingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, requestWithoutSimulate, {
+        universalRouterVersion: UniversalRouterVersion.V2_1_1,
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(simulateCalled).toBe(false);
+      expect(response.simulationStatus).equals(SimulationStatus.UNATTEMPTED);
     });
   });
 

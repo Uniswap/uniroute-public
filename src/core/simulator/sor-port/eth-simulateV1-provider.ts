@@ -131,7 +131,7 @@ export class EthSimulateV1Simulator extends Simulator {
         const approveUniversalRouterCallData =
           permit2Interface.encodeFunctionData('approve', [
             quoteSplit.swapInfo!.tokenInWrappedAddress,
-            getUniversalRouterAddress(swapOptions.version, this.chainId),
+            getUniversalRouterAddress(swapOptions.urVersion, this.chainId),
             MAX_UINT160,
             Math.floor(new Date().getTime() / 1000) + 10000000,
           ]);

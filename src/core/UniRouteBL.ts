@@ -99,6 +99,8 @@ import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
 import {RedisCache} from '@uniswap/lib-cache/redis';
 import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
+import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
+import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 
 export class UniRouteBL implements IUniRoutedBL {
   constructor(
@@ -602,7 +604,8 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags,
         gasPrice,
         requestBlockNumber,
-        options?.permit2Disabled ?? false
+        options?.permit2Disabled ?? false,
+        options?.universalRouterVersion
       );
 
       // Finally update best route's pools with latest pool information
@@ -1586,7 +1589,8 @@ export class UniRouteBL implements IUniRoutedBL {
     metricTags: string[],
     gasPrice?: bigint,
     blockNumber?: number,
-    permit2Disabled: boolean = false
+    permit2Disabled: boolean = false,
+    universalRouterVersion?: UniversalRouterVersion
   ): Promise<QuoteSplit | undefined> {
     if (topNQuotes.length === 0) {
       return undefined;
@@ -1599,13 +1603,13 @@ export class UniRouteBL implements IUniRoutedBL {
     const failedRoutes: string[] = [];
     let firstSwapInfo: SwapInfo | undefined = undefined; // Store swapInfo from first successful trade build
 
-    // Create our swap configuration
-    const swapOptions = SwapOptionsFactory.createUniversalRouterOptions_2_0({
+    let swapOptions: SwapOptionsUniversalRouter | undefined;
+
+    const swapOptionsInput = {
       chainId: chain.chainId,
       tradeType: tradeType,
       amountIn: request.amount,
       tokenInWrappedAddress: tokenInCurrencyInfo.wrappedAddress.address,
-      tokenInIsNative: tokenInCurrencyInfo.isNative,
       slippageTolerance: request.slippageTolerance?.toString(),
       portionBips: request.portionBips,
       portionRecipient: request.portionRecipient,
@@ -1617,8 +1621,37 @@ export class UniRouteBL implements IUniRoutedBL {
       permitAmount: request.permitAmount,
       permitSigDeadline: request.permitSigDeadline,
       simulateFromAddress: request.simulateFromAddress,
-      permit2Disabled,
-    });
+      permit2Disabled: permit2Disabled,
+      tokenInIsNative: tokenInCurrencyInfo.isNative,
+    };
+
+    if (
+      universalRouterVersion === undefined ||
+      universalRouterVersion === UniversalRouterVersion.V2_0
+    ) {
+      swapOptions =
+        SwapOptionsFactory.createUniversalRouterOptions_2_0(swapOptionsInput);
+    } else if (universalRouterVersion === UniversalRouterVersion.V2_1_1) {
+      swapOptions =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(swapOptionsInput);
+    } else if (request.simulateFromAddress) {
+      ctx.logger.warn(
+        'Simulation skipped: universalRouterVersion does not support simulation',
+        {
+          universalRouterVersion,
+        }
+      );
+      await ctx.metrics.count(
+        buildMetricKey('SimulationSkippedByRouterVersion'),
+        1,
+        {
+          tags: [
+            ...metricTags,
+            `routerVersion:${universalRouterVersion ?? 'undefined'}`,
+          ],
+        }
+      );
+    }
 
     if (
       this.serviceConfig.Simulation.Enabled &&

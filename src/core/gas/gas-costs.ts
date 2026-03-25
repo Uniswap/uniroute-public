@@ -236,7 +236,7 @@ export const calculateL1GasFeesHelper = async (
 }> => {
   const swapOptions: SwapOptionsUniversalRouter = {
     type: SwapType.UNIVERSAL_ROUTER,
-    version: UniversalRouterVersion.V2_0,
+    urVersion: UniversalRouterVersion.V2_0,
     recipient: '0x0000000000000000000000000000000000000001',
     deadlineOrPreviousBlockhash: 100,
     slippageTolerance: new Percent(5, 10_000),

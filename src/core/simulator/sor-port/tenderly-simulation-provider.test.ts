@@ -141,7 +141,7 @@ describe('tenderly-simulation-provider', () => {
 
     const swapOptions: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
-      version: UniversalRouterVersion.V1_2,
+      urVersion: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
       tokenTransferMode: TokenTransferMode.Permit2,
@@ -704,6 +704,15 @@ describe('tenderly-simulation-provider', () => {
     });
 
     describe('simulateTransaction with Simulation API (XLayer)', () => {
+      // XLayer does not have UR V1_2 deployed — use V2_0 for this chain.
+      const swapOptions: SwapOptionsUniversalRouter = {
+        type: SwapType.UNIVERSAL_ROUTER,
+        urVersion: UniversalRouterVersion.V2_0,
+        simulate: {fromAddress: USER_ADDRESS},
+        slippageTolerance: new Percent(5, 100),
+        tokenTransferMode: TokenTransferMode.Permit2,
+      };
+
       beforeEach(() => {
         simulator = new TenderlySimulator(
           ChainId.XLAYER,
@@ -915,7 +924,7 @@ describe('tenderly-simulation-provider', () => {
 
     const swapOptions: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
-      version: UniversalRouterVersion.V1_2,
+      urVersion: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
       tokenTransferMode: TokenTransferMode.Permit2,
@@ -1259,7 +1268,7 @@ describe('tenderly-simulation-provider', () => {
 
     const swapOptions: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
-      version: UniversalRouterVersion.V1_2,
+      urVersion: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
       tokenTransferMode: TokenTransferMode.Permit2,

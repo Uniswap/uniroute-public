@@ -36,6 +36,9 @@ vi.mock('ethers', async importOriginal => {
     this.pseudoTotalValueLocked = mockPseudoTVL;
   });
   return {
+    // Spread all named exports (e.g. constants, BigNumber) so downstream
+    // imports like `import { constants } from 'ethers'` continue to work.
+    ...actual,
     ethers: {
       ...actual.ethers,
       Contract: MockContract,

@@ -34,25 +34,46 @@ export type SwapOptionsUniversalRouterInput = {
 };
 
 export class SwapOptionsFactory {
-  static createUniversalRouterOptions_2_0({
-    chainId,
-    tradeType,
-    amountIn,
-    tokenInWrappedAddress,
-    slippageTolerance,
-    portionBips,
-    portionRecipient,
-    deadline,
-    recipient,
-    permitSignature,
-    permitNonce,
-    permitExpiration,
-    permitAmount,
-    permitSigDeadline,
-    simulateFromAddress,
-    permit2Disabled,
-    tokenInIsNative,
-  }: SwapOptionsUniversalRouterInput): SwapOptionsUniversalRouter | undefined {
+  static createUniversalRouterOptions_2_0(
+    input: SwapOptionsUniversalRouterInput
+  ): SwapOptionsUniversalRouter | undefined {
+    return SwapOptionsFactory.createUniversalRouterOptions(
+      UniversalRouterVersion.V2_0,
+      input
+    );
+  }
+
+  static createUniversalRouterOptions_2_1_1(
+    input: SwapOptionsUniversalRouterInput
+  ): SwapOptionsUniversalRouter | undefined {
+    return SwapOptionsFactory.createUniversalRouterOptions(
+      UniversalRouterVersion.V2_1_1,
+      input
+    );
+  }
+
+  private static createUniversalRouterOptions(
+    version: UniversalRouterVersion,
+    {
+      chainId,
+      tradeType,
+      amountIn,
+      tokenInWrappedAddress,
+      slippageTolerance,
+      portionBips,
+      portionRecipient,
+      deadline,
+      recipient,
+      permitSignature,
+      permitNonce,
+      permitExpiration,
+      permitAmount,
+      permitSigDeadline,
+      simulateFromAddress,
+      permit2Disabled,
+      tokenInIsNative,
+    }: SwapOptionsUniversalRouterInput
+  ): SwapOptionsUniversalRouter | undefined {
     if (!slippageTolerance) {
       return undefined;
     }
@@ -70,7 +91,7 @@ export class SwapOptionsFactory {
 
     const swapParams: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
-      version: UniversalRouterVersion.V2_0,
+      urVersion: version,
       chainId,
       deadlineOrPreviousBlockhash: deadline
         ? parseDeadline(deadline)
@@ -102,10 +123,7 @@ export class SwapOptionsFactory {
           expiration: permitExpiration,
           nonce: permitNonce,
         },
-        spender: getUniversalRouterAddress(
-          UniversalRouterVersion.V2_0,
-          chainId
-        ),
+        spender: getUniversalRouterAddress(version, chainId),
         sigDeadline: permitSigDeadline,
       };
 

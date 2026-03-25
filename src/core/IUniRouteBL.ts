@@ -1,3 +1,4 @@
+import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {
   QuoteRequest,
   QuoteResponse,
@@ -13,6 +14,7 @@ import {Context} from '@uniswap/lib-uni/context';
 export type QuoteOptions = {
   permit2Disabled?: boolean;
   requestSource?: string;
+  universalRouterVersion?: UniversalRouterVersion;
 };
 
 export interface IUniRoutedBL {

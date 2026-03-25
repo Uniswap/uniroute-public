@@ -49,7 +49,7 @@ describe('SwapOptionsFactory', () => {
 
       expect(result).toBeDefined();
       expect(result!.type).toBe(SwapType.UNIVERSAL_ROUTER);
-      expect(result!.version).toBe(UniversalRouterVersion.V2_0);
+      expect(result!.urVersion).toBe(UniversalRouterVersion.V2_0);
       expect(result!.slippageTolerance.toFixed(2)).toBe('0.50'); // 0.5%
     });
 
@@ -340,7 +340,132 @@ describe('SwapOptionsFactory', () => {
 
       expect(result).toBeDefined();
       expect(result!.type).toBe(SwapType.UNIVERSAL_ROUTER);
-      expect(result!.version).toBe(UniversalRouterVersion.V2_0);
+      expect(result!.urVersion).toBe(UniversalRouterVersion.V2_0);
+      expect(result!.recipient).toBe(
+        '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
+      );
+      expect(result!.deadlineOrPreviousBlockhash).toBeDefined();
+      expect(result!.inputTokenPermit).toBeDefined();
+      expect(result!.simulate).toBeDefined();
+    });
+  });
+
+  describe('createUniversalRouterOptions_2_1_1', () => {
+    const baseInput: SwapOptionsUniversalRouterInput = {
+      chainId: ChainId.MAINNET,
+      tradeType: TradeType.ExactIn,
+      amountIn: '1000000000000000000',
+      tokenInWrappedAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      slippageTolerance: '0.5',
+    };
+
+    it('should return undefined when slippageTolerance is not provided', () => {
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_1_1({
+        ...baseInput,
+        slippageTolerance: undefined,
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should create basic swap options with version V2_1_1', () => {
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(baseInput);
+
+      expect(result).toBeDefined();
+      expect(result!.type).toBe(SwapType.UNIVERSAL_ROUTER);
+      expect(result!.urVersion).toBe(UniversalRouterVersion.V2_1_1);
+      expect(result!.slippageTolerance.toFixed(2)).toBe('0.50');
+    });
+
+    it('should use V2_1_1 spender address in permit', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        permitSignature: '0x1234567890abcdef',
+        permitNonce: '1',
+        permitExpiration: '1700000000',
+        permitAmount: '1000000000000000000',
+        permitSigDeadline: '1700001000',
+      };
+
+      const result2_0 =
+        SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
+      const result2_1_1 =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(input);
+
+      expect(result2_1_1!.inputTokenPermit).toBeDefined();
+      expect(result2_1_1!.inputTokenPermit!.signature).toBe(
+        '0x1234567890abcdef'
+      );
+      // Spender address must differ between versions
+      expect(result2_1_1!.inputTokenPermit!.spender).not.toBe(
+        result2_0!.inputTokenPermit!.spender
+      );
+    });
+
+    it('should default to Permit2 tokenTransferMode when permit2Disabled is not provided', () => {
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(baseInput);
+
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
+    });
+
+    it('should set ApproveProxy tokenTransferMode when permit2Disabled is true', () => {
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_1_1({
+        ...baseInput,
+        permit2Disabled: true,
+      });
+
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.ApproveProxy);
+    });
+
+    it('should fall back to Permit2 when permit2Disabled is true but input is native', () => {
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_1_1({
+        ...baseInput,
+        permit2Disabled: true,
+        tokenInIsNative: true,
+      });
+
+      expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
+    });
+
+    it('should add simulate option when simulateFromAddress is provided', () => {
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_1_1({
+        ...baseInput,
+        simulateFromAddress: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+      });
+
+      expect(result!.simulate).toBeDefined();
+      expect(result!.simulate!.fromAddress).toBe(
+        '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
+      );
+    });
+
+    it('should handle full configuration with all options', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        chainId: ChainId.MAINNET,
+        tradeType: TradeType.ExactIn,
+        amountIn: '1000000000000000000',
+        tokenInWrappedAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        slippageTolerance: '0.5',
+        portionBips: 100,
+        portionRecipient: '0xFeeRecipient123456789012345678901234567890',
+        deadline: '1800',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        permitSignature: '0x1234567890abcdef',
+        permitNonce: '1',
+        permitExpiration: '1700000000',
+        permitAmount: '1000000000000000000',
+        permitSigDeadline: '1700001000',
+        simulateFromAddress: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+      };
+
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(input);
+
+      expect(result).toBeDefined();
+      expect(result!.type).toBe(SwapType.UNIVERSAL_ROUTER);
+      expect(result!.urVersion).toBe(UniversalRouterVersion.V2_1_1);
       expect(result!.recipient).toBe(
         '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
       );

@@ -134,7 +134,7 @@ describe('Simulator', () => {
   describe('simulate', () => {
     const swapOptions: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
-      version: UniversalRouterVersion.V1_2,
+      urVersion: UniversalRouterVersion.V1_2,
       simulate: {fromAddress: USER_ADDRESS},
       slippageTolerance: new Percent(5, 100),
     };

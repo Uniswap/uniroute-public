@@ -6,7 +6,6 @@ import {
   SWAP_PROXY_ADDRESS,
   SwapOptions as UniversalRouterSwapOptions,
   TokenTransferMode,
-  UniversalRouterVersion,
 } from '@uniswap/universal-router-sdk';
 
 import {ERC20__factory} from '../../../../abis/src/generated/contracts';
@@ -26,7 +25,6 @@ export enum SwapType {
 // Swap options for Universal Router and Permit2.
 export type SwapOptionsUniversalRouter = UniversalRouterSwapOptions & {
   type: SwapType.UNIVERSAL_ROUTER;
-  version: UniversalRouterVersion;
   simulate?: {fromAddress: string};
 };
 
@@ -231,7 +229,7 @@ export abstract class Simulator {
         await permit2Contract.allowance(
           fromAddress,
           tokenInAddress,
-          getUniversalRouterAddress(swapOptions.version, this.chainId)
+          getUniversalRouterAddress(swapOptions.urVersion, this.chainId)
         );
 
       const nowTimestampS = Math.round(Date.now() / 1000);

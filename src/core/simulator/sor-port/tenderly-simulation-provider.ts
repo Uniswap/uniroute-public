@@ -411,7 +411,7 @@ export class TenderlySimulator extends Simulator {
         const approveUniversalRouterCallData =
           permit2Interface.encodeFunctionData('approve', [
             quoteSplit.swapInfo!.tokenInWrappedAddress,
-            getUniversalRouterAddress(swapOptions.version, this.chainId),
+            getUniversalRouterAddress(swapOptions.urVersion, this.chainId),
             MAX_UINT160,
             Math.floor(new Date().getTime() / 1000) + 10000000,
           ]);
@@ -470,7 +470,7 @@ export class TenderlySimulator extends Simulator {
         estimate_gas: true,
         to: useUniversalRouterProxy
           ? SWAP_PROXY_ADDRESS(this.chainId)
-          : getUniversalRouterAddress(swapOptions.version, this.chainId),
+          : getUniversalRouterAddress(swapOptions.urVersion!, this.chainId),
         value: quoteSplit.swapInfo!.tokenInIsNative
           ? quoteSplit.swapInfo!.methodParameters.value
           : '0',
