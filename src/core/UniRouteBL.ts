@@ -241,6 +241,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const debugLogs = request.debugLogs;
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
+    const requestBlockNumber = request.blockNumber;
 
     const requestSource = options?.requestSource?.toLowerCase() || 'unknown';
     const metricTags = [
@@ -279,6 +280,7 @@ export class UniRouteBL implements IUniRoutedBL {
       // Those are needed for fot detection, gas estimation and quote conversion to USD.
       const getTokensStartTime = Date.now();
       ctx.logger.debug('Starting getTokens and block number fetch');
+
       const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
         this.tokenHandler.getTokens(
           chain,
@@ -292,9 +294,11 @@ export class UniRouteBL implements IUniRoutedBL {
           ],
           ctx
         ),
-        this.serviceConfig.ResponseRequirements.NeedsBlockNumber
-          ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
-          : Promise.resolve<number>(0),
+        requestBlockNumber !== undefined
+          ? Promise.resolve(requestBlockNumber)
+          : this.serviceConfig.ResponseRequirements.NeedsBlockNumber
+            ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
+            : Promise.resolve<number>(0),
         needToFetchGasPrice
           ? this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
           : Promise.resolve<BigNumber | undefined>(undefined),
@@ -524,7 +528,8 @@ export class UniRouteBL implements IUniRoutedBL {
           effectiveConfig,
           routes,
           tokensInfo,
-          metricTags
+          metricTags,
+          requestBlockNumber
         );
 
       ctx.logger.debug(
@@ -549,7 +554,8 @@ export class UniRouteBL implements IUniRoutedBL {
             : tokenInCurrencyInfo.wrappedAddress.toString(),
           tokensInfo,
           bestQuoteCandidates,
-          ctx
+          ctx,
+          requestBlockNumber
         );
         await logElapsedTime(
           'UpdateQuotesGasDetails',
@@ -579,6 +585,10 @@ export class UniRouteBL implements IUniRoutedBL {
       }
 
       // Simulate quotes one by one (from best quote to worst) until we find a valid one
+      // Pass requestBlockNumber (not the resolved blockNumber) to simulation.
+      // When the user doesn't provide a block number, requestBlockNumber is undefined,
+      // which causes simulation backends (Tenderly, eth_estimateGas) to use 'latest'.
+      // The resolved blockNumber is only used for the response and for pool/quote fetching.
       const bestQuote = await this.simulateAndPopulateBestQuote(
         chain,
         tokenInCurrencyInfo,
@@ -591,7 +601,7 @@ export class UniRouteBL implements IUniRoutedBL {
         ctx,
         metricTags,
         gasPrice,
-        blockNumber,
+        requestBlockNumber,
         options?.permit2Disabled ?? false
       );
 
@@ -624,7 +634,8 @@ export class UniRouteBL implements IUniRoutedBL {
             bestQuote,
             chain,
             ctx,
-            metricTags
+            metricTags,
+            requestBlockNumber
           );
           await logElapsedTime(
             'MainUpdateBestQuotePoolsWithFreshDetails',
@@ -1629,7 +1640,8 @@ export class UniRouteBL implements IUniRoutedBL {
           quoteSplit,
           chain,
           ctx,
-          metricTags
+          metricTags,
+          blockNumber
         );
 
         // Now build the trade

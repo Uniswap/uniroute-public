@@ -118,6 +118,8 @@ class TestQuoteFetcher implements IQuoteFetcher {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     metricTags?: string[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    blockNumber?: number,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     tokensInfo?: Map<string, Erc20Token | null>
   ): Promise<QuoteBasic[]> {
     if (this.quotes.length > 0) {

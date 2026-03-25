@@ -36,7 +36,8 @@ export class EthEstimateGasSimulator extends Simulator {
     fromAddress: string,
     swapOptions: SwapOptionsUniversalRouter,
     quoteSplit: QuoteSplit,
-    ctx: Context
+    ctx: Context,
+    blockNumber?: number
   ): Promise<QuoteSplit> {
     let estimatedGasUsed: BigNumber;
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
@@ -63,6 +64,7 @@ export class EthEstimateGasSimulator extends Simulator {
               ? quoteSplit.swapInfo!.methodParameters!.value
               : '0'
           ),
+          ...(blockNumber !== undefined ? {blockTag: blockNumber} : {}),
         });
       } catch (e) {
         ctx.logger.error('Error estimating gas', {e});
@@ -139,9 +141,7 @@ export class EthEstimateGasSimulator extends Simulator {
     swapOptions: SwapOptionsUniversalRouter,
     quoteSplit: QuoteSplit,
     ctx: Context,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     gasPrice?: bigint,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     blockNumber?: number
   ): Promise<QuoteSplit> {
     const inputAmount = quoteSplit.swapInfo!.inputAmount;
@@ -160,7 +160,8 @@ export class EthEstimateGasSimulator extends Simulator {
         fromAddress,
         swapOptions,
         quoteSplit,
-        ctx
+        ctx,
+        blockNumber
       );
     } else {
       ctx.logger.info('Token not approved, skipping simulation');

@@ -21,7 +21,8 @@ export interface IQuoteStrategy {
     serviceConfig: IUniRouteServiceConfig,
     routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
-    metricTags: string[]
+    metricTags: string[],
+    blockNumber?: number
   ): Promise<QuoteSplit[]>;
 
   name(): string;

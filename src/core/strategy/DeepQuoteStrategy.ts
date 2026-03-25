@@ -99,7 +99,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     serviceConfig: IUniRouteServiceConfig,
     routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
-    metricTags: string[]
+    metricTags: string[],
+    blockNumber?: number
   ): Promise<QuoteSplit[]> {
     // Generate all possible partial routes per percentage step
     const pctRoutes: RouteBasic[] = [];
@@ -125,6 +126,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       tradeType,
       ctx,
       metricTags,
+      blockNumber,
       tokensInfo
     );
     await logElapsedTime('FetchQuotes', fetchQuotesStartTime, ctx, metricTags);
@@ -133,7 +135,10 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     const gasEstimateStartTime = Date.now();
     ctx.logger.debug('Starting gasEstimate');
     const gasPriceWei = serviceConfig.GasEstimation.Enabled
-      ? await this.gasEstimateProvider.getCurrentGasPrice(chain.chainId)
+      ? await this.gasEstimateProvider.getCurrentGasPrice(
+          chain.chainId,
+          blockNumber
+        )
       : 0;
 
     // Below information is only needed when dealing with Arbitrum or Optimism Stack chains
@@ -159,7 +164,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
         tokensInfo,
         chain,
         ctx,
-        metricTags
+        metricTags,
+        blockNumber
       );
     }
 
@@ -276,7 +282,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     tokensInfo: Map<string, Erc20Token | null>,
     chain: Chain,
     ctx: Context,
-    metricTags: string[]
+    metricTags: string[],
+    blockNumber?: number
   ): Promise<Map<string, Erc20Token | null>> {
     // Ensure we have fresh pool details for all pools involved in the quotes as we need it to generate calldata for L2 gas estimation
     // Only needed for Arbitrum/Optimism Stack chains
@@ -297,7 +304,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     const updatedPoolsMap = await this.freshPoolDetailsWrapper.getPoolsDetails(
       ctx,
       poolsToUpdate,
-      chain
+      chain,
+      blockNumber
     );
     await updateQuotesWithFreshPoolDetailsUsingPoolsMap(
       updatedPoolsMap,

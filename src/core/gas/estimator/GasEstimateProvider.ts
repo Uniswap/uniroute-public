@@ -24,7 +24,7 @@ export interface IGasEstimateProvider {
     gasPriceWei?: number,
     l2GasData?: ArbitrumGasData
   ): Promise<GasDetails>;
-  getCurrentGasPrice(chainId: ChainId): Promise<number>;
+  getCurrentGasPrice(chainId: ChainId, blockNumber?: number): Promise<number>;
 }
 
 export class GasEstimateProvider implements IGasEstimateProvider {
@@ -125,10 +125,26 @@ export class GasEstimateProvider implements IGasEstimateProvider {
     }
   }
 
-  public async getCurrentGasPrice(chainId: ChainId): Promise<number> {
-    const gasPrice = await this.rpcProviderMap
-      .get(chainId)!
-      .send('eth_gasPrice', []);
+  public async getCurrentGasPrice(
+    chainId: ChainId,
+    blockNumber?: number
+  ): Promise<number> {
+    const provider = this.rpcProviderMap.get(chainId)!;
+
+    if (blockNumber !== undefined) {
+      const blockHex = '0x' + blockNumber.toString(16);
+      const feeHistory = await provider.send('eth_feeHistory', [
+        '0x1',
+        blockHex,
+        [],
+      ]);
+      const baseFeePerGas = feeHistory.baseFeePerGas?.[0];
+      if (baseFeePerGas) {
+        return parseInt(baseFeePerGas, 16);
+      }
+    }
+
+    const gasPrice = await provider.send('eth_gasPrice', []);
     return parseInt(gasPrice, 16);
   }
 }

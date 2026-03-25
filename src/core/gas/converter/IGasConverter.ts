@@ -9,7 +9,8 @@ export interface IGasConverter {
     quoteTokenAddress: string,
     tokensInfo: Map<string, Erc20Token | null>,
     quotes: QuoteSplit[],
-    ctx: Context
+    ctx: Context,
+    blockNumber?: number
   ): Promise<void>;
 }
 
@@ -24,7 +25,9 @@ export class NoGasConverter implements IGasConverter {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     quotes: QuoteSplit[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ctx: Context
+    ctx: Context,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _blockNumber?: number
   ): Promise<void> {
     return;
   }

@@ -41,7 +41,8 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     serviceConfig: IUniRouteServiceConfig,
     routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
-    metricTags: string[]
+    metricTags: string[],
+    blockNumber?: number
   ): Promise<QuoteSplit[]>;
 
   abstract name(): string;

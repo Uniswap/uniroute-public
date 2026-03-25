@@ -132,7 +132,8 @@ export const getQuoteThroughNativePool = (
 export async function getHighestLiquidityV2NativePool(
   token: Token,
   v2PoolsRepository: IPoolsRepository<V2Pool>,
-  ctx: Context
+  ctx: Context,
+  blockNumber?: number
 ): Promise<V2Pool | null> {
   const gasToken = getGasToken(token.chainId as ChainId);
 
@@ -140,7 +141,12 @@ export async function getHighestLiquidityV2NativePool(
     ctx,
     token.chainId,
     new Address(gasToken.address),
-    new Address(token.address)
+    new Address(token.address),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    blockNumber
   );
 
   if (pools.length === 0) {
@@ -153,7 +159,8 @@ export async function getHighestLiquidityV2NativePool(
 export async function getHighestLiquidityV3NativePool(
   token: Token,
   v3PoolsRepository: IPoolsRepository<V3Pool>,
-  ctx: Context
+  ctx: Context,
+  blockNumber?: number
 ): Promise<V3Pool | null> {
   const gasToken = getGasToken(token.chainId as ChainId);
 
@@ -161,7 +168,12 @@ export async function getHighestLiquidityV3NativePool(
     ctx,
     token.chainId,
     new Address(gasToken.address),
-    new Address(token.address)
+    new Address(token.address),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    blockNumber
   );
 
   if (pools.length === 0) {
@@ -176,7 +188,8 @@ export async function getHighestLiquidityV3NativePool(
 export async function getHighestLiquidityV4NativePool(
   token: Token,
   v4PoolsRepository: IPoolsRepository<V4Pool>,
-  ctx: Context
+  ctx: Context,
+  blockNumber?: number
 ): Promise<V4Pool | null> {
   const gasToken = getGasToken(token.chainId as ChainId);
 
@@ -184,7 +197,12 @@ export async function getHighestLiquidityV4NativePool(
     ctx,
     token.chainId,
     new Address(gasToken.address),
-    new Address(token.address)
+    new Address(token.address),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    blockNumber
   );
 
   if (pools.length === 0) {

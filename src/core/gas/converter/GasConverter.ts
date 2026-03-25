@@ -74,7 +74,8 @@ export class GasConverter implements IGasConverter {
     quoteTokenAddress: string,
     tokensInfo: Map<string, Erc20Token | null>,
     quotes: QuoteSplit[],
-    ctx: Context
+    ctx: Context,
+    blockNumber?: number
   ): Promise<void> {
     ctx.logger.debug('GasConverter.updateQuotesGasDetails', {
       tokensInfo,
@@ -97,7 +98,7 @@ export class GasConverter implements IGasConverter {
     const wrappedNativeCurrency = getGasToken(chainId);
     const wrappedNativeTokenInfo = tokensInfo.get(
       wrappedNativeCurrency.address
-    )!;
+    )!
 
     // If both USD prices are available, we can derive gasCostInQuoteToken from USD prices
     // without needing to fetch ETH/quoteToken pools
@@ -113,7 +114,8 @@ export class GasConverter implements IGasConverter {
       const gasPools = await this.fetchGasRelatedPools(
         chainId,
         quoteToken,
-        ctx
+        ctx,
+        blockNumber
       );
       ({
         nativeAndQuoteTokenV2PoolSDK,
@@ -331,7 +333,8 @@ export class GasConverter implements IGasConverter {
   private async fetchGasRelatedPools(
     chainId: ChainId,
     quoteToken: Token,
-    ctx: Context
+    ctx: Context,
+    blockNumber?: number
   ): Promise<GasPools> {
     const wrappedCurrency = getGasToken(chainId);
 
@@ -344,17 +347,20 @@ export class GasConverter implements IGasConverter {
       nativeAndQuoteTokenPoolPromiseV2 = getHighestLiquidityV2NativePool(
         quoteToken,
         this.v2PoolRepository,
-        ctx
+        ctx,
+        blockNumber
       );
       nativeAndQuoteTokenPoolPromiseV3 = getHighestLiquidityV3NativePool(
         quoteToken,
         this.v3PoolRepository,
-        ctx
+        ctx,
+        blockNumber
       );
       nativeAndQuoteTokenPoolPromiseV4 = getHighestLiquidityV4NativePool(
         quoteToken,
         this.v4PoolRepository,
-        ctx
+        ctx,
+        blockNumber
       );
     }
 
