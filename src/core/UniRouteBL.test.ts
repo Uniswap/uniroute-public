@@ -69,6 +69,16 @@ import {Pool} from '../models/pool/Pool';
 import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
 
+// Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
+// has a stable, non-empty allow-list for MAINNET without depending on which hook
+// addresses are actually deployed in production.
+vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
+  AGG_HOOKS_PER_CHAIN: {
+    // MAINNET_AGG_HOOK – must match the literal used in the tests below.
+    1: ['0xaaaa000000000000000000000000000000000001'],
+  },
+}));
+
 class TestTokenHandler implements ITokenHandler {
   public async getToken(
     chain: Chain,
@@ -4409,6 +4419,301 @@ describe('UniRouteBL', () => {
 
       expect(strategySpy).toHaveBeenCalledTimes(1);
       expectOriginalConfig(strategySpy.mock.calls[0][7], quickRouteConfig);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // BestQuote agg-hook pool leak detection
+  //
+  // UniRouteBL checks every quote in bestQuote.quotes for V4 pools whose hooks
+  // address is in AGG_HOOKS_PER_CHAIN.  When a leak is detected it must:
+  //   • log a warning
+  //   • emit UniRouteService.Metric.BestQuote.AggHookPoolLeak
+  //   • tag the metric with hitsCachedRoutes:<bool>
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('BestQuote agg-hook pool leak detection', () => {
+    // The address mocked in AGG_HOOKS_PER_CHAIN above.
+    const MAINNET_AGG_HOOK = '0xaaaa000000000000000000000000000000000001';
+    const LEAK_METRIC = 'UniRouteService.Metric.BestQuote.AggHookPoolLeak';
+
+    /** Build a QuoteSplit whose single leg goes through an agg-hook V4 pool. */
+    function makeAggHookQuote(tokenIn: Address, tokenOut: Address): QuoteSplit {
+      const aggHookPool = new V4Pool(
+        tokenIn,
+        tokenOut,
+        3000,
+        60,
+        MAINNET_AGG_HOOK,
+        BigInt('1000000000000'),
+        '0x' + 'ab'.repeat(20), // fake poolId (bytes32-like)
+        BigInt('1000000000000000000'),
+        BigInt('0')
+      );
+      return new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [aggHookPool]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+          }
+        ),
+      ]);
+    }
+
+    /**
+     * A fake ICachedRoutesRepository whose getCachedRoutes returns one dummy
+     * route, making usedCachedRoutes = true in UniRouteBL.
+     */
+    class FakeCachedRoutesRepositoryWithHit implements ICachedRoutesRepository {
+      constructCachedRouteKey(): string {
+        return 'fake-key';
+      }
+
+      async getCachedRoutes(
+        _chainId: number,
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo
+      ): Promise<RouteBasic[]> {
+        // Return a single V2 route so usedCachedRoutes is set to true.
+        return [
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              tokenInCurrencyInfo.wrappedAddress,
+              tokenOutCurrencyInfo.wrappedAddress,
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+        ];
+      }
+
+      async saveCachedRoutes(): Promise<void> {}
+
+      async deleteCachedRoutes(): Promise<boolean> {
+        return false;
+      }
+
+      async scoreFetchedRoutes(
+        routes: {route: RouteBasic; expiresAtMs: number}[]
+      ): Promise<{route: RouteBasic; score: number}[]> {
+        return routes.map(r => ({route: r.route, score: 1}));
+      }
+    }
+
+    it('emits metric and logs warning when best quote contains an agg-hook V4 pool for native protocols', async () => {
+      const testCtx = buildTestContext();
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      expect(testCtx.metrics.countStore[LEAK_METRIC]).toBe(1);
+      expect(testCtx.logger.outputs).toContainEqual(
+        expect.objectContaining({
+          prefix: 'WARN:',
+          msg: 'Best quote route contains agg hook pool for non-external protocols',
+        })
+      );
+    });
+
+    it('does not emit metric when best quote has no agg-hook pool', async () => {
+      const testCtx = buildTestContext();
+
+      // Default MockedQuoteStrategy returns a plain V2 route.
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      expect(testCtx.metrics.countStore[LEAK_METRIC]).toBeUndefined();
+    });
+
+    it('does not emit metric for external protocol requests even when agg-hook pool is in route', async () => {
+      const testCtx = buildTestContext();
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // External protocol — agg-hook pools are expected here, no leak signal.
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({
+          ...baseRequest,
+          tradeType: 'EXACT_IN',
+          protocols: Protocol.CURVESTABLESWAPNG,
+        })
+      );
+
+      expect(testCtx.metrics.countStore[LEAK_METRIC]).toBeUndefined();
+    });
+
+    it('tags metric with hitsCachedRoutes:true when leak comes from a stale cached route', async () => {
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      // Use the fake repo that returns cached routes (usedCachedRoutes → true)
+      // while the strategy still returns the agg-hook quote.
+      const fakeRepo = new FakeCachedRoutesRepositoryWithHit();
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        fakeRepo,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeDefined();
+      expect(leakCall?.[2]?.tags).toContain('hitsCachedRoutes:true');
+    });
+
+    it('tags metric with hitsCachedRoutes:false when leak comes from live routing', async () => {
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      // Empty cache → usedCachedRoutes = false.
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeDefined();
+      expect(leakCall?.[2]?.tags).toContain('hitsCachedRoutes:false');
     });
   });
 });

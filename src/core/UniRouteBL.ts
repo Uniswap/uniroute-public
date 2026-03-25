@@ -47,6 +47,7 @@ import {
   protocolToPoolTypeString,
   updateQuoteSplitWithFreshPoolDetails,
   isOnlyExternalProtocol,
+  isExternalProtocol,
 } from '../lib/helpers';
 import {Erc20Token} from '../models/token/Erc20Token';
 import {Protocol} from '../models/pool/Protocol';
@@ -97,6 +98,7 @@ import {FAKE_TICK_SPACING, isValidRoute} from '../lib/poolUtils';
 import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
+import {AGG_HOOKS_PER_CHAIN} from '../lib/poolCaching/util/hooksAddressesAllowlist';
 import {RedisCache} from '@uniswap/lib-cache/redis';
 import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
@@ -619,6 +621,40 @@ export class UniRouteBL implements IUniRoutedBL {
         });
 
         status = QuoteStatus.Success;
+
+        // Invariant check: for native Uniswap protocols (V2/V3/V4/Mixed) the returned
+        // best-quote routes must never contain agg-hook pools.  If one slips through
+        // (e.g. from a stale cached route written before the filter was in place) we want
+        // a loud signal so we can investigate during rollout.
+        if (!isExternalProtocol(protocols)) {
+          const aggHooksSet = new Set(
+            (AGG_HOOKS_PER_CHAIN[chain.chainId] ?? []).map(a => a.toLowerCase())
+          );
+          for (const quote of bestQuote.quotes) {
+            const aggHookPool = quote.route.path.find(
+              pool =>
+                pool instanceof V4Pool &&
+                pool.hooks &&
+                aggHooksSet.has(pool.hooks.toLowerCase())
+            ) as V4Pool | undefined;
+            if (aggHookPool) {
+              ctx.logger.warn(
+                'Best quote route contains agg hook pool for non-external protocols',
+                {
+                  chainId: chain.chainId,
+                  hooksAddress: aggHookPool.hooks,
+                  hitsCachedRoutes: usedCachedRoutes,
+                  protocols,
+                }
+              );
+              await ctx.metrics.count(
+                buildMetricKey('BestQuote.AggHookPoolLeak'),
+                1,
+                {tags: [`hitsCachedRoutes:${usedCachedRoutes}`]}
+              );
+            }
+          }
+        }
 
         // Only update pool details if required AND simulation hasn't already refreshed them.
         // When simulation ran (SUCCESS or FAILED), updateQuoteSplitWithFreshPoolDetails was
