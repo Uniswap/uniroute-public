@@ -645,12 +645,15 @@ export class UniRouteBL implements IUniRoutedBL {
                   hooksAddress: aggHookPool.hooks,
                   hitsCachedRoutes: usedCachedRoutes,
                   protocols,
+                  ...metricTags,
                 }
               );
               await ctx.metrics.count(
                 buildMetricKey('BestQuote.AggHookPoolLeak'),
                 1,
-                {tags: [`hitsCachedRoutes:${usedCachedRoutes}`]}
+                {
+                  tags: [...metricTags, `hitsCachedRoutes:${usedCachedRoutes}`],
+                }
               );
             }
           }
