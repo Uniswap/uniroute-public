@@ -32,6 +32,11 @@ import {
 } from '../gas/gas-data-provider';
 import {ITokenHandler} from '../../stores/token/ITokenHandler';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
+import {JsonRpcProvider} from '@ethersproject/providers';
+import {
+  partitionAggHookRoutes,
+  fetchAggHookQuotes,
+} from './AggHookQuoter';
 
 /**
  * DeepQuoteStrategy implements an optimized quote finding logic:
@@ -64,6 +69,7 @@ import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrappe
  */
 export class DeepQuoteStrategy extends BaseQuoteStrategy {
   private readonly quoteBestSplitFinder: QuoteBestSplitFinder<Pool>;
+  private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>;
 
   constructor(
     quoteFetcher: IQuoteFetcher,
@@ -73,7 +79,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     quoteSelector: IQuoteSelector,
     tokenHandler: ITokenHandler,
     arbitrumGasDataProvider: ArbitrumGasDataProvider,
-    freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
+    freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    rpcProviderMap?: Map<ChainId, JsonRpcProvider>
   ) {
     super(
       quoteFetcher,
@@ -86,6 +93,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       freshPoolDetailsWrapper
     );
     this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>();
+    this.rpcProviderMap = rpcProviderMap ?? new Map();
   }
 
   async findBestQuoteCandidates(
@@ -114,21 +122,48 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       }
     }
 
-    // Fetch quotes for all routes/percentage combos
+    // Partition: single-hop aggregator hook routes are quoted via hook.quote()
+    // directly, bypassing the V4Quoter which fails for these pools.
+    const {aggHookRoutes, otherRoutes} = partitionAggHookRoutes(pctRoutes);
+
     const fetchQuotesStartTime = Date.now();
-    ctx.logger.debug('Starting fetchQuotes');
-    const quotes = await this.quoteFetcher.fetchQuotes(
-      chain,
-      tokenInCurrencyInfo,
-      tokenOutCurrencyInfo,
-      amount,
-      pctRoutes,
-      tradeType,
-      ctx,
-      metricTags,
-      blockNumber,
-      tokensInfo
-    );
+    ctx.logger.debug('Starting fetchQuotes', {
+      totalPctRoutes: pctRoutes.length,
+      aggHookRoutes: aggHookRoutes.length,
+      otherRoutes: otherRoutes.length,
+    });
+
+    // Fetch quotes in parallel: hook.quote() for agg hooks, standard quoter for the rest
+    const [aggHookQuotes, standardQuotes] = await Promise.all([
+      aggHookRoutes.length > 0
+        ? fetchAggHookQuotes(
+            chain,
+            aggHookRoutes,
+            amount,
+            tradeType,
+            tokenInCurrencyInfo,
+            this.rpcProviderMap,
+            ctx,
+            metricTags
+          )
+        : Promise.resolve([] as QuoteBasic[]),
+      otherRoutes.length > 0
+        ? this.quoteFetcher.fetchQuotes(
+            chain,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            amount,
+            otherRoutes,
+            tradeType,
+            ctx,
+            metricTags,
+            blockNumber,
+            tokensInfo
+          )
+        : Promise.resolve([] as QuoteBasic[]),
+    ]);
+
+    const quotes = [...aggHookQuotes, ...standardQuotes];
     await logElapsedTime('FetchQuotes', fetchQuotesStartTime, ctx, metricTags);
 
     // Update quotes with gas estimation details
