@@ -42,9 +42,7 @@ export function isSingleHopTempoAggHookRoute(route: RouteBasic<Pool>): boolean {
  * // Phase 2 should detect these and compose hook.quote() with V4Quoter
  * // calls serially.
  */
-export function partitionAggHookRoutes(
-  routes: RouteBasic<Pool>[]
-): {
+export function partitionAggHookRoutes(routes: RouteBasic<Pool>[]): {
   aggHookRoutes: RouteBasic<Pool>[];
   otherRoutes: RouteBasic<Pool>[];
 } {
@@ -142,13 +140,17 @@ export async function fetchAggHookQuotes(
           : BigInt(routeAmount);
 
       const amountUnspecified: ethers.BigNumber =
-        await hookContract.callStatic.quote(zeroForOne, amountSpecified, poolId);
+        await hookContract.callStatic.quote(
+          zeroForOne,
+          amountSpecified,
+          poolId
+        );
 
       return new QuoteBasic(
         route,
         amountUnspecified.toBigInt(),
         undefined, // no v3QuoterResponseDetails for hook quotes
-        undefined  // gas details will be filled in later by the strategy
+        undefined // gas details will be filled in later by the strategy
       );
     })
   );
@@ -185,11 +187,9 @@ export async function fetchAggHookQuotes(
     failures,
     {tags: metricTags}
   );
-  await ctx.metrics.timer(
-    buildMetricKey('AggHookQuoter.latency'),
-    latencyMs,
-    {tags: metricTags}
-  );
+  await ctx.metrics.timer(buildMetricKey('AggHookQuoter.latency'), latencyMs, {
+    tags: metricTags,
+  });
 
   return quotes;
 }

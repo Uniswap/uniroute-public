@@ -33,10 +33,7 @@ import {
 import {ITokenHandler} from '../../stores/token/ITokenHandler';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
 import {JsonRpcProvider} from '@ethersproject/providers';
-import {
-  partitionAggHookRoutes,
-  fetchAggHookQuotes,
-} from './AggHookQuoter';
+import {partitionAggHookRoutes, fetchAggHookQuotes} from './AggHookQuoter';
 
 /**
  * DeepQuoteStrategy implements an optimized quote finding logic:

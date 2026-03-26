@@ -5,7 +5,6 @@ import {JsonRpcProvider} from '@ethersproject/providers';
 
 import {Address} from '../../models/address/Address';
 import {RouteBasic} from '../../models/route/RouteBasic';
-import {Pool} from '../../models/pool/Pool';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {V3Pool} from '../../models/pool/V3Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
@@ -246,7 +245,7 @@ describe('fetchAggHookQuotes', () => {
     return () =>
       ({
         callStatic: {quote: quoteFn},
-      } as unknown as ethers.Contract);
+      }) as unknown as ethers.Contract;
   }
 
   it('returns quotes for exact-in with correct amount', async () => {

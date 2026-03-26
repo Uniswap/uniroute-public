@@ -26,7 +26,7 @@ export class NoGasConverter implements IGasConverter {
     quotes: QuoteSplit[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
     _blockNumber?: number
   ): Promise<void> {
     return;

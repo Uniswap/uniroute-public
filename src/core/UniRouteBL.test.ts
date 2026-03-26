@@ -68,6 +68,7 @@ import {Protocol} from '../models/pool/Protocol';
 import {Pool} from '../models/pool/Pool';
 import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
+import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
 
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
@@ -1948,7 +1949,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       // Use the custom config that enables simulation
       const uniRouteBL = new UniRouteBL(
@@ -2061,7 +2062,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       // Use the custom config that enables simulation
       const uniRouteBL = new UniRouteBL(
@@ -2237,7 +2238,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
@@ -2348,7 +2349,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
@@ -2459,7 +2460,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
@@ -2562,7 +2563,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
         simulationEnabledConfig,
@@ -2741,7 +2742,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
       const uniRouteBL = new UniRouteBL(
@@ -2795,7 +2796,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
-        } as any);
+        } as unknown as SwapOptionsUniversalRouter);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
       const uniRouteBL = new UniRouteBL(

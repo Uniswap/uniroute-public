@@ -98,7 +98,7 @@ export class GasConverter implements IGasConverter {
     const wrappedNativeCurrency = getGasToken(chainId);
     const wrappedNativeTokenInfo = tokensInfo.get(
       wrappedNativeCurrency.address
-    )!
+    )!;
 
     // If both USD prices are available, we can derive gasCostInQuoteToken from USD prices
     // without needing to fetch ETH/quoteToken pools

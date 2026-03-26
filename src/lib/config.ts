@@ -167,10 +167,8 @@ export interface IUniRouteServiceConfig {
 export const getUniRouteSyncConfig = (
   s3PoolBucketName?: string
 ): IUniRouteServiceConfig => {
-  const {
-    allPoolsCacheEntryTtlSeconds,
-    tokenInOutPoolsCacheEntryTtlSeconds,
-  } = getPoolDiscoveryCacheTtls();
+  const {allPoolsCacheEntryTtlSeconds, tokenInOutPoolsCacheEntryTtlSeconds} =
+    getPoolDiscoveryCacheTtls();
 
   return {
     QuoteService: QuoteService.UniRoute,
@@ -252,10 +250,8 @@ export const getUniRouteSyncConfig = (
 export const getQuickRouteSyncConfig = (
   s3PoolBucketName?: string
 ): IUniRouteServiceConfig => {
-  const {
-    allPoolsCacheEntryTtlSeconds,
-    tokenInOutPoolsCacheEntryTtlSeconds,
-  } = getPoolDiscoveryCacheTtls();
+  const {allPoolsCacheEntryTtlSeconds, tokenInOutPoolsCacheEntryTtlSeconds} =
+    getPoolDiscoveryCacheTtls();
 
   return {
     QuoteService: QuoteService.QuickRoute,
