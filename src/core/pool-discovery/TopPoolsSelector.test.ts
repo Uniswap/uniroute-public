@@ -5,6 +5,11 @@ import {
   getPoolTVL,
   buildTokenPoolIndex,
 } from './TopPoolsSelector';
+import {
+  AGG_HOOKS_ON_MAINNET,
+  FLUID_DEX_LITE,
+  STABLE_SWAP_NG,
+} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
 import {ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
@@ -426,6 +431,147 @@ describe('BasicTopPoolsSelector', () => {
       expect((result[0] as V4PoolInfo).hooks).toBe(
         '0x1234567890123456789012345678901234567890'
       );
+    });
+
+    describe('agg hook exclusion', () => {
+      const aggHookAddress = FLUID_DEX_LITE[0].toLowerCase();
+      const nonAggHookAddress = '0x1234567890123456789012345678901234567890';
+
+      it('should exclude V4 pools whose hook is an agg hook address', async () => {
+        const aggHookPool: V4PoolInfo = {
+          id: '0xagg',
+          token0: {id: tokenIn.address},
+          token1: {id: tokenOut.address},
+          hooks: aggHookAddress,
+          feeTier: '3000',
+          tickSpacing: '60',
+          liquidity: '10000',
+          tvlETH: 9999,
+          tvlUSD: 9999,
+        } as V4PoolInfo;
+
+        const result = await selector.filterPools(
+          [aggHookPool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          undefined,
+          ctx
+        );
+
+        const ids = result.map(p => p.id);
+        expect(ids).not.toContain('0xagg');
+        expect(ids).toContain(mockV4Pool.id);
+      });
+
+      it('should exclude all agg hook families (FLUID_DEX_LITE and STABLE_SWAP_NG)', async () => {
+        const fluidPool: V4PoolInfo = {
+          ...mockV4Pool,
+          id: '0xfluid',
+          hooks: FLUID_DEX_LITE[0].toLowerCase(),
+        } as V4PoolInfo;
+        const stablePool: V4PoolInfo = {
+          ...mockV4Pool,
+          id: '0xstable',
+          hooks: STABLE_SWAP_NG[0].toLowerCase(),
+        } as V4PoolInfo;
+
+        const result = await selector.filterPools(
+          [fluidPool, stablePool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          undefined,
+          ctx
+        );
+
+        const ids = result.map(p => p.id);
+        expect(ids).not.toContain('0xfluid');
+        expect(ids).not.toContain('0xstable');
+        expect(ids).toContain(mockV4Pool.id);
+      });
+
+      it('should keep V4 pools with non-agg hook addresses', async () => {
+        const nonAggPool: V4PoolInfo = {
+          ...mockV4Pool,
+          id: '0xnonagg',
+          hooks: nonAggHookAddress,
+        } as V4PoolInfo;
+
+        const result = await selector.filterPools(
+          [nonAggPool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          undefined,
+          ctx
+        );
+
+        expect(result.map(p => p.id)).toContain('0xnonagg');
+      });
+
+      it('should exclude agg hook pools even when hooksOptions is HOOKS_INCLUSIVE', async () => {
+        const aggHookPool: V4PoolInfo = {
+          ...mockV4Pool,
+          id: '0xagg_inclusive',
+          hooks: aggHookAddress,
+        } as V4PoolInfo;
+
+        const result = await selector.filterPools(
+          [aggHookPool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_INCLUSIVE,
+          ctx
+        );
+
+        const ids = result.map(p => p.id);
+        expect(ids).not.toContain('0xagg_inclusive');
+        expect(ids).toContain(mockV4Pool.id);
+      });
+
+      it('should exclude agg hook pools even when hooksOptions is HOOKS_ONLY', async () => {
+        const aggHookPool: V4PoolInfo = {
+          ...mockV4Pool,
+          id: '0xagg_hooks_only',
+          hooks: aggHookAddress,
+        } as V4PoolInfo;
+
+        const result = await selector.filterPools(
+          [aggHookPool, mockV4PoolWithHooks],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_ONLY,
+          ctx
+        );
+
+        const ids = result.map(p => p.id);
+        expect(ids).not.toContain('0xagg_hooks_only');
+        // mockV4PoolWithHooks has a non-agg non-zero hook → survives HOOKS_ONLY
+        expect(ids).toContain(mockV4PoolWithHooks.id);
+      });
+
+      it('should not affect non-V4 protocols', async () => {
+        // V2/V3 pools have no hooks field — agg hook exclusion must not touch them
+        const result = await selector.filterPools(
+          [mockV2Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V2,
+          undefined,
+          ctx
+        );
+
+        expect(result.map(p => p.id)).toContain(mockV2Pool.id);
+      });
     });
   });
 
@@ -996,8 +1142,8 @@ describe('BasicTopPoolsSelector', () => {
 });
 
 // Pick one address from each family so tests are readable and deterministic
-const AGG_HOOK_FLUID_LITE = '0xf37c11667d10BbC39C7712a5409c19Ced7EBa088'; // FLUID_DEX_LITE[0].toLowerCase(); // 0xf37c...
-const AGG_HOOK_STABLE_SWAP = '0xc24cf69d2f636db53b57342709bdcb01fbd3a088'; // STABLE_SWAP_NG[0].toLowerCase(); // 0xc24c...
+const AGG_HOOK_FLUID_LITE = FLUID_DEX_LITE[0].toLowerCase(); // 0xf37c...
+const AGG_HOOK_STABLE_SWAP = STABLE_SWAP_NG[0].toLowerCase(); // 0xc24c...
 const NON_AGG_HOOK = '0x1234567890123456789012345678901234567890';
 
 function makeAggV4Pool(
@@ -1020,7 +1166,7 @@ function makeAggV4Pool(
   } as V4PoolInfo;
 }
 
-describe.skip('AggHooksTopPoolsSelector', () => {
+describe('AggHooksTopPoolsSelector', () => {
   const TOKEN_IN = '0x0000000000000000000000000000000000000001';
   const TOKEN_OUT = '0x0000000000000000000000000000000000000002';
   const TOKEN_OTHER = '0x0000000000000000000000000000000000000003';
@@ -1037,10 +1183,7 @@ describe.skip('AggHooksTopPoolsSelector', () => {
   });
 
   it('sanity: AGG_HOOKS_ON_MAINNET contains the addresses used in these tests', () => {
-    const lower = [
-      '0xf37c11667d10BbC39C7712a5409c19Ced7EBa088',
-      '0xc24cf69d2f636db53b57342709bdcb01fbd3a088',
-    ]; // AGG_HOOKS_ON_MAINNET.map(h => h.toLowerCase());
+    const lower = AGG_HOOKS_ON_MAINNET.map(h => h.toLowerCase());
     expect(lower).toContain(AGG_HOOK_FLUID_LITE);
     expect(lower).toContain(AGG_HOOK_STABLE_SWAP);
     expect(lower).not.toContain(NON_AGG_HOOK);

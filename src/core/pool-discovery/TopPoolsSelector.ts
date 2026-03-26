@@ -122,10 +122,29 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       filteredUnsupportedPools: filteredUnsupportedPools.length,
     });
 
+    // For V4, pre-compute the agg hooks set once to avoid recreating it per pool.
+    const aggHooksLowerSet = new Set(
+      (AGG_HOOKS_PER_CHAIN[chainId] ?? []).map(h => h.toLowerCase())
+    );
+
     // Also filter out pools that don't match the hooks options,
-    // only if the uniswap protocol is v4
+    // only if the uniswap protocol is v4.
+    // Additionally, exclude agg hook pools — those are handled exclusively by
+    // AggHooksTopPoolsSelector and must not appear in BasicTopPoolsSelector results.
     const filteredPools = filteredUnsupportedPools.filter(pool => {
       if (protocol === Protocol.V4) {
+        // Exclude agg hook pools regardless of hooksOptions,
+        // Because we have separate AggHooksTopPoolsSelector for agg hook pools.
+        if (aggHooksLowerSet.has((pool as V4PoolInfo).hooks.toLowerCase())) {
+          ctx.logger.debug('Excluding agg hook pool', {
+            chainId,
+            protocol,
+            poolId: pool.id,
+            poolHooks: (pool as V4PoolInfo).hooks,
+          });
+          return false;
+        }
+
         if (
           hooksOptions === undefined ||
           hooksOptions === HooksOptions.HOOKS_INCLUSIVE
