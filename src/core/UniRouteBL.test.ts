@@ -4716,5 +4716,164 @@ describe('UniRouteBL', () => {
       expect(leakCall).toBeDefined();
       expect(leakCall?.[2]?.tags).toContain('hitsCachedRoutes:false');
     });
+
+    it('tags metric and log with testAggHooks:true when options.testAggHooks is true', async () => {
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+      const warnSpy = vi.spyOn(testCtx.logger, 'warn');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'}),
+        {testAggHooks: true}
+      );
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeDefined();
+      expect(leakCall?.[2]?.tags).toContain('testAggHooks:true');
+
+      const warnCall = warnSpy.mock.calls.find(
+        ([msg]) =>
+          msg ===
+          'Best quote route contains agg hook pool for non-external protocols'
+      );
+      expect(warnCall).toBeDefined();
+      expect(warnCall?.[1]).toMatchObject({testAggHooks: true});
+    });
+
+    it('tags metric and log with testAggHooks:false when options.testAggHooks is false', async () => {
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+      const warnSpy = vi.spyOn(testCtx.logger, 'warn');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'}),
+        {testAggHooks: false}
+      );
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeDefined();
+      expect(leakCall?.[2]?.tags).toContain('testAggHooks:false');
+
+      const warnCall = warnSpy.mock.calls.find(
+        ([msg]) =>
+          msg ===
+          'Best quote route contains agg hook pool for non-external protocols'
+      );
+      expect(warnCall).toBeDefined();
+      expect(warnCall?.[1]).toMatchObject({testAggHooks: false});
+    });
+
+    it('tags metric and log with testAggHooks:undefined when options is not provided', async () => {
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+      const warnSpy = vi.spyOn(testCtx.logger, 'warn');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        // no options passed
+      );
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeDefined();
+      expect(leakCall?.[2]?.tags).toContain('testAggHooks:undefined');
+
+      const warnCall = warnSpy.mock.calls.find(
+        ([msg]) =>
+          msg ===
+          'Best quote route contains agg hook pool for non-external protocols'
+      );
+      expect(warnCall).toBeDefined();
+      expect(warnCall?.[1]).toMatchObject({testAggHooks: undefined});
+    });
   });
 });

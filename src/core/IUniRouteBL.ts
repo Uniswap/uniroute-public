@@ -15,6 +15,7 @@ export type QuoteOptions = {
   permit2Disabled?: boolean;
   requestSource?: string;
   universalRouterVersion?: UniversalRouterVersion;
+  testAggHooks?: boolean;
 };
 
 export interface IUniRoutedBL {

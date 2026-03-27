@@ -645,6 +645,7 @@ export class UniRouteBL implements IUniRoutedBL {
                   hooksAddress: aggHookPool.hooks,
                   hitsCachedRoutes: usedCachedRoutes,
                   protocols,
+                  testAggHooks: options?.testAggHooks,
                   ...metricTags,
                 }
               );
@@ -652,7 +653,11 @@ export class UniRouteBL implements IUniRoutedBL {
                 buildMetricKey('BestQuote.AggHookPoolLeak'),
                 1,
                 {
-                  tags: [...metricTags, `hitsCachedRoutes:${usedCachedRoutes}`],
+                  tags: [
+                    ...metricTags,
+                    `hitsCachedRoutes:${usedCachedRoutes}`,
+                    `testAggHooks:${options?.testAggHooks}`,
+                  ],
                 }
               );
             }
