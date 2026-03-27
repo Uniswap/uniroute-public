@@ -2,7 +2,7 @@
  * Ported from routing-api/lib/util/v4HooksPoolsFiltering.ts
  */
 
-import {Hook, HookOptions} from '@uniswap/v4-sdk';
+import {Hook} from '@uniswap/v4-sdk';
 import {
   HOOKS_ADDRESSES_ALLOWLIST,
   ZORA_CREATOR_HOOK_ON_BASE_v1,
@@ -33,17 +33,16 @@ import {
   CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
   CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
 } from './hooksAddressesAllowlist';
-import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {ChainId, Currency, Token} from '@uniswap/sdk-core';
 import {PriorityQueue} from '@datastructures-js/priority-queue';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+
 import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
 import {Logger} from '../sor-providers/util/log';
 import {IMetric} from '../sor-providers/util/metric';
 import {MetricLoggerUnit} from '../sor-providers/util/metric';
 import {isPoolFeeDynamic} from './isPoolFeeDynamic';
 import {nativeOnChain} from './nativeOnChain';
-import {getMajorTokens, isMajorPair} from './majorTokens';
 
 const CLANKER_HOOKS = new Set([
   CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
@@ -63,13 +62,6 @@ const TOP_GROUPED_V4_POOLS = 10;
 
 function convertV4PoolToGroupingKey(pool: V4SubgraphPool): V4PoolGroupingKey {
   return pool.token0.id.concat(pool.token1.id).concat(pool.feeTier);
-}
-
-export function hasCustomAccountingPermissions(hookAddress: string): boolean {
-  return (
-    Hook.hasPermission(hookAddress, HookOptions.BeforeSwapReturnsDelta) ||
-    Hook.hasPermission(hookAddress, HookOptions.AfterSwapReturnsDelta)
-  );
 }
 
 function isHooksPoolRoutable(
@@ -105,16 +97,10 @@ function isHooksPoolRoutable(
       1,
       MetricLoggerUnit.Count
     );
-    metric?.putMetric(
-      `Hook.hasCustomAccountingPermissions.${hasCustomAccountingPermissions(pool.hooks)}`,
-      1,
-      MetricLoggerUnit.Count
-    );
 
     return (
       pool.hooks === ADDRESS_ZERO ||
       (!Hook.hasSwapPermissions(pool.hooks) &&
-        !hasCustomAccountingPermissions(pool.hooks) &&
         Number(pool.feeTier) <= 1000000 &&
         !isPoolFeeDynamic(
           tokenA,
@@ -154,7 +140,6 @@ function isHooksPoolRoutable(
     return (
       pool.hooks === ADDRESS_ZERO ||
       (!Hook.hasSwapPermissions(pool.hooks) &&
-        !hasCustomAccountingPermissions(pool.hooks) &&
         Number(pool.feeTier) <= 1000000 &&
         !isPoolFeeDynamic(
           tokenA,
@@ -182,51 +167,9 @@ export function v4HooksPoolsFiltering(
     V4PoolGroupingKey,
     PriorityQueue<V4SubgraphPool>
   > = {};
-  const allowlistedHooksAddresses = new Set(
-    (HOOKS_ADDRESSES_ALLOWLIST[chainId] ?? []).map(hook => hook.toLowerCase())
-  );
-  const denylistedHooksAddresses = new Set(
-    (HOOKS_ADDRESSES_DENYLIST[chainId] ?? []).map(hook => hook.toLowerCase())
-  );
-  const majorTokens = getMajorTokens(chainId);
-
-  /* checks are in order of priority
-
-    - denylisted hooks - never allowed
-    - zero address - always allowed, same priority as denylist
-
-    NEEDS ALLOWLIST:
-    - custom accounting permissions
-    - major pair
-
-    Otherwise, automatically allowed
-   */
-  const isHookAllowedForPool = (pool: V4SubgraphPool): boolean => {
-    const hookAddress = pool.hooks.toLowerCase();
-
-    if (denylistedHooksAddresses.has(hookAddress)) {
-      return false;
-    }
-
-    if (hookAddress === ADDRESS_ZERO) {
-      return true;
-    }
-
-    if (
-      hasCustomAccountingPermissions(hookAddress) ||
-      isMajorPair(pool.token0.id, pool.token1.id, majorTokens)
-    ) {
-      return allowlistedHooksAddresses.has(hookAddress);
-    }
-
-    return true;
-  };
 
   pools.forEach((pool: V4SubgraphPool) => {
-    if (
-      isHooksPoolRoutable(pool, chainId, logger, metric) &&
-      !denylistedHooksAddresses.has(pool.hooks.toLowerCase())
-    ) {
+    if (isHooksPoolRoutable(pool, chainId, logger, metric)) {
       const v4Pools =
         v4PoolsByTokenPairsAndFees[convertV4PoolToGroupingKey(pool)] ??
         new PriorityQueue<V4SubgraphPool>(V4SubgraphPoolComparator);
@@ -345,7 +288,9 @@ export function v4HooksPoolsFiltering(
         v4Pools.dequeue();
       }
 
-      v4PoolsByTokenPairsAndFees[convertV4PoolToGroupingKey(pool)] = v4Pools;
+      v4PoolsByTokenPairsAndFees[
+        pool.token0.id.concat(pool.token1.id).concat(pool.feeTier)
+      ] = v4Pools;
     }
   });
 
@@ -356,12 +301,16 @@ export function v4HooksPoolsFiltering(
     }
   );
 
-  // Create Set for O(1) lookups in order to compute pools excluded by top TVL capping.
+  // Create Sets for O(1) lookups in order to compute 'allowlistedHooksPools'
   const topTvlPoolIds = new Set(topTvlPools.map(pool => pool.id.toLowerCase()));
+  const allowlistedHooksAddresses = new Set(
+    (HOOKS_ADDRESSES_ALLOWLIST[chainId] ?? []).map(hook => hook.toLowerCase())
+  );
 
   const allowlistedHooksPools = pools.filter((pool: V4SubgraphPool) => {
     return (
-      isHookAllowedForPool(pool) && !topTvlPoolIds.has(pool.id.toLowerCase())
+      allowlistedHooksAddresses.has(pool.hooks.toLowerCase()) &&
+      !topTvlPoolIds.has(pool.id.toLowerCase())
     );
   });
 
