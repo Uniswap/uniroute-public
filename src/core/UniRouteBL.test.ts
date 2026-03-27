@@ -587,11 +587,11 @@ describe('UniRouteBL', () => {
     });
   });
 
-  // Regression: Bug 2 — external protocol (e.g. STABLESWAPNG) cache save was guarded by
-  // `quoteType === QuoteType.Fast` which is always true for FAST quotes, so it saved in
-  // sync mode too. The correct guard is `LambdaType.Async`.
+  // getCachedRoutes/saveCachedRoutes is only enabled for the all-Uniswap-protocols case
+  // (V2 + V3 + V4 + MIXED). Any request that includes an external protocol must never
+  // read from or write to the route cache regardless of sync/async mode.
   describe('external protocol caching behavior', () => {
-    it('should NOT cache routes for external protocol in sync mode (second call still misses)', async () => {
+    it('should NOT cache routes for external-only protocol in sync mode (second call still misses)', async () => {
       const request = new QuoteRequest({
         ...baseRequest,
         tradeType: 'EXACT_IN',
@@ -599,7 +599,7 @@ describe('UniRouteBL', () => {
       });
 
       const uniRouteBL = new UniRouteBL(
-        serviceConfig, // LambdaType.Sync — must NOT save
+        serviceConfig,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -622,12 +622,12 @@ describe('UniRouteBL', () => {
       const firstResponse = await uniRouteBL.quote(ctx, request);
       expect(firstResponse.hitsCachedRoutes).toBe(false);
 
-      // Sync must NOT save routes — second call should still miss cache
+      // External protocol must never write to the cache — second call still misses
       const secondResponse = await uniRouteBL.quote(ctx, request);
       expect(secondResponse.hitsCachedRoutes).toBe(false);
     });
 
-    it('should cache routes for external protocol in async mode (second call hits cache)', async () => {
+    it('should NOT cache routes for external-only protocol in async mode (second call still misses)', async () => {
       const request = new QuoteRequest({
         ...baseRequest,
         tradeType: 'EXACT_IN',
@@ -635,7 +635,7 @@ describe('UniRouteBL', () => {
       });
 
       const uniRouteBL = new UniRouteBL(
-        serviceConfigAsync, // LambdaType.Async — must save
+        serviceConfigAsync,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -655,21 +655,91 @@ describe('UniRouteBL', () => {
         mockedRpcProviderMap
       );
 
-      // First call: cache is empty → miss
       const firstResponse = await uniRouteBL.quote(ctx, request);
       expect(firstResponse.hitsCachedRoutes).toBe(false);
 
-      // Async saves routes after first call → second call hits the external protocol cache
+      // External protocol must never write to the cache even in async mode
+      const secondResponse = await uniRouteBL.quote(ctx, request);
+      expect(secondResponse.hitsCachedRoutes).toBe(false);
+    });
+
+    it('should NOT cache routes when uniswap + external protocols are mixed (second call still misses)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        protocols: `${Protocol.V2},${Protocol.V3},${Protocol.V4},${Protocol.MIXED},${Protocol.CURVESTABLESWAPNG}`,
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const firstResponse = await uniRouteBL.quote(ctx, request);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // Any external protocol in the set disables the cache entirely
+      const secondResponse = await uniRouteBL.quote(ctx, request);
+      expect(secondResponse.hitsCachedRoutes).toBe(false);
+    });
+
+    it('should cache routes for all-Uniswap protocols in async mode (second call hits cache)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        // defaults to v2,v3,v4,mixed — all Uniswap, no external
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const firstResponse = await uniRouteBL.quote(ctx, request);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // Async saves routes after first call → second call hits the cache
       const secondResponse = await uniRouteBL.quote(ctx, request);
       expect(secondResponse.hitsCachedRoutes).toBe(true);
     });
 
-    it('should use a separate cache namespace for external protocol vs Uniswap protocols', async () => {
-      // First populate the standard Uniswap cache
+    it('should NOT cross-contaminate: external protocol request must not hit the Uniswap route cache', async () => {
       const uniswapRequest = new QuoteRequest({
         ...baseRequest,
         tradeType: 'EXACT_IN',
-        // protocols defaults to 'v2,v3,v4,mixed'
+        // defaults to v2,v3,v4,mixed
       });
       const externalRequest = new QuoteRequest({
         ...baseRequest,
@@ -701,20 +771,19 @@ describe('UniRouteBL', () => {
       // Populate the Uniswap cache
       await uniRouteBL.quote(ctx, uniswapRequest);
 
-      // The external protocol request must NOT get a cache hit from the Uniswap cache
+      // External protocol request must not read from the Uniswap cache
       const externalFirstResponse = await uniRouteBL.quote(
         ctx,
         externalRequest
       );
       expect(externalFirstResponse.hitsCachedRoutes).toBe(false);
 
-      // After the above call, the external protocol cache is populated
-      // The second external protocol call must hit the external cache, not the Uniswap one
+      // External protocol never writes to any cache — subsequent call still misses
       const externalSecondResponse = await uniRouteBL.quote(
         ctx,
         externalRequest
       );
-      expect(externalSecondResponse.hitsCachedRoutes).toBe(true);
+      expect(externalSecondResponse.hitsCachedRoutes).toBe(false);
     });
   });
 
@@ -4545,7 +4614,7 @@ describe('UniRouteBL', () => {
       expect(testCtx.logger.outputs).toContainEqual(
         expect.objectContaining({
           prefix: 'WARN:',
-          msg: 'Best quote route contains agg hook pool for non-external protocols',
+          msg: 'Best quote route contains unexpected agg hook pool',
         })
       );
     });
@@ -4578,49 +4647,6 @@ describe('UniRouteBL', () => {
       await uniRouteBL.quote(
         testCtx,
         new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
-      );
-
-      expect(testCtx.metrics.countStore[LEAK_METRIC]).toBeUndefined();
-    });
-
-    it('does not emit metric for external protocol requests even when agg-hook pool is in route', async () => {
-      const testCtx = buildTestContext();
-
-      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
-      const tokenOut = new Address(
-        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
-      );
-      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
-
-      const uniRouteBL = new UniRouteBL(
-        serviceConfig,
-        redisCache,
-        chainRepository,
-        poolDiscoverer,
-        freshPoolDetailsWrapper,
-        tokenHandler,
-        quoteFetcher,
-        quoteSelector,
-        routeQuoteAllocator,
-        gasEstimateProvider,
-        noGasConverter,
-        routeRepository,
-        cachedRoutesRepository,
-        new MockedQuoteStrategy(aggHookQuote),
-        dummySimulator,
-        quoteRequestValidator,
-        tokenProvider,
-        mockedRpcProviderMap
-      );
-
-      // External protocol — agg-hook pools are expected here, no leak signal.
-      await uniRouteBL.quote(
-        testCtx,
-        new QuoteRequest({
-          ...baseRequest,
-          tradeType: 'EXACT_IN',
-          protocols: Protocol.CURVESTABLESWAPNG,
-        })
       );
 
       expect(testCtx.metrics.countStore[LEAK_METRIC]).toBeUndefined();
@@ -4762,9 +4788,7 @@ describe('UniRouteBL', () => {
       expect(leakCall?.[2]?.tags).toContain('testAggHooks:true');
 
       const warnCall = warnSpy.mock.calls.find(
-        ([msg]) =>
-          msg ===
-          'Best quote route contains agg hook pool for non-external protocols'
+        ([msg]) => msg === 'Best quote route contains unexpected agg hook pool'
       );
       expect(warnCall).toBeDefined();
       expect(warnCall?.[1]).toMatchObject({testAggHooks: true});
@@ -4815,9 +4839,7 @@ describe('UniRouteBL', () => {
       expect(leakCall?.[2]?.tags).toContain('testAggHooks:false');
 
       const warnCall = warnSpy.mock.calls.find(
-        ([msg]) =>
-          msg ===
-          'Best quote route contains agg hook pool for non-external protocols'
+        ([msg]) => msg === 'Best quote route contains unexpected agg hook pool'
       );
       expect(warnCall).toBeDefined();
       expect(warnCall?.[1]).toMatchObject({testAggHooks: false});
@@ -4868,12 +4890,126 @@ describe('UniRouteBL', () => {
       expect(leakCall?.[2]?.tags).toContain('testAggHooks:undefined');
 
       const warnCall = warnSpy.mock.calls.find(
-        ([msg]) =>
-          msg ===
-          'Best quote route contains agg hook pool for non-external protocols'
+        ([msg]) => msg === 'Best quote route contains unexpected agg hook pool'
       );
       expect(warnCall).toBeDefined();
       expect(warnCall?.[1]).toMatchObject({testAggHooks: undefined});
+    });
+
+    it('emits AggHookPoolLeak for external protocol without testAggHooks', async () => {
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+      const warnSpy = vi.spyOn(testCtx.logger, 'warn');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // External protocol without testAggHooks — treated as unexpected.
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({
+          ...baseRequest,
+          tradeType: 'EXACT_IN',
+          protocols: Protocol.CURVESTABLESWAPNG,
+        })
+      );
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeDefined();
+      expect(leakCall?.[2]?.tags).toContain('testAggHooks:undefined');
+
+      const warnCall = warnSpy.mock.calls.find(
+        ([msg]) => msg === 'Best quote route contains unexpected agg hook pool'
+      );
+      expect(warnCall).toBeDefined();
+    });
+
+    it('emits AggHookPoolExpected (not Leak, no warn) for external protocol with testAggHooks=true', async () => {
+      const EXPECTED_METRIC =
+        'UniRouteService.Metric.BestQuote.AggHookPoolExpected';
+      const testCtx = buildTestContext();
+      const countSpy = vi.spyOn(testCtx.metrics, 'count');
+      const warnSpy = vi.spyOn(testCtx.logger, 'warn');
+
+      const tokenIn = new Address('0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2');
+      const tokenOut = new Address(
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      const aggHookQuote = makeAggHookQuote(tokenIn, tokenOut);
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(aggHookQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // External protocol + testAggHooks=true — this is the expected path.
+      await uniRouteBL.quote(
+        testCtx,
+        new QuoteRequest({
+          ...baseRequest,
+          tradeType: 'EXACT_IN',
+          protocols: Protocol.CURVESTABLESWAPNG,
+        }),
+        {testAggHooks: true}
+      );
+
+      const expectedCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === EXPECTED_METRIC
+      );
+      expect(expectedCall).toBeDefined();
+      expect(expectedCall?.[2]?.tags).toContain('testAggHooks:true');
+
+      const leakCall = countSpy.mock.calls.find(
+        ([metricName]) => metricName === LEAK_METRIC
+      );
+      expect(leakCall).toBeUndefined();
+
+      const warnCall = warnSpy.mock.calls.find(
+        ([msg]) => msg === 'Best quote route contains unexpected agg hook pool'
+      );
+      expect(warnCall).toBeUndefined();
     });
   });
 });

@@ -46,7 +46,6 @@ import {
   logElapsedTime,
   protocolToPoolTypeString,
   updateQuoteSplitWithFreshPoolDetails,
-  isOnlyExternalProtocol,
   isExternalProtocol,
 } from '../lib/helpers';
 import {Erc20Token} from '../models/token/Erc20Token';
@@ -378,8 +377,7 @@ export class UniRouteBL implements IUniRoutedBL {
       let usedCachedRoutes: boolean = false;
       if (
         quoteType === QuoteType.Fast &&
-        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
-          isOnlyExternalProtocol(protocols)) &&
+        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
         this.serviceConfig.CachedRoutes.Enabled
       ) {
@@ -622,35 +620,43 @@ export class UniRouteBL implements IUniRoutedBL {
 
         status = QuoteStatus.Success;
 
-        // Invariant check: for native Uniswap protocols (V2/V3/V4/Mixed) the returned
-        // best-quote routes must never contain agg-hook pools.  If one slips through
-        // (e.g. from a stale cached route written before the filter was in place) we want
-        // a loud signal so we can investigate during rollout.
-        if (!isExternalProtocol(protocols)) {
-          const aggHooksSet = new Set(
-            (AGG_HOOKS_PER_CHAIN[chain.chainId] ?? []).map(a => a.toLowerCase())
-          );
-          for (const quote of bestQuote.quotes) {
-            const aggHookPool = quote.route.path.find(
-              pool =>
-                pool instanceof V4Pool &&
-                pool.hooks &&
-                aggHooksSet.has(pool.hooks.toLowerCase())
-            ) as V4Pool | undefined;
-            if (aggHookPool) {
+        const aggHooksSet = new Set(
+          (AGG_HOOKS_PER_CHAIN[chain.chainId] ?? []).map(a => a.toLowerCase())
+        );
+        for (const quote of bestQuote.quotes) {
+          const aggHookPool = quote.route.path.find(
+            pool =>
+              pool instanceof V4Pool &&
+              pool.hooks &&
+              aggHooksSet.has(pool.hooks.toLowerCase())
+          ) as V4Pool | undefined;
+          if (aggHookPool) {
+            if (!isExternalProtocol(protocols) || !options?.testAggHooks) {
               ctx.logger.warn(
-                'Best quote route contains agg hook pool for non-external protocols',
+                'Best quote route contains unexpected agg hook pool',
                 {
                   chainId: chain.chainId,
                   hooksAddress: aggHookPool.hooks,
                   hitsCachedRoutes: usedCachedRoutes,
                   protocols,
-                  testAggHooks: options?.testAggHooks,
                   ...metricTags,
+                  testAggHooks: options?.testAggHooks,
                 }
               );
               await ctx.metrics.count(
                 buildMetricKey('BestQuote.AggHookPoolLeak'),
+                1,
+                {
+                  tags: [
+                    ...metricTags,
+                    `hitsCachedRoutes:${usedCachedRoutes}`,
+                    `testAggHooks:${options?.testAggHooks}`,
+                  ],
+                }
+              );
+            } else {
+              await ctx.metrics.count(
+                buildMetricKey('BestQuote.AggHookPoolExpected'),
                 1,
                 {
                   tags: [
@@ -731,8 +737,7 @@ export class UniRouteBL implements IUniRoutedBL {
       // if this was a cache miss + all protocols searched + the simulation didn't fail + is async call, cache the best quote's route(s)
       if (
         !usedCachedRoutes &&
-        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
-          isOnlyExternalProtocol(protocols)) &&
+        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
         this.serviceConfig.Lambda.Type === LambdaType.Async &&
         bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
         this.serviceConfig.CachedRoutes.Enabled

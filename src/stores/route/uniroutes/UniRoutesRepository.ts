@@ -31,7 +31,7 @@ import {
 import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
-import {isOnlyExternalProtocol, logElapsedTime} from '../../../lib/helpers';
+import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -115,7 +115,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
 
     // External protocols (StableSwap, FluidDex, etc.) are V4 hook-based pools.
     // Fetch them separately and merge into the V4 pool bucket for routing.
-    const externalProtocolExists = isOnlyExternalProtocol(protocols);
+    const externalProtocolExists = isExternalProtocol(protocols);
     if (externalProtocolExists && V4_SUPPORTED.includes(chain.chainId)) {
       // Build a selector that pre-filters the pool universe to only AGG_HOOKS pools before
       // applying the standard top-N selection logic.
