@@ -1,5 +1,8 @@
 import {describe, it, expect, vi} from 'vitest';
-import {v4HooksPoolsFiltering} from './v4HooksPoolsFiltering';
+import {
+  v4HooksPoolsFiltering,
+  hasCustomAccountingPermissions,
+} from './v4HooksPoolsFiltering';
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
@@ -15,6 +18,8 @@ import {
   CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
   HOOKS_ADDRESSES_ALLOWLIST,
 } from './hooksAddressesAllowlist';
+import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
+import {getMajorTokens, isMajorPair} from './majorTokens';
 
 const mockLogger: Logger = {
   info: vi.fn(),
@@ -63,7 +68,170 @@ function createPool(overrides: Partial<V4SubgraphPool> = {}): V4SubgraphPool {
   };
 }
 
+describe('hasCustomAccountingPermissions', () => {
+  it('returns false when no returnsDelta flags are set', () => {
+    expect(hasCustomAccountingPermissions(ADDRESS_ZERO)).toBe(false);
+    // beforeSwap only (0x80)
+    expect(
+      hasCustomAccountingPermissions(
+        '0x0000000000000000000000000000000000000080'
+      )
+    ).toBe(false);
+  });
+
+  it('returns true when beforeSwapReturnsDelta or afterSwapReturnsDelta is set', () => {
+    // beforeSwapReturnsDelta (0x08)
+    expect(
+      hasCustomAccountingPermissions(
+        '0x0000000000000000000000000000000000000008'
+      )
+    ).toBe(true);
+    // afterSwapReturnsDelta (0x04)
+    expect(
+      hasCustomAccountingPermissions(
+        '0x0000000000000000000000000000000000000004'
+      )
+    ).toBe(true);
+    // both (0x0c)
+    expect(
+      hasCustomAccountingPermissions(
+        '0x000000000000000000000000000000000000000c'
+      )
+    ).toBe(true);
+  });
+});
+
 describe('v4HooksPoolsFiltering', () => {
+  describe('major pair hook allowlisting', () => {
+    const hookWithoutSwapPermissions =
+      '0x0000000000000000000000000000000000000100';
+
+    it('keeps routable non-allowlisted hooked pools when both assets are majors', () => {
+      const pool = createPool({
+        hooks: hookWithoutSwapPermissions,
+        token0: {
+          id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+          symbol: 'WETH',
+          name: 'Wrapped Ether',
+          decimals: '18',
+        },
+        token1: {
+          id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result.length).toBe(1);
+      expect(result[0]?.id).toBe(pool.id);
+    });
+
+    it('drops non-routable non-allowlisted hook on major pair', () => {
+      // Hook with beforeSwap permission (0x80) — non-routable due to swap permissions.
+      // On a major pair (WETH/USDC on mainnet) and NOT in the explicit allowlist.
+      // Should be excluded: not routable (fails Phase 1), not auto-allowlisted
+      // (major pair fails isAutoAllowlistedHook), not explicitly allowlisted (Phase 3).
+      const hookWithSwapPermissions =
+        '0x0000000000000000000000000000000000000080';
+      const pool = createPool({
+        hooks: hookWithSwapPermissions,
+        tvlETH: 100,
+        token0: {
+          id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+          symbol: 'WETH',
+          name: 'Wrapped Ether',
+          decimals: '18',
+        },
+        token1: {
+          id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('includes non-allowlisted hooked pools when pair is not major-major', () => {
+      const pool = createPool({
+        hooks: hookWithoutSwapPermissions,
+        token0: {
+          id: '0x00000000000000000000000000000000000000a1',
+          symbol: 'TOKEN_A',
+          name: 'Token A',
+          decimals: '18',
+        },
+        token1: {
+          id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result.length).toBe(1);
+    });
+
+    it('applies env-based major token extensions without excluding routable pools', () => {
+      const previous = process.env.V4_HOOKS_EXTRA_MAJOR_TOKENS_BY_CHAIN;
+      try {
+        process.env.V4_HOOKS_EXTRA_MAJOR_TOKENS_BY_CHAIN = JSON.stringify({
+          [ChainId.MAINNET]: [
+            '0x00000000000000000000000000000000000000a1',
+            '0x00000000000000000000000000000000000000a2',
+          ],
+        });
+
+        const pool = createPool({
+          hooks: hookWithoutSwapPermissions,
+          token0: {
+            id: '0x00000000000000000000000000000000000000a1',
+            symbol: 'TOKEN_A',
+            name: 'Token A',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x00000000000000000000000000000000000000a2',
+            symbol: 'TOKEN_B',
+            name: 'Token B',
+            decimals: '18',
+          },
+        });
+
+        const result = v4HooksPoolsFiltering(
+          ChainId.MAINNET,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result.length).toBe(1);
+        expect(result[0]?.id).toBe(pool.id);
+      } finally {
+        process.env.V4_HOOKS_EXTRA_MAJOR_TOKENS_BY_CHAIN = previous;
+      }
+    });
+  });
+
   it('returns pools with ADDRESS_ZERO hooks', () => {
     const pools = [createPool({hooks: ADDRESS_ZERO, tvlETH: 5})];
     const result = v4HooksPoolsFiltering(
@@ -125,7 +293,7 @@ describe('v4HooksPoolsFiltering', () => {
     expect(result.length).toBe(1);
   });
 
-  it('filters pools by routability - non-routable pools excluded from top TVL', () => {
+  it('auto-allowlists non-major hooked pools even when non-routable', () => {
     const nonRoutableHook = '0x0000000000000000000000000000000000000080';
     const pool = createPool({
       hooks: nonRoutableHook,
@@ -138,7 +306,7 @@ describe('v4HooksPoolsFiltering', () => {
       mockLogger,
       mockMetric
     );
-    expect(result.length).toBe(0);
+    expect(result.length).toBe(1);
   });
 
   it('includes allowlisted hooks pools even if not in top TVL set', () => {
@@ -249,22 +417,21 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('does not apply Zora filter to non-BASE chain', () => {
+    it('auto-allowlists Zora hook on non-BASE chain when pair is not major-major', () => {
       const pool = createPool({
         hooks: ZORA_CREATOR_HOOK_ON_BASE_v1,
         tvlETH: 0.0001,
         tvlUSD: 0,
       });
       // On MAINNET the Zora TVL filter does not apply (requires chainId === BASE).
-      // However, the hook may still be excluded by the routability check if it has swap permissions.
+      // The pair is not major-major in this fixture, so the hook is auto-allowlisted.
       const result = v4HooksPoolsFiltering(
         ChainId.MAINNET,
         [pool],
         mockLogger,
         mockMetric
       );
-      // The hook address has swap permissions, so it is non-routable on any chain
-      expect(result.length).toBe(0);
+      expect(result.length).toBe(1);
     });
 
     it('handles Zora post hook v2_4_0 variant on BASE with low tvl', () => {
@@ -562,7 +729,7 @@ describe('v4HooksPoolsFiltering', () => {
 
   // --- High feeTier > 1000000 (non-routable) ---
   describe('high feeTier non-routable', () => {
-    it('excludes pool with feeTier > 1000000 and non-ADDRESS_ZERO hooks', () => {
+    it('auto-allowlists non-major hooks even when feeTier > 1000000', () => {
       // Use a hook that has no swap permissions but feeTier is too high
       // ADDRESS_ZERO hooks bypass the feeTier check (they are always routable)
       // We need a hook without swap permissions but with high feeTier
@@ -579,7 +746,88 @@ describe('v4HooksPoolsFiltering', () => {
         mockLogger,
         mockMetric
       );
-      expect(result.length).toBe(0);
+      expect(result.length).toBe(1);
+    });
+  });
+
+  describe('hook denylisting', () => {
+    it('excludes non-major hooked pools when hook is denylisted', () => {
+      const hookNoSwap = '0x0000000000000000000000000000000000000400';
+      const previous = HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET];
+      HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET] = [hookNoSwap];
+
+      try {
+        const pool = createPool({
+          hooks: hookNoSwap,
+          token0: {
+            id: '0x00000000000000000000000000000000000000a1',
+            symbol: 'TOKEN_A',
+            name: 'Token A',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x00000000000000000000000000000000000000a2',
+            symbol: 'TOKEN_B',
+            name: 'Token B',
+            decimals: '18',
+          },
+        });
+
+        const result = v4HooksPoolsFiltering(
+          ChainId.MAINNET,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result).toEqual([]);
+      } finally {
+        if (previous) {
+          HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET] = previous;
+        } else {
+          delete HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET];
+        }
+      }
+    });
+
+    it('gives denylist precedence over allowlist for major pairs', () => {
+      const allowlistedHookAddress = (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ??
+        [])[1]!;
+      const previous = HOOKS_ADDRESSES_DENYLIST[ChainId.BASE];
+      HOOKS_ADDRESSES_DENYLIST[ChainId.BASE] = [allowlistedHookAddress];
+
+      try {
+        const pool = createPool({
+          hooks: allowlistedHookAddress,
+          token0: {
+            id: '0x4200000000000000000000000000000000000006',
+            symbol: 'WETH',
+            name: 'WETH',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+            symbol: 'USDC',
+            name: 'USDC',
+            decimals: '6',
+          },
+          feeTier: '500',
+          tickSpacing: '10',
+        });
+
+        const result = v4HooksPoolsFiltering(
+          ChainId.BASE,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result).toEqual([]);
+      } finally {
+        if (previous) {
+          HOOKS_ADDRESSES_DENYLIST[ChainId.BASE] = previous;
+        } else {
+          delete HOOKS_ADDRESSES_DENYLIST[ChainId.BASE];
+        }
+      }
     });
   });
 
@@ -874,6 +1122,335 @@ describe('v4HooksPoolsFiltering', () => {
       );
       // Should only appear once
       expect(result.length).toBe(1);
+    });
+  });
+
+  describe('custom accounting hooks allowlisting', () => {
+    // 0x08 = beforeSwapReturnsDelta only, 0x04 = afterSwapReturnsDelta only, 0x0c = both
+    const hookBeforeSwapReturnsDelta =
+      '0x0000000000000000000000000000000000000008';
+    const hookAfterSwapReturnsDelta =
+      '0x0000000000000000000000000000000000000004';
+    const hookBothSwapReturnsDelta =
+      '0x000000000000000000000000000000000000000c';
+
+    it('excludes non-allowlisted custom accounting hook on non-major pair', () => {
+      const pool = createPool({
+        hooks: hookBeforeSwapReturnsDelta,
+        tvlETH: 100,
+        token0: {
+          id: '0x00000000000000000000000000000000000000a1',
+          symbol: 'TOKEN_A',
+          name: 'Token A',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x00000000000000000000000000000000000000a2',
+          symbol: 'TOKEN_B',
+          name: 'Token B',
+          decimals: '18',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('excludes non-allowlisted afterSwapReturnsDelta hook on non-major pair', () => {
+      const pool = createPool({
+        hooks: hookAfterSwapReturnsDelta,
+        tvlETH: 100,
+        token0: {
+          id: '0x00000000000000000000000000000000000000a1',
+          symbol: 'TOKEN_A',
+          name: 'Token A',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x00000000000000000000000000000000000000a2',
+          symbol: 'TOKEN_B',
+          name: 'Token B',
+          decimals: '18',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('excludes non-allowlisted custom accounting hook on major pair', () => {
+      const pool = createPool({
+        hooks: hookBothSwapReturnsDelta,
+        tvlETH: 100,
+        token0: {
+          id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+          symbol: 'WETH',
+          name: 'Wrapped Ether',
+          decimals: '18',
+        },
+        token1: {
+          id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('includes allowlisted custom accounting hook on non-major pair', () => {
+      const allowlistedHookAddress = (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ??
+        [])[1]!;
+
+      const pool = createPool({
+        hooks: allowlistedHookAddress,
+        tvlETH: 100,
+        token0: {
+          id: '0x00000000000000000000000000000000000000a1',
+          symbol: 'TOKEN_A',
+          name: 'Token A',
+          decimals: '18',
+        },
+        token1: {
+          id: '0x00000000000000000000000000000000000000a2',
+          symbol: 'TOKEN_B',
+          name: 'Token B',
+          decimals: '18',
+        },
+      });
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result.length).toBe(1);
+    });
+  });
+
+  describe('auto-allowlisted hooks compete in top-N TVL queue', () => {
+    it('caps auto-allowlisted hook pools per token pair + fee via top TVL', () => {
+      // 15 pools with a non-routable auto-allowlisted hook (has beforeSwap permission
+      // but no custom accounting, non-major pair) — same token pair and fee tier.
+      // Only the top 10 by TVL should survive; the rest are not in the explicit
+      // allowlist so they should not be re-added in Phase 2.
+      const hookWithBeforeSwap = '0x0000000000000000000000000000000000000080';
+      const pools = Array.from({length: 15}, (_, i) =>
+        createPool({
+          hooks: hookWithBeforeSwap,
+          tvlETH: i + 1,
+          token0: {
+            id: '0x00000000000000000000000000000000000000a1',
+            symbol: 'A',
+            name: 'A',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x00000000000000000000000000000000000000a2',
+            symbol: 'B',
+            name: 'B',
+            decimals: '18',
+          },
+          feeTier: '3000',
+        })
+      );
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        pools,
+        mockLogger,
+        mockMetric
+      );
+      expect(result.length).toBe(10);
+      // Verify the top 10 by TVL are kept (tvlETH 6-15)
+      const tvls = result.map(p => p.tvlETH).sort((a, b) => a - b);
+      expect(tvls).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    });
+
+    it('routable and auto-allowlisted hooks use separate top-N queues', () => {
+      // 15 routable ADDRESS_ZERO pools and 15 auto-allowlisted hook pools,
+      // all sharing the same token pair + fee tier.
+      // Each queue independently keeps its top 10.
+      const hookWithBeforeSwap = '0x0000000000000000000000000000000000000080';
+      const token0 = {
+        id: '0x00000000000000000000000000000000000000a1',
+        symbol: 'A',
+        name: 'A',
+        decimals: '18',
+      };
+      const token1 = {
+        id: '0x00000000000000000000000000000000000000a2',
+        symbol: 'B',
+        name: 'B',
+        decimals: '18',
+      };
+
+      const routablePools = Array.from({length: 15}, (_, i) =>
+        createPool({
+          hooks: ADDRESS_ZERO,
+          tvlETH: i + 1,
+          token0,
+          token1,
+          feeTier: '3000',
+        })
+      );
+      const autoAllowlistedPools = Array.from({length: 15}, (_, i) =>
+        createPool({
+          hooks: hookWithBeforeSwap,
+          tvlETH: i + 1,
+          token0,
+          token1,
+          feeTier: '3000',
+        })
+      );
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [...routablePools, ...autoAllowlistedPools],
+        mockLogger,
+        mockMetric
+      );
+
+      // Routable queue: top 10 by TVL (6-15) + 5 ADDRESS_ZERO re-added via explicit allowlist = 15
+      // Auto-allowlisted queue: top 10 by TVL (6-15), not in explicit allowlist = 10
+      // Total = 25
+      expect(result.length).toBe(25);
+
+      const routableResults = result.filter(p => p.hooks === ADDRESS_ZERO);
+      const autoResults = result.filter(p => p.hooks === hookWithBeforeSwap);
+      expect(routableResults.length).toBe(15);
+      expect(autoResults.length).toBe(10);
+
+      // Verify top-10 by TVL kept for auto-allowlisted
+      const autoTvls = autoResults.map(p => p.tvlETH).sort((a, b) => a - b);
+      expect(autoTvls).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    });
+  });
+
+  describe('top TVL membership equivalence', () => {
+    it('matches second-pass-only eligibility membership as a set', () => {
+      const hookNoSwapA = '0x0000000000000000000000000000000000000100';
+      const hookNoSwapB = '0x0000000000000000000000000000000000000200';
+
+      const pools: V4SubgraphPool[] = [
+        createPool({
+          id: '0x1000000000000000000000000000000000000000000000000000000000000001',
+          hooks: ADDRESS_ZERO,
+          token0: {
+            id: '0x00000000000000000000000000000000000000a1',
+            symbol: 'A',
+            name: 'A',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x00000000000000000000000000000000000000a2',
+            symbol: 'B',
+            name: 'B',
+            decimals: '18',
+          },
+          feeTier: '3000',
+          tvlETH: 1,
+        }),
+        createPool({
+          id: '0x1000000000000000000000000000000000000000000000000000000000000002',
+          hooks: hookNoSwapA,
+          token0: {
+            id: '0x00000000000000000000000000000000000000a3',
+            symbol: 'C',
+            name: 'C',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x00000000000000000000000000000000000000a4',
+            symbol: 'D',
+            name: 'D',
+            decimals: '18',
+          },
+          feeTier: '500',
+          tvlETH: 0.5,
+        }),
+        createPool({
+          id: '0x1000000000000000000000000000000000000000000000000000000000000003',
+          hooks: hookNoSwapB,
+          token0: {
+            id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+            symbol: 'WETH',
+            name: 'WETH',
+            decimals: '18',
+          },
+          token1: {
+            id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+            symbol: 'USDC',
+            name: 'USDC',
+            decimals: '6',
+          },
+          feeTier: '3000',
+          tvlETH: 999,
+        }),
+        createPool({
+          id: '0x1000000000000000000000000000000000000000000000000000000000000004',
+          hooks: (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ?? [])[1]!,
+          token0: {
+            id: '0x4200000000000000000000000000000000000006',
+            symbol: 'WETH',
+            name: 'WETH',
+            decimals: '18',
+          },
+          token1: {
+            id: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+            symbol: 'USDC',
+            name: 'USDC',
+            decimals: '6',
+          },
+          feeTier: '3000',
+          tvlETH: 0.001,
+        }),
+      ];
+
+      const result = v4HooksPoolsFiltering(
+        ChainId.BASE,
+        pools,
+        mockLogger,
+        mockMetric
+      );
+
+      const majorTokens = getMajorTokens(ChainId.BASE);
+      const allowlistedHooks = new Set(
+        (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ?? []).map(hook =>
+          hook.toLowerCase()
+        )
+      );
+      const expectedBySecondPassOnly = pools.filter(pool => {
+        const hook = pool.hooks.toLowerCase();
+        if (hook === ADDRESS_ZERO) {
+          return true;
+        }
+        if (!isMajorPair(pool.token0.id, pool.token1.id, majorTokens)) {
+          return true;
+        }
+        return allowlistedHooks.has(hook);
+      });
+
+      expect(new Set(result.map(pool => pool.id.toLowerCase()))).toEqual(
+        new Set(expectedBySecondPassOnly.map(pool => pool.id.toLowerCase()))
+      );
     });
   });
 });
