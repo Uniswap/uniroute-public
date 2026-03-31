@@ -13,7 +13,6 @@ import _ from 'lodash';
 import {Logger} from './util/log';
 import {IMetric} from './util/metric';
 import {ProviderConfig} from './provider';
-import {V4RawSubgraphPool} from './v4/subgraphProvider';
 
 export interface ISubgraphProvider<TSubgraphPool> {
   getPools(
@@ -25,6 +24,10 @@ export interface ISubgraphProvider<TSubgraphPool> {
 
 export const PAGE_SIZE = 1000; // 1k is max possible query size from subgraph.
 export const BASE_V4_PAGE_SIZE = 500; // TheGraph v4 base max pagesize is 3600, but ellipfra query page size perf better with smaller page size
+
+// Minimum TVL threshold applied at the subgraph query level for V4 pools.
+// V4 pools with totalValueLockedETH <= this value are excluded from queries.
+export const V4_MIN_TVL_ETH = 0.001;
 
 export type V3V4SubgraphPool = {
   id: string;
@@ -70,8 +73,6 @@ export abstract class SubgraphProvider<
     private timeout = 30000,
     private rollback = true,
     private trackedEthThreshold = 0.01,
-    private trackedZoraEthThreshold = 0.001,
-    private zoraHooks: Set<string>,
     private untrackedUsdThreshold = Number.MAX_VALUE,
     private subgraphUrl: string | undefined,
     private bearerToken: string | undefined,
@@ -104,13 +105,6 @@ export abstract class SubgraphProvider<
       });
     } else {
       this.client = new GraphQLClient(this.subgraphUrl);
-    }
-    if (
-      protocol === Protocol.V4 &&
-      this.zoraHooks.size === 0 &&
-      chainId === ChainId.BASE
-    ) {
-      throw new Error('Zora hooks param is mandatory for Base V4');
     }
     this.metricTags = {chainId: String(chainId), protocol: String(protocol)};
   }
@@ -164,41 +158,22 @@ export abstract class SubgraphProvider<
         `,
         variables: {threshold: this.trackedEthThreshold.toString()},
       },
-      // 2. V4: Non-Zora pools with liquidity > 0
+      // 2. V4: All pools with liquidity > 0 and TVL above minimum.
+      // Previously split into zora vs non-zora queries, but the
+      // V4_MIN_TVL_ETH threshold now applies uniformly to all V4 pools.
       ...(this.protocol === Protocol.V4
         ? [
             {
-              name: 'V4 non-Zora high liquidity pools',
+              name: 'V4 high liquidity pools',
               query: gql`
-          query getV4NonZoraHighLiquidityPools($pageSize: Int!, $id: String, $zoraHooks: [String!]!) {
+          query getV4HighLiquidityPools($pageSize: Int!, $id: String, $minTvl: String!) {
             pools(
               first: $pageSize
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
                 liquidity_gt: "0",
-                hooks_not_in: $zoraHooks
-              }
-            ) {
-              ${this.getPoolFields()}
-            }
-          }
-        `,
-              variables: {zoraHooks: Array.from(this.zoraHooks)},
-            },
-            // 3. V4: Zora pools with liquidity > 0 AND TVL > trackedZoraEthThreshold
-            {
-              name: 'V4 Zora high liquidity pools',
-              query: gql`
-          query getV4ZoraHighLiquidityPools($pageSize: Int!, $id: String, $zoraHooks: [String!]!, $zoraThreshold: String!) {
-            pools(
-              first: $pageSize
-              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
-              where: {
-                id_gt: $id,
-                liquidity_gt: "0",
-                hooks_in: $zoraHooks,
-                totalValueLockedETH_gt: $zoraThreshold
+                totalValueLockedETH_gt: $minTvl
               }
             ) {
               ${this.getPoolFields()}
@@ -206,13 +181,12 @@ export abstract class SubgraphProvider<
           }
         `,
               variables: {
-                zoraHooks: Array.from(this.zoraHooks),
-                zoraThreshold: this.trackedZoraEthThreshold.toString(),
+                minTvl: V4_MIN_TVL_ETH.toString(),
               },
             },
           ]
         : []),
-      // 4. V3: Pools with liquidity > 0 AND totalValueLockedETH = 0 (special V3 condition)
+      // 3. V3: Pools with liquidity > 0 AND totalValueLockedETH = 0 (special V3 condition)
       ...(this.protocol === Protocol.V3
         ? [
             {
@@ -407,18 +381,13 @@ export abstract class SubgraphProvider<
           return this.mapSubgraphPool(pool);
         });
     } else if (this.protocol === Protocol.V4) {
-      // For V4, apply additional filtering as a safety measure even though queries are optimized
+      // Include pools that either have positive liquidity or exceed the per-chain
+      // tracked ETH threshold. The V4_MIN_TVL_ETH floor at the subgraph query
+      // level already excludes V4 pools with totalValueLockedETH <= 0.001.
       poolsSanitized = allPools
         .filter(pool => {
           const liquidity = parseInt(pool.liquidity);
           const tvl = parseFloat(pool.totalValueLockedETH);
-          const hooks = (pool as unknown as V4RawSubgraphPool).hooks;
-          const isZora = this.zoraHooks.has(hooks);
-
-          if (isZora) {
-            return tvl > this.trackedZoraEthThreshold;
-          }
-
           return liquidity > 0 || tvl > this.trackedEthThreshold;
         })
         .map(pool => {

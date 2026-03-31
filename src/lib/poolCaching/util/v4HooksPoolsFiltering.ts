@@ -3,36 +3,7 @@
  */
 
 import {Hook, HookOptions} from '@uniswap/v4-sdk';
-import {
-  HOOKS_ADDRESSES_ALLOWLIST,
-  ZORA_CREATOR_HOOK_ON_BASE_v1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_1_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_2,
-  ZORA_CREATOR_HOOK_ON_BASE_v2_2,
-  ZORA_CREATOR_HOOK_ON_BASE_v2_2_1,
-  ZORA_POST_HOOK_ON_BASE_v1,
-  ZORA_POST_HOOK_ON_BASE_v1_0_0_1,
-  ZORA_POST_HOOK_ON_BASE_v1_0_0_2,
-  ZORA_POST_HOOK_ON_BASE_v1_1_1,
-  ZORA_POST_HOOK_ON_BASE_v1_1_1_1,
-  ZORA_POST_HOOK_ON_BASE_v1_1_2,
-  ZORA_POST_HOOK_ON_BASE_v2_2,
-  ZORA_POST_HOOK_ON_BASE_v2_2_1,
-  ZORA_POST_HOOK_ON_BASE_v2_3_0,
-  ZORA_POST_HOOK_ON_BASE_v2_4_0,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
-} from './hooksAddressesAllowlist';
+import {HOOKS_ADDRESSES_ALLOWLIST} from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {ChainId, Currency, Token} from '@uniswap/sdk-core';
 import {PriorityQueue} from '@datastructures-js/priority-queue';
@@ -44,19 +15,6 @@ import {MetricLoggerUnit} from '../sor-providers/util/metric';
 import {isPoolFeeDynamic} from './isPoolFeeDynamic';
 import {nativeOnChain} from './nativeOnChain';
 import {getMajorTokens, isMajorPair} from './majorTokens';
-
-const CLANKER_HOOKS = new Set([
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
-]);
 
 type V4PoolGroupingKey = string;
 const TOP_GROUPED_V4_POOLS = 10;
@@ -277,53 +235,21 @@ export function v4HooksPoolsFiltering(
       additionalAllowedPool += 1;
     }
 
-    let shouldNotAddV4Pool = false;
+    // Zora/Clanker low-TVL filtering (tvlETH <= 0.001) is no longer needed here —
+    // the V4_MIN_TVL_ETH filter at the subgraph query level already
+    // excludes V4 pools with totalValueLockedETH <= 0.001.
 
-    const isZoraPool =
-      (pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v1 ||
-        pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1 ||
-        pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v1_1_1 ||
-        pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v1_1_1_1 ||
-        pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v1_1_2 ||
-        pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v2_2 ||
-        pool.hooks.toLowerCase() === ZORA_CREATOR_HOOK_ON_BASE_v2_2_1 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v1 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v1_0_0_1 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v1_0_0_2 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v1_1_1 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v1_1_1_1 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v1_1_2 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v2_2 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v2_2_1 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v2_3_0 ||
-        pool.hooks.toLowerCase() === ZORA_POST_HOOK_ON_BASE_v2_4_0) &&
-      chainId === ChainId.BASE;
-    if (isZoraPool) {
-      if (pool.tvlETH <= 0.001) {
-        shouldNotAddV4Pool = true;
-      }
+    const key = convertV4PoolToGroupingKey(pool);
+    const pq =
+      queueMap[key] ??
+      new PriorityQueue<V4SubgraphPool>(V4SubgraphPoolComparator);
+    pq.push(pool);
+
+    if (pq.size() > TOP_GROUPED_V4_POOLS + additionalAllowedPool) {
+      pq.dequeue();
     }
 
-    const isClankerPool = CLANKER_HOOKS.has(pool.hooks.toLowerCase());
-    if (isClankerPool) {
-      if (pool.tvlETH <= 0.001) {
-        shouldNotAddV4Pool = true;
-      }
-    }
-
-    if (!shouldNotAddV4Pool) {
-      const key = convertV4PoolToGroupingKey(pool);
-      const pq =
-        queueMap[key] ??
-        new PriorityQueue<V4SubgraphPool>(V4SubgraphPoolComparator);
-      pq.push(pool);
-
-      if (pq.size() > TOP_GROUPED_V4_POOLS + additionalAllowedPool) {
-        pq.dequeue();
-      }
-
-      queueMap[key] = pq;
-    }
+    queueMap[key] = pq;
   };
 
   // Separate top-N TVL queue for auto-allowlisted hooks

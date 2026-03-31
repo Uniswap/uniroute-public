@@ -352,26 +352,12 @@ describe('v4HooksPoolsFiltering', () => {
   });
 
   // --- Zora hooks on BASE ---
+  // Note: Low-TVL filtering for Zora/Clanker hooks (tvlETH <= 0.001) is now handled
+  // at the subgraph query level via V4_MIN_TVL_ETH, so v4HooksPoolsFiltering
+  // no longer drops those pools. These tests verify that the function processes
+  // Zora/Clanker pools normally when they reach this stage.
   describe('Zora hooks on BASE', () => {
-    it('excludes Zora creator hook pool on BASE with tvlETH <= 0.001 from top TVL but allowlist may re-add', () => {
-      const pool = createPool({
-        hooks: ZORA_CREATOR_HOOK_ON_BASE_v1,
-        tvlETH: 0.0005,
-        tvlUSD: 1,
-      });
-      const result = v4HooksPoolsFiltering(
-        ChainId.BASE,
-        [pool],
-        mockLogger,
-        mockMetric
-      );
-      // The pool is excluded from the priority queue (shouldNotAddV4Pool = true),
-      // but it gets re-added via the allowlisted hooks path since ZORA hooks are in HOOKS_ADDRESSES_ALLOWLIST.
-      // The pool should still appear in the result because of the allowlist.
-      expect(result.length).toBe(1);
-    });
-
-    it('includes Zora creator hook pool on BASE with tvlETH > 0.001', () => {
+    it('includes Zora creator hook pool on BASE via allowlist', () => {
       const pool = createPool({
         hooks: ZORA_CREATOR_HOOK_ON_BASE_v1,
         tvlETH: 5,
@@ -386,23 +372,7 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('excludes Zora post hook pool on BASE with tvlETH <= 0.001 from priority queue', () => {
-      const pool = createPool({
-        hooks: ZORA_POST_HOOK_ON_BASE_v1,
-        tvlETH: 0.0001,
-        tvlUSD: 0,
-      });
-      const result = v4HooksPoolsFiltering(
-        ChainId.BASE,
-        [pool],
-        mockLogger,
-        mockMetric
-      );
-      // Excluded from priority queue but re-added via allowlist
-      expect(result.length).toBe(1);
-    });
-
-    it('includes Zora post hook pool on BASE with tvlETH > 0.001', () => {
+    it('includes Zora post hook pool on BASE via allowlist', () => {
       const pool = createPool({
         hooks: ZORA_POST_HOOK_ON_BASE_v1,
         tvlETH: 1,
@@ -420,11 +390,10 @@ describe('v4HooksPoolsFiltering', () => {
     it('auto-allowlists Zora hook on non-BASE chain when pair is not major-major', () => {
       const pool = createPool({
         hooks: ZORA_CREATOR_HOOK_ON_BASE_v1,
-        tvlETH: 0.0001,
-        tvlUSD: 0,
+        tvlETH: 0.002,
+        tvlUSD: 4,
       });
-      // On MAINNET the Zora TVL filter does not apply (requires chainId === BASE).
-      // The pair is not major-major in this fixture, so the hook is auto-allowlisted.
+      // On MAINNET the pair is not major-major in this fixture, so the hook is auto-allowlisted.
       const result = v4HooksPoolsFiltering(
         ChainId.MAINNET,
         [pool],
@@ -434,11 +403,11 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('handles Zora post hook v2_4_0 variant on BASE with low tvl', () => {
+    it('includes Zora post hook v2_4_0 variant on BASE via allowlist', () => {
       const pool = createPool({
         hooks: ZORA_POST_HOOK_ON_BASE_v2_4_0,
-        tvlETH: 0.0001,
-        tvlUSD: 0,
+        tvlETH: 0.5,
+        tvlUSD: 1000,
       });
       const result = v4HooksPoolsFiltering(
         ChainId.BASE,
@@ -446,30 +415,13 @@ describe('v4HooksPoolsFiltering', () => {
         mockLogger,
         mockMetric
       );
-      // Excluded from priority queue due to low TVL, but re-added via allowlist
       expect(result.length).toBe(1);
     });
   });
 
   // --- Clanker hooks ---
   describe('Clanker hooks', () => {
-    it('excludes Clanker dynamic fee hook pool with tvlETH <= 0.001 from priority queue', () => {
-      const pool = createPool({
-        hooks: CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
-        tvlETH: 0.0005,
-        tvlUSD: 1,
-      });
-      const result = v4HooksPoolsFiltering(
-        ChainId.BASE,
-        [pool],
-        mockLogger,
-        mockMetric
-      );
-      // Excluded from priority queue but re-added via allowlist since Clanker hooks are allowlisted on BASE
-      expect(result.length).toBe(1);
-    });
-
-    it('includes Clanker dynamic fee hook pool with tvlETH > 0.001', () => {
+    it('includes Clanker dynamic fee hook pool via allowlist', () => {
       const pool = createPool({
         hooks: CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
         tvlETH: 5,
@@ -484,23 +436,7 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('excludes Clanker static fee hook pool with tvlETH <= 0.001 from priority queue', () => {
-      const pool = createPool({
-        hooks: CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
-        tvlETH: 0,
-        tvlUSD: 0,
-      });
-      const result = v4HooksPoolsFiltering(
-        ChainId.BASE,
-        [pool],
-        mockLogger,
-        mockMetric
-      );
-      // Excluded from priority queue but re-added via allowlist
-      expect(result.length).toBe(1);
-    });
-
-    it('includes Clanker static fee hook pool with tvlETH > 0.001', () => {
+    it('includes Clanker static fee hook pool via allowlist', () => {
       const pool = createPool({
         hooks: CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
         tvlETH: 2,
@@ -515,11 +451,11 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('excludes Clanker hook on UNICHAIN with tvlETH <= 0.001 from priority queue', () => {
+    it('includes Clanker hook on UNICHAIN via allowlist', () => {
       const pool = createPool({
         hooks: CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-        tvlETH: 0.001,
-        tvlUSD: 0,
+        tvlETH: 0.5,
+        tvlUSD: 1000,
       });
       const result = v4HooksPoolsFiltering(
         ChainId.UNICHAIN,
@@ -527,7 +463,6 @@ describe('v4HooksPoolsFiltering', () => {
         mockLogger,
         mockMetric
       );
-      // Excluded from priority queue but re-added via allowlist
       expect(result.length).toBe(1);
     });
   });

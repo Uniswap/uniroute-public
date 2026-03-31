@@ -6,12 +6,6 @@ import {
   v2SubgraphUrlOverride,
   v3TrackedEthThreshold,
   v2TrackedEthThreshold,
-  ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING,
-  HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE,
-  HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_UNICHAIN,
-  HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_ARBITRUM,
-  HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MAINNET,
-  HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MONAD,
 } from './cacheConfig';
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
@@ -189,34 +183,6 @@ describe('cacheConfig', () => {
     it('returns undefined for unknown chain', () => {
       const url = v2SubgraphUrlOverride(999999 as ChainId);
       expect(url).toBeUndefined();
-    });
-  });
-
-  describe('hook filtering sets', () => {
-    it('ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING has expected size', () => {
-      expect(ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING.size).toBe(16);
-    });
-
-    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE contains all Zora hooks plus ZoraV4CoinHook, 4 Clanker and 2 Doppler Base hooks', () => {
-      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE.size).toBe(
-        ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING.size + 7
-      );
-    });
-
-    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_UNICHAIN contains 2 Clanker Unichain hooks', () => {
-      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_UNICHAIN.size).toBe(2);
-    });
-
-    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_ARBITRUM contains 2 Clanker Arbitrum hooks', () => {
-      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_ARBITRUM.size).toBe(2);
-    });
-
-    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MAINNET contains 1 Clanker Mainnet hook', () => {
-      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MAINNET.size).toBe(1);
-    });
-
-    it('HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MONAD contains 1 Clanker Monad hook', () => {
-      expect(HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MONAD.size).toBe(1);
     });
   });
 

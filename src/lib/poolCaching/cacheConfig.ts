@@ -21,90 +21,7 @@ import {
 import {Logger} from './sor-providers/util/log';
 import {IMetric} from './sor-providers/util/metric';
 
-import {
-  ZORA_CREATOR_HOOK_ON_BASE_v1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_1_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_2,
-  ZORA_CREATOR_HOOK_ON_BASE_v2_2,
-  ZORA_CREATOR_HOOK_ON_BASE_v2_2_1,
-  ZORA_POST_HOOK_ON_BASE_v1,
-  ZORA_POST_HOOK_ON_BASE_v1_0_0_1,
-  ZORA_POST_HOOK_ON_BASE_v1_0_0_2,
-  ZORA_POST_HOOK_ON_BASE_v1_1_1,
-  ZORA_POST_HOOK_ON_BASE_v1_1_1_1,
-  ZORA_POST_HOOK_ON_BASE_v1_1_2,
-  ZORA_POST_HOOK_ON_BASE_v2_2,
-  ZORA_POST_HOOK_ON_BASE_v2_2_1,
-  ZORA_POST_HOOK_ON_BASE_v2_3_0,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
-  DOPPLER_HOOKS_ADDRESS_ON_BASE,
-  DOPPLER_HOOKS_ADDRESS_ON_BASE_V2,
-} from './util/hooksAddressesAllowlist';
 import {AGG_HOOKS_ON_MAINNET} from './util/aggHooksAddressesAllowlist';
-
-// Zora hooks addresses for V4 filtering - MUST be lowercase
-export const ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING = new Set([
-  ZORA_CREATOR_HOOK_ON_BASE_v1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_1_1,
-  ZORA_CREATOR_HOOK_ON_BASE_v1_1_2,
-  ZORA_CREATOR_HOOK_ON_BASE_v2_2,
-  ZORA_CREATOR_HOOK_ON_BASE_v2_2_1,
-  ZORA_POST_HOOK_ON_BASE_v1,
-  ZORA_POST_HOOK_ON_BASE_v1_0_0_1,
-  ZORA_POST_HOOK_ON_BASE_v1_0_0_2,
-  ZORA_POST_HOOK_ON_BASE_v1_1_1,
-  ZORA_POST_HOOK_ON_BASE_v1_1_1_1,
-  ZORA_POST_HOOK_ON_BASE_v1_1_2,
-  ZORA_POST_HOOK_ON_BASE_v2_2,
-  ZORA_POST_HOOK_ON_BASE_v2_2_1,
-  ZORA_POST_HOOK_ON_BASE_v2_3_0,
-]);
-
-// ZoraV4CoinHook on Base — must be lowercase
-const ZORA_V4_COIN_HOOK_ON_BASE = '0x0469a4bd3724dc86c9542f4694c976da13c450c0';
-
-// Per-chain hooks sets for V4SubgraphProvider low-TVL filtering (uses trackedZoraEthThreshold = 0.001)
-export const HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE = new Set([
-  ...ZORA_HOOKS_FOR_V4_SUBGRAPH_FILTERING,
-  ZORA_V4_COIN_HOOK_ON_BASE,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE,
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BASE_v2,
-  DOPPLER_HOOKS_ADDRESS_ON_BASE,
-  DOPPLER_HOOKS_ADDRESS_ON_BASE_V2,
-]);
-
-export const HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_UNICHAIN = new Set([
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
-]);
-
-export const HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_ARBITRUM = new Set([
-  CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ARBITRUM,
-]);
-
-export const HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MAINNET = new Set([
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
-]);
-
-export const HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MONAD = new Set([
-  CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
-]);
 
 // --- Subgraph URL overrides (read from environment at init time) ---
 
@@ -237,7 +154,6 @@ export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
 
 const v4TrackedEthThreshold = 0.01;
 const v4BaseTrackedEthThreshold = 0.1;
-const v4BaseZoraTrackedEthThreshold = 0.001;
 const v4UntrackedUsdThreshold = 0;
 
 export const v3TrackedEthThreshold = 0.01;
@@ -864,8 +780,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.SEPOLIA),
         undefined,
@@ -883,8 +797,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_ARBITRUM,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
         undefined,
@@ -902,8 +814,6 @@ export function createChainProtocols(
         90000,
         true,
         v4BaseTrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_BASE,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.BASE),
         process.env.GRAPH_BEARER_TOKEN,
@@ -921,8 +831,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.POLYGON),
         undefined,
@@ -940,8 +848,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.WORLDCHAIN),
         undefined,
@@ -959,8 +865,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.ZORA),
         undefined,
@@ -978,8 +882,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_UNICHAIN,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.UNICHAIN),
         undefined,
@@ -1006,8 +908,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.BLAST),
         undefined,
@@ -1025,8 +925,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MAINNET,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.MAINNET),
         undefined,
@@ -1067,8 +965,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.SONEIUM),
         undefined,
@@ -1086,8 +982,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.OPTIMISM),
         undefined,
@@ -1105,8 +999,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.BNB),
         undefined,
@@ -1124,8 +1016,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        HOOKS_FOR_V4_SUBGRAPH_LOW_TVL_FILTERING_ON_MONAD,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.MONAD),
         process.env.GOLD_SKY_BEARER_TOKEN,
@@ -1143,8 +1033,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(CHAIN_ID_TEMPO),
         process.env.GOLD_SKY_BEARER_TOKEN,
@@ -1162,8 +1050,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.XLAYER),
         process.env.GRAPH_BEARER_TOKEN,
@@ -1181,8 +1067,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.AVALANCHE),
         undefined,
@@ -1200,8 +1084,6 @@ export function createChainProtocols(
         90000,
         true,
         v4TrackedEthThreshold,
-        v4BaseZoraTrackedEthThreshold,
-        undefined,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.LINEA),
         process.env.GOLD_SKY_BEARER_TOKEN,
