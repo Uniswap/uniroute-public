@@ -74,10 +74,15 @@ import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provid
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
 // addresses are actually deployed in production.
 vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
-  AGG_HOOKS_PER_CHAIN: {
-    // MAINNET_AGG_HOOK – must match the literal used in the tests below.
-    1: ['0xaaaa000000000000000000000000000000000001'],
-  },
+  AGG_HOOKS_PER_CHAIN: {},
+  AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
+  // MAINNET_AGG_HOOK – must match the literal used in the tests below.
+  // Returns a non-undefined Protocol string so callers treat it as an agg hook.
+  getProtocolForAggHookAddress: (hookAddress: string, chainId: number) =>
+    chainId === 1 &&
+    hookAddress.toLowerCase() === '0xaaaa000000000000000000000000000000000001'
+      ? 'CurveStableSwapNG'
+      : undefined,
 }));
 
 class TestTokenHandler implements ITokenHandler {

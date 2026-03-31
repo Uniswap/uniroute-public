@@ -32,6 +32,7 @@ import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
+import {getProtocolForAggHookAddress} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -364,8 +365,23 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       allPoolsPromises.push(Promise.resolve([]));
     }
 
-    const [allV2Pools, allV3Pools, allV4Pools] =
+    const [allV2Pools, allV3Pools, rawAllV4Pools] =
       await Promise.all(allPoolsPromises);
+
+    // Exclude agg hook pools whose protocol was NOT explicitly requested.
+    // If the caller includes an external protocol (e.g. a Curve or Fluid hook),
+    // those pools are valid cross-liquidity candidates and must be kept.
+    // Pools with unrecognized hooks (regular V4) are always kept.
+    const allV4Pools = rawAllV4Pools.filter(pool => {
+      const hookProtocol = getProtocolForAggHookAddress(
+        (pool as V4PoolInfo).hooks,
+        chain.chainId
+      );
+      return (
+        hookProtocol === undefined ||
+        protocols.includes(hookProtocol as Protocol)
+      );
+    });
 
     const tokenInAddressLower = tokenInAddress.address.toLowerCase();
     const tokenOutAddressLower = tokenOutAddress.address.toLowerCase();

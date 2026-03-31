@@ -4,19 +4,91 @@
 
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
-import {AGG_HOOKS_ON_MAINNET} from './aggHooksAddressesAllowlist';
-
-/**
- * Per-chain map of aggregator hook addresses.
- * Add a new entry here when agg hook support expands to additional chains.
- */
-export const AGG_HOOKS_PER_CHAIN: Partial<Record<ChainId, string[]>> &
-  Record<number, string[]> = {
-  [ChainId.MAINNET]: AGG_HOOKS_ON_MAINNET,
-};
+import {
+  FLUID_DEX_1,
+  FLUID_DEX_LITE,
+  STABLE_SWAP,
+  STABLE_SWAP_NG,
+} from './aggHooksAddressesAllowlist';
+import {Protocol} from '../../../models/pool/Protocol';
+import {EXTERNAL_PROTOCOLS} from '../../helpers';
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
+// Declared before AGG_HOOKS_PER_CHAIN to avoid a const TDZ forward-reference.
+export const UNISWAP_AGG_HOOK_ON_TEMPO =
+  '0x7169a78a59f136876e724b648fbb339a42f46888';
+
+// Protocols listed here are excluded from cached-routes retrieval inside
+// CachedRoutesRepository.  All external (agg hook) protocols are included
+// because production metrics show cached routes still containing agg hook
+// pools that should be filtered out before being returned to callers.
+// Remove a protocol from this list to start serving its cached routes again.
+export const AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: ReadonlySet<Protocol> =
+  EXTERNAL_PROTOCOLS;
+
+/**
+ * Per-protocol, per-chain map of aggregator hook addresses.
+ *
+ * Keyed first by the external Protocol that owns the hook contract, then by
+ * chainId.  This lets callers look up the exact hook set for a specific
+ * protocol/chain pair.
+ *
+ * Use `getAllAggHooksForChain(chainId)` when you need the full union of all
+ * agg-hook addresses for a given chain (e.g. for exclusion filters).
+ *
+ * Add a new entry here when agg hook support expands to additional chains or
+ * protocols.
+ */
+export const AGG_HOOKS_PER_CHAIN: Partial<
+  Record<Protocol, Partial<Record<number, string[]>>>
+> = {
+  [Protocol.CURVESTABLESWAP]: {
+    [ChainId.MAINNET]: STABLE_SWAP,
+  },
+  [Protocol.CURVESTABLESWAPNG]: {
+    [ChainId.MAINNET]: STABLE_SWAP_NG,
+  },
+  [Protocol.FLUIDDEXT1]: {
+    [ChainId.MAINNET]: FLUID_DEX_1,
+  },
+  [Protocol.FLUIDDEXLITE]: {
+    [ChainId.MAINNET]: FLUID_DEX_LITE,
+  },
+  [Protocol.TEMPOEXCHANGE]: {
+    [CHAIN_ID_TEMPO]: [UNISWAP_AGG_HOOK_ON_TEMPO],
+  },
+};
+
+// Reverse lookup built once at module load: chainId -> hookAddress(lowercase) -> Protocol.
+// O(1) per-pool lookups replace O(protocols * addresses) set construction on every request.
+const AGG_HOOKS_REVERSE_LOOKUP = new Map<number, Map<string, Protocol>>();
+for (const [protocol, perChain] of Object.entries(AGG_HOOKS_PER_CHAIN) as [
+  Protocol,
+  Partial<Record<number, string[]>>,
+][]) {
+  for (const [chainIdStr, addresses] of Object.entries(perChain ?? {})) {
+    const chainId = Number(chainIdStr);
+    if (!AGG_HOOKS_REVERSE_LOOKUP.has(chainId)) {
+      AGG_HOOKS_REVERSE_LOOKUP.set(chainId, new Map());
+    }
+    const chainMap = AGG_HOOKS_REVERSE_LOOKUP.get(chainId)!;
+    for (const address of addresses ?? []) {
+      chainMap.set(address.toLowerCase(), protocol);
+    }
+  }
+}
+
+/**
+ * Returns the Protocol that owns a given hook address on a given chain,
+ * or undefined if the address is not a known agg hook.
+ */
+export function getProtocolForAggHookAddress(
+  hookAddress: string,
+  chainId: number
+): Protocol | undefined {
+  return AGG_HOOKS_REVERSE_LOOKUP.get(chainId)?.get(hookAddress.toLowerCase());
+}
 
 // all hook addresses need to be lower case, since the check in isHooksPoolRoutable assumes lower case
 export const extraHooksAddressesOnSepolia =
@@ -267,8 +339,6 @@ export const LAUNCHLY_BNB_HOOKS_ADDRESS_ON_BNB =
   '0xe1b70e28a596972afe25087c062f459a0f4b40cc';
 export const ANSTROM_HOOK_ON_BASE =
   '0x631352aaa9d6554848af674106bcd8bb9e59a5cf';
-export const UNISWAP_AGG_HOOK_ON_TEMPO =
-  '0x7169a78a59f136876e724b648fbb339a42f46888';
 export const TETRIS_CUSTOM_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a3a9a072ab438335a52e0cf064f7ec91d824080';
 export const ACCUMULATE_HOOK_ON_BASE =
@@ -319,7 +389,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AUTO_LIQUIDITY_GENERATOR_HOOK_ON_MAINNET,
     ENS_WHEEL_HOOK_ON_MAINNET_2,
     UPEG_HOOK_ON_MAINNET,
-    ...AGG_HOOKS_ON_MAINNET,
+    ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
   [ChainId.SEPOLIA]: [

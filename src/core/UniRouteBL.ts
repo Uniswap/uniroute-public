@@ -97,7 +97,7 @@ import {FAKE_TICK_SPACING, isValidRoute} from '../lib/poolUtils';
 import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
-import {AGG_HOOKS_PER_CHAIN} from '../lib/poolCaching/util/hooksAddressesAllowlist';
+import {getProtocolForAggHookAddress} from '../lib/poolCaching/util/hooksAddressesAllowlist';
 import {RedisCache} from '@uniswap/lib-cache/redis';
 import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
@@ -620,15 +620,13 @@ export class UniRouteBL implements IUniRoutedBL {
 
         status = QuoteStatus.Success;
 
-        const aggHooksSet = new Set(
-          (AGG_HOOKS_PER_CHAIN[chain.chainId] ?? []).map(a => a.toLowerCase())
-        );
         for (const quote of bestQuote.quotes) {
           const aggHookPool = quote.route.path.find(
             pool =>
               pool instanceof V4Pool &&
               pool.hooks &&
-              aggHooksSet.has(pool.hooks.toLowerCase())
+              getProtocolForAggHookAddress(pool.hooks, chain.chainId) !==
+                undefined
           ) as V4Pool | undefined;
           if (aggHookPool) {
             if (!isExternalProtocol(protocols) || !options?.testAggHooks) {

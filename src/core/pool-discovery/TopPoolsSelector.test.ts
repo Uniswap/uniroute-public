@@ -1205,7 +1205,7 @@ describe('AggHooksTopPoolsSelector', () => {
       expect(result[0].id).toBe('0xagg_direct');
     });
 
-    it('should exclude pools whose hook address is not in AGG_HOOKS_ON_MAINNET', async () => {
+    it('should exclude pools whose hook address is not in AGG_HOOKS_PER_CHAIN for the chain', async () => {
       const nonAggPool = makeAggV4Pool(
         '0xnon_agg',
         TOKEN_IN,
@@ -1378,6 +1378,117 @@ describe('AggHooksTopPoolsSelector', () => {
         HooksOptions.NO_HOOKS,
         ctx
       );
+      expect(result).toHaveLength(0);
+    });
+  });
+
+  describe('protocol-specific pre-filter', () => {
+    it('returns only FluidDexLite pools when protocol is FLUIDDEXLITE', async () => {
+      const fluidPool = makeAggV4Pool(
+        '0xfluid',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_FLUID_LITE
+      );
+      const stablePool = makeAggV4Pool(
+        '0xstable',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_STABLE_SWAP
+      );
+
+      const result = await selector.filterPools(
+        [fluidPool, stablePool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.FLUIDDEXLITE,
+        undefined,
+        ctx
+      );
+
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xfluid');
+      expect(ids).not.toContain('0xstable');
+    });
+
+    it('returns only CurveStableSwapNG pools when protocol is CURVESTABLESWAPNG', async () => {
+      const fluidPool = makeAggV4Pool(
+        '0xfluid',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_FLUID_LITE
+      );
+      const stablePool = makeAggV4Pool(
+        '0xstable',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_STABLE_SWAP
+      );
+
+      const result = await selector.filterPools(
+        [fluidPool, stablePool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.CURVESTABLESWAPNG,
+        undefined,
+        ctx
+      );
+
+      const ids = result.map(p => p.id);
+      expect(ids).not.toContain('0xfluid');
+      expect(ids).toContain('0xstable');
+    });
+
+    it('includes pools from all agg hook protocols when protocol is V4 (fallback)', async () => {
+      const fluidPool = makeAggV4Pool(
+        '0xfluid',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_FLUID_LITE
+      );
+      const stablePool = makeAggV4Pool(
+        '0xstable',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_STABLE_SWAP
+      );
+
+      const result = await selector.filterPools(
+        [fluidPool, stablePool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xfluid');
+      expect(ids).toContain('0xstable');
+    });
+
+    it('returns empty when no pools match the specific protocol address list', async () => {
+      // AGG_HOOK_STABLE_SWAP belongs to CURVESTABLESWAPNG, not FLUIDDEXLITE
+      const stablePool = makeAggV4Pool(
+        '0xstable',
+        TOKEN_IN,
+        TOKEN_OUT,
+        AGG_HOOK_STABLE_SWAP
+      );
+
+      const result = await selector.filterPools(
+        [stablePool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.FLUIDDEXLITE,
+        undefined,
+        ctx
+      );
+
       expect(result).toHaveLength(0);
     });
   });
