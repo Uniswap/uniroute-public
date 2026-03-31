@@ -18,6 +18,12 @@ const MAINNET = ChainId.MAINNET;
 const CHAIN_ID_TEMPO = 4217;
 
 describe('AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST', () => {
+  it('is defined (guards against circular-import causing undefined at module load)', () => {
+    expect(AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST).toBeInstanceOf(
+      Set
+    );
+  });
+
   it('contains all external protocols', () => {
     expect(AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST).toEqual(
       new Set([

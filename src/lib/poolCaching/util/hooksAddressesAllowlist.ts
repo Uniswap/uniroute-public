@@ -11,7 +11,6 @@ import {
   STABLE_SWAP_NG,
 } from './aggHooksAddressesAllowlist';
 import {Protocol} from '../../../models/pool/Protocol';
-import {EXTERNAL_PROTOCOLS} from '../../helpers';
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
@@ -24,8 +23,19 @@ export const UNISWAP_AGG_HOOK_ON_TEMPO =
 // because production metrics show cached routes still containing agg hook
 // pools that should be filtered out before being returned to callers.
 // Remove a protocol from this list to start serving its cached routes again.
+//
+// NOTE: Do NOT replace this with EXTERNAL_PROTOCOLS from ../../helpers —
+// helpers.ts imports from this file, creating a circular dependency that
+// causes this set to be undefined at runtime.
 export const AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: ReadonlySet<Protocol> =
-  EXTERNAL_PROTOCOLS;
+  new Set<Protocol>([
+    Protocol.CURVESTABLESWAP,
+    Protocol.CURVESTABLESWAPNG,
+    Protocol.FLUIDDEXT1,
+    Protocol.FLUIDDEXV2,
+    Protocol.FLUIDDEXLITE,
+    Protocol.TEMPOEXCHANGE,
+  ]);
 
 /**
  * Per-protocol, per-chain map of aggregator hook addresses.
