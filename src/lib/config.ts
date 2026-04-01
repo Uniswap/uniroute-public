@@ -194,7 +194,7 @@ export const getUniRouteSyncConfig = (
     },
     CachedRoutes: {
       Enabled: true,
-      AggHooksReadEnabled: false,
+      AggHooksReadEnabled: true,
       AggHooksWriteEnabled: false,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
@@ -280,7 +280,7 @@ export const getQuickRouteSyncConfig = (
     },
     CachedRoutes: {
       Enabled: true,
-      AggHooksReadEnabled: false,
+      AggHooksReadEnabled: true,
       AggHooksWriteEnabled: false,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
