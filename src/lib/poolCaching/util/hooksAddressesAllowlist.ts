@@ -66,9 +66,6 @@ export const AGG_HOOKS_PER_CHAIN: Partial<
   [Protocol.FLUIDDEXLITE]: {
     [ChainId.MAINNET]: FLUID_DEX_LITE,
   },
-  [Protocol.TEMPOEXCHANGE]: {
-    [CHAIN_ID_TEMPO]: [UNISWAP_AGG_HOOK_ON_TEMPO],
-  },
 };
 
 // Reverse lookup built once at module load: chainId -> hookAddress(lowercase) -> Protocol.

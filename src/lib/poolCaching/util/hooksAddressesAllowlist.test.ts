@@ -44,7 +44,6 @@ describe('AGG_HOOKS_PER_CHAIN', () => {
     expect(AGG_HOOKS_PER_CHAIN[Protocol.CURVESTABLESWAPNG]).toBeDefined();
     expect(AGG_HOOKS_PER_CHAIN[Protocol.FLUIDDEXT1]).toBeDefined();
     expect(AGG_HOOKS_PER_CHAIN[Protocol.FLUIDDEXLITE]).toBeDefined();
-    expect(AGG_HOOKS_PER_CHAIN[Protocol.TEMPOEXCHANGE]).toBeDefined();
   });
 });
 
@@ -74,7 +73,8 @@ describe('getProtocolForAggHookAddress', () => {
       );
     });
 
-    it('identifies the TEMPOEXCHANGE address on the Tempo chain', () => {
+    // skipped because Tempo is a special case, we want to treat it as normal v4 pool
+    it.skip('identifies the TEMPOEXCHANGE address on the Tempo chain', () => {
       expect(
         getProtocolForAggHookAddress(UNISWAP_AGG_HOOK_ON_TEMPO, CHAIN_ID_TEMPO)
       ).toBe(Protocol.TEMPOEXCHANGE);
