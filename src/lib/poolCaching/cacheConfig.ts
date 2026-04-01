@@ -21,7 +21,10 @@ import {
 import {Logger} from './sor-providers/util/log';
 import {IMetric} from './sor-providers/util/metric';
 
-import {AGG_HOOKS_ON_MAINNET} from './util/aggHooksAddressesAllowlist';
+import {
+  AGG_HOOKS_ON_MAINNET,
+  AGG_HOOKS_ON_TEMPO,
+} from './util/aggHooksAddressesAllowlist';
 
 // --- Subgraph URL overrides (read from environment at init time) ---
 
@@ -186,6 +189,12 @@ export function createChainProtocols(
     ? new ethers.providers.StaticJsonRpcProvider(
         `${uniRpcEndpoint}/rpc/${ChainId.MAINNET}`,
         ChainId.MAINNET
+      )
+    : undefined;
+  const tempoEthersProvider = uniRpcEndpoint
+    ? new ethers.providers.StaticJsonRpcProvider(
+        `${uniRpcEndpoint}/rpc/${CHAIN_ID_TEMPO}`,
+        CHAIN_ID_TEMPO
       )
     : undefined;
 
@@ -1039,6 +1048,21 @@ export function createChainProtocols(
         logger,
         metric
       ),
+      aggHooksProvider: tempoEthersProvider
+        ? new AggHooksSubgraphProvider(
+            CHAIN_ID_TEMPO,
+            AGG_HOOKS_ON_TEMPO,
+            tempoEthersProvider,
+            3,
+            90000,
+            true,
+            v4SubgraphUrlOverride(CHAIN_ID_TEMPO),
+            process.env.GOLD_SKY_BEARER_TOKEN,
+            logger,
+            metric,
+            true
+          )
+        : undefined,
     },
     {
       protocol: Protocol.V4,

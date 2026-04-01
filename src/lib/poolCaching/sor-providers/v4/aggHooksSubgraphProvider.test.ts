@@ -93,6 +93,7 @@ function makeRawPool(id: string, hooks = MOCK_HOOK): any {
     },
     totalValueLockedUSD: '0',
     totalValueLockedETH: '0',
+    isExternalLiquidity: true,
   };
 }
 

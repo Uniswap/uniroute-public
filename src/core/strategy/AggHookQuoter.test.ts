@@ -14,7 +14,7 @@ import {Chain} from '../../models/chain/Chain';
 import {NativeCurrency} from '../../models/chain/NativeCurrency';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {ChainId} from '../../lib/config';
-import {UNISWAP_AGG_HOOK_ON_TEMPO} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {UNISWAP_AGG_HOOK_ON_TEMPO} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
 
 import {isTempoAggHook} from '../../lib/helpers';
 import {

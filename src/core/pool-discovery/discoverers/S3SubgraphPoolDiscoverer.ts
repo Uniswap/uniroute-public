@@ -33,6 +33,7 @@ interface V3PoolData extends BasePoolData {
 interface V4PoolData extends V3PoolData {
   tickSpacing: string;
   hooks: string;
+  isExternalLiquidity?: boolean;
 }
 
 export const S3_POOL_CACHE_KEY = (
@@ -186,6 +187,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         case Protocol.V4:
           filteredPools = (poolInfos as V4PoolInfo[]).filter(
             pool =>
+              pool.isExternalLiquidity ||
               parseInt(pool.liquidity) > 0 ||
               pool.tvlETH > this.TrackedEthThreshold ||
               this.forceSelectSpecialPools(pool as TPoolInfo, chainId)
@@ -364,6 +366,7 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       tvlUSD,
       tickSpacing,
       hooks,
+      isExternalLiquidity,
     } = pool;
     // TODO: We need to know if a pool is DYNAMIC_FEE_FLAG with a subgraph field.
     // https://linear.app/uniswap/issue/ROUTE-607/
@@ -382,6 +385,7 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       },
       tvlETH: tvlETH,
       tvlUSD: tvlUSD,
+      isExternalLiquidity,
     };
   }
 }

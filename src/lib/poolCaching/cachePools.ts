@@ -500,7 +500,10 @@ async function cachePoolsForChainProtocol(
       MetricLoggerUnit.Count,
       metricTags
     );
-    logger.error('Failed to get pools', {err});
+    logger.error(
+      `Failed to get pools from ${protocol} subgraph provider: ${err instanceof Error ? err.message : String(err)}`,
+      {err}
+    );
     throw err;
   }
 
@@ -618,9 +621,10 @@ export async function cacheAllPools(
     results.forEach((result, idx) => {
       const cp = batch[idx]!;
       if (result.status === 'rejected') {
+        const reason = result.reason;
         cronLogger.error(
-          `[${cp.chainId}_${cp.protocol}] Failed to cache pools`,
-          {err: result.reason}
+          `[${cp.chainId}_${cp.protocol}] Failed to cache pools: ${reason instanceof Error ? reason.message : String(reason)}`,
+          {err: reason}
         );
         metricInstance.putMetric(
           'CachePools.batch.error',

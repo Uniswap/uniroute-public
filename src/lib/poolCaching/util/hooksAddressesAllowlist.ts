@@ -5,6 +5,7 @@
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {
+  AGG_HOOKS_ON_TEMPO,
   FLUID_DEX_1,
   FLUID_DEX_LITE,
   STABLE_SWAP,
@@ -544,5 +545,5 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.SONEIUM]: [ADDRESS_ZERO],
   [ChainId.XLAYER]: [ADDRESS_ZERO, AEGIS_V3],
   [ChainId.LINEA]: [ADDRESS_ZERO],
-  [CHAIN_ID_TEMPO]: [ADDRESS_ZERO, UNISWAP_AGG_HOOK_ON_TEMPO],
+  [CHAIN_ID_TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
 };

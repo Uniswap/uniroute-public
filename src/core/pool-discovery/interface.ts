@@ -77,4 +77,5 @@ export interface V4PoolInfo {
   };
   tvlETH: number;
   tvlUSD: number;
+  isExternalLiquidity?: boolean;
 }

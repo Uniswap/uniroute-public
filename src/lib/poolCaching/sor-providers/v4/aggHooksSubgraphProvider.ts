@@ -58,6 +58,7 @@ interface AggHooksRawPool {
   };
   totalValueLockedUSD: string;
   totalValueLockedETH: string;
+  isExternalLiquidity?: boolean;
 }
 
 export interface IAggHooksSubgraphProvider {
@@ -79,7 +80,8 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
     subgraphUrlOverride?: string,
     bearerToken?: string,
     private logger?: Logger,
-    private metric?: IMetric
+    private metric?: IMetric,
+    private useExternalLiquidity = false
   ) {
     const url = subgraphUrlOverride ?? SUBGRAPH_URL_BY_CHAIN[chainId];
     if (!url) {
@@ -133,6 +135,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
           }
           totalValueLockedUSD
           totalValueLockedETH
+          ${this.useExternalLiquidity ? 'isExternalLiquidity' : ''}
         }
       }
     `;
@@ -286,8 +289,13 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
 
     // Enrich each pool's TVL using pseudoTotalValueLocked on the hook contract.
     // The subgraph returns 0 for these pools because their liquidity is held externally.
+    // When useExternalLiquidity is enabled, only include pools that the subgraph
+    // marks as holding liquidity externally via the hook contract.
+    const filteredPools = this.useExternalLiquidity
+      ? rawPools.filter(rawPool => rawPool.isExternalLiquidity)
+      : rawPools;
     const pools = await Promise.all(
-      rawPools.map(async rawPool => {
+      filteredPools.map(async rawPool => {
         const pool: V4SubgraphPool = {
           id: rawPool.id,
           feeTier: rawPool.feeTier,
@@ -309,6 +317,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
           // Start from subgraph values; will be overwritten below if contract call succeeds.
           tvlETH: parseFloat(rawPool.totalValueLockedETH),
           tvlUSD: parseFloat(rawPool.totalValueLockedUSD),
+          isExternalLiquidity: rawPool.isExternalLiquidity ?? false,
         };
 
         try {

@@ -30,6 +30,7 @@ export interface V4SubgraphPool {
   };
   tvlETH: number;
   tvlUSD: number;
+  isExternalLiquidity?: boolean;
 }
 
 export type V4RawSubgraphPool = {
