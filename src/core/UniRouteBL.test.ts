@@ -76,6 +76,9 @@ import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provid
 vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
   AGG_HOOKS_PER_CHAIN: {},
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
+  UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
+  getAggHooksForChain: (chainId: number) =>
+    chainId === 1 ? ['0xaaaa000000000000000000000000000000000001'] : [],
   // MAINNET_AGG_HOOK – must match the literal used in the tests below.
   // Returns a non-undefined Protocol string so callers treat it as an agg hook.
   getProtocolForAggHookAddress: (hookAddress: string, chainId: number) =>
@@ -789,6 +792,163 @@ describe('UniRouteBL', () => {
         externalRequest
       );
       expect(externalSecondResponse.hitsCachedRoutes).toBe(false);
+    });
+  });
+
+  describe('AggHooksReadEnabled / AggHooksWriteEnabled feature flags', () => {
+    const uniswapOnlyRequest = new QuoteRequest({
+      ...baseRequest,
+      tradeType: 'EXACT_IN',
+      // defaults to v2,v3,v4,mixed
+    });
+    const mixedRequest = new QuoteRequest({
+      ...baseRequest,
+      tradeType: 'EXACT_IN',
+      protocols: `${Protocol.V2},${Protocol.V3},${Protocol.V4},${Protocol.MIXED},${Protocol.CURVESTABLESWAPNG}`,
+    });
+
+    it('uniswap-only protocols hit getCachedRoutes and saveCachedRoutes regardless of AggHooks flags', async () => {
+      // Default config: AggHooksReadEnabled=false, AggHooksWriteEnabled=false
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // First call: cache miss → async saves
+      const firstResponse = await uniRouteBL.quote(ctx, uniswapOnlyRequest);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // Second call: cache hit from the save above
+      const secondResponse = await uniRouteBL.quote(ctx, uniswapOnlyRequest);
+      expect(secondResponse.hitsCachedRoutes).toBe(true);
+    });
+
+    it('mixed protocols do NOT hit getCachedRoutes or saveCachedRoutes when both flags are false', async () => {
+      // Default config: AggHooksReadEnabled=false, AggHooksWriteEnabled=false
+      const uniRouteBL = new UniRouteBL(
+        serviceConfigAsync,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const firstResponse = await uniRouteBL.quote(ctx, mixedRequest);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // No save occurred → second call still misses
+      const secondResponse = await uniRouteBL.quote(ctx, mixedRequest);
+      expect(secondResponse.hitsCachedRoutes).toBe(false);
+    });
+
+    it('mixed protocols hit getCachedRoutes but NOT saveCachedRoutes when AggHooksReadEnabled=true only', async () => {
+      const readOnlyConfig = {
+        ...getUniRouteTestConfig(LambdaType.Async),
+        CachedRoutes: {
+          ...getUniRouteTestConfig(LambdaType.Async).CachedRoutes,
+          AggHooksReadEnabled: true,
+          AggHooksWriteEnabled: false,
+        },
+      };
+
+      // First: populate the uniswap-only cache with an async call
+      const uniRouteBLAsync = new UniRouteBL(
+        readOnlyConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // Mixed protocol first call: cache miss (nothing saved yet for this key)
+      const firstResponse = await uniRouteBLAsync.quote(ctx, mixedRequest);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // AggHooksWriteEnabled=false → no save → second call still misses
+      const secondResponse = await uniRouteBLAsync.quote(ctx, mixedRequest);
+      expect(secondResponse.hitsCachedRoutes).toBe(false);
+    });
+
+    it('mixed protocols hit getCachedRoutes and saveCachedRoutes when both AggHooksReadEnabled and AggHooksWriteEnabled are true', async () => {
+      const readWriteConfig = {
+        ...getUniRouteTestConfig(LambdaType.Async),
+        CachedRoutes: {
+          ...getUniRouteTestConfig(LambdaType.Async).CachedRoutes,
+          AggHooksReadEnabled: true,
+          AggHooksWriteEnabled: true,
+        },
+      };
+
+      const uniRouteBL = new UniRouteBL(
+        readWriteConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      // First call: cache miss → async saves with mixed protocols
+      const firstResponse = await uniRouteBL.quote(ctx, mixedRequest);
+      expect(firstResponse.hitsCachedRoutes).toBe(false);
+
+      // Second call: cache hit from the save above
+      const secondResponse = await uniRouteBL.quote(ctx, mixedRequest);
+      expect(secondResponse.hitsCachedRoutes).toBe(true);
     });
   });
 
@@ -1786,6 +1946,7 @@ describe('UniRouteBL', () => {
 
       // Let's check what's actually in the cache
       const cacheKey = cachedRoutesRepository.constructCachedRouteKey(
+        [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         1,
         new Address('0x0000000000000000000000000000000000000000'),
         new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),

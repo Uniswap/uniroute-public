@@ -47,6 +47,8 @@ import {
   protocolToPoolTypeString,
   updateQuoteSplitWithFreshPoolDetails,
   isExternalProtocol,
+  UNISWAP_NATIVE_PROTOCOLS,
+  allUniswapAndSomeExternalProtocolsAndMixed,
 } from '../lib/helpers';
 import {Erc20Token} from '../models/token/Erc20Token';
 import {Protocol} from '../models/pool/Protocol';
@@ -377,7 +379,10 @@ export class UniRouteBL implements IUniRoutedBL {
       let usedCachedRoutes: boolean = false;
       if (
         quoteType === QuoteType.Fast &&
-        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
+        // TODO: replace with requestedProtocolsToHitCache once we have enabled agg hooks caching read
+        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
+          (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
+            this.serviceConfig.CachedRoutes.AggHooksReadEnabled)) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
         this.serviceConfig.CachedRoutes.Enabled
       ) {
@@ -735,7 +740,10 @@ export class UniRouteBL implements IUniRoutedBL {
       // if this was a cache miss + all protocols searched + the simulation didn't fail + is async call, cache the best quote's route(s)
       if (
         !usedCachedRoutes &&
-        onlyUniswapProtocolsIncludedAndMixed(protocols) &&
+        // TODO: replace with requestedProtocolsToHitCache once we have enabled agg hooks caching write
+        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
+          (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
+            this.serviceConfig.CachedRoutes.AggHooksWriteEnabled)) &&
         this.serviceConfig.Lambda.Type === LambdaType.Async &&
         bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
         this.serviceConfig.CachedRoutes.Enabled
@@ -857,7 +865,8 @@ export class UniRouteBL implements IUniRoutedBL {
             amountIn,
             usdBucket,
             QuoteType.Fresh,
-            [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED], // All protocols
+            // TODO: https://linear.app/uniswap/issue/ROUTE-1103/tech-debt-admin-getcachedroutes-request-payload-to-modify-to-accept
+            [...UNISWAP_NATIVE_PROTOCOLS], // All protocols
             new QuoteRequest(), // Empty request since we're not doing a full quote
             ctx
           );
@@ -927,8 +936,10 @@ export class UniRouteBL implements IUniRoutedBL {
       const amountIn = BigInt(0);
       const usdBucket = request.usdBucket as UsdBucket;
 
-      // Delete cached routes
+      // Delete cached routes (default: standard Uniswap+V4+MIXED set used for bucketed cache keys)
       const success = await this.cachedRoutesRepository.deleteCachedRoutes(
+        // TODO: https://linear.app/uniswap/issue/ROUTE-1102/tech-debt-deletecachedroutes-admin-endpoint-request-payload-needs-to
+        [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         chain.chainId,
         tokenInCurrencyInfo.isNative
           ? new Address(ADDRESS_ZERO)

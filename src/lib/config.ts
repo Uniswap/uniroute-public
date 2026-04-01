@@ -82,10 +82,16 @@ export interface IUniRouteServiceConfig {
   CachedRoutes: {
     // Whether to enable cached routes.
     Enabled: boolean;
+    // Whether to enable getting agg-hook (external protocol) cached routes.
+    AggHooksReadEnabled: boolean;
+    // Whether to enable writing agg-hook (external protocol) cached routes.
+    AggHooksWriteEnabled: boolean;
     // The TTL for the route cache entry refresh.
     RouteCacheEntryRefreshSeconds: number;
     // The TTL for the cached routes.
     RouteCacheEntryTtlSeconds: number;
+    // The TTL for agg-hook (external protocol) cached routes.
+    AggHooksRouteCacheEntryTtlSeconds: number;
     // Cached routes to retrieve
     CachedRoutesToRetrieve: number;
     // Cached routes to keep after scoring
@@ -188,8 +194,11 @@ export const getUniRouteSyncConfig = (
     },
     CachedRoutes: {
       Enabled: true,
+      AggHooksReadEnabled: false,
+      AggHooksWriteEnabled: false,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
+      AggHooksRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
@@ -271,8 +280,11 @@ export const getQuickRouteSyncConfig = (
     },
     CachedRoutes: {
       Enabled: true,
+      AggHooksReadEnabled: false,
+      AggHooksWriteEnabled: false,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
+      AggHooksRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
