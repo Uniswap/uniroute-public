@@ -15,10 +15,6 @@ import {Protocol} from '../../../models/pool/Protocol';
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
-// Declared before AGG_HOOKS_PER_CHAIN to avoid a const TDZ forward-reference.
-export const UNISWAP_AGG_HOOK_ON_TEMPO =
-  '0x7169a78a59f136876e724b648fbb339a42f46888';
-
 // Protocols listed here are excluded from cached-routes retrieval inside
 // CachedRoutesRepository.  All external (agg hook) protocols are included
 // because production metrics show cached routes still containing agg hook
@@ -66,6 +62,9 @@ export const AGG_HOOKS_PER_CHAIN: Partial<
   [Protocol.FLUIDDEXLITE]: {
     [ChainId.MAINNET]: FLUID_DEX_LITE,
   },
+  // NOTE: TEMPOEXCHANGE is intentionally omitted here. Tempo agg hook pools
+  // are a special case — they are meant to be mixed with V4 pools rather than
+  // treated as a separate agg hook protocol in routing.
 };
 
 // Reverse lookup built once at module load: chainId -> hookAddress(lowercase) -> Protocol.

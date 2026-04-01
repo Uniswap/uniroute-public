@@ -2,7 +2,6 @@ import {describe, it, expect} from 'vitest';
 import {
   AGG_HOOKS_PER_CHAIN,
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST,
-  UNISWAP_AGG_HOOK_ON_TEMPO,
   getProtocolForAggHookAddress,
 } from './hooksAddressesAllowlist';
 import {
@@ -10,6 +9,7 @@ import {
   FLUID_DEX_LITE,
   STABLE_SWAP,
   STABLE_SWAP_NG,
+  UNISWAP_AGG_HOOK_ON_TEMPO,
 } from './aggHooksAddressesAllowlist';
 import {Protocol} from '../../../models/pool/Protocol';
 import {ChainId} from '@uniswap/sdk-core';
