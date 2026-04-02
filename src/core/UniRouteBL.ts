@@ -262,7 +262,8 @@ export class UniRouteBL implements IUniRoutedBL {
 
     // Log for debugging token usage spikes
     ctx.logger.info('Quote request parsed', {
-      chainId: chain.chainId,
+      quoteService: this.serviceConfig.QuoteService,
+      chain: ChainId[chain.chainId],
       tokenIn: request.tokenInAddress,
       tokenOut: request.tokenOutAddress,
       tradeType,
