@@ -25,14 +25,7 @@ const CHAIN_ID_TEMPO = 4217 as ChainId;
 // helpers.ts imports from this file, creating a circular dependency that
 // causes this set to be undefined at runtime.
 export const AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: ReadonlySet<Protocol> =
-  new Set<Protocol>([
-    Protocol.CURVESTABLESWAP,
-    Protocol.CURVESTABLESWAPNG,
-    Protocol.FLUIDDEXT1,
-    Protocol.FLUIDDEXV2,
-    Protocol.FLUIDDEXLITE,
-    Protocol.TEMPOEXCHANGE,
-  ]);
+  new Set<Protocol>();
 
 /**
  * Per-protocol, per-chain map of aggregator hook addresses.

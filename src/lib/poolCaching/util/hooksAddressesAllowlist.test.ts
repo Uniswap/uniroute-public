@@ -24,17 +24,8 @@ describe('AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST', () => {
     );
   });
 
-  it('contains all external protocols', () => {
-    expect(AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST).toEqual(
-      new Set([
-        Protocol.CURVESTABLESWAP,
-        Protocol.CURVESTABLESWAPNG,
-        Protocol.FLUIDDEXT1,
-        Protocol.FLUIDDEXV2,
-        Protocol.FLUIDDEXLITE,
-        Protocol.TEMPOEXCHANGE,
-      ])
-    );
+  it('is empty (denylist cleared — uniswap-only filtering uses Rule 1 in fetchCachedRoutes)', () => {
+    expect(AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST).toEqual(new Set());
   });
 });
 
