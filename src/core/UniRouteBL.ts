@@ -266,6 +266,7 @@ export class UniRouteBL implements IUniRoutedBL {
       chain: ChainId[chain.chainId],
       tokenIn: request.tokenInAddress,
       tokenOut: request.tokenOutAddress,
+      amount: request.amount,
       tradeType,
       quoteType,
       protocols: protocols.sort().join(',').toLowerCase(),
