@@ -260,6 +260,21 @@ export class UniRouteBL implements IUniRoutedBL {
       `requestSource:${requestSource}`,
     ];
 
+    // Log for debugging token usage spikes
+    ctx.logger.info('Quote request parsed', {
+      chainId: chain.chainId,
+      tokenIn: request.tokenInAddress,
+      tokenOut: request.tokenOutAddress,
+      tradeType,
+      quoteType,
+      protocols: protocols.sort().join(',').toLowerCase(),
+      hooksOptions,
+      requestSource,
+      forceMixed,
+      portionBips,
+      universalRouterVersion: options?.universalRouterVersion,
+    });
+
     try {
       // Start parallel token search operations
       const tokenSearchStartTime = Date.now();
