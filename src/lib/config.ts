@@ -195,7 +195,7 @@ export const getUniRouteSyncConfig = (
     CachedRoutes: {
       Enabled: true,
       AggHooksReadEnabled: true,
-      AggHooksWriteEnabled: false,
+      AggHooksWriteEnabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       AggHooksRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,

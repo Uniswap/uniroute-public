@@ -671,7 +671,15 @@ describe('UniRouteBL', () => {
       expect(secondResponse.hitsCachedRoutes).toBe(false);
     });
 
-    it('should NOT cache routes when uniswap + external protocols are mixed (second call still misses)', async () => {
+    it('should NOT cache routes when uniswap + external protocols are mixed and AggHooks flags are off (second call still misses)', async () => {
+      const noAggHooksConfig = {
+        ...getUniRouteTestConfig(LambdaType.Async),
+        CachedRoutes: {
+          ...getUniRouteTestConfig(LambdaType.Async).CachedRoutes,
+          AggHooksReadEnabled: false,
+          AggHooksWriteEnabled: false,
+        },
+      };
       const request = new QuoteRequest({
         ...baseRequest,
         tradeType: 'EXACT_IN',
@@ -679,7 +687,7 @@ describe('UniRouteBL', () => {
       });
 
       const uniRouteBL = new UniRouteBL(
-        serviceConfigAsync,
+        noAggHooksConfig,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -840,9 +848,16 @@ describe('UniRouteBL', () => {
     });
 
     it('mixed protocols do NOT hit getCachedRoutes or saveCachedRoutes when both flags are false', async () => {
-      // Default config: AggHooksReadEnabled=false, AggHooksWriteEnabled=false
+      const noAggHooksConfig = {
+        ...getUniRouteTestConfig(LambdaType.Async),
+        CachedRoutes: {
+          ...getUniRouteTestConfig(LambdaType.Async).CachedRoutes,
+          AggHooksReadEnabled: false,
+          AggHooksWriteEnabled: false,
+        },
+      };
       const uniRouteBL = new UniRouteBL(
-        serviceConfigAsync,
+        noAggHooksConfig,
         redisCache,
         chainRepository,
         poolDiscoverer,
