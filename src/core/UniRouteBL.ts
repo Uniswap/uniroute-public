@@ -404,9 +404,8 @@ export class UniRouteBL implements IUniRoutedBL {
         const getCachedRoutesStartTime = Date.now();
 
         // Fire both cache lookups in parallel to save latency
-        // No-route cache is currently enabled for EXACT_IN only.
         const [usdCliff, cachedRoutes] = await Promise.all([
-          usdAmount !== undefined && tradeType === TradeType.ExactIn
+          usdAmount !== undefined
             ? this.noRouteCacheRepository.getUsdCliff(
                 protocols,
                 chain.chainId,
@@ -777,12 +776,11 @@ export class UniRouteBL implements IUniRoutedBL {
       );
 
       if (status === QuoteStatus.NoRoute) {
-        // No-route cache write — only from async path, EXACT_IN only for now.
+        // No-route cache write — only from async path.
         if (
           !usedCachedRoutes &&
           shouldCheckCache &&
           usdAmount !== undefined &&
-          tradeType === TradeType.ExactIn &&
           this.serviceConfig.Lambda.Type === LambdaType.Async
         ) {
           await this.noRouteCacheRepository.setUsdCliff(
