@@ -64,6 +64,7 @@ import {IPoolDiscoverer, UniPoolInfo} from './pool-discovery/interface';
 import {IFreshPoolDetailsWrapper} from '../stores/pool/FreshPoolDetailsWrapper';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {ICachedRoutesRepository} from '../stores/route/uniroutes/ICachedRoutesRepository';
+import {INoRouteCacheRepository} from '../stores/route/uniroutes/NoRouteCacheRepository';
 import {QuoteType} from '../models/quote/QuoteType';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {EnumUtils} from '../lib/EnumUtils';
@@ -120,6 +121,7 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly gasConverter: IGasConverter,
     private readonly routeRepository: IRoutesRepository<Pool>,
     private readonly cachedRoutesRepository: ICachedRoutesRepository,
+    private readonly noRouteCacheRepository: INoRouteCacheRepository,
     private readonly quoteStrategy: IQuoteStrategy,
     private readonly simulator: ISimulator,
     private readonly quoteRequestValidator: IQuoteRequestValidator,
@@ -388,40 +390,74 @@ export class UniRouteBL implements IUniRoutedBL {
         tokenOut: tokenOutCurrencyInfo.wrappedAddress.toString(),
       });
 
-      // Check if we have cached routes / otherwise use fresh ones.
-      // If QuoteType.Fast, we always try to use cached routes first, even if expired (in which case an async QuoteType.Fresh fetch will be triggered)
-      // - we only use cached routes if all protocols are included (i.e. we don't cache specific protocols requests as this would harm our "Global best" caching approach)
-      // If QuoteType.Fresh, we force a fresh route fetch.
-      let routes: RouteBasic<Pool>[] = [];
-      let usedCachedRoutes: boolean = false;
-      if (
-        quoteType === QuoteType.Fast &&
-        // TODO: replace with requestedProtocolsToHitCache once we have enabled agg hooks caching read
+      // Check caches: no-route negative cache and route cache in parallel.
+      const shouldCheckCache =
         (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
           (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
             this.serviceConfig.CachedRoutes.AggHooksReadEnabled)) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
-        this.serviceConfig.CachedRoutes.Enabled
-      ) {
+        this.serviceConfig.CachedRoutes.Enabled;
+
+      let routes: RouteBasic<Pool>[] = [];
+      let usedCachedRoutes: boolean = false;
+      if (quoteType === QuoteType.Fast && shouldCheckCache) {
         const getCachedRoutesStartTime = Date.now();
-        routes = await this.cachedRoutesRepository.getCachedRoutes(
-          chain.chainId,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          tradeType,
-          amountIn,
-          usdBucket,
-          quoteType,
-          protocols,
-          request,
-          ctx
-        );
+
+        // Fire both cache lookups in parallel to save latency
+        // No-route cache is currently enabled for EXACT_IN only.
+        const [usdCliff, cachedRoutes] = await Promise.all([
+          usdAmount !== undefined && tradeType === TradeType.ExactIn
+            ? this.noRouteCacheRepository.getUsdCliff(
+                protocols,
+                chain.chainId,
+                tokenInCurrencyInfo.wrappedAddress,
+                tokenOutCurrencyInfo.wrappedAddress,
+                tradeType
+              )
+            : Promise.resolve(undefined),
+          this.cachedRoutesRepository.getCachedRoutes(
+            chain.chainId,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            tradeType,
+            amountIn,
+            usdBucket,
+            quoteType,
+            protocols,
+            request,
+            ctx
+          ),
+        ]);
+
         await logElapsedTime(
           'GetCachedRoutes',
           getCachedRoutesStartTime,
           ctx,
           metricTags
         );
+
+        // Check no-route cache — if a recent async deep search confirmed no route
+        // at or below this USD amount, short-circuit to avoid expensive discovery.
+        if (
+          usdCliff !== undefined &&
+          usdAmount !== undefined &&
+          usdAmount >= usdCliff
+        ) {
+          await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
+            tags: metricTags,
+          });
+          ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
+          return new QuoteResponse({
+            error: {
+              code: 404,
+              message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+            },
+            hitsCachedRoutes: false,
+            usdBucket: fineGrainedUsdBucket.toString(),
+          });
+        }
+
+        routes = cachedRoutes;
         if (routes.length > 0) {
           usedCachedRoutes = true;
         }
@@ -741,6 +777,38 @@ export class UniRouteBL implements IUniRoutedBL {
       );
 
       if (status === QuoteStatus.NoRoute) {
+        // No-route cache write — only from async path, EXACT_IN only for now.
+        if (
+          !usedCachedRoutes &&
+          shouldCheckCache &&
+          usdAmount !== undefined &&
+          tradeType === TradeType.ExactIn &&
+          this.serviceConfig.Lambda.Type === LambdaType.Async
+        ) {
+          await this.noRouteCacheRepository.setUsdCliff(
+            protocols,
+            chain.chainId,
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            tradeType,
+            usdAmount
+          );
+          await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
+            tags: metricTags,
+          });
+          // Clear pending refresh so the next sync request at a lower amount
+          // can trigger a new async refresh to ratchet down the usdCliff.
+          await this.cachedRoutesRepository.deletePendingRefresh(
+            protocols,
+            chain.chainId,
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            tradeType,
+            amountIn,
+            usdBucket
+          );
+        }
+
         return new QuoteResponse({
           error: {
             code: 404,
@@ -782,6 +850,19 @@ export class UniRouteBL implements IUniRoutedBL {
               usdBucket
             )
           )
+        );
+        await this.cachedRoutesRepository.deletePendingRefresh(
+          protocols,
+          chain.chainId,
+          tokenInCurrencyInfo.isNative
+            ? new Address(ADDRESS_ZERO)
+            : tokenInCurrencyInfo.wrappedAddress,
+          tokenOutCurrencyInfo.isNative
+            ? new Address(ADDRESS_ZERO)
+            : tokenOutCurrencyInfo.wrappedAddress,
+          tradeType,
+          amountIn,
+          usdBucket
         );
       }
 

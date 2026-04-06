@@ -98,6 +98,8 @@ export interface IUniRouteServiceConfig {
     CachedRoutesToKeepAfterScoring: number;
     // Skip async cache update call (to be used only for local debugging purposes)
     SkipAsyncCacheUpdateCall: boolean;
+    // The TTL for no-route negative cache entries.
+    NoRouteCacheTtlSeconds: number;
   };
   RouteFinder: {
     // The max number of raw routes to consider (before splitting).
@@ -202,6 +204,7 @@ export const getUniRouteSyncConfig = (
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
+      NoRouteCacheTtlSeconds: __PLACEHOLDER__,
     },
     RouteFinder: {
       MaxHops: __PLACEHOLDER__,
@@ -288,6 +291,7 @@ export const getQuickRouteSyncConfig = (
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
+      NoRouteCacheTtlSeconds: __PLACEHOLDER__,
     },
     RouteFinder: {
       MaxHops: __PLACEHOLDER__,
