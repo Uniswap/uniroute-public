@@ -231,6 +231,15 @@ export class UniRouteBL implements IUniRoutedBL {
 
     const quoteCallStartTime = Date.now();
 
+    const emitCallMetrics = async (tags: string[]) => {
+      await ctx.metrics.count(buildMetricKey('Call'), 1, {tags});
+      await ctx.metrics.timer(
+        buildMetricKey('Latency'),
+        Date.now() - quoteCallStartTime,
+        {tags}
+      );
+    };
+
     // Parse inputs
     const chain = await this.chainRepository.getChain(request.tokenInChainId)!;
     const tradeType = EnumUtils.stringToEnum(TradeType, request.tradeType);
@@ -442,9 +451,12 @@ export class UniRouteBL implements IUniRoutedBL {
           usdAmount !== undefined &&
           usdAmount >= usdCliff
         ) {
+          metricTags.push(`status:${QuoteStatus.NoRoute}`);
+          metricTags.push('cachedRoutesStatus:noRouteCacheHit');
           await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
             tags: metricTags,
           });
+          await emitCallMetrics(metricTags);
           ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
           return new QuoteResponse({
             error: {
@@ -764,16 +776,7 @@ export class UniRouteBL implements IUniRoutedBL {
       metricTags.push(
         `routeFinderConfig:${effectiveConfig !== this.serviceConfig ? 'reduced' : 'original'}`
       );
-      await ctx.metrics.count(buildMetricKey('Call'), 1, {
-        tags: metricTags,
-      });
-      await ctx.metrics.timer(
-        buildMetricKey('Latency'),
-        Date.now() - quoteCallStartTime,
-        {
-          tags: metricTags,
-        }
-      );
+      await emitCallMetrics(metricTags);
 
       if (status === QuoteStatus.NoRoute) {
         // No-route cache write — only from async path.
