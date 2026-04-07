@@ -413,16 +413,14 @@ export class UniRouteBL implements IUniRoutedBL {
         const getCachedRoutesStartTime = Date.now();
 
         // Fire both cache lookups in parallel to save latency
-        const [usdCliff, cachedRoutes] = await Promise.all([
-          usdAmount !== undefined
-            ? this.noRouteCacheRepository.getUsdCliff(
-                protocols,
-                chain.chainId,
-                tokenInCurrencyInfo.wrappedAddress,
-                tokenOutCurrencyInfo.wrappedAddress,
-                tradeType
-              )
-            : Promise.resolve(undefined),
+        const [amountCliff, cachedRoutes] = await Promise.all([
+          this.noRouteCacheRepository.getAmountCliff(
+            protocols,
+            chain.chainId,
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            tradeType
+          ),
           this.cachedRoutesRepository.getCachedRoutes(
             chain.chainId,
             tokenInCurrencyInfo,
@@ -445,12 +443,8 @@ export class UniRouteBL implements IUniRoutedBL {
         );
 
         // Check no-route cache — if a recent async deep search confirmed no route
-        // at or below this USD amount, short-circuit to avoid expensive discovery.
-        if (
-          usdCliff !== undefined &&
-          usdAmount !== undefined &&
-          usdAmount >= usdCliff
-        ) {
+        // at or above this amount, short-circuit to avoid expensive discovery.
+        if (amountCliff !== undefined && amountIn >= amountCliff) {
           metricTags.push(`status:${QuoteStatus.NoRoute}`);
           metricTags.push('cachedRoutesStatus:noRouteCacheHit');
           await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
@@ -783,31 +777,32 @@ export class UniRouteBL implements IUniRoutedBL {
         if (
           !usedCachedRoutes &&
           shouldCheckCache &&
-          usdAmount !== undefined &&
           this.serviceConfig.Lambda.Type === LambdaType.Async
         ) {
-          await this.noRouteCacheRepository.setUsdCliff(
+          const wrote = await this.noRouteCacheRepository.setAmountCliff(
             protocols,
             chain.chainId,
             tokenInCurrencyInfo.wrappedAddress,
             tokenOutCurrencyInfo.wrappedAddress,
             tradeType,
-            usdAmount
+            amountIn
           );
-          await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
-            tags: metricTags,
-          });
-          // Clear pending refresh so the next sync request at a lower amount
-          // can trigger a new async refresh to ratchet down the usdCliff.
-          await this.cachedRoutesRepository.deletePendingRefresh(
-            protocols,
-            chain.chainId,
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            tradeType,
-            amountIn,
-            usdBucket
-          );
+          // Only emit metric and clear pending refresh on ratchet-down (value changed).
+          // Don't clear pending key on same-value writes to avoid a refresh loop.
+          if (wrote) {
+            await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
+              tags: metricTags,
+            });
+            await this.cachedRoutesRepository.deletePendingRefresh(
+              protocols,
+              chain.chainId,
+              tokenInCurrencyInfo.wrappedAddress,
+              tokenOutCurrencyInfo.wrappedAddress,
+              tradeType,
+              amountIn,
+              usdBucket
+            );
+          }
         }
 
         return new QuoteResponse({
