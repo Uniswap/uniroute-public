@@ -139,6 +139,7 @@ export interface IUniRouteServiceConfig {
   };
   TopPoolsSelector: {
     PoolSelectionConfig: Record<ChainId, IPoolSelectionConfig>;
+    AggHooksPoolSelectionConfig: Record<ChainId, IPoolSelectionConfig>;
   };
   OnChainQuoteFetcher: {
     // Maximum number of retries when encountering "out of gas" errors, while reducing batchSize
@@ -230,6 +231,7 @@ export const getUniRouteSyncConfig = (
     },
     TopPoolsSelector: {
       PoolSelectionConfig: poolSelectionConfig,
+      AggHooksPoolSelectionConfig: aggHooksPoolSelectionPerChainConfig,
     },
     OnChainQuoteFetcher: {
       maxRetries: __PLACEHOLDER__,
@@ -317,6 +319,7 @@ export const getQuickRouteSyncConfig = (
     },
     TopPoolsSelector: {
       PoolSelectionConfig: poolSelectionConfig,
+      AggHooksPoolSelectionConfig: aggHooksPoolSelectionPerChainConfig,
     },
     OnChainQuoteFetcher: {
       maxRetries: __PLACEHOLDER__,
@@ -533,6 +536,19 @@ export const defaultPoolSelectionConfig: IPoolSelectionConfig = {
   topNWithBaseToken: __PLACEHOLDER__,
 };
 
+// Pool selection config for agg hook pools.
+// AggHooksTopPoolsSelector only selects direct pairs, so only topNDirectPairs
+// is meaningful here. The other fields are set to __PLACEHOLDER__ since agg hook pools are
+// always direct-swap pools (tokenIn ↔ tokenOut) and don't need multi-hop heuristics.
+export const aggHooksPoolSelectionConfig: IPoolSelectionConfig = {
+  topNDirectPairs: __PLACEHOLDER__,
+  topNOneHopPairs: __PLACEHOLDER__,
+  topNSecondHopPairs: __PLACEHOLDER__,
+  topNPairs: __PLACEHOLDER__,
+  topNWithBaseTokenEach: __PLACEHOLDER__,
+  topNWithBaseToken: __PLACEHOLDER__,
+};
+
 export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.MAINNET]: {...defaultPoolSelectionConfig},
   [ChainId.OPTIMISM]: {...defaultPoolSelectionConfig},
@@ -556,6 +572,34 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.XLAYER]: {...defaultPoolSelectionConfig},
   [ChainId.TEMPO]: {...defaultPoolSelectionConfig},
   [ChainId.LINEA]: {...defaultPoolSelectionConfig},
+};
+
+export const aggHooksPoolSelectionPerChainConfig: Record<
+  ChainId,
+  IPoolSelectionConfig
+> = {
+  [ChainId.MAINNET]: {...aggHooksPoolSelectionConfig},
+  [ChainId.OPTIMISM]: {...aggHooksPoolSelectionConfig},
+  [ChainId.ARBITRUM]: {...aggHooksPoolSelectionConfig},
+  [ChainId.POLYGON]: {...aggHooksPoolSelectionConfig},
+  [ChainId.SEPOLIA]: {...aggHooksPoolSelectionConfig},
+  [ChainId.CELO]: {...aggHooksPoolSelectionConfig},
+  [ChainId.BNB]: {...aggHooksPoolSelectionConfig},
+  [ChainId.AVAX]: {...aggHooksPoolSelectionConfig},
+  [ChainId.BASE]: {...aggHooksPoolSelectionConfig},
+  [ChainId.BLAST]: {...aggHooksPoolSelectionConfig},
+  [ChainId.ZORA]: {...aggHooksPoolSelectionConfig},
+  [ChainId.ZKSYNC]: {...aggHooksPoolSelectionConfig},
+  [ChainId.WORLDCHAIN]: {...aggHooksPoolSelectionConfig},
+  [ChainId.UNICHAIN_SEPOLIA]: {...aggHooksPoolSelectionConfig},
+  [ChainId.MONAD_TESTNET]: {...aggHooksPoolSelectionConfig},
+  [ChainId.MONAD]: {...aggHooksPoolSelectionConfig},
+  [ChainId.BASE_SEPOLIA]: {...aggHooksPoolSelectionConfig},
+  [ChainId.UNICHAIN]: {...aggHooksPoolSelectionConfig},
+  [ChainId.SONEIUM]: {...aggHooksPoolSelectionConfig},
+  [ChainId.XLAYER]: {...aggHooksPoolSelectionConfig},
+  [ChainId.TEMPO]: {...aggHooksPoolSelectionConfig},
+  [ChainId.LINEA]: {...aggHooksPoolSelectionConfig},
 };
 
 // Mapping of chainId to Set of token addresses that require gasPrice to be passed to simulation

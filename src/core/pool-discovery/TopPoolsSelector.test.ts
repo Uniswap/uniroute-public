@@ -22,7 +22,11 @@ import {
 } from '../../lib/tokenUtils';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
-import {poolSelectionConfig} from 'src/lib/config';
+import {
+  poolSelectionConfig,
+  aggHooksPoolSelectionPerChainConfig,
+  IPoolSelectionConfig,
+} from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
 
 describe('BasicTopPoolsSelector', () => {
@@ -1170,15 +1174,37 @@ describe('AggHooksTopPoolsSelector', () => {
   const TOKEN_IN = '0x0000000000000000000000000000000000000001';
   const TOKEN_OUT = '0x0000000000000000000000000000000000000002';
   const TOKEN_OTHER = '0x0000000000000000000000000000000000000003';
+  const TOKEN_INTERMEDIARY = '0x0000000000000000000000000000000000000004';
+  const WETH = WRAPPED_NATIVE_CURRENCY[ChainId.MAINNET].address.toLowerCase();
 
   const tokenIn = new Address(TOKEN_IN);
   const tokenOut = new Address(TOKEN_OUT);
 
+  // Config with all heuristics enabled (non-zero limits) for multi-hop tests.
+  const fullHeuristicsConfig: Record<ChainId, IPoolSelectionConfig> =
+    Object.fromEntries(
+      Object.keys(poolSelectionConfig).map(k => [
+        Number(k),
+        {
+          topNDirectPairs: 2,
+          topNOneHopPairs: 3,
+          topNSecondHopPairs: 2,
+          topNPairs: 2,
+          topNWithBaseTokenEach: 2,
+          topNWithBaseToken: 4,
+        },
+      ])
+    ) as Record<ChainId, IPoolSelectionConfig>;
+
   let selector: AggHooksTopPoolsSelector;
+  let selectorDefault: AggHooksTopPoolsSelector;
   let ctx: Context;
 
   beforeEach(() => {
-    selector = new AggHooksTopPoolsSelector(poolSelectionConfig);
+    selector = new AggHooksTopPoolsSelector(fullHeuristicsConfig);
+    selectorDefault = new AggHooksTopPoolsSelector(
+      aggHooksPoolSelectionPerChainConfig
+    );
     ctx = {logger: {debug: vi.fn()}} as unknown as Context;
   });
 
@@ -1272,8 +1298,8 @@ describe('AggHooksTopPoolsSelector', () => {
     });
   });
 
-  describe('only builds direct pairs', () => {
-    it('should not include tokenIn-only or tokenOut-only pools', async () => {
+  describe('multi-hop pool selection (with non-zero config limits)', () => {
+    it('includes direct pairs, tokenIn-only, and tokenOut-only pools', async () => {
       const directPool = makeAggV4Pool('0xdirect', TOKEN_IN, TOKEN_OUT);
       const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
       const tokenOutOnlyPool = makeAggV4Pool(
@@ -1292,14 +1318,145 @@ describe('AggHooksTopPoolsSelector', () => {
         ctx
       );
 
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe('0xdirect');
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xdirect');
+      expect(ids).toContain('0xin_only');
+      expect(ids).toContain('0xout_only');
     });
 
-    it('should return empty array when no agg pools match tokenIn/tokenOut directly', async () => {
-      const unrelatedPool = makeAggV4Pool('0xunrelated', TOKEN_IN, TOKEN_OTHER);
+    it('includes tokenIn-only pools even when no direct pair exists', async () => {
+      const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
       const result = await selector.filterPools(
-        [unrelatedPool],
+        [tokenInOnlyPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('0xin_only');
+    });
+
+    it('discovers intermediary tokens and selects second-hop pools', async () => {
+      // tokenIn → intermediary (first hop)
+      const firstHop = makeAggV4Pool(
+        '0xfirst_hop',
+        TOKEN_IN,
+        TOKEN_INTERMEDIARY
+      );
+      // intermediary → tokenOut (second hop)
+      const secondHop = makeAggV4Pool(
+        '0xsecond_hop',
+        TOKEN_INTERMEDIARY,
+        TOKEN_OUT
+      );
+      // intermediary → other (second-hop pool for the intermediary token)
+      const secondHopOther = makeAggV4Pool(
+        '0xsecond_hop_other',
+        TOKEN_INTERMEDIARY,
+        TOKEN_OTHER
+      );
+
+      const result = await selector.filterPools(
+        [firstHop, secondHop, secondHopOther],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xfirst_hop');
+      expect(ids).toContain('0xsecond_hop');
+      // secondHopOther may or may not be included depending on topNSecondHopPairs
+      // and dedup logic, but the key point is that intermediary token was discovered
+    });
+
+    it('selects top N pools by TVL when more pools than limit', async () => {
+      // Create more pools than the topNPairs limit (2)
+      const pools = [
+        makeAggV4Pool(
+          '0xhigh_tvl',
+          TOKEN_IN,
+          TOKEN_OUT,
+          AGG_HOOK_FLUID_LITE,
+          9000
+        ),
+        makeAggV4Pool(
+          '0xmed_tvl',
+          TOKEN_OTHER,
+          TOKEN_INTERMEDIARY,
+          AGG_HOOK_FLUID_LITE,
+          5000
+        ),
+        makeAggV4Pool(
+          '0xlow_tvl_1',
+          TOKEN_INTERMEDIARY,
+          TOKEN_IN,
+          AGG_HOOK_FLUID_LITE,
+          1000
+        ),
+        makeAggV4Pool(
+          '0xlow_tvl_2',
+          TOKEN_INTERMEDIARY,
+          TOKEN_OUT,
+          AGG_HOOK_FLUID_LITE,
+          500
+        ),
+        makeAggV4Pool(
+          '0xlow_tvl_3',
+          TOKEN_OTHER,
+          TOKEN_IN,
+          AGG_HOOK_FLUID_LITE,
+          200
+        ),
+      ];
+
+      const result = await selector.filterPools(
+        pools,
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      // Should include pools — higher TVL pools should be preferred in each category
+      expect(result.length).toBeGreaterThan(0);
+      // The highest TVL direct pair should always be included
+      expect(result.map(p => p.id)).toContain('0xhigh_tvl');
+    });
+
+    it('includes WETH pools for tokenIn and tokenOut when available', async () => {
+      const directPool = makeAggV4Pool('0xdirect', TOKEN_IN, TOKEN_OUT);
+      const wethTokenInPool = makeAggV4Pool('0xweth_in', WETH, TOKEN_IN);
+      const wethTokenOutPool = makeAggV4Pool('0xweth_out', WETH, TOKEN_OUT);
+
+      const result = await selector.filterPools(
+        [directPool, wethTokenInPool, wethTokenOutPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xdirect');
+      expect(ids).toContain('0xweth_in');
+      expect(ids).toContain('0xweth_out');
+    });
+
+    it('should return empty array when no pools are provided', async () => {
+      const result = await selector.filterPools(
+        [],
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
@@ -1309,10 +1466,38 @@ describe('AggHooksTopPoolsSelector', () => {
       );
       expect(result).toHaveLength(0);
     });
+  });
 
-    it('should return empty array when no pools are provided', async () => {
-      const result = await selector.filterPools(
-        [],
+  describe('default aggHooksPoolSelectionConfig (zero non-direct limits)', () => {
+    it('returns only direct pairs when one-hop limits are zero', async () => {
+      const directPool = makeAggV4Pool('0xdirect', TOKEN_IN, TOKEN_OUT);
+      const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
+      const tokenOutOnlyPool = makeAggV4Pool(
+        '0xout_only',
+        TOKEN_OTHER,
+        TOKEN_OUT
+      );
+
+      const result = await selectorDefault.filterPools(
+        [directPool, tokenInOnlyPool, tokenOutOnlyPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      // With topNOneHopPairs=0, topNSecondHopPairs=0, topNPairs=0, etc.,
+      // only direct pairs should be returned.
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('0xdirect');
+    });
+
+    it('returns empty when no direct pair exists and all other limits are zero', async () => {
+      const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
+      const result = await selectorDefault.filterPools(
+        [tokenInOnlyPool],
         ChainId.MAINNET,
         tokenIn,
         tokenOut,
@@ -1517,6 +1702,38 @@ describe('AggHooksTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0xgood');
+    });
+  });
+
+  describe('no manuallyGenerateDirectPairs fallback', () => {
+    it('does not generate synthetic direct pairs when none exist in pool universe', async () => {
+      // Only non-direct pools — BasicTopPoolsSelector would fall back to
+      // manuallyGenerateDirectPairs, but AggHooksTopPoolsSelector should not.
+      const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
+
+      const result = await selector.filterPools(
+        [tokenInOnlyPool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        undefined,
+        ctx
+      );
+
+      // tokenIn-only pool is included via one-hop heuristic, but no synthetic
+      // direct pair (tokenIn ↔ tokenOut) should be fabricated.
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xin_only');
+      // No pool with both tokenIn AND tokenOut should appear
+      const directPools = result.filter(
+        p =>
+          (p.token0.id.toLowerCase() === TOKEN_IN.toLowerCase() &&
+            p.token1.id.toLowerCase() === TOKEN_OUT.toLowerCase()) ||
+          (p.token0.id.toLowerCase() === TOKEN_OUT.toLowerCase() &&
+            p.token1.id.toLowerCase() === TOKEN_IN.toLowerCase())
+      );
+      expect(directPools).toHaveLength(0);
     });
   });
 });

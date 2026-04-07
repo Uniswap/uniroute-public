@@ -304,9 +304,9 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
     expect(result).toHaveLength(0);
   });
 
-  it('returns empty when no agg hook pool matches the tokenIn/tokenOut pair', async () => {
+  it('includes a tokenIn-only agg hook pool via one-hop heuristic', async () => {
     const OTHER_TOKEN = '0x3000000000000000000000000000000000000001';
-    // Pool exists for a different pair — not TOKEN_IN/TOKEN_OUT.
+    // Pool exists for tokenIn → other, not tokenIn → tokenOut directly.
     const aggPool = makeV4Pool(
       'agg-pool',
       TOKEN_IN,
@@ -318,13 +318,15 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       [aggPool],
       ChainId.MAINNET,
       tokenIn,
-      tokenOut, // TOKEN_OUT — no pool covers this pair directly
+      tokenOut,
       Protocol.V4,
       undefined,
       ctx
     );
 
-    expect(result).toHaveLength(0);
+    // With the refactored multi-hop heuristics, tokenIn-only pools are selected
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('agg-pool');
   });
 
   it('AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST has no effect on pool inclusion', async () => {

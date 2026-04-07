@@ -427,7 +427,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return directPairs;
   }
 
-  protected static getTokenInOnlyPairs(
+  public static getTokenInOnlyPairs(
     tokenIn: Address,
     tokenOut: Address,
     selectedPoolIds: Set<string>,
@@ -443,7 +443,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     );
   }
 
-  protected static getTokenOutOnlyPairs(
+  public static getTokenOutOnlyPairs(
     tokenIn: Address,
     tokenOut: Address,
     selectedPoolIds: Set<string>,
@@ -459,7 +459,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     );
   }
 
-  protected static getIntermediaryTokenIds(
+  public static getIntermediaryTokenIds(
     tokenInOnlyPairs: UniPoolInfo[],
     tokenOutOnlyPairs: UniPoolInfo[],
     tokenIn: Address,
@@ -485,7 +485,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return Array.from(intermediaryTokenIds);
   }
 
-  protected static getTopNPoolsForIntermediaryToken(
+  public static getTopNPoolsForIntermediaryToken(
     intermediaryTokenIds: string[],
     selectedPoolIds: Set<string>,
     tokenPoolIndex: TokenPoolIndex,
@@ -529,7 +529,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return secondHopPairs;
   }
 
-  protected static getTopNPairs(
+  public static getTopNPairs(
     filteredPools: UniPoolInfo[],
     selectedPoolIds: Set<string>,
     chainId: ChainId,
@@ -543,7 +543,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     );
   }
 
-  protected static getTopBaseTokenPools(
+  public static getTopBaseTokenPools(
     selectedPoolIds: Set<string>,
     chainId: ChainId,
     tokenAddress: string,
@@ -581,7 +581,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       .slice(0, poolSelectionConfig[chainId].topNWithBaseToken);
   }
 
-  protected static getTopPoolForTokens(
+  public static getTopPoolForTokens(
     selectedPoolIds: Set<string>,
     token0Address: string,
     token1Address: string,
@@ -743,13 +743,14 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 /**
  * Top pools selector for aggregator hook pools (e.g. FluidDex, StableSwapNG).
  *
- * Unlike BasicTopPoolsSelector, this only builds direct pairs — agg hook pools
- * are always direct-swap pools (tokenIn ↔ tokenOut), so there is no need for
- * one-hop, second-hop, or global top-N selection.
+ * Uses the same multi-step heuristic as BasicTopPoolsSelector (direct pairs,
+ * one-hop, second-hop, intermediary tokens, global top-N, base token pools,
+ * WETH/ETH pools) but operates on a pool universe pre-filtered to agg hook
+ * addresses only, ensuring that high-TVL vanilla V4 pools cannot crowd out the
+ * quota reserved for agg hook pools.
  *
- * The pool universe is pre-filtered to AGG_HOOKS_LOWER_SET before any selection
- * logic runs, ensuring that high-TVL no-hook V4 pools cannot crowd out the quota
- * reserved for agg hook pools.
+ * Does NOT include the manuallyGenerateDirectPairs fallback since agg hook pools
+ * are discovered from subgraph data, not generated from factory addresses.
  */
 export class AggHooksTopPoolsSelector
   implements ITopPoolsSelector<UniPoolInfo>
@@ -768,7 +769,7 @@ export class AggHooksTopPoolsSelector
     ctx: Context
   ): Promise<UniPoolInfo[]> {
     // 1. Restrict to agg hook pools only before any selection logic runs.
-    // Use protocol-specific list when protocol is an external/agg hook protocol,
+    // Use protocol-specific list when protocol is an external/agg hook protocol.
     const protocolAddresses = AGG_HOOKS_PER_CHAIN[protocol]?.[chainId];
     const aggHookAddressSet = new Set(
       (
@@ -823,11 +824,11 @@ export class AggHooksTopPoolsSelector
       filteredPools: filteredPools.length,
     });
 
-    // 4. Build token-to-pool index for O(1) intersection lookup.
+    // 4. Build token-to-pool index for faster lookups
     const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
     const selectedPoolIds = new Set<string>();
 
-    // 5. Only direct pairs — agg hook pools serve tokenIn ↔ tokenOut swaps directly.
+    // 5. Direct pairs (pools with both tokenIn and tokenOut)
     const directPairs = BasicTopPoolsSelector.getDirectPairs(
       filteredPools,
       chainId,
@@ -839,12 +840,130 @@ export class AggHooksTopPoolsSelector
       this.poolSelectionConfig
     );
 
+    // 6. Pools with only tokenIn
+    const tokenInOnlyPairs = BasicTopPoolsSelector.getTokenInOnlyPairs(
+      tokenIn,
+      tokenOut,
+      selectedPoolIds,
+      tokenPoolIndex,
+      chainId,
+      this.poolSelectionConfig
+    );
+
+    // 7. Pools with only tokenOut
+    const tokenOutOnlyPairs = BasicTopPoolsSelector.getTokenOutOnlyPairs(
+      tokenIn,
+      tokenOut,
+      selectedPoolIds,
+      tokenPoolIndex,
+      chainId,
+      this.poolSelectionConfig
+    );
+
+    // 8. Get tokens from first hop pools to use as intermediary tokens
+    const intermediaryTokenIds = BasicTopPoolsSelector.getIntermediaryTokenIds(
+      tokenInOnlyPairs,
+      tokenOutOnlyPairs,
+      tokenIn,
+      tokenOut
+    );
+
+    // 9. For each intermediary token, get top N pools
+    const secondHopPairs =
+      BasicTopPoolsSelector.getTopNPoolsForIntermediaryToken(
+        intermediaryTokenIds,
+        selectedPoolIds,
+        tokenPoolIndex,
+        chainId,
+        this.poolSelectionConfig
+      );
+
+    // 10. Get top N pools with highest liquidity (excluding already selected pools)
+    const topNPairs = BasicTopPoolsSelector.getTopNPairs(
+      filteredPools,
+      selectedPoolIds,
+      chainId,
+      this.poolSelectionConfig
+    );
+
+    // 11. Get top base token pools for tokenIn and tokenOut
+    const topBaseTokenPoolsTokenIn = BasicTopPoolsSelector.getTopBaseTokenPools(
+      selectedPoolIds,
+      chainId,
+      tokenIn.address,
+      tokenPoolIndex,
+      this.poolSelectionConfig
+    );
+
+    const topBaseTokenPoolsTokenOut =
+      BasicTopPoolsSelector.getTopBaseTokenPools(
+        selectedPoolIds,
+        chainId,
+        tokenOut.address,
+        tokenPoolIndex,
+        this.poolSelectionConfig
+      );
+
+    // 12. Top 1 WETH and ETH pool for tokenIn
+    const topWethPoolTokenIn = BasicTopPoolsSelector.getTopPoolForTokens(
+      selectedPoolIds,
+      WRAPPED_NATIVE_CURRENCY[chainId].address,
+      tokenIn.address,
+      tokenPoolIndex
+    );
+    const topEthPoolTokenIn = BasicTopPoolsSelector.getTopPoolForTokens(
+      selectedPoolIds,
+      ADDRESS_ZERO,
+      tokenIn.address,
+      tokenPoolIndex
+    );
+
+    // 13. Top 1 WETH and ETH pool for tokenOut
+    const topWethPoolTokenOut = BasicTopPoolsSelector.getTopPoolForTokens(
+      selectedPoolIds,
+      WRAPPED_NATIVE_CURRENCY[chainId].address,
+      tokenOut.address,
+      tokenPoolIndex
+    );
+    const topEthPoolTokenOut = BasicTopPoolsSelector.getTopPoolForTokens(
+      selectedPoolIds,
+      ADDRESS_ZERO,
+      tokenOut.address,
+      tokenPoolIndex
+    );
+
+    const allPools = [
+      ...directPairs,
+      ...tokenInOnlyPairs,
+      ...tokenOutOnlyPairs,
+      ...secondHopPairs,
+      ...topNPairs,
+      ...topBaseTokenPoolsTokenIn,
+      ...topBaseTokenPoolsTokenOut,
+      ...topWethPoolTokenIn,
+      ...topWethPoolTokenOut,
+      ...topEthPoolTokenIn,
+      ...topEthPoolTokenOut,
+    ];
+
     ctx.logger.debug('AggHooksTopPoolsSelector selected pools', {
       chainId,
       protocol,
       directPairs: directPairs.length,
+      tokenInOnlyPairs: tokenInOnlyPairs.length,
+      tokenOutOnlyPairs: tokenOutOnlyPairs.length,
+      secondHopPairs: secondHopPairs.length,
+      topNPairs: topNPairs.length,
+      topBaseTokenPoolsTokenIn: topBaseTokenPoolsTokenIn.length,
+      topBaseTokenPoolsTokenOut: topBaseTokenPoolsTokenOut.length,
+      topWethPoolTokenIn: topWethPoolTokenIn.length,
+      topWethPoolTokenOut: topWethPoolTokenOut.length,
+      topEthPoolTokenIn: topEthPoolTokenIn.length,
+      topEthPoolTokenOut: topEthPoolTokenOut.length,
+      intermediaryTokenIds,
+      totalSelected: allPools.length,
     });
 
-    return directPairs;
+    return allPools;
   }
 }
