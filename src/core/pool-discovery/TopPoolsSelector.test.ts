@@ -1468,8 +1468,8 @@ describe('AggHooksTopPoolsSelector', () => {
     });
   });
 
-  describe('default aggHooksPoolSelectionConfig (zero non-direct limits)', () => {
-    it('returns only direct pairs when one-hop limits are zero', async () => {
+  describe('default aggHooksPoolSelectionConfig (direct + one-hop only)', () => {
+    it('returns direct and one-hop pairs with default config', async () => {
       const directPool = makeAggV4Pool('0xdirect', TOKEN_IN, TOKEN_OUT);
       const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
       const tokenOutOnlyPool = makeAggV4Pool(
@@ -1488,13 +1488,15 @@ describe('AggHooksTopPoolsSelector', () => {
         ctx
       );
 
-      // With topNOneHopPairs=0, topNSecondHopPairs=0, topNPairs=0, etc.,
-      // only direct pairs should be returned.
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe('0xdirect');
+      // With topNOneHopPairs=5, direct pairs + one-hop pairs should be returned.
+      expect(result).toHaveLength(3);
+      const ids = result.map(p => p.id);
+      expect(ids).toContain('0xdirect');
+      expect(ids).toContain('0xin_only');
+      expect(ids).toContain('0xout_only');
     });
 
-    it('returns empty when no direct pair exists and all other limits are zero', async () => {
+    it('returns one-hop pairs even when no direct pair exists', async () => {
       const tokenInOnlyPool = makeAggV4Pool('0xin_only', TOKEN_IN, TOKEN_OTHER);
       const result = await selectorDefault.filterPools(
         [tokenInOnlyPool],
@@ -1505,7 +1507,9 @@ describe('AggHooksTopPoolsSelector', () => {
         undefined,
         ctx
       );
-      expect(result).toHaveLength(0);
+      // topNOneHopPairs=5 allows one-hop pools through
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe('0xin_only');
     });
   });
 
