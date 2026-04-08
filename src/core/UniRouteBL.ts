@@ -410,40 +410,16 @@ export class UniRouteBL implements IUniRoutedBL {
       let routes: RouteBasic<Pool>[] = [];
       let usedCachedRoutes: boolean = false;
       if (quoteType === QuoteType.Fast && shouldCheckCache) {
-        const getCachedRoutesStartTime = Date.now();
-
-        // Fire both cache lookups in parallel to save latency
-        const [amountCliff, cachedRoutes] = await Promise.all([
-          this.noRouteCacheRepository.getAmountCliff(
-            protocols,
-            chain.chainId,
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            tradeType
-          ),
-          this.cachedRoutesRepository.getCachedRoutes(
-            chain.chainId,
-            tokenInCurrencyInfo,
-            tokenOutCurrencyInfo,
-            tradeType,
-            amountIn,
-            usdBucket,
-            quoteType,
-            protocols,
-            request,
-            ctx
-          ),
-        ]);
-
-        await logElapsedTime(
-          'GetCachedRoutes',
-          getCachedRoutesStartTime,
-          ctx,
-          metricTags
+        // Check no-route cache first — if a recent async deep search confirmed
+        // no route at or above this amount, short-circuit before calling
+        // getCachedRoutes (which has side effects like triggering async refresh).
+        const amountCliff = await this.noRouteCacheRepository.getAmountCliff(
+          protocols,
+          chain.chainId,
+          tokenInCurrencyInfo.wrappedAddress,
+          tokenOutCurrencyInfo.wrappedAddress,
+          tradeType
         );
-
-        // Check no-route cache — if a recent async deep search confirmed no route
-        // at or above this amount, short-circuit to avoid expensive discovery.
         if (amountCliff !== undefined && amountIn >= amountCliff) {
           metricTags.push(`status:${QuoteStatus.NoRoute}`);
           metricTags.push('cachedRoutesStatus:noRouteCacheHit');
@@ -462,7 +438,25 @@ export class UniRouteBL implements IUniRoutedBL {
           });
         }
 
-        routes = cachedRoutes;
+        const getCachedRoutesStartTime = Date.now();
+        routes = await this.cachedRoutesRepository.getCachedRoutes(
+          chain.chainId,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          tradeType,
+          amountIn,
+          usdBucket,
+          quoteType,
+          protocols,
+          request,
+          ctx
+        );
+        await logElapsedTime(
+          'GetCachedRoutes',
+          getCachedRoutesStartTime,
+          ctx,
+          metricTags
+        );
         if (routes.length > 0) {
           usedCachedRoutes = true;
         }
@@ -787,22 +781,22 @@ export class UniRouteBL implements IUniRoutedBL {
             tradeType,
             amountIn
           );
-          // Only emit metric and clear pending refresh on ratchet-down (value changed).
-          // Don't clear pending key on same-value writes to avoid a refresh loop.
           if (wrote) {
             await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
               tags: metricTags,
             });
-            await this.cachedRoutesRepository.deletePendingRefresh(
-              protocols,
-              chain.chainId,
-              tokenInCurrencyInfo.wrappedAddress,
-              tokenOutCurrencyInfo.wrappedAddress,
-              tradeType,
-              amountIn,
-              usdBucket
-            );
           }
+          // Clear pending refresh so the next sync request at a lower amount
+          // can trigger a new async refresh to ratchet down the amountCliff.
+          await this.cachedRoutesRepository.deletePendingRefresh(
+            protocols,
+            chain.chainId,
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            tradeType,
+            amountIn,
+            usdBucket
+          );
         }
 
         return new QuoteResponse({
