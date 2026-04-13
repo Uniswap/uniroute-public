@@ -340,7 +340,7 @@ export const getQuickRouteSyncConfig = (
     },
     ResponseRequirements: {
       NeedsBlockNumber: false,
-      NeedsUpToDatePoolsInfo: false,
+      NeedsUpToDatePoolsInfo: true,
     },
     FeeOnTransfer: {
       V2AdjustmentEnabled: true,
