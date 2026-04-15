@@ -33,6 +33,7 @@ import {BaseRoutesRepository} from '../BaseRoutesRepository';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
 import {getProtocolForAggHookAddress} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {getHardcodedV4Pools} from '../../../core/pool-discovery/discoverers/hardcoded-v4-pools';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -210,6 +211,41 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       }
       if (crossLiquidityPools.v4Pools.length > 0) {
         poolsV4.push(...crossLiquidityPools.v4Pools);
+      }
+    }
+
+    // Append hardcoded V4 pools so they are always routable regardless of cache state.
+    if (
+      V4_SUPPORTED.includes(chain.chainId) &&
+      protocols.includes(Protocol.V4)
+    ) {
+      const existingV4Ids = new Set(poolsV4.map(p => p.id));
+      const tokenInLower = tokenInAddress.lowerCased;
+      const tokenOutLower = tokenOutAddress.lowerCased;
+      const appendedPools: V4PoolInfo[] = [];
+      for (const hp of getHardcodedV4Pools(chain.chainId)) {
+        if (existingV4Ids.has(hp.id)) {
+          ctx.logger.debug(
+            `Hardcoded V4 pool ${hp.id} already present from pool discovery`,
+            {chainId: chain.chainId}
+          );
+          continue;
+        }
+        const t0 = hp.token0.id;
+        const t1 = hp.token1.id;
+        if (
+          (t0 === tokenInLower || t0 === tokenOutLower) &&
+          (t1 === tokenInLower || t1 === tokenOutLower)
+        ) {
+          poolsV4.push(hp);
+          appendedPools.push(hp);
+        }
+      }
+      if (appendedPools.length > 0) {
+        ctx.logger.debug(
+          `Appended ${appendedPools.length} hardcoded V4 pools`,
+          {chainId: chain.chainId, pools: appendedPools}
+        );
       }
     }
 

@@ -1,0 +1,25 @@
+{
+  "1": [
+    {
+      "id": "0x5eb459d3fc44f3f412ef43f93fa1e44ecb4ca9cb62a16bcbd94b5d0b834ff854",
+      "feeTier": 3000,
+      "tickSpacing": "60",
+      "hooks": "0x0000000000000000000000000000000000000000",
+      "liquidity": "316227766016837938635",
+      "token0": {
+        "symbol": "ETH",
+        "id": "0x0000000000000000000000000000000000000000",
+        "name": "Ethereum",
+        "decimals": "18"
+      },
+      "token1": {
+        "symbol": "wOCT",
+        "id": "0x4647e1fE715c9e23959022C2416C71867F5a6E80",
+        "name": "Wrapped OCT",
+        "decimals": "6"
+      },
+      "tvlETH": 10000,
+      "tvlUSD": 100000000000
+    }
+  ]
+}
