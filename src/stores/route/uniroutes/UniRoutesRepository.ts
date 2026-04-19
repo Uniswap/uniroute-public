@@ -234,8 +234,10 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         const t0 = hp.token0.id;
         const t1 = hp.token1.id;
         if (
-          (t0 === tokenInLower || t0 === tokenOutLower) &&
-          (t1 === tokenInLower || t1 === tokenOutLower)
+          t0 === tokenInLower ||
+          t0 === tokenOutLower ||
+          t1 === tokenInLower ||
+          t1 === tokenOutLower
         ) {
           poolsV4.push(hp);
           appendedPools.push(hp);
