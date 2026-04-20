@@ -767,37 +767,39 @@ export class UniRouteBL implements IUniRoutedBL {
       await emitCallMetrics(metricTags);
 
       if (status === QuoteStatus.NoRoute) {
-        // No-route cache write — only from async path.
-        if (
-          !usedCachedRoutes &&
-          shouldCheckCache &&
-          this.serviceConfig.Lambda.Type === LambdaType.Async
-        ) {
-          const wrote = await this.noRouteCacheRepository.setAmountCliff(
-            protocols,
-            chain.chainId,
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            tradeType,
-            amountIn
-          );
-          if (wrote) {
-            await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
-              tags: metricTags,
-            });
-          }
-          // Clear pending refresh so the next sync request at a lower amount
-          // can trigger a new async refresh to ratchet down the amountCliff.
-          await this.cachedRoutesRepository.deletePendingRefresh(
-            protocols,
-            chain.chainId,
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            tradeType,
-            amountIn,
-            usdBucket
-          );
-        }
+        // No-route cache write — temporarily disabled to avoid caching
+        // "no route" for newly launched pools before they are initialized.
+        // TODO: re-enable after CCA launch window
+        // if (
+        //   !usedCachedRoutes &&
+        //   shouldCheckCache &&
+        //   this.serviceConfig.Lambda.Type === LambdaType.Async
+        // ) {
+        //   const wrote = await this.noRouteCacheRepository.setAmountCliff(
+        //     protocols,
+        //     chain.chainId,
+        //     tokenInCurrencyInfo.wrappedAddress,
+        //     tokenOutCurrencyInfo.wrappedAddress,
+        //     tradeType,
+        //     amountIn
+        //   );
+        //   if (wrote) {
+        //     await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
+        //       tags: metricTags,
+        //     });
+        //   }
+        //   // Clear pending refresh so the next sync request at a lower amount
+        //   // can trigger a new async refresh to ratchet down the amountCliff.
+        //   await this.cachedRoutesRepository.deletePendingRefresh(
+        //     protocols,
+        //     chain.chainId,
+        //     tokenInCurrencyInfo.wrappedAddress,
+        //     tokenOutCurrencyInfo.wrappedAddress,
+        //     tradeType,
+        //     amountIn,
+        //     usdBucket
+        //   );
+        // }
 
         return new QuoteResponse({
           error: {
