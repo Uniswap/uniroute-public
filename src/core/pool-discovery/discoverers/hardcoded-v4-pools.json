@@ -4,7 +4,7 @@
       "id": "0x5eb459d3fc44f3f412ef43f93fa1e44ecb4ca9cb62a16bcbd94b5d0b834ff854",
       "feeTier": 3000,
       "tickSpacing": "60",
-      "hooks": "0x0000000000000000000000000000000000000000",
+      "hooks": "0x890681cff5ad2069f020027f41f5f68f6a292000",
       "liquidity": "316227766016837938635",
       "token0": {
         "symbol": "ETH",
