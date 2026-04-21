@@ -13,6 +13,16 @@ export interface NamespaceResolutionInput {
   protocols: Protocol[];
   /** Hooks preference from the request. */
   hooksOptions: HooksOptions;
+  /**
+   * Value of the `x-is-user-allowlisted` header, or `undefined` if absent.
+   *
+   * TAPI sends this header iff tokenIn or tokenOut is a permissioned adapter
+   * token (e.g. a Superstate Security Token); the boolean indicates whether
+   * the caller is allowlisted to swap through the adapter. Header **presence**
+   * activates the `PermissionedHooks` namespace — the value is consumed later
+   * by the simulator short-circuit (not here).
+   */
+  isUserAllowlisted?: boolean;
 }
 
 /**
@@ -64,9 +74,12 @@ export interface NamespaceCacheConfig {
 export function resolveNamespaces(
   input: NamespaceResolutionInput
 ): RouteNamespaceContext {
-  const {protocols, hooksOptions} = input;
+  const {protocols, hooksOptions, isUserAllowlisted} = input;
 
   // When hooks are excluded entirely, only standard routing applies.
+  // A permissioned request with NO_HOOKS is nonsensical (permissioned pools
+  // are V4 hook pools) — resolve to Standard and let pool discovery drop the
+  // impossible combination.
   if (hooksOptions === HooksOptions.NO_HOOKS) {
     return STANDARD_NAMESPACE_CONTEXT;
   }
@@ -89,11 +102,13 @@ export function resolveNamespaces(
     namespaces.push(CacheNamespace.AggHooks);
   }
 
-  // TODO: Add permissioned namespace activation once product confirms
-  // the trigger (token-based vs. request-header-based).
-  // if (isPermissionedRequest) {
-  //   namespaces.push(CacheNamespace.PermissionedHooks);
-  // }
+  // PermissionedHooks activates on `x-is-user-allowlisted` header presence.
+  // TAPI sends the header iff tokenIn or tokenOut is a permissioned adapter
+  // token. Value (true/false) does not affect namespace resolution — the
+  // simulator short-circuit consumes it separately.
+  if (isUserAllowlisted !== undefined) {
+    namespaces.push(CacheNamespace.PermissionedHooks);
+  }
 
   // TODO: Add experimental namespace activation once product confirms
   // the trigger.

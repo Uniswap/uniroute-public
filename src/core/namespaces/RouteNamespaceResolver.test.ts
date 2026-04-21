@@ -155,6 +155,73 @@ describe('RouteNamespaceResolver', () => {
       const ctx = resolveNamespaces(makeInput());
       expect(Object.isFrozen(ctx.allowedNamespaces)).toBe(true);
     });
+
+    it('activates PermissionedHooks when x-is-user-allowlisted is true', () => {
+      const ctx = resolveNamespaces(makeInput({isUserAllowlisted: true}));
+      expect([...ctx.allowedNamespaces]).toEqual([
+        CacheNamespace.PermissionedHooks,
+        CacheNamespace.Standard,
+      ]);
+      expect(ctx.namespaceKey).toBe('PermissionedHooks#Standard');
+    });
+
+    it('activates PermissionedHooks when x-is-user-allowlisted is false', () => {
+      const ctx = resolveNamespaces(makeInput({isUserAllowlisted: false}));
+      expect([...ctx.allowedNamespaces]).toContain(
+        CacheNamespace.PermissionedHooks
+      );
+    });
+
+    it('does not activate PermissionedHooks when the header is absent', () => {
+      const ctx = resolveNamespaces(makeInput());
+      expect([...ctx.allowedNamespaces]).not.toContain(
+        CacheNamespace.PermissionedHooks
+      );
+    });
+
+    it('combines AggHooks and PermissionedHooks (sorted)', () => {
+      const ctx = resolveNamespaces(
+        makeInput({
+          protocols: [
+            Protocol.V2,
+            Protocol.V3,
+            Protocol.V4,
+            Protocol.MIXED,
+            Protocol.CURVESTABLESWAP,
+          ],
+          isUserAllowlisted: true,
+        })
+      );
+      expect([...ctx.allowedNamespaces]).toEqual([
+        CacheNamespace.AggHooks,
+        CacheNamespace.PermissionedHooks,
+        CacheNamespace.Standard,
+      ]);
+      expect(ctx.namespaceKey).toBe('AggHooks#PermissionedHooks#Standard');
+    });
+
+    it('resolves Standard for NO_HOOKS even when the header is set', () => {
+      const ctx = resolveNamespaces(
+        makeInput({
+          hooksOptions: HooksOptions.NO_HOOKS,
+          isUserAllowlisted: true,
+        })
+      );
+      expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.Standard]);
+    });
+
+    it('activates PermissionedHooks alone for HOOKS_ONLY + header set', () => {
+      const ctx = resolveNamespaces(
+        makeInput({
+          protocols: [Protocol.V4],
+          hooksOptions: HooksOptions.HOOKS_ONLY,
+          isUserAllowlisted: true,
+        })
+      );
+      expect([...ctx.allowedNamespaces]).toEqual([
+        CacheNamespace.PermissionedHooks,
+      ]);
+    });
   });
 
   describe('isNamespaceCacheable', () => {
