@@ -6,6 +6,7 @@ import {
   RouteNamespaceContext,
   createNamespaceContext,
 } from '../../models/hooks/CacheNamespace';
+import {Experiment} from '../../models/hooks/Experiment';
 import {EXTERNAL_PROTOCOLS} from '../../lib/helpers';
 
 export interface NamespaceResolutionInput {
@@ -23,8 +24,14 @@ export interface NamespaceResolutionInput {
    * by the simulator short-circuit (not here).
    */
   isUserAllowlisted?: boolean;
-  /** Whether the request targets experimental-hook pools. */
-  isExperimentalHooks?: boolean;
+  /**
+   * The active experiment for this request, when the caller has opted into
+   * experimental-hook routing (e.g. `x-stable-stable-hook-enabled: true` →
+   * `Experiment.GuideStar_Stable_Stable`). Presence activates the
+   * `ExperimentalHooks` namespace and scopes the cache keyspace under the
+   * specific experiment (`ExperimentalHooks#<experiment>#`).
+   */
+  experiment?: Experiment;
 }
 
 /**
@@ -77,8 +84,7 @@ export interface NamespaceCacheConfig {
 export function resolveNamespaces(
   input: NamespaceResolutionInput
 ): RouteNamespaceContext {
-  const {protocols, hooksOptions, isUserAllowlisted, isExperimentalHooks} =
-    input;
+  const {protocols, hooksOptions, isUserAllowlisted, experiment} = input;
 
   // NO_HOOKS forces the base case: no hook pools of any class, so no
   // specialised namespaces apply.
@@ -104,11 +110,11 @@ export function resolveNamespaces(
     namespaces.push(CacheNamespace.PermissionedHooks);
   }
 
-  if (isExperimentalHooks) {
+  if (experiment !== undefined) {
     namespaces.push(CacheNamespace.ExperimentalHooks);
   }
 
-  return createNamespaceContext(namespaces);
+  return createNamespaceContext(namespaces, experiment);
 }
 
 /**

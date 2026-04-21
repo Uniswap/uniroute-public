@@ -12,6 +12,7 @@ import {
   createNamespaceContext,
   EMPTY_NAMESPACE_CONTEXT,
 } from '../../models/hooks/CacheNamespace';
+import {Experiment} from '../../models/hooks/Experiment';
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 
@@ -218,28 +219,25 @@ describe('RouteNamespaceResolver', () => {
       ]);
     });
 
-    it('includes ExperimentalHooks when isExperimentalHooks is true', () => {
-      const ctx = resolveNamespaces(makeInput({isExperimentalHooks: true}));
+    it('includes ExperimentalHooks and sets experiment when experiment is provided', () => {
+      const ctx = resolveNamespaces(
+        makeInput({experiment: Experiment.GuideStar_Stable_Stable})
+      );
       expect([...ctx.allowedNamespaces]).toContain(
         CacheNamespace.ExperimentalHooks
       );
+      expect(ctx.experiment).toBe(Experiment.GuideStar_Stable_Stable);
       expect(
-        buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])
-      ).toContain('ExperimentalHooks');
+        buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces], ctx.experiment)
+      ).toBe('ExperimentalHooks#GuideStar_Stable_Stable#');
     });
 
-    it('does not include ExperimentalHooks when isExperimentalHooks is false', () => {
-      const ctx = resolveNamespaces(makeInput({isExperimentalHooks: false}));
-      expect([...ctx.allowedNamespaces]).not.toContain(
-        CacheNamespace.ExperimentalHooks
-      );
-    });
-
-    it('does not include ExperimentalHooks when isExperimentalHooks is omitted', () => {
+    it('does not include ExperimentalHooks when experiment is omitted', () => {
       const ctx = resolveNamespaces(makeInput());
       expect([...ctx.allowedNamespaces]).not.toContain(
         CacheNamespace.ExperimentalHooks
       );
+      expect(ctx.experiment).toBeUndefined();
     });
 
     it('combines ExperimentalHooks with AggHooks when both are triggered', () => {
@@ -252,26 +250,30 @@ describe('RouteNamespaceResolver', () => {
             Protocol.MIXED,
             Protocol.CURVESTABLESWAP,
           ],
-          isExperimentalHooks: true,
+          experiment: Experiment.GuideStar_Stable_Stable,
         })
       );
       expect([...ctx.allowedNamespaces]).toContain(CacheNamespace.AggHooks);
       expect([...ctx.allowedNamespaces]).toContain(
         CacheNamespace.ExperimentalHooks
       );
+      expect(
+        buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces], ctx.experiment)
+      ).toBe('AggHooks#ExperimentalHooks#GuideStar_Stable_Stable#');
     });
 
-    it('returns ExperimentalHooks for HOOKS_ONLY when isExperimentalHooks is true', () => {
+    it('returns ExperimentalHooks for HOOKS_ONLY when experiment is provided', () => {
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [Protocol.V4],
           hooksOptions: HooksOptions.HOOKS_ONLY,
-          isExperimentalHooks: true,
+          experiment: Experiment.GuideStar_Stable_Stable,
         })
       );
       expect([...ctx.allowedNamespaces]).toEqual([
         CacheNamespace.ExperimentalHooks,
       ]);
+      expect(ctx.experiment).toBe(Experiment.GuideStar_Stable_Stable);
     });
   });
 

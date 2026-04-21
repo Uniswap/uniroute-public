@@ -96,6 +96,7 @@ import {
 } from '../lib/portionUtils';
 import {HooksOptions} from '../models/hooks/HooksOptions';
 import {CacheNamespace} from '../models/hooks/CacheNamespace';
+import {Experiment} from '../models/hooks/Experiment';
 import {resolveNamespaces} from './namespaces/RouteNamespaceResolver';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {FAKE_TICK_SPACING, isValidRoute} from '../lib/poolUtils';
@@ -260,8 +261,15 @@ export class UniRouteBL implements IUniRoutedBL {
     // read/write uses the same namespace identity. `isUserAllowlisted` is
     // deliberately omitted in this PR — PermissionedHooks activation lands
     // in a follow-up.
-    const nsCtx = resolveNamespaces({protocols, hooksOptions});
+    const nsCtx = resolveNamespaces({
+      protocols,
+      hooksOptions,
+      experiment: options?.stableStableHookEnabled
+        ? Experiment.GuideStar_Stable_Stable
+        : undefined,
+    });
     const namespaces: CacheNamespace[] = [...nsCtx.allowedNamespaces];
+    const experiment = nsCtx.experiment;
     const debugLogs = request.debugLogs;
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
@@ -423,6 +431,7 @@ export class UniRouteBL implements IUniRoutedBL {
         // getCachedRoutes (which has side effects like triggering async refresh).
         const amountCliff = await this.noRouteCacheRepository.getAmountCliff(
           namespaces,
+          experiment,
           protocols,
           chain.chainId,
           tokenInCurrencyInfo.wrappedAddress,
@@ -450,6 +459,7 @@ export class UniRouteBL implements IUniRoutedBL {
         const getCachedRoutesStartTime = Date.now();
         routes = await this.cachedRoutesRepository.getCachedRoutes(
           namespaces,
+          experiment,
           chain.chainId,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
@@ -786,6 +796,7 @@ export class UniRouteBL implements IUniRoutedBL {
         ) {
           const wrote = await this.noRouteCacheRepository.setAmountCliff(
             namespaces,
+            experiment,
             protocols,
             chain.chainId,
             tokenInCurrencyInfo.wrappedAddress,
@@ -802,6 +813,7 @@ export class UniRouteBL implements IUniRoutedBL {
           // can trigger a new async refresh to ratchet down the amountCliff.
           await this.cachedRoutesRepository.deletePendingRefresh(
             namespaces,
+            experiment,
             protocols,
             chain.chainId,
             tokenInCurrencyInfo.wrappedAddress,
@@ -840,6 +852,7 @@ export class UniRouteBL implements IUniRoutedBL {
           bestQuote!.quotes.map(quote =>
             this.cachedRoutesRepository.saveCachedRoutes(
               namespaces,
+              experiment,
               protocols,
               quote.route,
               chain.chainId,
@@ -857,6 +870,7 @@ export class UniRouteBL implements IUniRoutedBL {
         );
         await this.cachedRoutesRepository.deletePendingRefresh(
           namespaces,
+          experiment,
           protocols,
           chain.chainId,
           tokenInCurrencyInfo.isNative
@@ -965,6 +979,7 @@ export class UniRouteBL implements IUniRoutedBL {
             // specialised namespaces aren't surfaced here. See ROUTE-1103
             // (payload will accept namespaces when we expand).
             [],
+            undefined,
             chain.chainId,
             tokenInCurrencyInfo,
             tokenOutCurrencyInfo,
@@ -1047,6 +1062,7 @@ export class UniRouteBL implements IUniRoutedBL {
       const success = await this.cachedRoutesRepository.deleteCachedRoutes(
         ctx,
         [],
+        undefined,
         // TODO: https://linear.app/uniswap/issue/ROUTE-1102/tech-debt-deletecachedroutes-admin-endpoint-request-payload-needs-to
         [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         chain.chainId,
