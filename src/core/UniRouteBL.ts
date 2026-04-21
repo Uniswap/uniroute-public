@@ -95,6 +95,8 @@ import {
   getQuoteGasAndPortionAdjusted,
 } from '../lib/portionUtils';
 import {HooksOptions} from '../models/hooks/HooksOptions';
+import {CacheNamespace} from '../models/hooks/CacheNamespace';
+import {resolveNamespaces} from './namespaces/RouteNamespaceResolver';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {FAKE_TICK_SPACING, isValidRoute} from '../lib/poolUtils';
 import {BigNumber} from '@ethersproject/bignumber';
@@ -254,6 +256,12 @@ export class UniRouteBL implements IUniRoutedBL {
     const protocols = request.protocols
       .split(',')
       .map(p => EnumUtils.stringToEnum(Protocol, p));
+    // Resolve the cache-namespace context once per request so every cache
+    // read/write uses the same namespace identity. `isUserAllowlisted` is
+    // deliberately omitted in this PR — PermissionedHooks activation lands
+    // in a follow-up.
+    const nsCtx = resolveNamespaces({protocols, hooksOptions});
+    const namespaces: CacheNamespace[] = [...nsCtx.allowedNamespaces];
     const debugLogs = request.debugLogs;
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
@@ -414,6 +422,7 @@ export class UniRouteBL implements IUniRoutedBL {
         // no route at or above this amount, short-circuit before calling
         // getCachedRoutes (which has side effects like triggering async refresh).
         const amountCliff = await this.noRouteCacheRepository.getAmountCliff(
+          namespaces,
           protocols,
           chain.chainId,
           tokenInCurrencyInfo.wrappedAddress,
@@ -440,6 +449,7 @@ export class UniRouteBL implements IUniRoutedBL {
 
         const getCachedRoutesStartTime = Date.now();
         routes = await this.cachedRoutesRepository.getCachedRoutes(
+          namespaces,
           chain.chainId,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
@@ -774,6 +784,7 @@ export class UniRouteBL implements IUniRoutedBL {
           this.serviceConfig.Lambda.Type === LambdaType.Async
         ) {
           const wrote = await this.noRouteCacheRepository.setAmountCliff(
+            namespaces,
             protocols,
             chain.chainId,
             tokenInCurrencyInfo.wrappedAddress,
@@ -789,6 +800,7 @@ export class UniRouteBL implements IUniRoutedBL {
           // Clear pending refresh so the next sync request at a lower amount
           // can trigger a new async refresh to ratchet down the amountCliff.
           await this.cachedRoutesRepository.deletePendingRefresh(
+            namespaces,
             protocols,
             chain.chainId,
             tokenInCurrencyInfo.wrappedAddress,
@@ -826,6 +838,7 @@ export class UniRouteBL implements IUniRoutedBL {
         await Promise.all(
           bestQuote!.quotes.map(quote =>
             this.cachedRoutesRepository.saveCachedRoutes(
+              namespaces,
               protocols,
               quote.route,
               chain.chainId,
@@ -842,6 +855,7 @@ export class UniRouteBL implements IUniRoutedBL {
           )
         );
         await this.cachedRoutesRepository.deletePendingRefresh(
+          namespaces,
           protocols,
           chain.chainId,
           tokenInCurrencyInfo.isNative
@@ -946,6 +960,10 @@ export class UniRouteBL implements IUniRoutedBL {
           // - see `CachedRoutesRepository.validateAndParseCachedRoutes` logic in `CachedRoutesRepository.ts`
           // - see `UniRouteService.getCachedRoutes` in `src/api/index.ts`
           const routes = await this.cachedRoutesRepository.getCachedRoutes(
+            // Admin endpoint operates on the base (pure-Uniswap) keyspace —
+            // specialised namespaces aren't surfaced here. See ROUTE-1103
+            // (payload will accept namespaces when we expand).
+            [],
             chain.chainId,
             tokenInCurrencyInfo,
             tokenOutCurrencyInfo,
@@ -1026,6 +1044,8 @@ export class UniRouteBL implements IUniRoutedBL {
 
       // Delete cached routes (default: standard Uniswap+V4+MIXED set used for bucketed cache keys)
       const success = await this.cachedRoutesRepository.deleteCachedRoutes(
+        ctx,
+        [],
         // TODO: https://linear.app/uniswap/issue/ROUTE-1102/tech-debt-deletecachedroutes-admin-endpoint-request-payload-needs-to
         [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         chain.chainId,

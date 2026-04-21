@@ -2,9 +2,9 @@ import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {
   CacheNamespace,
+  EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
   createNamespaceContext,
-  STANDARD_NAMESPACE_CONTEXT,
 } from '../../models/hooks/CacheNamespace';
 import {EXTERNAL_PROTOCOLS} from '../../lib/helpers';
 
@@ -33,9 +33,6 @@ export interface NamespaceResolutionInput {
  * These are separate from namespace resolution — the resolver determines
  * the correct namespace identity, and these flags decide whether the
  * cache layer is allowed to act on that namespace.
- *
- * Today only agg hooks have flags; permissioned and experimental
- * are added as placeholders so the gate functions are ready for them.
  */
 export interface NamespaceCacheConfig {
   /** Global cache enabled flag. */
@@ -58,20 +55,24 @@ export interface NamespaceCacheConfig {
  * threaded through cache lookup, pool discovery, and cache writes so
  * that every layer operates on the same namespace scope.
  *
+ * The base (pure-Uniswap) case resolves to the empty set, which produces
+ * an empty cache-key prefix and therefore byte-identical keys to the
+ * pre-namespace format. Specialised namespaces (AggHooks, PermissionedHooks,
+ * ExperimentalHooks) are layered on top.
+ *
+ * Whether the request is actually cacheable at all is a separate concern
+ * from namespace resolution — it's gated by `shouldCheckCache` in
+ * UniRouteBL (HOOKS_ONLY without external protocols, for example, is
+ * uncacheable regardless of namespace).
+ *
  * Design principles:
  *   – Resolution is purely semantic: it identifies what pool classes
- *     are allowed in the search space based on the request.  Config
+ *     are allowed in the search space based on the request. Config
  *     flags that gate cache access (read/write enabled) are NOT
  *     consulted here — use isCacheReadAllowed / isCacheWriteAllowed
  *     for that.
  *   – Resolution is request-driven, not route-driven. We never infer
  *     the namespace from the final route — we decide upfront.
- *   – HooksOptions is orthogonal to namespaces. NO_HOOKS constrains
- *     the search space to non-hook pools; HOOKS_ONLY constrains it
- *     to only hooked pools. Neither changes which namespace *class*
- *     a pool belongs to, but HOOKS_ONLY means the Standard namespace
- *     should not be included because Standard represents a search
- *     space that includes non-hook pools.
  */
 export function resolveNamespaces(
   input: NamespaceResolutionInput
@@ -79,23 +80,13 @@ export function resolveNamespaces(
   const {protocols, hooksOptions, isUserAllowlisted, isExperimentalHooks} =
     input;
 
-  // When hooks are excluded entirely, only standard routing applies.
-  // A permissioned request with NO_HOOKS is nonsensical (permissioned pools
-  // are V4 hook pools) — resolve to Standard and let pool discovery drop the
-  // impossible combination.
+  // NO_HOOKS forces the base case: no hook pools of any class, so no
+  // specialised namespaces apply.
   if (hooksOptions === HooksOptions.NO_HOOKS) {
-    return STANDARD_NAMESPACE_CONTEXT;
+    return EMPTY_NAMESPACE_CONTEXT;
   }
 
   const namespaces: CacheNamespace[] = [];
-
-  // Standard is included for HOOKS_INCLUSIVE (the common case).
-  // For HOOKS_ONLY, Standard is excluded — the caller explicitly
-  // wants only hooked pools, so the search space should not contain
-  // the non-hook Standard pool class.
-  if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
-    namespaces.push(CacheNamespace.Standard);
-  }
 
   // If any external (agg-hook) protocols are requested, add AggHooks.
   // This is unconditional — whether caching is enabled for agg hooks
@@ -117,50 +108,22 @@ export function resolveNamespaces(
     namespaces.push(CacheNamespace.ExperimentalHooks);
   }
 
-  // If no namespaces were resolved (e.g. HOOKS_ONLY with no external
-  // protocols and no permissioned/experimental signals), the request
-  // has no cacheable namespace.  Return null to signal this explicitly
-  // — callers must check before using the context for cache operations.
-  if (namespaces.length === 0) {
-    return NULL_NAMESPACE_CONTEXT;
-  }
-
   return createNamespaceContext(namespaces);
-}
-
-/**
- * Sentinel context for requests that don't map to any cache namespace.
- *
- * This happens when HOOKS_ONLY is requested but no specialised hook
- * type (agg, permissioned, experimental) is identified.  Cache
- * operations should be skipped for these requests.
- */
-export const NULL_NAMESPACE_CONTEXT: RouteNamespaceContext = Object.freeze({
-  allowedNamespaces: Object.freeze([] as CacheNamespace[]),
-  namespaceKey: '',
-});
-
-/**
- * Returns true when the namespace context represents a cacheable request.
- * Returns false for NULL_NAMESPACE_CONTEXT.
- */
-export function isNamespaceCacheable(nsCtx: RouteNamespaceContext): boolean {
-  return nsCtx.allowedNamespaces.length > 0;
 }
 
 /**
  * Determines whether cached-route reads are allowed for the resolved
  * namespace context.
  *
- * Replaces the ad-hoc `shouldCheckCache` logic in UniRouteBL that
- * checks `AggHooksReadEnabled` inline.
+ * The base case (empty namespace set) is always read-allowed when the
+ * global cache is enabled. Specialised namespaces gate on their
+ * per-namespace feature flags.
  */
 export function isCacheReadAllowed(
   nsCtx: RouteNamespaceContext,
   config: NamespaceCacheConfig
 ): boolean {
   if (!config.enabled) return false;
-  if (!isNamespaceCacheable(nsCtx)) return false;
 
   for (const ns of nsCtx.allowedNamespaces) {
     switch (ns) {
@@ -172,9 +135,6 @@ export function isCacheReadAllowed(
         break;
       case CacheNamespace.ExperimentalHooks:
         if (!config.experimentalHooksReadEnabled) return false;
-        break;
-      case CacheNamespace.Standard:
-        // Standard is always allowed when global cache is enabled.
         break;
     }
   }
@@ -190,7 +150,6 @@ export function isCacheWriteAllowed(
   config: NamespaceCacheConfig
 ): boolean {
   if (!config.enabled) return false;
-  if (!isNamespaceCacheable(nsCtx)) return false;
 
   for (const ns of nsCtx.allowedNamespaces) {
     switch (ns) {
@@ -202,8 +161,6 @@ export function isCacheWriteAllowed(
         break;
       case CacheNamespace.ExperimentalHooks:
         if (!config.experimentalHooksWriteEnabled) return false;
-        break;
-      case CacheNamespace.Standard:
         break;
     }
   }

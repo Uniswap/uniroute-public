@@ -3,14 +3,14 @@ import {
   resolveNamespaces,
   isCacheReadAllowed,
   isCacheWriteAllowed,
-  isNamespaceCacheable,
-  NULL_NAMESPACE_CONTEXT,
   NamespaceCacheConfig,
   NamespaceResolutionInput,
 } from './RouteNamespaceResolver';
 import {
+  buildCacheKeyNamespacePrefix,
   CacheNamespace,
   createNamespaceContext,
+  EMPTY_NAMESPACE_CONTEXT,
 } from '../../models/hooks/CacheNamespace';
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
@@ -47,13 +47,14 @@ function makeInput(
 
 describe('RouteNamespaceResolver', () => {
   describe('resolveNamespaces', () => {
-    it('returns Standard for uniswap-only protocols with HOOKS_INCLUSIVE', () => {
+    it('returns empty set for uniswap-only protocols with HOOKS_INCLUSIVE (base case)', () => {
       const ctx = resolveNamespaces(makeInput());
-      expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.Standard]);
-      expect(ctx.namespaceKey).toBe('Standard');
+      expect([...ctx.allowedNamespaces]).toEqual([]);
+      // Empty → empty prefix → byte-identical to pre-namespace keys.
+      expect(buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])).toBe('');
     });
 
-    it('returns Standard for NO_HOOKS regardless of protocols', () => {
+    it('returns empty set for NO_HOOKS regardless of protocols', () => {
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [
@@ -66,10 +67,10 @@ describe('RouteNamespaceResolver', () => {
           hooksOptions: HooksOptions.NO_HOOKS,
         })
       );
-      expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.Standard]);
+      expect([...ctx.allowedNamespaces]).toEqual([]);
     });
 
-    it('returns AggHooks#Standard when external protocols are present', () => {
+    it('returns [AggHooks] when external protocols are present', () => {
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [
@@ -81,16 +82,14 @@ describe('RouteNamespaceResolver', () => {
           ],
         })
       );
-      expect([...ctx.allowedNamespaces]).toEqual([
-        CacheNamespace.AggHooks,
-        CacheNamespace.Standard,
-      ]);
-      expect(ctx.namespaceKey).toBe('AggHooks#Standard');
+      expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.AggHooks]);
+      expect(buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])).toBe(
+        'AggHooks#'
+      );
     });
 
     it('does not consult config flags — agg hook namespace is always resolved when external protocols are present', () => {
-      // Even if someone later passes config flags, the resolver ignores them.
-      // This verifies the decoupling: resolution is purely semantic.
+      // Resolution is purely semantic; caching-enabled flags live elsewhere.
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [
@@ -103,23 +102,19 @@ describe('RouteNamespaceResolver', () => {
         })
       );
       expect([...ctx.allowedNamespaces]).toContain(CacheNamespace.AggHooks);
-      expect([...ctx.allowedNamespaces]).toContain(CacheNamespace.Standard);
     });
 
-    it('returns NULL_NAMESPACE_CONTEXT for HOOKS_ONLY with no external protocols', () => {
+    it('returns empty set for HOOKS_ONLY with no external protocols (caller gates via shouldCheckCache)', () => {
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [Protocol.V4],
           hooksOptions: HooksOptions.HOOKS_ONLY,
         })
       );
-      expect(ctx).toBe(NULL_NAMESPACE_CONTEXT);
-      expect(ctx.allowedNamespaces).toHaveLength(0);
-      expect(ctx.namespaceKey).toBe('');
-      expect(isNamespaceCacheable(ctx)).toBe(false);
+      expect([...ctx.allowedNamespaces]).toEqual([]);
     });
 
-    it('returns AggHooks for HOOKS_ONLY with external protocols', () => {
+    it('returns [AggHooks] for HOOKS_ONLY with external protocols', () => {
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [Protocol.V4, Protocol.MIXED, Protocol.FLUIDDEXT1],
@@ -127,7 +122,9 @@ describe('RouteNamespaceResolver', () => {
         })
       );
       expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.AggHooks]);
-      expect(ctx.namespaceKey).toBe('AggHooks');
+      expect(buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])).toBe(
+        'AggHooks#'
+      );
     });
 
     it('handles multiple external protocols without duplication', () => {
@@ -144,11 +141,7 @@ describe('RouteNamespaceResolver', () => {
           ],
         })
       );
-      // Multiple external protocols still produce a single AggHooks entry
-      expect([...ctx.allowedNamespaces]).toEqual([
-        CacheNamespace.AggHooks,
-        CacheNamespace.Standard,
-      ]);
+      expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.AggHooks]);
     });
 
     it('produces frozen allowedNamespaces', () => {
@@ -160,9 +153,10 @@ describe('RouteNamespaceResolver', () => {
       const ctx = resolveNamespaces(makeInput({isUserAllowlisted: true}));
       expect([...ctx.allowedNamespaces]).toEqual([
         CacheNamespace.PermissionedHooks,
-        CacheNamespace.Standard,
       ]);
-      expect(ctx.namespaceKey).toBe('PermissionedHooks#Standard');
+      expect(buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])).toBe(
+        'PermissionedHooks#'
+      );
     });
 
     it('activates PermissionedHooks when x-is-user-allowlisted is false', () => {
@@ -195,19 +189,20 @@ describe('RouteNamespaceResolver', () => {
       expect([...ctx.allowedNamespaces]).toEqual([
         CacheNamespace.AggHooks,
         CacheNamespace.PermissionedHooks,
-        CacheNamespace.Standard,
       ]);
-      expect(ctx.namespaceKey).toBe('AggHooks#PermissionedHooks#Standard');
+      expect(buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])).toBe(
+        'AggHooks#PermissionedHooks#'
+      );
     });
 
-    it('resolves Standard for NO_HOOKS even when the header is set', () => {
+    it('resolves empty set for NO_HOOKS even when the header is set', () => {
       const ctx = resolveNamespaces(
         makeInput({
           hooksOptions: HooksOptions.NO_HOOKS,
           isUserAllowlisted: true,
         })
       );
-      expect([...ctx.allowedNamespaces]).toEqual([CacheNamespace.Standard]);
+      expect([...ctx.allowedNamespaces]).toEqual([]);
     });
 
     it('activates PermissionedHooks alone for HOOKS_ONLY + header set', () => {
@@ -228,7 +223,9 @@ describe('RouteNamespaceResolver', () => {
       expect([...ctx.allowedNamespaces]).toContain(
         CacheNamespace.ExperimentalHooks
       );
-      expect(ctx.namespaceKey).toContain('ExperimentalHooks');
+      expect(
+        buildCacheKeyNamespacePrefix([...ctx.allowedNamespaces])
+      ).toContain('ExperimentalHooks');
     });
 
     it('does not include ExperimentalHooks when isExperimentalHooks is false', () => {
@@ -272,41 +269,27 @@ describe('RouteNamespaceResolver', () => {
           isExperimentalHooks: true,
         })
       );
-      expect([...ctx.allowedNamespaces]).toContain(
-        CacheNamespace.ExperimentalHooks
-      );
-      expect(isNamespaceCacheable(ctx)).toBe(true);
+      expect([...ctx.allowedNamespaces]).toEqual([
+        CacheNamespace.ExperimentalHooks,
+      ]);
     });
   });
 
-  describe('isNamespaceCacheable', () => {
-    it('returns true for Standard context', () => {
-      const ctx = resolveNamespaces(makeInput());
-      expect(isNamespaceCacheable(ctx)).toBe(true);
+  describe('EMPTY_NAMESPACE_CONTEXT', () => {
+    it('has an empty allowedNamespaces set', () => {
+      expect([...EMPTY_NAMESPACE_CONTEXT.allowedNamespaces]).toEqual([]);
     });
 
-    it('returns true for AggHooks#Standard context', () => {
+    it('is the base-case context for NO_HOOKS / HOOKS_ONLY-with-no-external requests', () => {
       const ctx = resolveNamespaces(
-        makeInput({
-          protocols: [
-            Protocol.V2,
-            Protocol.V3,
-            Protocol.V4,
-            Protocol.MIXED,
-            Protocol.CURVESTABLESWAP,
-          ],
-        })
+        makeInput({hooksOptions: HooksOptions.NO_HOOKS})
       );
-      expect(isNamespaceCacheable(ctx)).toBe(true);
-    });
-
-    it('returns false for NULL_NAMESPACE_CONTEXT', () => {
-      expect(isNamespaceCacheable(NULL_NAMESPACE_CONTEXT)).toBe(false);
+      expect(ctx).toBe(EMPTY_NAMESPACE_CONTEXT);
     });
   });
 
   describe('isCacheReadAllowed', () => {
-    it('returns true for Standard with global cache enabled', () => {
+    it('returns true for the base (empty) namespace context with global cache enabled', () => {
       const ctx = resolveNamespaces(makeInput());
       expect(isCacheReadAllowed(ctx, DEFAULT_CONFIG)).toBe(true);
     });
@@ -318,19 +301,13 @@ describe('RouteNamespaceResolver', () => {
       );
     });
 
-    it('returns true for AggHooks#Standard when agg hooks read is enabled', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.AggHooks,
-        CacheNamespace.Standard,
-      ]);
+    it('returns true for [AggHooks] when agg hooks read is enabled', () => {
+      const ctx = createNamespaceContext([CacheNamespace.AggHooks]);
       expect(isCacheReadAllowed(ctx, DEFAULT_CONFIG)).toBe(true);
     });
 
     it('returns false when AggHooks is in namespace but read flag is off', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.AggHooks,
-        CacheNamespace.Standard,
-      ]);
+      const ctx = createNamespaceContext([CacheNamespace.AggHooks]);
       expect(
         isCacheReadAllowed(ctx, {
           ...DEFAULT_CONFIG,
@@ -340,10 +317,7 @@ describe('RouteNamespaceResolver', () => {
     });
 
     it('returns false when PermissionedHooks is in namespace but read flag is off', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.Standard,
-        CacheNamespace.PermissionedHooks,
-      ]);
+      const ctx = createNamespaceContext([CacheNamespace.PermissionedHooks]);
       expect(
         isCacheReadAllowed(ctx, {
           ...ALL_ENABLED_CONFIG,
@@ -353,10 +327,7 @@ describe('RouteNamespaceResolver', () => {
     });
 
     it('returns false when ExperimentalHooks is in namespace but read flag is off', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.Standard,
-        CacheNamespace.ExperimentalHooks,
-      ]);
+      const ctx = createNamespaceContext([CacheNamespace.ExperimentalHooks]);
       expect(
         isCacheReadAllowed(ctx, {
           ...ALL_ENABLED_CONFIG,
@@ -364,16 +335,10 @@ describe('RouteNamespaceResolver', () => {
         })
       ).toBe(false);
     });
-
-    it('returns false for NULL_NAMESPACE_CONTEXT even with all enabled', () => {
-      expect(
-        isCacheReadAllowed(NULL_NAMESPACE_CONTEXT, ALL_ENABLED_CONFIG)
-      ).toBe(false);
-    });
   });
 
   describe('isCacheWriteAllowed', () => {
-    it('returns true for Standard with global cache enabled', () => {
+    it('returns true for the base (empty) namespace context with global cache enabled', () => {
       const ctx = resolveNamespaces(makeInput());
       expect(isCacheWriteAllowed(ctx, DEFAULT_CONFIG)).toBe(true);
     });
@@ -385,19 +350,13 @@ describe('RouteNamespaceResolver', () => {
       ).toBe(false);
     });
 
-    it('returns true for AggHooks#Standard when write is enabled', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.AggHooks,
-        CacheNamespace.Standard,
-      ]);
+    it('returns true for [AggHooks] when write is enabled', () => {
+      const ctx = createNamespaceContext([CacheNamespace.AggHooks]);
       expect(isCacheWriteAllowed(ctx, DEFAULT_CONFIG)).toBe(true);
     });
 
     it('returns false when AggHooks is in namespace but write flag is off', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.AggHooks,
-        CacheNamespace.Standard,
-      ]);
+      const ctx = createNamespaceContext([CacheNamespace.AggHooks]);
       expect(
         isCacheWriteAllowed(ctx, {
           ...DEFAULT_CONFIG,
@@ -407,21 +366,12 @@ describe('RouteNamespaceResolver', () => {
     });
 
     it('returns false when PermissionedHooks is in namespace but write flag is off', () => {
-      const ctx = createNamespaceContext([
-        CacheNamespace.Standard,
-        CacheNamespace.PermissionedHooks,
-      ]);
+      const ctx = createNamespaceContext([CacheNamespace.PermissionedHooks]);
       expect(
         isCacheWriteAllowed(ctx, {
           ...ALL_ENABLED_CONFIG,
           permissionedHooksWriteEnabled: false,
         })
-      ).toBe(false);
-    });
-
-    it('returns false for NULL_NAMESPACE_CONTEXT even with all enabled', () => {
-      expect(
-        isCacheWriteAllowed(NULL_NAMESPACE_CONTEXT, ALL_ENABLED_CONFIG)
       ).toBe(false);
     });
   });
