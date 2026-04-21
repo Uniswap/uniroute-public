@@ -459,7 +459,8 @@ export class UniRouteBL implements IUniRoutedBL {
           quoteType,
           protocols,
           request,
-          ctx
+          ctx,
+          options
         );
         await logElapsedTime(
           'GetCachedRoutes',
