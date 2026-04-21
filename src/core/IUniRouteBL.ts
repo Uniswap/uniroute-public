@@ -16,6 +16,7 @@ export type QuoteOptions = {
   requestSource?: string;
   universalRouterVersion?: UniversalRouterVersion;
   testAggHooks?: boolean;
+  stableStableHookEnabled?: boolean;
 };
 
 export interface IUniRoutedBL {
