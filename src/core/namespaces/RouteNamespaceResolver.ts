@@ -23,6 +23,8 @@ export interface NamespaceResolutionInput {
    * by the simulator short-circuit (not here).
    */
   isUserAllowlisted?: boolean;
+  /** Whether the request targets experimental-hook pools. */
+  isExperimentalHooks?: boolean;
 }
 
 /**
@@ -74,7 +76,8 @@ export interface NamespaceCacheConfig {
 export function resolveNamespaces(
   input: NamespaceResolutionInput
 ): RouteNamespaceContext {
-  const {protocols, hooksOptions, isUserAllowlisted} = input;
+  const {protocols, hooksOptions, isUserAllowlisted, isExperimentalHooks} =
+    input;
 
   // When hooks are excluded entirely, only standard routing applies.
   // A permissioned request with NO_HOOKS is nonsensical (permissioned pools
@@ -110,11 +113,9 @@ export function resolveNamespaces(
     namespaces.push(CacheNamespace.PermissionedHooks);
   }
 
-  // TODO: Add experimental namespace activation once product confirms
-  // the trigger.
-  // if (isExperimentalRequest) {
-  //   namespaces.push(CacheNamespace.ExperimentalHooks);
-  // }
+  if (isExperimentalHooks) {
+    namespaces.push(CacheNamespace.ExperimentalHooks);
+  }
 
   // If no namespaces were resolved (e.g. HOOKS_ONLY with no external
   // protocols and no permissioned/experimental signals), the request

@@ -222,6 +222,61 @@ describe('RouteNamespaceResolver', () => {
         CacheNamespace.PermissionedHooks,
       ]);
     });
+
+    it('includes ExperimentalHooks when isExperimentalHooks is true', () => {
+      const ctx = resolveNamespaces(makeInput({isExperimentalHooks: true}));
+      expect([...ctx.allowedNamespaces]).toContain(
+        CacheNamespace.ExperimentalHooks
+      );
+      expect(ctx.namespaceKey).toContain('ExperimentalHooks');
+    });
+
+    it('does not include ExperimentalHooks when isExperimentalHooks is false', () => {
+      const ctx = resolveNamespaces(makeInput({isExperimentalHooks: false}));
+      expect([...ctx.allowedNamespaces]).not.toContain(
+        CacheNamespace.ExperimentalHooks
+      );
+    });
+
+    it('does not include ExperimentalHooks when isExperimentalHooks is omitted', () => {
+      const ctx = resolveNamespaces(makeInput());
+      expect([...ctx.allowedNamespaces]).not.toContain(
+        CacheNamespace.ExperimentalHooks
+      );
+    });
+
+    it('combines ExperimentalHooks with AggHooks when both are triggered', () => {
+      const ctx = resolveNamespaces(
+        makeInput({
+          protocols: [
+            Protocol.V2,
+            Protocol.V3,
+            Protocol.V4,
+            Protocol.MIXED,
+            Protocol.CURVESTABLESWAP,
+          ],
+          isExperimentalHooks: true,
+        })
+      );
+      expect([...ctx.allowedNamespaces]).toContain(CacheNamespace.AggHooks);
+      expect([...ctx.allowedNamespaces]).toContain(
+        CacheNamespace.ExperimentalHooks
+      );
+    });
+
+    it('returns ExperimentalHooks for HOOKS_ONLY when isExperimentalHooks is true', () => {
+      const ctx = resolveNamespaces(
+        makeInput({
+          protocols: [Protocol.V4],
+          hooksOptions: HooksOptions.HOOKS_ONLY,
+          isExperimentalHooks: true,
+        })
+      );
+      expect([...ctx.allowedNamespaces]).toContain(
+        CacheNamespace.ExperimentalHooks
+      );
+      expect(isNamespaceCacheable(ctx)).toBe(true);
+    });
   });
 
   describe('isNamespaceCacheable', () => {
