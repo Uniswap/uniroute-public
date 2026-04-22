@@ -1,13 +1,17 @@
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
-import {
-  CacheNamespace,
-  EMPTY_NAMESPACE_CONTEXT,
-  RouteNamespaceContext,
-  createNamespaceContext,
-} from '../../models/hooks/CacheNamespace';
 import {Experiment} from '../../models/hooks/Experiment';
 import {EXTERNAL_PROTOCOLS} from '../../lib/helpers';
+import {
+  AggHooksNamespace,
+  CacheNamespace,
+  CacheNamespaceName,
+  EMPTY_NAMESPACE_CONTEXT,
+  ExperimentalHooksNamespace,
+  PermissionedHooksNamespace,
+  RouteNamespaceContext,
+  createNamespaceContext,
+} from '../../models/hooks/namespaces';
 
 export interface NamespaceResolutionInput {
   /** Protocols requested for this quote (e.g. [V2, V3, V4, CurveStableSwap]). */
@@ -65,7 +69,8 @@ export interface NamespaceCacheConfig {
  * The base (pure-Uniswap) case resolves to the empty set, which produces
  * an empty cache-key prefix and therefore byte-identical keys to the
  * pre-namespace format. Specialised namespaces (AggHooks, PermissionedHooks,
- * ExperimentalHooks) are layered on top.
+ * ExperimentalHooks) are layered on top, each carrying its own dimensions
+ * (protocols for AggHooks, experiment for ExperimentalHooks).
  *
  * Whether the request is actually cacheable at all is a separate concern
  * from namespace resolution — it's gated by `shouldCheckCache` in
@@ -94,27 +99,29 @@ export function resolveNamespaces(
 
   const namespaces: CacheNamespace[] = [];
 
-  // If any external (agg-hook) protocols are requested, add AggHooks.
-  // This is unconditional — whether caching is enabled for agg hooks
-  // is a separate concern handled by isCacheReadAllowed / isCacheWriteAllowed.
+  // If any external (agg-hook) protocols are requested, add AggHooks and
+  // embed the *full request protocol list* in the namespace instance — the
+  // AggHooks cache-key segment (`AggHooks#CurveStableSwapNG,mixed,v2,v3,v4`)
+  // renders from this list. The repository layer enforces that callers
+  // resolving external protocols through this function end up with an
+  // AggHooksNamespace in `namespaces`; hand-rolling `[]` alongside external
+  // protocols will throw in `assertCacheableProtocols` rather than silently
+  // writing to the Standard keyspace.
   const hasExternalProtocol = protocols.some(p => EXTERNAL_PROTOCOLS.has(p));
   if (hasExternalProtocol) {
-    namespaces.push(CacheNamespace.AggHooks);
+    namespaces.push(new AggHooksNamespace(protocols));
   }
 
   // PermissionedHooks activates on `x-is-user-allowlisted` header presence.
-  // TAPI sends the header iff tokenIn or tokenOut is a permissioned adapter
-  // token. Value (true/false) does not affect namespace resolution — the
-  // simulator short-circuit consumes it separately.
   if (isUserAllowlisted !== undefined) {
-    namespaces.push(CacheNamespace.PermissionedHooks);
+    namespaces.push(new PermissionedHooksNamespace());
   }
 
   if (experiment !== undefined) {
-    namespaces.push(CacheNamespace.ExperimentalHooks);
+    namespaces.push(new ExperimentalHooksNamespace(experiment));
   }
 
-  return createNamespaceContext(namespaces, experiment);
+  return createNamespaceContext(namespaces);
 }
 
 /**
@@ -132,14 +139,14 @@ export function isCacheReadAllowed(
   if (!config.enabled) return false;
 
   for (const ns of nsCtx.allowedNamespaces) {
-    switch (ns) {
-      case CacheNamespace.AggHooks:
+    switch (ns.name) {
+      case CacheNamespaceName.AggHooks:
         if (!config.aggHooksReadEnabled) return false;
         break;
-      case CacheNamespace.PermissionedHooks:
+      case CacheNamespaceName.PermissionedHooks:
         if (!config.permissionedHooksReadEnabled) return false;
         break;
-      case CacheNamespace.ExperimentalHooks:
+      case CacheNamespaceName.ExperimentalHooks:
         if (!config.experimentalHooksReadEnabled) return false;
         break;
     }
@@ -158,14 +165,14 @@ export function isCacheWriteAllowed(
   if (!config.enabled) return false;
 
   for (const ns of nsCtx.allowedNamespaces) {
-    switch (ns) {
-      case CacheNamespace.AggHooks:
+    switch (ns.name) {
+      case CacheNamespaceName.AggHooks:
         if (!config.aggHooksWriteEnabled) return false;
         break;
-      case CacheNamespace.PermissionedHooks:
+      case CacheNamespaceName.PermissionedHooks:
         if (!config.permissionedHooksWriteEnabled) return false;
         break;
-      case CacheNamespace.ExperimentalHooks:
+      case CacheNamespaceName.ExperimentalHooks:
         if (!config.experimentalHooksWriteEnabled) return false;
         break;
     }
