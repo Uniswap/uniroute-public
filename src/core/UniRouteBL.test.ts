@@ -21,6 +21,7 @@ import {ITokenHandler} from '../stores/token/ITokenHandler';
 import {Chain} from '../models/chain/Chain';
 import {Address} from '../models/address/Address';
 import {Erc20Token} from '../models/token/Erc20Token';
+import {FeeOnTransfer} from '../models/token/FeeOnTransfer';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
 import {QuoteBasic} from '../models/quote/QuoteBasic';
@@ -100,6 +101,38 @@ class TestTokenHandler implements ITokenHandler {
     ctx: UniContext
   ): Promise<Erc20Token | null> {
     return new Erc20Token(address, 18, 'TEST', 'TestToken', undefined, 1.0);
+  }
+  public async getTokens(
+    chain: Chain,
+    addresses: Address[],
+    ctx: UniContext
+  ): Promise<Map<string, Erc20Token | null>> {
+    const tokens = new Map<string, Erc20Token | null>();
+    for (const address of addresses) {
+      tokens.set(address.toString(), await this.getToken(chain, address, ctx));
+    }
+    return tokens;
+  }
+}
+
+class FotTokenHandler implements ITokenHandler {
+  constructor(private readonly fotAddresses: Set<string>) {}
+
+  public async getToken(
+    chain: Chain,
+    address: Address,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    ctx: UniContext
+  ): Promise<Erc20Token | null> {
+    const isFot = this.fotAddresses.has(address.toString().toLowerCase());
+    return new Erc20Token(
+      address,
+      18,
+      'TEST',
+      'TestToken',
+      isFot ? new FeeOnTransfer(100, 100) : undefined,
+      1.0
+    );
   }
   public async getTokens(
     chain: Chain,
@@ -5278,6 +5311,174 @@ describe('UniRouteBL', () => {
         ([msg]) => msg === 'Best quote route contains unexpected agg hook pool'
       );
       expect(warnCall).toBeUndefined();
+    });
+  });
+
+  describe('FOT token EXACT_OUT exclusion', () => {
+    // tokenOut is a FOT token (USDC address lowercased for matching)
+    const fotTokenOut = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+    const fotHandler = new FotTokenHandler(
+      new Set([fotTokenOut.toLowerCase()])
+    );
+
+    it('should return error for FOT token with EXACT_OUT trade type', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        fotHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+      expect(response.error).toBeDefined();
+      expect(response.error!.code).toBe(400);
+      expect(response.error!.message).toContain('FOT');
+      expect(response.error!.message).toContain('EXACT_OUT');
+    });
+
+    it('should still return a quote for FOT token with EXACT_IN trade type', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        fotHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+      // EXACT_IN with FOT should succeed (not error)
+      expect(response.error).toBeUndefined();
+    });
+
+    it('should filter out routes with intermediary FOT tokens for EXACT_OUT', async () => {
+      const intermediaryFotToken = '0x1111111111111111111111111111111111111111';
+      const fotHandlerWithIntermediary = new FotTokenHandler(
+        new Set([intermediaryFotToken.toLowerCase()])
+      );
+
+      // Create a route repository that returns multi-hop routes through FOT intermediary
+      class FotIntermediaryRoutesRepository extends TestRoutesRepository {
+        public async getRoutes(
+          chain: Chain,
+          tokenInCurrencyInfo: CurrencyInfo,
+          tokenOutCurrencyInfo: CurrencyInfo,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          protocols: Protocol[],
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          tradeType: TradeType,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          fotInDirectSwap: boolean,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          hooksOptions: HooksOptions | undefined,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          skipPoolsForTokensCache: boolean,
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          ctx: UniContext
+        ): Promise<RouteBasic[]> {
+          return [
+            // Route 1: direct (no intermediary FOT)
+            new RouteBasic(Protocol.V2, [
+              new V2Pool(
+                tokenInCurrencyInfo.wrappedAddress,
+                tokenOutCurrencyInfo.wrappedAddress,
+                new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+            ]),
+            // Route 2: multi-hop through FOT intermediary token
+            new RouteBasic(Protocol.V2, [
+              new V2Pool(
+                tokenInCurrencyInfo.wrappedAddress,
+                new Address(intermediaryFotToken),
+                new Address('0x2222222222222222222222222222222222222222'),
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+              new V2Pool(
+                new Address(intermediaryFotToken),
+                tokenOutCurrencyInfo.wrappedAddress,
+                new Address('0x3333333333333333333333333333333333333333'),
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+            ]),
+          ];
+        }
+      }
+
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        fotHandlerWithIntermediary,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        new FotIntermediaryRoutesRepository(),
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+      // Should succeed — the direct route (without FOT intermediary) is still available
+      expect(response.error).toBeUndefined();
     });
   });
 });

@@ -98,7 +98,13 @@ import {HooksOptions} from '../models/hooks/HooksOptions';
 import {Experiment} from '../models/hooks/Experiment';
 import {resolveNamespaces} from './namespaces/RouteNamespaceResolver';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
-import {FAKE_TICK_SPACING, isValidRoute} from '../lib/poolUtils';
+import {
+  containsExternalTransferFailedTokens,
+  containsFOT,
+  FAKE_TICK_SPACING,
+  filterRoutesWithFotIntermediaryTokens,
+  isValidRoute,
+} from '../lib/poolUtils';
 import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
@@ -373,9 +379,25 @@ export class UniRouteBL implements IUniRoutedBL {
           ].includes(k)
         )
       );
-      const fotInDirectSwap = this.containsFOT(directSwapTokens);
+      // checks if tokenIn/Out is a FOT token
+      const fotInDirectSwap = containsFOT(directSwapTokens);
       const externalTransferFailedInDirectSwap =
-        this.containsExternalTransferFailedTokens(directSwapTokens);
+        containsExternalTransferFailedTokens(directSwapTokens);
+
+      // FOT tokens are not supported for EXACT_OUT trades. Fee-on-transfer tokens
+      // take a percentage during each transfer, making exact output guarantees impossible.
+      if (fotInDirectSwap && tradeType === TradeType.ExactOut) {
+        metricTags.push(`status:${QuoteStatus.NoRoute}`);
+        metricTags.push('reason:fot_exact_out');
+        await emitCallMetrics(metricTags);
+        return new QuoteResponse({
+          error: {
+            code: 400,
+            message: 'FOT tokens are not supported for EXACT_OUT trade type',
+          },
+          hitsCachedRoutes: false,
+        });
+      }
 
       // Do portion adjustments if needed for ExactOut.
       if (tradeType === TradeType.ExactOut) {
@@ -548,6 +570,35 @@ export class UniRouteBL implements IUniRoutedBL {
           filteredRoutesLength: routes.length,
           invalidRoutes,
         });
+      }
+
+      // For EXACT_OUT, filter out routes whose intermediary pools contain FOT tokens.
+      // Direct swap FOT tokens are already rejected above; this handles multi-hop routes
+      // that route through an intermediary FOT token.
+      if (tradeType === TradeType.ExactOut && routes.length > 0) {
+        const preFilterCount = routes.length;
+        const {filteredRoutes, fotIntermediaryTokens} =
+          await filterRoutesWithFotIntermediaryTokens(
+            routes,
+            tokenInCurrencyInfo.wrappedAddress.toString(),
+            tokenOutCurrencyInfo.wrappedAddress.toString(),
+            tokensInfo,
+            this.tokenHandler,
+            chain,
+            ctx
+          );
+        routes = filteredRoutes;
+
+        if (fotIntermediaryTokens.size > 0) {
+          ctx.logger.debug(
+            'Filtered routes with intermediary FOT tokens for EXACT_OUT',
+            {
+              preFilterCount,
+              postFilterCount: routes.length,
+              fotIntermediaryTokens: Array.from(fotIntermediaryTokens),
+            }
+          );
+        }
       }
 
       if (forceMixed) {
@@ -1685,28 +1736,6 @@ export class UniRouteBL implements IUniRoutedBL {
     }
 
     return quoteResponse;
-  }
-
-  containsFOT(tokensInfo: Map<string, Erc20Token | null>): boolean {
-    for (const token of tokensInfo.values()) {
-      const sellTokenIsFot = token?.feeOnTransfer?.buyFeeBps ?? 0 > 0;
-      const buyTokenIsFot = token?.feeOnTransfer?.sellFeeBps ?? 0 > 0;
-      if (sellTokenIsFot || buyTokenIsFot) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  containsExternalTransferFailedTokens(
-    tokensInfo: Map<string, Erc20Token | null>
-  ): boolean {
-    for (const token of tokensInfo.values()) {
-      if (token?.feeOnTransfer?.externalTransferFailed) {
-        return true;
-      }
-    }
-    return false;
   }
 
   private constructDebugInfo(
