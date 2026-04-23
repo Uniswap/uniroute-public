@@ -43,7 +43,7 @@ import {
 } from './pool-discovery/discoverers/EmptyPoolDiscoverer';
 import {InMemoryRedisCache} from '@uniswap/lib-cache/redis';
 import {IFreshPoolDetailsWrapper} from '../stores/pool/FreshPoolDetailsWrapper';
-import {CachedRoutesBucketedRepositoryECS} from '../stores/route/uniroutes/CachedRoutesBucketedRepositoryECS';
+import {CachedRoutesRepository} from '../stores/route/uniroutes/CachedRoutesRepository';
 import {RouteQuoteAllocator} from './route/RouteQuoteAllocator';
 import {Context} from '@uniswap/lib-uni/context';
 import {NoGasConverter} from './gas/converter/IGasConverter';
@@ -406,7 +406,7 @@ describe('UniRouteBL', () => {
 
   beforeEach(() => {
     redisCache = new InMemoryRedisCache<string, string>();
-    cachedRoutesRepository = new CachedRoutesBucketedRepositoryECS(
+    cachedRoutesRepository = new CachedRoutesRepository(
       redisCache,
       serviceConfig,
       new NoOpMessageQueue()
