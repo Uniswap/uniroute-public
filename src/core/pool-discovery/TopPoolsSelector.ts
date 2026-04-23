@@ -304,6 +304,10 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       const experimentHookAddresses = new Set(
         (EXPERIMENT_HOOKS[experiment] ?? []).map(addr => addr.toLowerCase())
       );
+      const experimentPoolsAvailable = pools.filter(pool => {
+        const hooks = (pool as V4PoolInfo).hooks?.toLowerCase();
+        return hooks !== undefined && experimentHookAddresses.has(hooks);
+      }).length;
       const experimentPools = pools.filter(pool => {
         const hooks = (pool as V4PoolInfo).hooks?.toLowerCase();
         if (!hooks || !experimentHookAddresses.has(hooks)) {
@@ -320,6 +324,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       ctx.logger.debug('Manually appended experiment pools', {
         chainId,
         experiment,
+        availableCount: experimentPoolsAvailable,
         appendedCount: experimentPools.length,
       });
       const experimentMetricTags = [
@@ -329,6 +334,11 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       await ctx.metrics.count(
         buildMetricKey('TopPoolsSelector.ExperimentHit'),
         1,
+        {tags: experimentMetricTags}
+      );
+      await ctx.metrics.count(
+        buildMetricKey('TopPoolsSelector.ExperimentPoolsAvailable'),
+        experimentPoolsAvailable,
         {tags: experimentMetricTags}
       );
       await ctx.metrics.count(
