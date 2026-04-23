@@ -196,7 +196,8 @@ describe('PoolDiscoverer', () => {
         expect.any(Object),
         undefined,
         false,
-        ctx
+        ctx,
+        undefined
       );
       expect(v2DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(result).toEqual(
@@ -242,7 +243,8 @@ describe('PoolDiscoverer', () => {
         expect.any(Object),
         undefined,
         false,
-        ctx
+        ctx,
+        undefined
       );
       expect(v3DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(result).toEqual(
@@ -288,7 +290,8 @@ describe('PoolDiscoverer', () => {
         expect.any(Object),
         HooksOptions.HOOKS_INCLUSIVE,
         false,
-        ctx
+        ctx,
+        undefined
       );
       expect(v4DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(result).toEqual(

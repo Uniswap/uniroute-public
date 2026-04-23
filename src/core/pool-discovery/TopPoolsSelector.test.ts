@@ -21,6 +21,7 @@ import {
   WRAPPED_NATIVE_CURRENCY,
 } from '../../lib/tokenUtils';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
+import {Experiment} from 'src/models/hooks/Experiment';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {
   poolSelectionConfig,
@@ -45,6 +46,9 @@ describe('BasicTopPoolsSelector', () => {
     ctx = {
       logger: {
         debug: vi.fn(),
+      },
+      metrics: {
+        count: vi.fn(),
       },
     } as unknown as Context;
 
@@ -575,6 +579,147 @@ describe('BasicTopPoolsSelector', () => {
         );
 
         expect(result.map(p => p.id)).toContain(mockV2Pool.id);
+      });
+    });
+
+    describe('experiment manual append', () => {
+      // Matches EXPERIMENT_HOOKS[GuideStar_Stable_Stable] in
+      // src/models/hooks/Experiment.ts.
+      const experimentHookAddress =
+        '0x4509b7eb3f9641226804fea4976963435d1c6080';
+
+      const makeExperimentPool = (
+        id: string,
+        hooks: string,
+        tvlUSD = 0
+      ): V4PoolInfo =>
+        ({
+          id,
+          token0: {id: '0x0000000000000000000000000000000000000099'},
+          token1: {id: '0x0000000000000000000000000000000000000098'},
+          hooks,
+          feeTier: '3000',
+          tickSpacing: '60',
+          liquidity: '10000',
+          tvlETH: tvlUSD / 1000,
+          tvlUSD,
+        }) as V4PoolInfo;
+
+      it('appends a V4 pool with matching experiment hook even when TVL is tiny', async () => {
+        const tinyExperimentPool = makeExperimentPool(
+          '0xexp',
+          experimentHookAddress,
+          /* tvlUSD= */ 1
+        );
+
+        const result = await selector.filterPools(
+          [tinyExperimentPool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_INCLUSIVE,
+          ctx,
+          Experiment.GuideStar_Stable_Stable
+        );
+
+        expect(result.map(p => p.id)).toContain('0xexp');
+      });
+
+      it('is a no-op when experiment is undefined', async () => {
+        // Assert directly on the manual-append debug log since the experiment
+        // pool may still be pulled in via the generic top-N path regardless
+        // of the append branch. Absence of the debug line is the ground truth
+        // for "the append branch did not execute".
+        const tinyExperimentPool = makeExperimentPool(
+          '0xexp',
+          experimentHookAddress,
+          /* tvlUSD= */ 1
+        );
+        const debugSpy = ctx.logger.debug as unknown as ReturnType<
+          typeof vi.fn
+        >;
+
+        await selector.filterPools(
+          [tinyExperimentPool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_INCLUSIVE,
+          ctx
+        );
+
+        const appendedCalls = debugSpy.mock.calls.filter(
+          ([msg]) => msg === 'Manually appended experiment pools'
+        );
+        expect(appendedCalls).toHaveLength(0);
+      });
+
+      it('does not append for non-V4 protocols even when experiment is set', async () => {
+        const result = await selector.filterPools(
+          [mockV2Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V2,
+          undefined,
+          ctx,
+          Experiment.GuideStar_Stable_Stable
+        );
+
+        // Result is exactly the V2 pool, no duplicate, no extra appended entry.
+        expect(result).toHaveLength(1);
+        expect(result[0].id).toBe(mockV2Pool.id);
+      });
+
+      it('deduplicates: does not re-append a pool already selected by the TopN path', async () => {
+        // Give the experiment pool high TVL so it lands in the normal selection.
+        const hiTvlExperimentPool = makeExperimentPool(
+          '0xexp_hi',
+          experimentHookAddress,
+          /* tvlUSD= */ 100_000_000
+        );
+        // Make the token pair match tokenIn/tokenOut so it goes into directPairs.
+        hiTvlExperimentPool.token0 = {id: tokenIn.address};
+        hiTvlExperimentPool.token1 = {id: tokenOut.address};
+
+        const result = await selector.filterPools(
+          [hiTvlExperimentPool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_INCLUSIVE,
+          ctx,
+          Experiment.GuideStar_Stable_Stable
+        );
+
+        const occurrences = result.filter(p => p.id === '0xexp_hi').length;
+        expect(occurrences).toBe(1);
+      });
+
+      it('matches experiment hook addresses case-insensitively', async () => {
+        // Hook stored in UPPERCASE — must still match the lowercase entry in
+        // EXPERIMENT_HOOKS.
+        const upperCaseHookPool = makeExperimentPool(
+          '0xexp_case',
+          experimentHookAddress.toUpperCase(),
+          /* tvlUSD= */ 1
+        );
+
+        const result = await selector.filterPools(
+          [upperCaseHookPool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_INCLUSIVE,
+          ctx,
+          Experiment.GuideStar_Stable_Stable
+        );
+
+        expect(result.map(p => p.id)).toContain('0xexp_case');
       });
     });
   });
@@ -1205,7 +1350,10 @@ describe('AggHooksTopPoolsSelector', () => {
     selectorDefault = new AggHooksTopPoolsSelector(
       aggHooksPoolSelectionPerChainConfig
     );
-    ctx = {logger: {debug: vi.fn()}} as unknown as Context;
+    ctx = {
+      logger: {debug: vi.fn()},
+      metrics: {count: vi.fn()},
+    } as unknown as Context;
   });
 
   it('sanity: AGG_HOOKS_ON_MAINNET contains the addresses used in these tests', () => {

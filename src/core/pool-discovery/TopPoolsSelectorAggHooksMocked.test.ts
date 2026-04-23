@@ -49,6 +49,8 @@ vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
     FluidDexT1: {[1]: ['0xaaaa000000000000000000000000000000000001']},
   },
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(['FluidDexT1']),
+  GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET:
+    '0x4509b7eb3f9641226804fea4976963435d1c6080',
   getProtocolForAggHookAddress: (hookAddress: string, _chainId: number) =>
     hookAddress.toLowerCase() === '0xaaaa000000000000000000000000000000000001'
       ? 'FluidDexT1'

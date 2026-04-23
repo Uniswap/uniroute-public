@@ -82,6 +82,8 @@ vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
   AGG_HOOKS_PER_CHAIN: {},
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
   UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
+  GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET:
+    '0x4509b7eb3f9641226804fea4976963435d1c6080',
   getAggHooksForChain: (chainId: number) =>
     chainId === 1 ? ['0xaaaa000000000000000000000000000000000001'] : [],
   // MAINNET_AGG_HOOK – must match the literal used in the tests below.

@@ -6,7 +6,7 @@ import {
   V3PoolInfo,
   V4PoolInfo,
 } from './interface';
-import {ChainId} from '../../lib/config';
+import {buildMetricKey, ChainId} from '../../lib/config';
 import {
   BASE_TOKENS_PER_CHAIN,
   WRAPPED_NATIVE_CURRENCY,
@@ -22,6 +22,7 @@ import {
   V4Pool,
 } from '../../models/pool/V4Pool';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {Experiment, EXPERIMENT_HOOKS} from '../../models/hooks/Experiment';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
 import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
@@ -106,7 +107,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<UniPoolInfo[]> {
     ctx.logger.debug(
       `Starting Filtering pools for tokens ${tokenIn} and ${tokenOut}`
@@ -292,6 +294,49 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       ...topEthPoolTokenIn,
       ...topEthPoolTokenOut,
     ];
+
+    // Manually append V4 pools bearing experiment hook addresses so the
+    // experimental-hooks routing path always sees them as candidates,
+    // regardless of TVL / top-N thresholds. Operates on the pre-filter
+    // `pools` input so pools that would otherwise be pruned still make it
+    // through. Gated on V4 because experiment hooks are a V4-only concept.
+    if (protocol === Protocol.V4 && experiment !== undefined) {
+      const experimentHookAddresses = new Set(
+        (EXPERIMENT_HOOKS[experiment] ?? []).map(addr => addr.toLowerCase())
+      );
+      const experimentPools = pools.filter(pool => {
+        const hooks = (pool as V4PoolInfo).hooks?.toLowerCase();
+        if (!hooks || !experimentHookAddresses.has(hooks)) {
+          return false;
+        }
+        const poolId = pool.id.toLowerCase();
+        if (selectedPoolIds.has(poolId)) {
+          return false;
+        }
+        selectedPoolIds.add(poolId);
+        return true;
+      });
+      allPools = [...allPools, ...experimentPools];
+      ctx.logger.debug('Manually appended experiment pools', {
+        chainId,
+        experiment,
+        appendedCount: experimentPools.length,
+      });
+      const experimentMetricTags = [
+        `chainId:${chainId}`,
+        `experiment:${experiment}`,
+      ];
+      await ctx.metrics.count(
+        buildMetricKey('TopPoolsSelector.ExperimentHit'),
+        1,
+        {tags: experimentMetricTags}
+      );
+      await ctx.metrics.count(
+        buildMetricKey('TopPoolsSelector.ExperimentPoolsAppended'),
+        experimentPools.length,
+        {tags: experimentMetricTags}
+      );
+    }
 
     // 10. Finally, manually add some direct pairs pools if not already discovered/selected.
     // This is to handle the case where a direct pool exists but was not returned by the subgraph query.
@@ -766,7 +811,9 @@ export class AggHooksTopPoolsSelector
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    ctx: Context
+    ctx: Context,
+
+    _experiment?: Experiment
   ): Promise<UniPoolInfo[]> {
     // 1. Restrict to agg hook pools only before any selection logic runs.
     // Use protocol-specific list when protocol is an external/agg hook protocol.

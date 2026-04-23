@@ -3,6 +3,7 @@ import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {Protocol} from 'src/models/pool/Protocol';
+import {Experiment} from '../../models/hooks/Experiment';
 
 export type UniPoolInfo = V2PoolInfo | V3PoolInfo | V4PoolInfo;
 
@@ -20,7 +21,8 @@ export interface IPoolDiscoverer<TPool extends UniPoolInfo> {
     topPoolSelector: ITopPoolsSelector<TPool>,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<TPool[]>;
 }
 
@@ -32,7 +34,8 @@ export interface ITopPoolsSelector<TPool extends UniPoolInfo> {
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<TPool[]>;
 }
 

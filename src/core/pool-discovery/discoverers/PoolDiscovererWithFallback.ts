@@ -13,6 +13,7 @@ import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IUniRouteServiceConfig} from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
+import {Experiment} from '../../../models/hooks/Experiment';
 
 abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
   implements IPoolDiscoverer<TPoolInfo>
@@ -77,7 +78,8 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
     topPoolSelector: ITopPoolsSelector<TPoolInfo>,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<TPoolInfo[]> {
     try {
       const primaryPools = await this.primaryDiscoverer.getPoolsForTokens(
@@ -88,7 +90,8 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
         topPoolSelector,
         hooksOptions,
         skipPoolsForTokensCache,
-        ctx
+        ctx,
+        experiment
       );
       if (primaryPools.length > 0) {
         ctx.logger.debug('Using primary discoverer pools for tokens', {
@@ -129,7 +132,8 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
       topPoolSelector,
       hooksOptions,
       skipPoolsForTokensCache,
-      ctx
+      ctx,
+      experiment
     );
     ctx.logger.debug('Using fallback discoverer pools for tokens', {
       chainId,

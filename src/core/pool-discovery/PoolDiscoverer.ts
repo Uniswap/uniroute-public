@@ -11,6 +11,7 @@ import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Address} from '../../models/address/Address';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {Experiment} from '../../models/hooks/Experiment';
 
 // Main class that delegates pool discovery to the appropriate pool discoverer based on the protocol.
 // Different implementations can be plugged in during init and passed down to BL.
@@ -49,7 +50,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     topPoolsSelector: ITopPoolsSelector<UniPoolInfo>,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<UniPoolInfo[]> {
     // Get protocol-specific pools
     let protocolPools: UniPoolInfo[] = [];
@@ -63,7 +65,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             tOut: Address,
             protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
-            ctx: Context
+            ctx: Context,
+            experiment?: Experiment
           ) =>
             (await topPoolsSelector.filterPools(
               pools,
@@ -72,7 +75,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               tOut,
               protocol,
               hooksOptions,
-              ctx
+              ctx,
+              experiment
             )) as V2PoolInfo[],
         };
         protocolPools = await this.v2PoolDiscoverer.getPoolsForTokens(
@@ -83,7 +87,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           v2Selector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx
+          ctx,
+          experiment
         );
         break;
       }
@@ -96,7 +101,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             tOut: Address,
             protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
-            ctx: Context
+            ctx: Context,
+            experiment?: Experiment
           ) =>
             (await topPoolsSelector.filterPools(
               pools,
@@ -105,7 +111,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               tOut,
               protocol,
               hooksOptions,
-              ctx
+              ctx,
+              experiment
             )) as V3PoolInfo[],
         };
         protocolPools = await this.v3PoolDiscoverer.getPoolsForTokens(
@@ -116,7 +123,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           v3Selector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx
+          ctx,
+          experiment
         );
         break;
       }
@@ -129,7 +137,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             tOut: Address,
             protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
-            ctx: Context
+            ctx: Context,
+            experiment?: Experiment
           ) =>
             (await topPoolsSelector.filterPools(
               pools,
@@ -138,7 +147,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               tOut,
               protocol,
               hooksOptions,
-              ctx
+              ctx,
+              experiment
             )) as V4PoolInfo[],
         };
         protocolPools = await this.v4PoolDiscoverer.getPoolsForTokens(
@@ -149,7 +159,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           v4Selector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx
+          ctx,
+          experiment
         );
         break;
       }
@@ -169,7 +180,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx
+          ctx,
+          experiment
         );
         break;
       case Protocol.V3:
@@ -181,7 +193,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx
+          ctx,
+          experiment
         );
         break;
       case Protocol.V4:
@@ -194,7 +207,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             topPoolsSelector,
             hooksOptions,
             skipPoolsForTokensCache,
-            ctx
+            ctx,
+            experiment
           );
         }
         break;

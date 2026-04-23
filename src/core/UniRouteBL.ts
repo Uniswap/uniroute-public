@@ -95,7 +95,7 @@ import {
   getQuoteGasAndPortionAdjusted,
 } from '../lib/portionUtils';
 import {HooksOptions} from '../models/hooks/HooksOptions';
-import {Experiment} from '../models/hooks/Experiment';
+import {EXPERIMENT_HOOKS, Experiment} from '../models/hooks/Experiment';
 import {resolveNamespaces} from './namespaces/RouteNamespaceResolver';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {
@@ -266,12 +266,13 @@ export class UniRouteBL implements IUniRoutedBL {
     // read/write uses the same namespace identity. `isUserAllowlisted` is
     // deliberately omitted in this PR — PermissionedHooks activation lands
     // in a follow-up.
+    const experiment = options?.stableStableHookEnabled
+      ? Experiment.GuideStar_Stable_Stable
+      : undefined;
     const nsCtx = resolveNamespaces({
       protocols,
       hooksOptions,
-      experiment: options?.stableStableHookEnabled
-        ? Experiment.GuideStar_Stable_Stable
-        : undefined,
+      experiment,
     });
     const namespaces = nsCtx.allowedNamespaces;
     const debugLogs = request.debugLogs;
@@ -290,6 +291,10 @@ export class UniRouteBL implements IUniRoutedBL {
       `hooksOptions:${hooksOptions}`,
       `requestSource:${requestSource}`,
     ];
+
+    await ctx.metrics.count(buildMetricKey('QuoteRequest.Experiment'), 1, {
+      tags: [`experiment:${experiment ?? 'none'}`],
+    });
 
     // Log for debugging token usage spikes
     ctx.logger.info('Quote request parsed', {
@@ -516,7 +521,8 @@ export class UniRouteBL implements IUniRoutedBL {
           fotInDirectSwap,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx
+          ctx,
+          experiment
         );
         await logElapsedTime('GetRoutes', getRoutesStartTime, ctx, metricTags);
       }
@@ -744,6 +750,33 @@ export class UniRouteBL implements IUniRoutedBL {
         });
 
         status = QuoteStatus.Success;
+
+        if (options?.stableStableHookEnabled) {
+          const guideStarHookAddresses = new Set(
+            (EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] ?? []).map(
+              addr => addr.toLowerCase()
+            )
+          );
+          const matched = bestQuote.quotes.some(quote =>
+            quote.route.path.some(
+              pool =>
+                pool instanceof V4Pool &&
+                pool.hooks !== undefined &&
+                guideStarHookAddresses.has(pool.hooks.toLowerCase())
+            )
+          );
+          await ctx.metrics.count(
+            buildMetricKey('BestQuote.GuideStarStableStableHookMatch'),
+            1,
+            {
+              tags: [
+                ...metricTags,
+                `chainId:${chain.chainId}`,
+                `matched:${matched}`,
+              ],
+            }
+          );
+        }
 
         for (const quote of bestQuote.quotes) {
           const aggHookPool = quote.route.path.find(

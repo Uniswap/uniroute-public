@@ -29,6 +29,7 @@ import {withTimeout} from './util/withTimeout';
 import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET} from './util/hooksAddressesAllowlist';
 
 export interface CachePoolsConfig {
   s3Bucket: string;
@@ -485,6 +486,17 @@ async function cachePoolsForChainProtocol(
         logger,
         metricInstance
       );
+
+      const guideStarStableStablePools = pools.filter(
+        pool =>
+          (pool as V4SubgraphPool).hooks?.toLowerCase() ===
+          GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET.toLowerCase()
+      );
+      if (guideStarStableStablePools.length > 0) {
+        logger.debug(
+          `Found GuideStar stable-stable pool ${JSON.stringify(guideStarStableStablePools)}`
+        );
+      }
     }
 
     metricInstance.putMetric(

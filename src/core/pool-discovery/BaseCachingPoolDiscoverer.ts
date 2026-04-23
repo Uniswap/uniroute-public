@@ -6,6 +6,7 @@ import {IPoolDiscoverer, ITopPoolsSelector, UniPoolInfo} from './interface';
 import {Address} from '../../models/address/Address';
 import {ErrorNotFound, IRedisCache} from '@uniswap/lib-cache';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {Experiment} from '../../models/hooks/Experiment';
 
 // Base class for pool discoverers that fetch pools from a remote source and caches them.
 // Will be used in the future to fetch/cache pools from different sources (e.g. subgraph, s3, indexer etc.).
@@ -137,7 +138,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     topPoolSelector: ITopPoolsSelector<TPool>,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<TPool[]> {
     this.assertSupportedProtocol(protocol);
     ctx.logger.debug(
@@ -195,7 +197,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         tokenOut,
         protocol,
         hooksOptions,
-        ctx
+        ctx,
+        experiment
       );
       const filterPoolsElapsed = Date.now() - filterPoolsStartTime;
       ctx.logger.debug(
