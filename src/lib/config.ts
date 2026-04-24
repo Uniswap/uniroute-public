@@ -88,10 +88,15 @@ export interface IUniRouteServiceConfig {
     AggHooksWriteEnabled: boolean;
     // The TTL for the route cache entry refresh.
     RouteCacheEntryRefreshSeconds: number;
-    // The TTL for the cached routes.
+    // The default TTL for cached routes. Applies to pure-Uniswap routes
+    // and Uniswap + all-external-protocol routes (optionally with
+    // permissioned-hooks). Experimental-hook or partial-external routes
+    // fall through to ShortRouteCacheEntryTtlSeconds instead.
     RouteCacheEntryTtlSeconds: number;
-    // The TTL for agg-hook (external protocol) cached routes.
-    AggHooksRouteCacheEntryTtlSeconds: number;
+    // The shorter TTL for cached routes whose liquidity is considered
+    // more volatile: partial-external (Uniswap + some-but-not-all
+    // external protocols) and any experimental-hooks route.
+    ShortRouteCacheEntryTtlSeconds: number;
     // Cached routes to retrieve
     CachedRoutesToRetrieve: number;
     // Cached routes to keep after scoring
@@ -201,7 +206,7 @@ export const getUniRouteSyncConfig = (
       AggHooksWriteEnabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
-      AggHooksRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
+      ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
@@ -289,7 +294,7 @@ export const getQuickRouteSyncConfig = (
       AggHooksWriteEnabled: false,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
-      AggHooksRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
+      ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
