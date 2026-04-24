@@ -119,6 +119,14 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       }
     }
 
+    await ctx.metrics.dist(
+      buildMetricKey('DeepQuoteStrategy.PctRoutesExpanded'),
+      pctRoutes.length,
+      {
+        tags: [`chain:${ChainId[chain.chainId]}`, `trade_type:${tradeType}`],
+      }
+    );
+
     // Partition: single-hop aggregator hook routes are quoted via hook.quote()
     // directly, bypassing the V4Quoter which fails for these pools.
     const {aggHookRoutes, otherRoutes} = partitionAggHookRoutes(pctRoutes);
