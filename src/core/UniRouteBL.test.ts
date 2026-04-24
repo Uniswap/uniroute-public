@@ -74,7 +74,10 @@ import {Pool} from '../models/pool/Pool';
 import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
-import {CacheNamespace} from '../models/hooks/namespaces';
+import {
+  CacheNamespace,
+  RouteNamespaceContext,
+} from '../models/hooks/namespaces';
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
 // addresses are actually deployed in production.
@@ -198,6 +201,8 @@ class TestRoutesRepository implements IRoutesRepository<Pool> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     skipPoolsForTokensCache: boolean,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: UniContext
   ): Promise<RouteBasic<Pool>[]> {
     return [];
@@ -217,6 +222,8 @@ class TestRoutesRepository implements IRoutesRepository<Pool> {
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     skipPoolsForTokensCache: boolean,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: UniContext
   ): Promise<RouteBasic[]> {
@@ -5415,6 +5422,8 @@ describe('UniRouteBL', () => {
           hooksOptions: HooksOptions | undefined,
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           skipPoolsForTokensCache: boolean,
+
+          _nsCtx: RouteNamespaceContext,
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           ctx: UniContext
         ): Promise<RouteBasic[]> {

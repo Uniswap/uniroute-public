@@ -97,6 +97,7 @@ import {
 import {HooksOptions} from '../models/hooks/HooksOptions';
 import {EXPERIMENT_HOOKS, Experiment} from '../models/hooks/Experiment';
 import {resolveNamespaces} from './namespaces/RouteNamespaceResolver';
+import {CacheNamespaceName} from '../models/hooks/namespaces';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {
   containsExternalTransferFailedTokens,
@@ -262,19 +263,20 @@ export class UniRouteBL implements IUniRoutedBL {
     const protocols = request.protocols
       .split(',')
       .map(p => EnumUtils.stringToEnum(Protocol, p));
-    // Resolve the cache-namespace context once per request so every cache
-    // read/write uses the same namespace identity. `isUserAllowlisted` is
-    // deliberately omitted in this PR — PermissionedHooks activation lands
-    // in a follow-up.
+    // read/write uses the same namespace identity.
     const experiment = options?.stableStableHookEnabled
       ? Experiment.GuideStar_Stable_Stable
       : undefined;
     const nsCtx = resolveNamespaces({
       protocols,
       hooksOptions,
+      isUserAllowlisted: options?.isUserAllowlisted,
       experiment,
     });
     const namespaces = nsCtx.allowedNamespaces;
+    const hasPermissionedHooksNamespace = namespaces.some(
+      ns => ns.name === CacheNamespaceName.PermissionedHooks
+    );
     const debugLogs = request.debugLogs;
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
@@ -445,6 +447,8 @@ export class UniRouteBL implements IUniRoutedBL {
         (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
           (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
             this.serviceConfig.CachedRoutes.AggHooksReadEnabled)) &&
+        (!hasPermissionedHooksNamespace ||
+          this.serviceConfig.CachedRoutes.PermissionedHooksReadEnabled) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
         this.serviceConfig.CachedRoutes.Enabled;
 
@@ -521,8 +525,8 @@ export class UniRouteBL implements IUniRoutedBL {
           fotInDirectSwap,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         );
         await logElapsedTime('GetRoutes', getRoutesStartTime, ctx, metricTags);
       }
@@ -570,6 +574,7 @@ export class UniRouteBL implements IUniRoutedBL {
           tags: metricTags,
         }
       );
+
       if (unfilteredRoutesLength !== routes.length) {
         ctx.logger.debug('Filtered out invalid routes', {
           unfilteredRoutesLength,
@@ -922,6 +927,8 @@ export class UniRouteBL implements IUniRoutedBL {
         (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
           (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
             this.serviceConfig.CachedRoutes.AggHooksWriteEnabled)) &&
+        (!hasPermissionedHooksNamespace ||
+          this.serviceConfig.CachedRoutes.PermissionedHooksWriteEnabled) &&
         this.serviceConfig.Lambda.Type === LambdaType.Async &&
         bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
         this.serviceConfig.CachedRoutes.Enabled

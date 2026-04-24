@@ -23,8 +23,9 @@ import {
   V4_SUPPORTED,
 } from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
-import {Experiment} from '../../../models/hooks/Experiment';
+import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
 import {
+  BasicTopPoolsSelector,
   buildTokenPoolIndex,
   getPoolTVL,
   getOtherToken,
@@ -55,8 +56,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     generateMixedRoutes: boolean,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: UniContext,
-    experiment?: Experiment
+    nsCtx: RouteNamespaceContext,
+    ctx: UniContext
   ): Promise<RouteBasic<Pool>[]> {
     // Only fetch pools for requested protocols
     const poolPromises: Promise<UniPoolInfo[]>[] = [];
@@ -73,8 +74,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -91,8 +92,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -112,8 +113,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -148,8 +149,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topAggHooksPoolsSelector,
           hooksOptions,
           true, // always skip per-token-pair cache to avoid polluting Protocol.V4 cache
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -199,6 +200,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         protocolPoolsMap,
         protocols,
         hooksOptions,
+        nsCtx,
         ctx
       );
       await logElapsedTime(
@@ -364,6 +366,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     protocolPools: Partial<Record<Protocol, UniPoolInfo[]>>,
     protocols: Protocol[],
     hooksOptions: HooksOptions | undefined,
+    nsCtx: RouteNamespaceContext,
     ctx: UniContext
   ): Promise<{
     v2Pools: V2PoolInfo[];
@@ -412,19 +415,37 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     const [allV2Pools, allV3Pools, rawAllV4Pools] =
       await Promise.all(allPoolsPromises);
 
+    // Delegate the permissioned-hook filter to the top-pools selector so
+    // the admission rule lives in one place. Cross-liquidity fetches bypass
+    // the selector's top-N heuristic, but the pool-admissibility check is
+    // identical, so we reuse `applyPermissionedFilter` here.
+    const permissionedFilteredPools =
+      BasicTopPoolsSelector.applyPermissionedFilter(
+        rawAllV4Pools,
+        chain,
+        nsCtx,
+        tokenInAddress,
+        tokenOutAddress,
+        chain.chainId
+      );
+
     // Exclude agg hook pools whose protocol was NOT explicitly requested.
     // If the caller includes an external protocol (e.g. a Curve or Fluid hook),
     // those pools are valid cross-liquidity candidates and must be kept.
     // Pools with unrecognized hooks (regular V4) are always kept.
-    const allV4Pools = rawAllV4Pools.filter(pool => {
+    const allV4Pools = permissionedFilteredPools.filter(pool => {
+      const v4Pool = pool as V4PoolInfo;
       const hookProtocol = getProtocolForAggHookAddress(
-        (pool as V4PoolInfo).hooks,
+        v4Pool.hooks,
         chain.chainId
       );
-      return (
-        hookProtocol === undefined ||
-        protocols.includes(hookProtocol as Protocol)
-      );
+      if (
+        hookProtocol !== undefined &&
+        !protocols.includes(hookProtocol as Protocol)
+      ) {
+        return false;
+      }
+      return true;
     });
 
     const tokenInAddressLower = tokenInAddress.address.toLowerCase();

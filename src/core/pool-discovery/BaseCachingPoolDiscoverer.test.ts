@@ -8,6 +8,10 @@ import {IRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {
+  EMPTY_NAMESPACE_CONTEXT,
+  RouteNamespaceContext,
+} from '../../models/hooks/namespaces';
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -22,6 +26,8 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<UniPoolInfo[]> {
@@ -226,6 +232,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       topPoolSelector,
       undefined,
       false,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -262,6 +269,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       topPoolSelector,
       undefined,
       false,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -273,6 +281,53 @@ describe('BaseCachingPoolDiscoverer', () => {
     );
     expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
       tags: ['result', 'miss'],
+    });
+  });
+
+  it('runs filterPools on every cache hit so namespace activation is not poisoned by cached entries', async () => {
+    // Regression guard: the cached value is the namespace-INDEPENDENT raw
+    // pool universe. The selector runs on every request to apply the
+    // namespace-dependent permissioned-hook filter + top-TVL heuristic
+    // against that universe, so the same cache entry serves both
+    // header-present and header-absent requests with correct filtering.
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V2;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+    const cachedPools = [
+      {
+        id: 'cached-pool',
+        feeTier: '3000',
+        tickSpacing: '1',
+        hooks: '0x1111111111111111111111111111111111111111',
+        liquidity: '1000',
+        token0: {id: '0x1111111111111111111111111111111111111111'},
+        token1: {id: '0x2222222222222222222222222222222222222222'},
+        tvlETH: 1000,
+        tvlUSD: 1000,
+      },
+    ];
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockResolvedValue(JSON.stringify(cachedPools));
+
+    const filterSpy = vi.spyOn(topPoolSelector, 'filterPools');
+
+    await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(filterSpy).toHaveBeenCalledTimes(1);
+    expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
+      tags: ['result', 'hit'],
     });
   });
 
@@ -298,6 +353,7 @@ describe('BaseCachingPoolDiscoverer', () => {
         topPoolSelector,
         undefined,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       )
     ).rejects.toThrow('Unsupported protocol');

@@ -6,7 +6,7 @@ import {IPoolDiscoverer, ITopPoolsSelector, UniPoolInfo} from './interface';
 import {Address} from '../../models/address/Address';
 import {ErrorNotFound, IRedisCache} from '@uniswap/lib-cache';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
-import {Experiment} from '../../models/hooks/Experiment';
+import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 
 // Base class for pool discoverers that fetch pools from a remote source and caches them.
 // Will be used in the future to fetch/cache pools from different sources (e.g. subgraph, s3, indexer etc.).
@@ -128,8 +128,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     ctx: Context
   ): Promise<TPool[]>;
 
-  // Gets pools from the cache if available, otherwise fetches them from the _getPoolsForTokens implementation.
-  // Filters the pools based on the given tokens and returns a small number of pools (topPoolSelector logic) before caching them.
+  // Gets pools for the requested token pair. The cache stores the raw,
+  // namespace-independent pool universe; `topPoolSelector.filterPools`
+  // (which applies the permissioned-hook filter and then the top-TVL
+  // selection heuristic) runs on every request, so namespace activation
+  // cannot poison the cache.
   public async getPoolsForTokens(
     chainId: ChainId,
     protocol: Protocol,
@@ -138,8 +141,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     topPoolSelector: ITopPoolsSelector<TPool>,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: Context,
-    experiment?: Experiment
+    nsCtx: RouteNamespaceContext,
+    ctx: Context
   ): Promise<TPool[]> {
     this.assertSupportedProtocol(protocol);
     ctx.logger.debug(
@@ -153,19 +156,16 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       tokenOut
     );
 
-    let retrievedPools: TPool[] | undefined;
+    let rawPools: TPool[] | undefined;
     try {
       if (!skipPoolsForTokensCache) {
-        const retrievedPoolsStr =
-          await this.getPoolsForTokensCache.get(cacheKey);
-        if (retrievedPoolsStr !== undefined) {
-          retrievedPools = JSON.parse(retrievedPoolsStr);
-          retrievedPools = this.filterUnsupportedTokenPools(retrievedPools!);
+        const cachedStr = await this.getPoolsForTokensCache.get(cacheKey);
+        if (cachedStr !== undefined) {
+          rawPools = JSON.parse(cachedStr);
+          rawPools = this.filterUnsupportedTokenPools(rawPools!);
           ctx.logger.debug(
             `[${this.discovererName}] Retrieved ${protocol} pools for tokens from cache`,
-            {
-              cacheKey,
-            }
+            {cacheKey}
           );
         }
       }
@@ -175,67 +175,62 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       }
     }
 
-    if (retrievedPools === undefined || retrievedPools.length === 0) {
+    if (rawPools === undefined || rawPools.length === 0) {
       status = 'miss';
-      retrievedPools = await this._getPoolsForTokens(
+      rawPools = await this._getPoolsForTokens(
         chainId,
         protocol,
         tokenIn,
         tokenOut,
         ctx
       );
-
-      // Filter out pools with unsupported tokens
-      retrievedPools = this.filterUnsupportedTokenPools(retrievedPools);
-
-      // use topPoolSelector to filter pools - we need to make sure a small number of pools is returned here
-      const filterPoolsStartTime = Date.now();
-      retrievedPools = await topPoolSelector.filterPools(
-        retrievedPools,
-        chainId,
-        tokenIn,
-        tokenOut,
-        protocol,
-        hooksOptions,
-        ctx,
-        experiment
-      );
-      const filterPoolsElapsed = Date.now() - filterPoolsStartTime;
-      ctx.logger.debug(
-        `[Latency] TopPoolsSelector.filterPools took ${filterPoolsElapsed}ms`
-      );
-      await ctx.metrics.timer(
-        buildMetricKey('TopPoolsSelector.filterPools.Latency'),
-        filterPoolsElapsed,
-        {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
-      );
-
-      // now we are ready to cache
-      const retrievedPoolsStr = JSON.stringify(retrievedPools);
-      ctx.logger.debug(
-        `[${this.discovererName}] Caching retrieved ${protocol} pools for tokens`,
-        {
-          cacheKey,
-        }
-      );
+      rawPools = this.filterUnsupportedTokenPools(rawPools);
 
       if (!skipPoolsForTokensCache) {
-        await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
+        const serialized = JSON.stringify(rawPools);
+        ctx.logger.debug(
+          `[${this.discovererName}] Caching retrieved ${protocol} pools for tokens`,
+          {cacheKey}
+        );
+        await this.getPoolsForTokensCache.set(cacheKey, serialized, {
           ttl: this.serviceConfig.RedisCache
             .TokenInOutPoolsCacheEntryTtlSeconds,
         });
       }
     }
 
+    // Run the selector on every request (both cache-hit and cache-miss
+    // paths) on the raw, namespace-independent cached universe so that
+    // header-present and header-absent requests each produce their own
+    // correctly filtered result from the same cached entry.
+    const filterPoolsStartTime = Date.now();
+    const selectedPools = await topPoolSelector.filterPools(
+      rawPools,
+      chainId,
+      tokenIn,
+      tokenOut,
+      protocol,
+      hooksOptions,
+      nsCtx,
+      ctx
+    );
+    const filterPoolsElapsed = Date.now() - filterPoolsStartTime;
+    ctx.logger.debug(
+      `[Latency] TopPoolsSelector.filterPools took ${filterPoolsElapsed}ms`
+    );
+    await ctx.metrics.timer(
+      buildMetricKey('TopPoolsSelector.filterPools.Latency'),
+      filterPoolsElapsed,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+    );
+
     await ctx.metrics.count(
       buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache'),
       1,
-      {
-        tags: ['result', status],
-      }
+      {tags: ['result', status]}
     );
 
-    return retrievedPools;
+    return selectedPools;
   }
 
   public getPoolsCacheKey(chainId: ChainId, protocol: Protocol) {
