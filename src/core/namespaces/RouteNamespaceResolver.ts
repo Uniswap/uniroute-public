@@ -1,7 +1,7 @@
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {Experiment} from '../../models/hooks/Experiment';
-import {EXTERNAL_PROTOCOLS} from '../../lib/helpers';
+import {allUniswapAndSomeExternalProtocolsAndMixed} from '../../lib/helpers';
 import {
   AggHooksNamespace,
   CacheNamespace,
@@ -107,8 +107,7 @@ export function resolveNamespaces(
   // AggHooksNamespace in `namespaces`; hand-rolling `[]` alongside external
   // protocols will throw in `assertCacheableProtocols` rather than silently
   // writing to the Standard keyspace.
-  const hasExternalProtocol = protocols.some(p => EXTERNAL_PROTOCOLS.has(p));
-  if (hasExternalProtocol) {
+  if (allUniswapAndSomeExternalProtocolsAndMixed(protocols)) {
     namespaces.push(new AggHooksNamespace(protocols));
   }
 

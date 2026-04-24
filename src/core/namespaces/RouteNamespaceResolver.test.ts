@@ -124,13 +124,19 @@ describe('RouteNamespaceResolver', () => {
     it('returns [AggHooks] for HOOKS_ONLY with external protocols', () => {
       const ctx = resolveNamespaces(
         makeInput({
-          protocols: [Protocol.V4, Protocol.MIXED, Protocol.FLUIDDEXT1],
+          protocols: [
+            Protocol.V2,
+            Protocol.V3,
+            Protocol.V4,
+            Protocol.MIXED,
+            Protocol.FLUIDDEXT1,
+          ],
           hooksOptions: HooksOptions.HOOKS_ONLY,
         })
       );
       expect(names(ctx)).toEqual(['AggHooks']);
       expect(buildCacheKeyNamespacePrefix(ctx.allowedNamespaces)).toBe(
-        'AggHooks#FluidDexT1,mixed,v4#'
+        'AggHooks#FluidDexT1,mixed,v2,v3,v4#'
       );
     });
 
