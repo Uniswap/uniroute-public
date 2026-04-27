@@ -21,10 +21,6 @@ import {ITopPoolsSelector, UniPoolInfo} from '../interface';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {Protocol} from 'src/models/pool/Protocol';
-import {
-  EMPTY_NAMESPACE_CONTEXT,
-  RouteNamespaceContext,
-} from '../../../models/hooks/namespaces';
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -40,8 +36,6 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -105,7 +99,6 @@ describe('StaticPoolDiscovererV2', () => {
       topPoolsSelector,
       undefined,
       false,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -145,7 +138,6 @@ describe('StaticPoolDiscovererV2', () => {
       topPoolsSelector,
       undefined,
       false,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -212,7 +204,6 @@ describe('StaticPoolDiscovererV3', () => {
       topPoolsSelector,
       undefined,
       false,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -252,7 +243,6 @@ describe('StaticPoolDiscovererV3', () => {
       topPoolsSelector,
       undefined,
       false,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -321,7 +311,6 @@ describe('StaticPoolDiscovererV4', () => {
       topPoolsSelector,
       undefined,
       false,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -363,7 +352,6 @@ describe('StaticPoolDiscovererV4', () => {
       topPoolsSelector,
       undefined,
       false,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 

@@ -17,7 +17,6 @@
  */
 
 import {describe, beforeEach, it, expect, vi} from 'vitest';
-import {EMPTY_NAMESPACE_CONTEXT} from '../../models/hooks/namespaces';
 import {
   AggHooksTopPoolsSelector,
   BasicTopPoolsSelector,
@@ -134,7 +133,6 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -158,7 +156,6 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -181,7 +178,6 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       HooksOptions.HOOKS_INCLUSIVE,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -209,7 +205,6 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -226,7 +221,6 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V2,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -262,7 +256,6 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -286,7 +279,6 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -308,7 +300,6 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -332,7 +323,6 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -354,7 +344,6 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -377,7 +366,6 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
-      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 

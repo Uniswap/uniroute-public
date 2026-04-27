@@ -86,14 +86,6 @@ export interface IUniRouteServiceConfig {
     AggHooksReadEnabled: boolean;
     // Whether to enable writing agg-hook (external protocol) cached routes.
     AggHooksWriteEnabled: boolean;
-    // Kill-switch for reads against the PermissionedHooks-namespaced cache.
-    // Default `true`; flip to `false` to disable reads only for permissioned
-    // pools (e.g. during an incident) without affecting the rest of caching.
-    PermissionedHooksReadEnabled: boolean;
-    // Kill-switch for writes from the async worker into the
-    // PermissionedHooks-namespaced cache. Default `true`; same purpose as
-    // the read flag, scoped to the write side.
-    PermissionedHooksWriteEnabled: boolean;
     // The TTL for the route cache entry refresh.
     RouteCacheEntryRefreshSeconds: number;
     // The default TTL for cached routes. Applies to pure-Uniswap routes
@@ -212,8 +204,6 @@ export const getUniRouteSyncConfig = (
       Enabled: true,
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: true,
-      PermissionedHooksReadEnabled: true,
-      PermissionedHooksWriteEnabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
@@ -302,8 +292,6 @@ export const getQuickRouteSyncConfig = (
       Enabled: true,
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: false,
-      PermissionedHooksReadEnabled: true,
-      PermissionedHooksWriteEnabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,

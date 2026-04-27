@@ -16,22 +16,16 @@ import {RoutingBlockList} from '../../lib/RoutingBlockList';
 import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
-import {Chain} from '../../models/chain/Chain';
 import {getApplicableV3FeeAmounts, V3Pool} from '../../models/pool/V3Pool';
 import {
   getApplicableV4FeesTickspacingsHooks,
   V4Pool,
 } from '../../models/pool/V4Pool';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
-import {EXPERIMENT_HOOKS} from '../../models/hooks/Experiment';
+import {Experiment, EXPERIMENT_HOOKS} from '../../models/hooks/Experiment';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
 import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
-import {
-  getActiveExperiment,
-  RouteNamespaceContext,
-} from '../../models/hooks/namespaces';
-import {canIncludePermissionedPool} from '../../models/hooks/PermissionedHooks';
 
 // Token-to-pool index for faster lookups
 interface TokenPoolIndex {
@@ -113,13 +107,12 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    nsCtx: RouteNamespaceContext,
-    ctx: Context
+    ctx: Context,
+    experiment?: Experiment
   ): Promise<UniPoolInfo[]> {
     ctx.logger.debug(
       `Starting Filtering pools for tokens ${tokenIn} and ${tokenOut}`
     );
-    const experiment = getActiveExperiment(nsCtx);
 
     // Filter out pools that are unsupported:
     // Only consider pools where neither tokens are in the blocked token list.
@@ -141,25 +134,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       )
     );
 
-    const chain = await this.chainRepository.getChain(chainId);
-
-    // Pre-filter permissioned-hook pools before top-TVL selection runs so
-    // they don't occupy top-N slots that the heuristic below would
-    // otherwise give to legitimate candidates. The pool-caching layer
-    // (BaseCachingPoolDiscoverer) is namespace-agnostic by design — the
-    // namespace gate lives here, at top-pools selection, and must run
-    // first so the TVL selection heuristic operates on the
-    // already-admissible universe.
-    const prefilteredPools = BasicTopPoolsSelector.applyPermissionedFilter(
-      filteredUnsupportedPools,
-      chain,
-      nsCtx,
-      tokenIn,
-      tokenOut,
-      chainId
-    );
-
-    const filteredPools = prefilteredPools.filter(pool => {
+    const filteredPools = filteredUnsupportedPools.filter(pool => {
       if (protocol === Protocol.V4) {
         // Exclude agg hook pools regardless of hooksOptions,
         // Because we have separate AggHooksTopPoolsSelector for agg hook pools.
@@ -420,45 +395,6 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       return (
         !RoutingBlockList.isUnsupportedToken(pool.token0.id, chainId) &&
         !RoutingBlockList.isUnsupportedToken(pool.token1.id, chainId)
-      );
-    });
-  }
-
-  /**
-   * Drop permissioned-hook pools that aren't admissible for this request,
-   * applied as a pre-step to the top-TVL heuristic so the heuristic's
-   * candidate universe is already pruned. Non-permissioned pools pass
-   * through unchanged. For permissioned pools:
-   *   – namespace inactive → drop;
-   *   – namespace active → drop unless both adapter tokens in the pool
-   *     are request endpoints (see `canIncludePermissionedPool`).
-   */
-  public static applyPermissionedFilter(
-    pools: UniPoolInfo[],
-    chain: Chain | undefined,
-    nsCtx: RouteNamespaceContext,
-    tokenIn: Address,
-    tokenOut: Address,
-    chainId: ChainId
-  ): UniPoolInfo[] {
-    if (chain === undefined || !chain.permissionedHookAddress) {
-      // No permissioned hook registered for this chain — nothing to filter.
-      return pools;
-    }
-    const tokenInLower = tokenIn.lowerCased;
-    const tokenOutLower = tokenOut.lowerCased;
-    return pools.filter(pool => {
-      const v4Pool = pool as V4PoolInfo;
-      if (!v4Pool.hooks) return true;
-      return canIncludePermissionedPool(
-        v4Pool.hooks,
-        v4Pool.token0.id,
-        v4Pool.token1.id,
-        chain,
-        nsCtx,
-        tokenInLower,
-        tokenOutLower,
-        chainId
       );
     });
   }
@@ -885,8 +821,9 @@ export class AggHooksTopPoolsSelector
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    _nsCtx: RouteNamespaceContext,
-    ctx: Context
+    ctx: Context,
+
+    _experiment?: Experiment
   ): Promise<UniPoolInfo[]> {
     // 1. Restrict to agg hook pools only before any selection logic runs.
     // Use protocol-specific list when protocol is an external/agg hook protocol.
