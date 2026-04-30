@@ -262,10 +262,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const protocols = request.protocols
       .split(',')
       .map(p => EnumUtils.stringToEnum(Protocol, p));
-    // Resolve the cache-namespace context once per request so every cache
-    // read/write uses the same namespace identity. `isUserAllowlisted` is
-    // deliberately omitted in this PR — PermissionedHooks activation lands
-    // in a follow-up.
+    // Resolve the cache-namespace context once per request.
     const experiment = options?.stableStableHookEnabled
       ? Experiment.GuideStar_Stable_Stable
       : undefined;
@@ -273,6 +270,9 @@ export class UniRouteBL implements IUniRoutedBL {
       protocols,
       hooksOptions,
       experiment,
+      tokenInAddress: request.tokenInAddress,
+      tokenOutAddress: request.tokenOutAddress,
+      chainId: chain.chainId,
     });
     const namespaces = nsCtx.allowedNamespaces;
     const debugLogs = request.debugLogs;

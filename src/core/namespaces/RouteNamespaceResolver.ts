@@ -1,7 +1,9 @@
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {Experiment} from '../../models/hooks/Experiment';
+import {ChainId} from '../../lib/config';
 import {allUniswapAndSomeExternalProtocolsAndMixed} from '../../lib/helpers';
+import {shouldUsePermissionedHookNamespace} from '../../models/hooks/PermissionedHooks';
 import {
   AggHooksNamespace,
   CacheNamespace,
@@ -18,16 +20,10 @@ export interface NamespaceResolutionInput {
   protocols: Protocol[];
   /** Hooks preference from the request. */
   hooksOptions: HooksOptions;
-  /**
-   * Value of the `x-is-user-allowlisted` header, or `undefined` if absent.
-   *
-   * TAPI sends this header iff tokenIn or tokenOut is a permissioned adapter
-   * token (e.g. a Superstate Security Token); the boolean indicates whether
-   * the caller is allowlisted to swap through the adapter. Header **presence**
-   * activates the `PermissionedHooks` namespace — the value is consumed later
-   * by the simulator short-circuit (not here).
-   */
-  isUserAllowlisted?: boolean;
+  /** Request params — used to derive PermissionedHooks activation. */
+  tokenInAddress: string;
+  tokenOutAddress: string;
+  chainId: ChainId;
   /**
    * The active experiment for this request, when the caller has opted into
    * experimental-hook routing (e.g. `x-stable-stable-hook-enabled: true` →
@@ -89,7 +85,14 @@ export interface NamespaceCacheConfig {
 export function resolveNamespaces(
   input: NamespaceResolutionInput
 ): RouteNamespaceContext {
-  const {protocols, hooksOptions, isUserAllowlisted, experiment} = input;
+  const {
+    protocols,
+    hooksOptions,
+    tokenInAddress,
+    tokenOutAddress,
+    chainId,
+    experiment,
+  } = input;
 
   // NO_HOOKS forces the base case: no hook pools of any class, so no
   // specialised namespaces apply.
@@ -111,8 +114,9 @@ export function resolveNamespaces(
     namespaces.push(new AggHooksNamespace(protocols));
   }
 
-  // PermissionedHooks activates on `x-is-user-allowlisted` header presence.
-  if (isUserAllowlisted !== undefined) {
+  if (
+    shouldUsePermissionedHookNamespace(tokenInAddress, tokenOutAddress, chainId)
+  ) {
     namespaces.push(new PermissionedHooksNamespace());
   }
 

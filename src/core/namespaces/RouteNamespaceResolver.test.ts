@@ -9,6 +9,7 @@ import {
 import {Experiment} from '../../models/hooks/Experiment';
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {ChainId} from '../../lib/config';
 import {
   AggHooksNamespace,
   EMPTY_NAMESPACE_CONTEXT,
@@ -38,12 +39,23 @@ const DEFAULT_CONFIG: NamespaceCacheConfig = {
   experimentalHooksWriteEnabled: false,
 };
 
+// Non-adapter tokens — `shouldUsePermissionedHookNamespace` returns
+// false for these, so the default makeInput resolves without
+// PermissionedHooks unless the caller swaps one in.
+const NON_ADAPTER_TOKEN_IN = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'; // WETH
+const NON_ADAPTER_TOKEN_OUT = '0xa0b86991c6218B36c1d19D4a2e9Eb0cE3606eB48'; // USDC
+// USCC — registered Mainnet adapter (matches PERMISSIONED_ADAPTER_TOKENS).
+const USCC_MAINNET = '0x14d60E7FDC0D71d8611742720E4C50E7a974020c';
+
 function makeInput(
   overrides: Partial<NamespaceResolutionInput> = {}
 ): NamespaceResolutionInput {
   return {
     protocols: [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
     hooksOptions: HooksOptions.HOOKS_INCLUSIVE,
+    tokenInAddress: NON_ADAPTER_TOKEN_IN,
+    tokenOutAddress: NON_ADAPTER_TOKEN_OUT,
+    chainId: ChainId.MAINNET,
     ...overrides,
   };
 }
@@ -162,21 +174,31 @@ describe('RouteNamespaceResolver', () => {
       expect(Object.isFrozen(ctx.allowedNamespaces)).toBe(true);
     });
 
-    it('activates PermissionedHooks when x-is-user-allowlisted is true', () => {
-      const ctx = resolveNamespaces(makeInput({isUserAllowlisted: true}));
+    it('activates PermissionedHooks when tokenIn is a registered adapter', () => {
+      const ctx = resolveNamespaces(makeInput({tokenInAddress: USCC_MAINNET}));
       expect(names(ctx)).toEqual(['PermissionedHooks']);
       expect(buildCacheKeyNamespacePrefix(ctx.allowedNamespaces)).toBe(
         'PermissionedHooks#'
       );
     });
 
-    it('activates PermissionedHooks when x-is-user-allowlisted is false', () => {
-      const ctx = resolveNamespaces(makeInput({isUserAllowlisted: false}));
+    it('activates PermissionedHooks when tokenOut is a registered adapter', () => {
+      const ctx = resolveNamespaces(makeInput({tokenOutAddress: USCC_MAINNET}));
       expect(names(ctx)).toContain('PermissionedHooks');
     });
 
-    it('does not activate PermissionedHooks when the header is absent', () => {
+    it('does not activate PermissionedHooks when neither token is an adapter', () => {
       const ctx = resolveNamespaces(makeInput());
+      expect(names(ctx)).not.toContain('PermissionedHooks');
+    });
+
+    it('does not activate PermissionedHooks on chains without registered adapters', () => {
+      const ctx = resolveNamespaces(
+        makeInput({
+          tokenInAddress: USCC_MAINNET,
+          chainId: ChainId.ARBITRUM,
+        })
+      );
       expect(names(ctx)).not.toContain('PermissionedHooks');
     });
 
@@ -190,7 +212,7 @@ describe('RouteNamespaceResolver', () => {
             Protocol.MIXED,
             Protocol.CURVESTABLESWAP,
           ],
-          isUserAllowlisted: true,
+          tokenInAddress: USCC_MAINNET,
         })
       );
       expect(names(ctx)).toEqual(['AggHooks', 'PermissionedHooks']);
@@ -199,22 +221,22 @@ describe('RouteNamespaceResolver', () => {
       );
     });
 
-    it('resolves empty set for NO_HOOKS even when the header is set', () => {
+    it('resolves empty set for NO_HOOKS even when an adapter token is involved', () => {
       const ctx = resolveNamespaces(
         makeInput({
           hooksOptions: HooksOptions.NO_HOOKS,
-          isUserAllowlisted: true,
+          tokenInAddress: USCC_MAINNET,
         })
       );
       expect(names(ctx)).toEqual([]);
     });
 
-    it('activates PermissionedHooks alone for HOOKS_ONLY + header set', () => {
+    it('activates PermissionedHooks alone for HOOKS_ONLY + adapter token', () => {
       const ctx = resolveNamespaces(
         makeInput({
           protocols: [Protocol.V4],
           hooksOptions: HooksOptions.HOOKS_ONLY,
-          isUserAllowlisted: true,
+          tokenInAddress: USCC_MAINNET,
         })
       );
       expect(names(ctx)).toEqual(['PermissionedHooks']);
