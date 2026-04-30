@@ -16,9 +16,14 @@ import {RoutingBlockList} from '../../lib/RoutingBlockList';
 import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
-import {getApplicableV3FeeAmounts, V3Pool} from '../../models/pool/V3Pool';
+import {
+  getApplicableV3FeeAmounts,
+  V3FeeAmountsBase,
+  V3Pool,
+} from '../../models/pool/V3Pool';
 import {
   getApplicableV4FeesTickspacingsHooks,
+  V4FeeAmounts,
   V4Pool,
 } from '../../models/pool/V4Pool';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
@@ -93,6 +98,39 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
 
   return {tokenToPools, poolToTokens};
 };
+
+// Worst-case pool count returned by manuallyGenerateDirectPairs across all
+// (protocol, chain) combos. V2 → 1, V3 → up to V3FeeAmountsBase.length (BASE
+// has the most fee tiers), V4 → V4FeeAmounts.length. Auto-tracks if any
+// protocol adds a fee tier.
+export const MAX_MANUAL_DIRECT_PAIRS_FALLBACK = Math.max(
+  1,
+  V3FeeAmountsBase.length,
+  V4FeeAmounts.length
+);
+
+// Strict upper bound on pools BasicTopPoolsSelector.filterPools can return for
+// a given (chainId, protocol, tokenIn, tokenOut). Mirrors the stage limits in
+// filterPools(); update both together. Pools are deduped via shared
+// selectedPoolIds, so this is a real upper bound, not a sum of expectations.
+//
+// Excludes experiment-hook pools (V4 + experiment opt-in only) — unbounded by
+// config but small in practice. Callers gating on this should leave headroom.
+export function getMaxFilteredPoolCount(config: IPoolSelectionConfig): number {
+  const oneHopBoth = 2 * config.topNOneHopPairs;
+  const intermediaryTokens = oneHopBoth; // worst case: one new token per one-hop pool
+  const secondHopPerIntermediary = config.topNSecondHopPairs + 2; // + WETH + ETH
+  return (
+    // Stage-1 direct pairs OR manual fallback — the two are mutually
+    // exclusive (fallback only fires when stage-1 returns 0).
+    Math.max(config.topNDirectPairs, MAX_MANUAL_DIRECT_PAIRS_FALLBACK) +
+    oneHopBoth + // tokenIn-only + tokenOut-only
+    intermediaryTokens * secondHopPerIntermediary + // second-hop per intermediary
+    config.topNPairs + // global top-N
+    2 * config.topNWithBaseToken + // base-token pools for tokenIn + tokenOut
+    4 // top WETH/ETH pool × {tokenIn, tokenOut}
+  );
+}
 
 export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   constructor(

@@ -4,7 +4,10 @@ import {
   BasicTopPoolsSelector,
   getPoolTVL,
   buildTokenPoolIndex,
+  getMaxFilteredPoolCount,
+  MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
 } from './TopPoolsSelector';
+import {defaultPoolSelectionConfig} from '../../lib/config';
 import {
   AGG_HOOKS_ON_MAINNET,
   FLUID_DEX_LITE,
@@ -1887,5 +1890,31 @@ describe('AggHooksTopPoolsSelector', () => {
       );
       expect(directPools).toHaveLength(0);
     });
+  });
+});
+
+// Regression tests pinning the upper-bound formula. The cache-size guardrail
+// in BaseCachingPoolDiscoverer derives its limit from getMaxFilteredPoolCount,
+// so any drift here changes the cache write threshold. If you bump a
+// poolSelectionConfig limit or add a fee tier, expect these to fail and update
+// both the formula and these pinned values together.
+describe('getMaxFilteredPoolCount', () => {
+  it('returns 75 for defaultPoolSelectionConfig', () => {
+    // 7 (max(topNDirectPairs=2, MAX_MANUAL_DIRECT_PAIRS_FALLBACK=7))
+    // + 10 (2 × topNOneHopPairs=5)
+    // + 40 (10 intermediaries × (topNSecondHopPairs=2 + WETH + ETH))
+    // + 2  (topNPairs)
+    // + 12 (2 × topNWithBaseToken=6)
+    // + 4  (top WETH/ETH × {tokenIn, tokenOut})
+    // = 75
+    expect(getMaxFilteredPoolCount(defaultPoolSelectionConfig)).toBe(75);
+  });
+
+  it('MAX_MANUAL_DIRECT_PAIRS_FALLBACK matches BASE/V3 fee-tier count', () => {
+    // BASE has the most V3 fee tiers (V3FeeAmountsBase.length = 7) and is the
+    // worst case for manuallyGenerateDirectPairs. If a new fee tier is added
+    // anywhere, this constant should grow and the pinned value above must be
+    // updated.
+    expect(MAX_MANUAL_DIRECT_PAIRS_FALLBACK).toBe(7);
   });
 });

@@ -1,5 +1,8 @@
 import {describe, beforeEach, it, expect, vi} from 'vitest';
-import {BaseCachingPoolDiscoverer} from './BaseCachingPoolDiscoverer';
+import {
+  BaseCachingPoolDiscoverer,
+  POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES,
+} from './BaseCachingPoolDiscoverer';
 import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
@@ -301,6 +304,92 @@ describe('BaseCachingPoolDiscoverer', () => {
         ctx
       )
     ).rejects.toThrow('Unsupported protocol');
+  });
+
+  it('should skip cache write, warn, and emit metric when getPoolsForTokens cache value exceeds size limit', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V2;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    // Build a payload large enough to exceed the limit when JSON.stringify'd.
+    const padding = 'x'.repeat(POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES + 1024);
+    const oversizedPool = {
+      id: padding,
+      feeTier: '3000',
+      tickSpacing: '1',
+      hooks: '0x1111111111111111111111111111111111111111',
+      liquidity: '1000',
+      token0: {id: '0x1111111111111111111111111111111111111111'},
+      token1: {id: '0x2222222222222222222222222222222222222222'},
+      tvlETH: 1000,
+      tvlUSD: 1000,
+    };
+
+    class OversizedPoolDiscoverer extends TestPoolDiscoverer {
+      protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
+        return [oversizedPool];
+      }
+    }
+    const oversizedDiscoverer = new OversizedPoolDiscoverer(
+      serviceConfig,
+      getPoolsCache,
+      getPoolsForTokensCache
+    );
+
+    const pools = await oversizedDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      false,
+      ctx
+    );
+
+    // The pools are still returned to the caller — the user-facing quote
+    // is unaffected; only the cache write is skipped.
+    expect(pools).toEqual([oversizedPool]);
+    expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+    expect(ctx.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Skipping getPoolsForTokens cache write'),
+      expect.objectContaining({chainId, protocol})
+    );
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'PoolDiscoverer.getPoolsForTokens.Cache.ValueTooLarge'
+      ),
+      1,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+    );
+  });
+
+  it('should not throw when getPoolsForTokens cache value is within size limit', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V2;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      false,
+      ctx
+    );
+
+    expect(getPoolsForTokensCache.set).toHaveBeenCalledTimes(1);
+    expect(ctx.metrics.count).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'PoolDiscoverer.getPoolsForTokens.Cache.ValueTooLarge'
+      ),
+      expect.anything(),
+      expect.anything()
+    );
   });
 
   it('should generate different cache keys for different discoverer implementations', () => {

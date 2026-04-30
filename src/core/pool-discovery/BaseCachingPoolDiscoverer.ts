@@ -1,4 +1,4 @@
-import {ChainId} from '../../lib/config';
+import {ChainId, defaultPoolSelectionConfig} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
@@ -7,6 +7,24 @@ import {Address} from '../../models/address/Address';
 import {ErrorNotFound, IRedisCache} from '@uniswap/lib-cache';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {Experiment} from '../../models/hooks/Experiment';
+import {getMaxFilteredPoolCount} from './TopPoolsSelector';
+
+// Upper bound on serialized size of a getPoolsForTokens cache entry, derived
+// from the selector's pool-count cap and a pessimistic per-pool byte estimate.
+//
+// Per-pool byte estimate: V4 worst case ≈ 280-330 bytes JSON-stringified
+// (id+feeTier+tickSpacing+hooks+liquidity+token0+token1+tvlETH+tvlUSD with
+// 0x-prefixed addresses). Round up to 400 for safety.
+//
+// Safety multiplier: 4x covers experiment-hook pools (V4 + experiment opt-in,
+// unbounded by config) and any future selector tweaks that don't update the
+// formula. Observed prod p100 is ~21 KB — well under the derived ceiling.
+const POOLS_FOR_TOKENS_CACHE_BYTES_PER_POOL_ESTIMATE = 400;
+const POOLS_FOR_TOKENS_CACHE_SIZE_SAFETY_MULTIPLIER = 4;
+export const POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES =
+  getMaxFilteredPoolCount(defaultPoolSelectionConfig) *
+  POOLS_FOR_TOKENS_CACHE_BYTES_PER_POOL_ESTIMATE *
+  POOLS_FOR_TOKENS_CACHE_SIZE_SAFETY_MULTIPLIER;
 
 // Base class for pool discoverers that fetch pools from a remote source and caches them.
 // Will be used in the future to fetch/cache pools from different sources (e.g. subgraph, s3, indexer etc.).
@@ -212,18 +230,36 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
 
       // now we are ready to cache
       const retrievedPoolsStr = JSON.stringify(retrievedPools);
+      const cacheValueBytes = Buffer.byteLength(retrievedPoolsStr, 'utf8');
       ctx.logger.debug(
         `[${this.discovererName}] Caching retrieved ${protocol} pools for tokens`,
         {
           cacheKey,
+          chainId,
+          protocol,
+          poolCount: retrievedPools.length,
+          cacheValueBytes,
+          cacheValueLimitBytes: POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES,
+          cacheValuePctOfLimit: Math.round(
+            (cacheValueBytes / POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES) * 100
+          ),
         }
       );
 
       if (!skipPoolsForTokensCache) {
-        await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
-          ttl: this.serviceConfig.RedisCache
-            .TokenInOutPoolsCacheEntryTtlSeconds,
-        });
+        const cacheValueWithinLimit =
+          await this.checkPoolsForTokensCacheValueSize(
+            cacheValueBytes,
+            chainId,
+            protocol,
+            ctx
+          );
+        if (cacheValueWithinLimit) {
+          await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
+            ttl: this.serviceConfig.RedisCache
+              .TokenInOutPoolsCacheEntryTtlSeconds,
+          });
+        }
       }
     }
 
@@ -236,6 +272,33 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     );
 
     return retrievedPools;
+  }
+
+  // Guardrail: returns false (and logs + emits metric) when the serialized
+  // getPoolsForTokens cache value exceeds POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES.
+  // Callers should skip the cache write when this returns false. We don't throw
+  // because cache writes are an optimization: skipping protects Redis from bloat
+  // while keeping the user-facing quote request unaffected.
+  protected async checkPoolsForTokensCacheValueSize(
+    sizeBytes: number,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<boolean> {
+    if (sizeBytes <= POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES) {
+      return true;
+    }
+    ctx.logger.warn(
+      `[${this.discovererName}] Skipping getPoolsForTokens cache write: value size ` +
+        `${sizeBytes} bytes exceeds limit ${POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES} bytes`,
+      {chainId, protocol, sizeBytes}
+    );
+    await ctx.metrics.count(
+      buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache.ValueTooLarge'),
+      1,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+    );
+    return false;
   }
 
   public getPoolsCacheKey(chainId: ChainId, protocol: Protocol) {
