@@ -521,8 +521,8 @@ export class UniRouteBL implements IUniRoutedBL {
           fotInDirectSwap,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         );
         await logElapsedTime('GetRoutes', getRoutesStartTime, ctx, metricTags);
       }

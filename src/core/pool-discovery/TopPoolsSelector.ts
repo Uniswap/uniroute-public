@@ -27,7 +27,11 @@ import {
   V4Pool,
 } from '../../models/pool/V4Pool';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
-import {Experiment, EXPERIMENT_HOOKS} from '../../models/hooks/Experiment';
+import {EXPERIMENT_HOOKS} from '../../models/hooks/Experiment';
+import {
+  getActiveExperiment,
+  RouteNamespaceContext,
+} from '../../models/hooks/namespaces';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
 import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
@@ -145,9 +149,10 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    ctx: Context,
-    experiment?: Experiment
+    nsCtx: RouteNamespaceContext,
+    ctx: Context
   ): Promise<UniPoolInfo[]> {
+    const experiment = getActiveExperiment(nsCtx);
     ctx.logger.debug(
       `Starting Filtering pools for tokens ${tokenIn} and ${tokenOut}`
     );
@@ -859,9 +864,8 @@ export class AggHooksTopPoolsSelector
     tokenOut: Address,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
-    ctx: Context,
-
-    _experiment?: Experiment
+    _nsCtx: RouteNamespaceContext,
+    ctx: Context
   ): Promise<UniPoolInfo[]> {
     // 1. Restrict to agg hook pools only before any selection logic runs.
     // Use protocol-specific list when protocol is an external/agg hook protocol.

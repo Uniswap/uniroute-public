@@ -13,6 +13,7 @@ import {
 } from './interface';
 import {Address} from '../../models/address/Address';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {EMPTY_NAMESPACE_CONTEXT} from '../../models/hooks/namespaces';
 
 const TOKEN_IN = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
 const TOKEN_OUT = new Address('0xdac17f958d2ee523a2206206994597c13d831ec7');
@@ -185,6 +186,7 @@ describe('PoolDiscoverer', () => {
         selector,
         undefined,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -196,8 +198,8 @@ describe('PoolDiscoverer', () => {
         expect.any(Object),
         undefined,
         false,
-        ctx,
-        undefined
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
       );
       expect(v2DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(result).toEqual(
@@ -232,6 +234,7 @@ describe('PoolDiscoverer', () => {
         selector,
         undefined,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -243,8 +246,8 @@ describe('PoolDiscoverer', () => {
         expect.any(Object),
         undefined,
         false,
-        ctx,
-        undefined
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
       );
       expect(v3DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(result).toEqual(
@@ -279,6 +282,7 @@ describe('PoolDiscoverer', () => {
         selector,
         HooksOptions.HOOKS_INCLUSIVE,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -290,8 +294,8 @@ describe('PoolDiscoverer', () => {
         expect.any(Object),
         HooksOptions.HOOKS_INCLUSIVE,
         false,
-        ctx,
-        undefined
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
       );
       expect(v4DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(result).toEqual(
@@ -310,6 +314,7 @@ describe('PoolDiscoverer', () => {
         selector,
         HooksOptions.HOOKS_ONLY,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -329,6 +334,7 @@ describe('PoolDiscoverer', () => {
           selector,
           HooksOptions.HOOKS_INCLUSIVE,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         )
       ).rejects.toThrow(`Unsupported protocol ${Protocol.CURVESTABLESWAPNG}`);
@@ -355,6 +361,7 @@ describe('PoolDiscoverer', () => {
             selector,
             undefined,
             false,
+            EMPTY_NAMESPACE_CONTEXT,
             ctx
           )
         ).rejects.toThrow(`Unsupported protocol ${protocol}`);
@@ -392,6 +399,7 @@ describe('PoolDiscoverer', () => {
         selector,
         HooksOptions.HOOKS_INCLUSIVE,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -452,6 +460,7 @@ describe('PoolDiscoverer', () => {
         selector,
         undefined,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -472,6 +481,7 @@ describe('PoolDiscoverer', () => {
           selector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         )
       ).rejects.toThrow(`Unsupported protocol ${protocol}`);

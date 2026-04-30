@@ -23,7 +23,7 @@ import {
   V4_SUPPORTED,
 } from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
-import {Experiment} from '../../../models/hooks/Experiment';
+import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
 import {
   buildTokenPoolIndex,
   getPoolTVL,
@@ -55,8 +55,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     generateMixedRoutes: boolean,
     hooksOptions: HooksOptions | undefined,
     skipPoolsForTokensCache: boolean,
-    ctx: UniContext,
-    experiment?: Experiment
+    nsCtx: RouteNamespaceContext,
+    ctx: UniContext
   ): Promise<RouteBasic<Pool>[]> {
     // Only fetch pools for requested protocols
     const poolPromises: Promise<UniPoolInfo[]>[] = [];
@@ -73,8 +73,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -91,8 +91,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -112,8 +112,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topPoolsSelector,
           hooksOptions,
           skipPoolsForTokensCache,
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {
@@ -148,8 +148,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           this.topAggHooksPoolsSelector,
           hooksOptions,
           true, // always skip per-token-pair cache to avoid polluting Protocol.V4 cache
-          ctx,
-          experiment
+          nsCtx,
+          ctx
         )
       );
     } else {

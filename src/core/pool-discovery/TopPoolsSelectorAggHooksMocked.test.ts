@@ -29,6 +29,7 @@ import {HardcodedChainRepository} from '../../stores/chain/hardcoded/HardcodedCh
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {poolSelectionConfig} from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
+import {EMPTY_NAMESPACE_CONTEXT} from '../../models/hooks/namespaces';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 
 // ---------------------------------------------------------------------------
@@ -133,6 +134,7 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -156,6 +158,7 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -178,6 +181,7 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       HooksOptions.HOOKS_INCLUSIVE,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -205,6 +209,7 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -221,6 +226,7 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       tokenOut,
       Protocol.V2,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -256,6 +262,7 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -279,6 +286,7 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -300,6 +308,7 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -323,6 +332,7 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -344,6 +354,7 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -366,6 +377,7 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       tokenOut,
       Protocol.V4,
       undefined,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 

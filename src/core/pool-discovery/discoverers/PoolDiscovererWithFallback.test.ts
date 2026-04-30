@@ -18,6 +18,10 @@ import {USDC_MAINNET, USDT_MAINNET} from '../../../lib/tokenUtils';
 import {ITopPoolsSelector} from '../interface';
 import {Context} from '@uniswap/lib-uni/context';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
+import {
+  EMPTY_NAMESPACE_CONTEXT,
+  RouteNamespaceContext,
+} from '../../../models/hooks/namespaces';
 
 // Mock pool data
 const mockV2Pool: V2PoolInfo = {
@@ -66,6 +70,8 @@ class TestTopPoolsSelectorV2 implements ITopPoolsSelector<V2PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
     return Promise.resolve(pools);
@@ -86,6 +92,8 @@ class TestTopPoolsSelectorV3 implements ITopPoolsSelector<V3PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V3PoolInfo[]> {
     return Promise.resolve(pools);
@@ -105,6 +113,8 @@ class TestTopPoolsSelectorV4 implements ITopPoolsSelector<V4PoolInfo> {
     protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V4PoolInfo[]> {
@@ -210,6 +220,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV2Pool]);
@@ -230,6 +241,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV2Pool]);
@@ -252,6 +264,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV2Pool]);
@@ -276,6 +289,7 @@ describe('PoolDiscovererWithFallback', () => {
             topPoolSelector,
             undefined,
             false,
+            EMPTY_NAMESPACE_CONTEXT,
             ctx
           )
         ).rejects.toThrow(error);
@@ -377,6 +391,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV3Pool]);
@@ -397,6 +412,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV3Pool]);
@@ -498,6 +514,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV4Pool]);
@@ -518,6 +535,7 @@ describe('PoolDiscovererWithFallback', () => {
           topPoolSelector,
           undefined,
           false,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
         expect(pools).toEqual([mockV4Pool]);

@@ -20,6 +20,11 @@ import {IChainRepository} from '../../stores/chain/IChainRepository';
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from './interface';
 import {HardcodedChainRepository} from '../../stores/chain/hardcoded/HardcodedChainRepository';
 import {
+  createNamespaceContext,
+  EMPTY_NAMESPACE_CONTEXT,
+  ExperimentalHooksNamespace,
+} from '../../models/hooks/namespaces';
+import {
   BASE_TOKENS_PER_CHAIN,
   WRAPPED_NATIVE_CURRENCY,
 } from '../../lib/tokenUtils';
@@ -280,6 +285,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V2,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -305,6 +311,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V3,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -322,6 +329,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -337,6 +345,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V2,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -358,6 +367,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V2,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -382,6 +392,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         HooksOptions.HOOKS_INCLUSIVE,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -410,6 +421,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         HooksOptions.NO_HOOKS,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -435,6 +447,7 @@ describe('BasicTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         HooksOptions.HOOKS_ONLY,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -468,6 +481,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           undefined,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -495,6 +509,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           undefined,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -518,6 +533,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           undefined,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -538,6 +554,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -560,6 +577,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           HooksOptions.HOOKS_ONLY,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -578,6 +596,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V2,
           undefined,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -622,8 +641,10 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
-          ctx,
-          Experiment.GuideStar_Stable_Stable
+          createNamespaceContext([
+            new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
+          ]),
+          ctx
         );
 
         expect(result.map(p => p.id)).toContain('0xexp');
@@ -650,6 +671,7 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
+          EMPTY_NAMESPACE_CONTEXT,
           ctx
         );
 
@@ -667,8 +689,10 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V2,
           undefined,
-          ctx,
-          Experiment.GuideStar_Stable_Stable
+          createNamespaceContext([
+            new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
+          ]),
+          ctx
         );
 
         // Result is exactly the V2 pool, no duplicate, no extra appended entry.
@@ -694,8 +718,10 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
-          ctx,
-          Experiment.GuideStar_Stable_Stable
+          createNamespaceContext([
+            new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
+          ]),
+          ctx
         );
 
         const occurrences = result.filter(p => p.id === '0xexp_hi').length;
@@ -718,8 +744,10 @@ describe('BasicTopPoolsSelector', () => {
           tokenOut,
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
-          ctx,
-          Experiment.GuideStar_Stable_Stable
+          createNamespaceContext([
+            new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
+          ]),
+          ctx
         );
 
         expect(result.map(p => p.id)).toContain('0xexp_case');
@@ -1376,6 +1404,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(1);
@@ -1396,6 +1425,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(0);
@@ -1415,6 +1445,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(0);
@@ -1441,6 +1472,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(2);
@@ -1466,6 +1498,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1484,6 +1517,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1518,6 +1552,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1575,6 +1610,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1596,6 +1632,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1613,6 +1650,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(0);
@@ -1636,6 +1674,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1656,6 +1695,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       // topNOneHopPairs=5 allows one-hop pools through
@@ -1674,6 +1714,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(1);
@@ -1688,6 +1729,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         HooksOptions.HOOKS_INCLUSIVE,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(1);
@@ -1702,6 +1744,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         HooksOptions.HOOKS_ONLY,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(1);
@@ -1716,6 +1759,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         HooksOptions.NO_HOOKS,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
       expect(result).toHaveLength(0);
@@ -1744,6 +1788,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.FLUIDDEXLITE,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1773,6 +1818,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.CURVESTABLESWAPNG,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1802,6 +1848,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1826,6 +1873,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.FLUIDDEXLITE,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1852,6 +1900,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 
@@ -1873,6 +1922,7 @@ describe('AggHooksTopPoolsSelector', () => {
         tokenOut,
         Protocol.V4,
         undefined,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
 

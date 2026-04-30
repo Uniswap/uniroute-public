@@ -11,6 +11,10 @@ import {IRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {
+  EMPTY_NAMESPACE_CONTEXT,
+  RouteNamespaceContext,
+} from '../../models/hooks/namespaces';
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -25,6 +29,8 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     protocol: Protocol,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     hooksOptions: HooksOptions | undefined,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<UniPoolInfo[]> {
@@ -229,6 +235,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       topPoolSelector,
       undefined,
       false,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -265,6 +272,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       topPoolSelector,
       undefined,
       false,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -301,6 +309,7 @@ describe('BaseCachingPoolDiscoverer', () => {
         topPoolSelector,
         undefined,
         false,
+        EMPTY_NAMESPACE_CONTEXT,
         ctx
       )
     ).rejects.toThrow('Unsupported protocol');
@@ -345,6 +354,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       topPoolSelector,
       undefined,
       false,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
@@ -379,6 +389,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       topPoolSelector,
       undefined,
       false,
+      EMPTY_NAMESPACE_CONTEXT,
       ctx
     );
 
