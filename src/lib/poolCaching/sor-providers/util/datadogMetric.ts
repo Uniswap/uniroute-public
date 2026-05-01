@@ -89,14 +89,14 @@ export class DatadogPoolCachingMetric extends IMetric {
       let ms = value;
       if (unit === MetricLoggerUnit.Seconds) ms = value * 1000;
       if (unit === MetricLoggerUnit.Microseconds) ms = value / 1000;
-      void this.metrics.timer(metricName, ms, opts);
+      void this.metrics.dist(`${metricName}.dist`, ms, opts);
     } else if (unit && COUNT_UNITS.has(unit)) {
       void this.metrics.count(metricName, value, opts);
     } else if (unit && GAUGE_UNITS.has(unit)) {
       void this.metrics.gauge(metricName, value, opts);
     } else {
       // None, unspecified, or unknown → use distribution
-      void this.metrics.dist(metricName, value, opts);
+      void this.metrics.dist(`${metricName}.dist`, value, opts);
     }
   }
 }

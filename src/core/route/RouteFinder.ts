@@ -103,8 +103,8 @@ export class RouteFinder<TPool extends Pool> implements IRouteFinder<TPool> {
       ctx.logger.debug(
         `[Latency] RouteFinder.findAllPaths took ${findAllPathsElapsed}ms`
       );
-      await ctx.metrics.timer(
-        buildMetricKey('RouteFinder.findAllPaths.Latency'),
+      await ctx.metrics.dist(
+        buildMetricKey('RouteFinder.findAllPaths.Latency.dist'),
         findAllPathsElapsed,
         {tags: metricTags}
       );

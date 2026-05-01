@@ -187,9 +187,11 @@ export async function fetchAggHookQuotes(
     failures,
     {tags: metricTags}
   );
-  await ctx.metrics.timer(buildMetricKey('AggHookQuoter.latency'), latencyMs, {
-    tags: metricTags,
-  });
+  await ctx.metrics.dist(
+    buildMetricKey('AggHookQuoter.latency.dist'),
+    latencyMs,
+    {tags: metricTags}
+  );
 
   return quotes;
 }

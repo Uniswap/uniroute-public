@@ -241,8 +241,8 @@ export class UniRouteBL implements IUniRoutedBL {
 
     const emitCallMetrics = async (tags: string[]) => {
       await ctx.metrics.count(buildMetricKey('Call'), 1, {tags});
-      await ctx.metrics.timer(
-        buildMetricKey('Latency'),
+      await ctx.metrics.dist(
+        buildMetricKey('Latency.dist'),
         Date.now() - quoteCallStartTime,
         {tags}
       );
@@ -2089,8 +2089,8 @@ export class UniRouteBL implements IUniRoutedBL {
         const simulationStatus =
           simulatedQuote.simulationResult?.status ??
           SimulationStatus.UNATTEMPTED;
-        await ctx.metrics.timer(
-          buildMetricKey('SimulationLatency'),
+        await ctx.metrics.dist(
+          buildMetricKey('SimulationLatency.dist'),
           simulationLatency,
           {
             tags: [

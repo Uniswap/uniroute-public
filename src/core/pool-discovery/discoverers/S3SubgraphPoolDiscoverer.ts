@@ -220,8 +220,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
           tags: metricTags,
         }
       );
-      await ctx.metrics.timer(
-        buildMetricKey('S3SubgraphPoolDiscoverer.Latency'),
+      await ctx.metrics.dist(
+        buildMetricKey('S3SubgraphPoolDiscoverer.Latency.dist'),
         Date.now() - poolCallStartTime,
         {
           tags: metricTags,

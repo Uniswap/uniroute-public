@@ -496,8 +496,8 @@ export class TenderlySimulator extends Simulator {
 
         const simulationLatency = Date.now() - before;
 
-        await ctx.metrics.timer(
-          'Tenderly.Simulation.Latency',
+        await ctx.metrics.dist(
+          'Tenderly.Simulation.Latency.dist',
           simulationLatency,
           {
             tags: [`chain:${chainId}`, 'simType:SimApi'],
@@ -581,8 +581,8 @@ export class TenderlySimulator extends Simulator {
 
         const simulationLatency = Date.now() - before;
 
-        await ctx.metrics.timer(
-          'Tenderly.Simulation.Latency',
+        await ctx.metrics.dist(
+          'Tenderly.Simulation.Latency.dist',
           simulationLatency,
           {
             tags: [`chain:${chainId}`, 'simType:Node'],

@@ -38,21 +38,21 @@ function createMockMetrics(): IMetrics & {
 }
 
 describe('DatadogPoolCachingMetric', () => {
-  it('routes Milliseconds to timer', () => {
+  it('routes Milliseconds to dist', () => {
     const mock = createMockMetrics();
     const metric = new DatadogPoolCachingMetric(mock);
     metric.putMetric('getPools.latency', 250, MetricLoggerUnit.Milliseconds);
-    expect(mock.calls.timer).toHaveLength(1);
-    expect(mock.calls.timer[0]!.name).toBe('pool_caching.getPools_latency');
-    expect(mock.calls.timer[0]!.val).toBe(250);
+    expect(mock.calls.dist).toHaveLength(1);
+    expect(mock.calls.dist[0]!.name).toBe('pool_caching.getPools_latency.dist');
+    expect(mock.calls.dist[0]!.val).toBe(250);
   });
 
-  it('converts Seconds to milliseconds for timer', () => {
+  it('converts Seconds to milliseconds for dist', () => {
     const mock = createMockMetrics();
     const metric = new DatadogPoolCachingMetric(mock);
     metric.putMetric('duration', 1.5, MetricLoggerUnit.Seconds);
-    expect(mock.calls.timer).toHaveLength(1);
-    expect(mock.calls.timer[0]!.val).toBe(1500);
+    expect(mock.calls.dist).toHaveLength(1);
+    expect(mock.calls.dist[0]!.val).toBe(1500);
   });
 
   it('routes Count to count', () => {
@@ -76,7 +76,9 @@ describe('DatadogPoolCachingMetric', () => {
     const metric = new DatadogPoolCachingMetric(mock);
     metric.putMetric('compression_ratio', 3.5);
     expect(mock.calls.dist).toHaveLength(1);
-    expect(mock.calls.dist[0]!.name).toBe('pool_caching.compression_ratio');
+    expect(mock.calls.dist[0]!.name).toBe(
+      'pool_caching.compression_ratio.dist'
+    );
     expect(mock.calls.dist[0]!.val).toBe(3.5);
   });
 
@@ -106,8 +108,8 @@ describe('DatadogPoolCachingMetric', () => {
       100,
       MetricLoggerUnit.Milliseconds
     );
-    expect(mock.calls.timer[0]!.name).toBe(
-      'pool_caching.CachePools_getPools_latency'
+    expect(mock.calls.dist[0]!.name).toBe(
+      'pool_caching.CachePools_getPools_latency.dist'
     );
   });
 

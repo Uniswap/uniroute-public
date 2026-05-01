@@ -222,8 +222,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       ctx.logger.debug(
         `[Latency] TopPoolsSelector.filterPools took ${filterPoolsElapsed}ms`
       );
-      await ctx.metrics.timer(
-        buildMetricKey('TopPoolsSelector.filterPools.Latency'),
+      await ctx.metrics.dist(
+        buildMetricKey('TopPoolsSelector.filterPools.Latency.dist'),
         filterPoolsElapsed,
         {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
       );

@@ -258,8 +258,8 @@ export class EthSimulateV1Simulator extends Simulator {
           ).toFixed(0)
         );
 
-        await ctx.metrics.timer(
-          'UniRpcV2.Simulation.Latency',
+        await ctx.metrics.dist(
+          'UniRpcV2.Simulation.Latency.dist',
           simulationLatency,
           {
             tags: [`chain:${this.chainId}`, 'simType:eth_simulateV1'],

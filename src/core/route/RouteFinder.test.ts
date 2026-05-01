@@ -16,7 +16,7 @@ const createMockContext = (): UniContext => {
     metrics: {
       count: vi.fn().mockResolvedValue(undefined),
       gauge: vi.fn().mockResolvedValue(undefined),
-      timer: vi.fn().mockResolvedValue(undefined),
+      dist: vi.fn().mockResolvedValue(undefined),
     },
     logger: {
       debug: vi.fn(),

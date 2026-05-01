@@ -137,7 +137,7 @@ describe('BaseCachingPoolDiscoverer', () => {
     ctx = {
       metrics: {
         count: vi.fn(),
-        timer: vi.fn(),
+        dist: vi.fn(),
       },
       logger: {
         debug: vi.fn(),

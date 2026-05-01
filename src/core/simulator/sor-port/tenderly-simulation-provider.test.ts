@@ -170,7 +170,7 @@ describe('tenderly-simulation-provider', () => {
           debug: vi.fn(),
         },
         metrics: {
-          timer: vi.fn(),
+          dist: vi.fn(),
           count: vi.fn(),
         },
       } as unknown as Context;
@@ -358,8 +358,8 @@ describe('tenderly-simulation-provider', () => {
           quoteSplit.tokensInfo,
           195000n * 50000000000n // estimatedGasUsed * gasPriceWei
         );
-        expect(ctx.metrics.timer).toHaveBeenCalledWith(
-          'Tenderly.Simulation.Latency',
+        expect(ctx.metrics.dist).toHaveBeenCalledWith(
+          'Tenderly.Simulation.Latency.dist',
           expect.any(Number),
           {tags: ['chain:1', 'simType:Node']}
         );
@@ -762,8 +762,8 @@ describe('tenderly-simulation-provider', () => {
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
         expect(result.simulationResult?.estimatedGasUsed).toBe(195000n); // 150000 * 1.3
-        expect(ctx.metrics.timer).toHaveBeenCalledWith(
-          'Tenderly.Simulation.Latency',
+        expect(ctx.metrics.dist).toHaveBeenCalledWith(
+          'Tenderly.Simulation.Latency.dist',
           expect.any(Number),
           {tags: ['chain:196', 'simType:SimApi']}
         );
@@ -989,7 +989,7 @@ describe('tenderly-simulation-provider', () => {
           debug: vi.fn(),
         },
         metrics: {
-          timer: vi.fn(),
+          dist: vi.fn(),
           count: vi.fn(),
         },
       } as unknown as Context;
@@ -1298,7 +1298,7 @@ describe('tenderly-simulation-provider', () => {
           debug: vi.fn(),
         },
         metrics: {
-          timer: vi.fn(),
+          dist: vi.fn(),
           count: vi.fn(),
         },
       } as unknown as Context;
@@ -1381,8 +1381,8 @@ describe('tenderly-simulation-provider', () => {
           2000n
         );
 
-        expect(ctx.metrics.timer).toHaveBeenCalledWith(
-          'UniRpcV2.Simulation.Latency',
+        expect(ctx.metrics.dist).toHaveBeenCalledWith(
+          'UniRpcV2.Simulation.Latency.dist',
           expect.any(Number),
           {
             tags: ['chain:1', 'simType:eth_simulateV1'],
