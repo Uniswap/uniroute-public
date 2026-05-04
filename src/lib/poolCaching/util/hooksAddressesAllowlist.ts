@@ -8,6 +8,8 @@ import {
   AGG_HOOKS_ON_TEMPO,
   FLUID_DEX_1,
   FLUID_DEX_LITE,
+  PANCAKESWAP_V3,
+  SLIPSTREAM,
   STABLE_SWAP,
   STABLE_SWAP_NG,
 } from './aggHooksAddressesAllowlist';
@@ -54,6 +56,12 @@ export const AGG_HOOKS_PER_CHAIN: Partial<
   },
   [Protocol.FLUIDDEXLITE]: {
     [ChainId.MAINNET]: FLUID_DEX_LITE,
+  },
+  [Protocol.SLIPSTREAM]: {
+    [ChainId.BASE]: SLIPSTREAM,
+  },
+  [Protocol.PANCAKESWAPV3]: {
+    [ChainId.BASE]: PANCAKESWAP_V3,
   },
   // NOTE: TEMPOEXCHANGE is intentionally omitted here. Tempo agg hook pools
   // are a special case — they are meant to be mixed with V4 pools rather than
@@ -507,6 +515,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ADAPTIVE_BURN_HOOK_ON_BASE,
     LAUNCHLY_HOOK_ON_BASE,
     DRXGAI_HOOK_ON_BASE,
+    ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO],
   [ChainId.ZORA_SEPOLIA]: [ADDRESS_ZERO],
