@@ -15,6 +15,7 @@ export interface IQuoteBestSplitFinder<TPool extends Pool> {
     timeoutMs: number,
     tradeType: TradeType,
     metricTags: string[],
-    ctx: UniContext
+    ctx: UniContext,
+    testAggHooks?: boolean
   ): Promise<RouteBasic<TPool>[][]>;
 }

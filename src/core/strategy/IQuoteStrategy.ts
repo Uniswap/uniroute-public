@@ -22,7 +22,8 @@ export interface IQuoteStrategy {
     routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[],
-    blockNumber?: number
+    blockNumber?: number,
+    testAggHooks?: boolean
   ): Promise<QuoteSplit[]>;
 
   name(): string;

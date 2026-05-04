@@ -781,7 +781,8 @@ export class UniRouteBL implements IUniRoutedBL {
           routes,
           tokensInfo,
           metricTags,
-          requestBlockNumber
+          requestBlockNumber,
+          options?.testAggHooks
         );
 
       ctx.logger.debug(

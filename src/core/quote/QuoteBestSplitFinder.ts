@@ -136,12 +136,17 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * @param chainId The chain ID
    * @returns Array of best available quotes
    */
-  private getBestUnusedQuotes(
+  private getBestUnusedQuotesStats(
     percentage: number,
     percentageToSortedQuotes: Map<number, QuoteBasic[]>,
     usedRoutes: RouteBasic<TPool>[],
     chainId: ChainId
-  ): QuoteBasic[] {
+  ): {
+    quotes: QuoteBasic[];
+    totalCount: number;
+    validCount: number;
+    returnedCount: number;
+  } {
     const quotes = percentageToSortedQuotes.get(percentage) || [];
     // First filter valid quotes
     const validQuotes = quotes.filter(quote => {
@@ -152,7 +157,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       );
     });
     // Then return only top MAX_VALID_QUOTES_PER_PERCENTAGE quotes
-    return validQuotes.slice(0, this.MAX_VALID_QUOTES_PER_PERCENTAGE);
+    const returnedQuotes = validQuotes.slice(
+      0,
+      this.MAX_VALID_QUOTES_PER_PERCENTAGE
+    );
+    return {
+      quotes: returnedQuotes,
+      totalCount: quotes.length,
+      validCount: validQuotes.length,
+      returnedCount: returnedQuotes.length,
+    };
   }
 
   /**
@@ -255,7 +269,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     timeoutMs: number,
     tradeType: TradeType,
     metricTags: string[],
-    ctx: UniContext
+    ctx: UniContext,
+    testAggHooks?: boolean
   ): Promise<RouteBasic<TPool>[][]> {
     if (percentageStep < 5 || percentageStep > 100) {
       throw new Error('Percentage step must be between 5 and 100');
@@ -270,6 +285,19 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     let previousLevelBestAmount = 0n;
     const startTime = Date.now();
     let timedOut = false;
+    let earlyExitReason:
+      | 'timeout'
+      | 'no_new_routes'
+      | 'low_improvement'
+      | null = null;
+    const bestUnusedQuoteStats = {
+      calls: 0,
+      totalQuotes: 0,
+      validQuotes: 0,
+      returnedQuotes: 0,
+      droppedByConflict: 0,
+      droppedByLimit: 0,
+    };
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -310,6 +338,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         }
       }
     };
+    const getBestUnusedQuotes = (
+      percentage: number,
+      currentRoutes: RouteBasic<TPool>[]
+    ): QuoteBasic[] => {
+      const stats = this.getBestUnusedQuotesStats(
+        percentage,
+        percentageToSortedQuotes,
+        currentRoutes,
+        chainId
+      );
+      bestUnusedQuoteStats.calls++;
+      bestUnusedQuoteStats.totalQuotes += stats.totalCount;
+      bestUnusedQuoteStats.validQuotes += stats.validCount;
+      bestUnusedQuoteStats.returnedQuotes += stats.returnedCount;
+      bestUnusedQuoteStats.droppedByConflict +=
+        stats.totalCount - stats.validCount;
+      bestUnusedQuoteStats.droppedByLimit +=
+        stats.validCount - stats.returnedCount;
+      return stats.quotes;
+    };
 
     // First, add all 100% routes from the best quotes
     const fullQuotes = percentageToSortedQuotes.get(100) || [];
@@ -339,6 +387,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       // Check for timeout
       if (Date.now() - startTime > timeoutMs) {
         timedOut = true;
+        earlyExitReason = 'timeout';
         return;
       }
 
@@ -360,11 +409,9 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           remainingPercentage >= percentageStep &&
           remainingPercentage <= 100 - percentageStep
         ) {
-          const availableQuotes = this.getBestUnusedQuotes(
+          const availableQuotes = getBestUnusedQuotes(
             remainingPercentage,
-            percentageToSortedQuotes,
-            currentRoutes,
-            chainId
+            currentRoutes
           );
 
           // Try each available quote
@@ -390,22 +437,19 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         // Check for timeout in the percentage loop
         if (Date.now() - startTime > timeoutMs) {
           timedOut = true;
+          earlyExitReason = 'timeout';
           return;
         }
 
         // Get best available quotes for this percentage
-        const availableQuotes = this.getBestUnusedQuotes(
-          percent,
-          percentageToSortedQuotes,
-          currentRoutes,
-          chainId
-        );
+        const availableQuotes = getBestUnusedQuotes(percent, currentRoutes);
 
         // Try each available quote
         for (const quote of availableQuotes) {
           // Check for timeout in the inner loop
           if (Date.now() - startTime > timeoutMs) {
             timedOut = true;
+            earlyExitReason = 'timeout';
             return;
           }
 
@@ -465,6 +509,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         ctx.logger.debug(
           `QuoteBestSplitFinder: No new routes added at level ${level}, exiting early`
         );
+        earlyExitReason = 'no_new_routes';
         break;
       }
 
@@ -487,6 +532,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           ctx.logger.debug(
             `QuoteBestSplitFinder: Improvement less than 0.01% at level ${level}, exiting early`
           );
+          earlyExitReason = 'low_improvement';
           break;
         }
       }
@@ -510,6 +556,35 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         `QuoteBestSplitFinder: Pre-filter ${result.length} route combinations`
       );
     }
+
+    ctx.logger.debug('QuoteBestSplitFinder observability', {
+      chainId,
+      percentageStep,
+      maxSplits,
+      maxSplitRoutes,
+      timeoutMs,
+      elapsedMs: Date.now() - startTime,
+      timedOut,
+      earlyExitReason,
+      combinationsFound: result.length,
+      bestUnusedQuoteStats,
+    });
+    const earlyExitTag = `earlyExitReason:${earlyExitReason ?? 'normal'}`;
+    await Promise.all([
+      ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.PrunedByConflict'),
+        bestUnusedQuoteStats.droppedByConflict,
+        {tags: metricTags}
+      ),
+      ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.PrunedByLimit'),
+        bestUnusedQuoteStats.droppedByLimit,
+        {tags: metricTags}
+      ),
+      ctx.metrics.count(buildMetricKey('QuoteBestSplitFinder.EarlyExit'), 1, {
+        tags: [...metricTags, earlyExitTag, `testAggHooks:${testAggHooks}`],
+      }),
+    ]);
 
     return result;
   }

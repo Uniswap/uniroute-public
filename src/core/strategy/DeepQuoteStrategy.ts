@@ -34,6 +34,7 @@ import {ITokenHandler} from '../../stores/token/ITokenHandler';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {partitionAggHookRoutes, fetchAggHookQuotes} from './AggHookQuoter';
+import {isAggHookPool} from '../../lib/observability';
 
 /**
  * DeepQuoteStrategy implements an optimized quote finding logic:
@@ -105,7 +106,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[],
-    blockNumber?: number
+    blockNumber?: number,
+    testAggHooks?: boolean
   ): Promise<QuoteSplit[]> {
     // Generate all possible partial routes per percentage step
     const pctRoutes: RouteBasic[] = [];
@@ -244,6 +246,56 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
         return tradeType === TradeType.ExactOut ? -comparison : comparison;
       });
     }
+    const percentageBucketSummary = Array.from(
+      percentageToSortedQuotes.entries()
+    ).map(([percentage, quotes]) => ({
+      percentage,
+      quoteCount: quotes.length,
+      aggHookQuoteCount: quotes.filter(quote =>
+        quote.route.path.some(pool => isAggHookPool(pool, chain.chainId))
+      ).length,
+      v3OnlyQuoteCount: quotes.filter(quote =>
+        quote.route.path.every(pool => pool.protocol === Protocol.V3)
+      ).length,
+    }));
+    const aggHookQuoteCountTotal = percentageBucketSummary.reduce(
+      (sum, bucket) => sum + bucket.aggHookQuoteCount,
+      0
+    );
+    const v3OnlyQuoteCountTotal = percentageBucketSummary.reduce(
+      (sum, bucket) => sum + bucket.v3OnlyQuoteCount,
+      0
+    );
+    ctx.logger.debug('DeepQuoteStrategy percentage bucket observability', {
+      chainId: chain.chainId,
+      tradeType,
+      protocols: protocols.join(',').toLowerCase(),
+      routeSplitPercentage: serviceConfig.RouteFinder.RouteSplitPercentage,
+      pctRoutes: pctRoutes.length,
+      quotesWithGas: quotesWithGas.length,
+      percentageBuckets: percentageBucketSummary,
+    });
+    const deepQuoteStrategyMetricTags = [
+      ...metricTags,
+      `testAggHooks:${testAggHooks}`,
+    ];
+    await Promise.all([
+      ctx.metrics.count(
+        buildMetricKey('DeepQuoteStrategy.PctRoutes'),
+        pctRoutes.length,
+        {tags: deepQuoteStrategyMetricTags}
+      ),
+      ctx.metrics.count(
+        buildMetricKey('DeepQuoteStrategy.AggHookQuotes'),
+        aggHookQuoteCountTotal,
+        {tags: deepQuoteStrategyMetricTags}
+      ),
+      ctx.metrics.count(
+        buildMetricKey('DeepQuoteStrategy.V3OnlyQuotes'),
+        v3OnlyQuoteCountTotal,
+        {tags: deepQuoteStrategyMetricTags}
+      ),
+    ]);
 
     // Use QuoteBestSplitFinder to find optimal route combinations
     const findSplitsStartTime = Date.now();
@@ -257,14 +309,26 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       serviceConfig.RouteFinder.RouteSplitTimeoutMs,
       tradeType,
       metricTags,
-      ctx
+      ctx,
+      testAggHooks
     );
+    const findBestSplitsLatencyMs = Date.now() - findSplitsStartTime;
     await logElapsedTime(
       'FindBestSplits',
       findSplitsStartTime,
       ctx,
       metricTags
     );
+    ctx.logger.debug('DeepQuoteStrategy split search observability', {
+      chainId: chain.chainId,
+      tradeType,
+      protocols: protocols.join(',').toLowerCase(),
+      findBestSplitsLatencyMs,
+      routeSplitTimeoutMs: serviceConfig.RouteFinder.RouteSplitTimeoutMs,
+      maxSplits: serviceConfig.RouteFinder.MaxSplits,
+      maxSplitRoutes: serviceConfig.RouteFinder.MaxSplitRoutes,
+      splitRoutes: splitRoutes.length,
+    });
 
     ctx.logger.debug(`--> Routes (${routes.length})`);
     ctx.logger.debug(`--> PctRoutes (${pctRoutes.length})`);
