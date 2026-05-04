@@ -113,6 +113,10 @@ import {RedisCache} from '@uniswap/lib-cache/redis';
 import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
 import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {
+  namespaceFieldsForLogging,
+  summarizeRouteForLogging,
+} from '../lib/observability';
 
 export class UniRouteBL implements IUniRoutedBL {
   constructor(
@@ -275,6 +279,7 @@ export class UniRouteBL implements IUniRoutedBL {
       chainId: chain.chainId,
     });
     const namespaces = nsCtx.allowedNamespaces;
+    const namespaceLogFields = namespaceFieldsForLogging(namespaces);
     const debugLogs = request.debugLogs;
     const portionBips = request.portionBips;
     const portionRecipient = request.portionRecipient;
@@ -307,6 +312,10 @@ export class UniRouteBL implements IUniRoutedBL {
       quoteType,
       protocols: protocols.sort().join(',').toLowerCase(),
       hooksOptions,
+      ...namespaceLogFields,
+      hasExternalProtocols: isExternalProtocol(protocols),
+      stableStableExperiment: experiment,
+      testAggHooks: options?.testAggHooks,
       requestSource,
       forceMixed,
       portionBips,
@@ -926,6 +935,68 @@ export class UniRouteBL implements IUniRoutedBL {
         bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
         this.serviceConfig.CachedRoutes.Enabled
       ) {
+        const bestQuoteRouteCount = bestQuote!.quotes.length;
+        const simulationStatusForTag =
+          bestQuote?.simulationResult?.status !== undefined
+            ? SimulationStatus[bestQuote.simulationResult.status]
+            : 'none';
+        const routeCountBucket =
+          bestQuoteRouteCount === 0
+            ? '0'
+            : bestQuoteRouteCount === 1
+              ? '1'
+              : bestQuoteRouteCount <= 3
+                ? '2-3'
+                : bestQuoteRouteCount <= 5
+                  ? '4-5'
+                  : bestQuoteRouteCount <= 10
+                    ? '6-10'
+                    : '>10';
+        ctx.logger.debug('Cached route write observability', {
+          chainId: chain.chainId,
+          tradeType,
+          quoteType,
+          hooksOptions,
+          protocols: protocols.join(',').toLowerCase(),
+          amountIn: amountIn.toString(),
+          usdBucket,
+          ...namespaceLogFields,
+          bestQuoteRouteCount,
+          simulationStatus: bestQuote?.simulationResult?.status,
+          routeSummaries: bestQuote!.quotes.map(quote => {
+            const routeSummary = summarizeRouteForLogging(
+              quote.route,
+              chain.chainId
+            );
+            return {
+              routeHash: routeSummary.routeHash,
+              routeString: routeSummary.routeString,
+              protocol: routeSummary.protocol,
+              percentage: routeSummary.percentage,
+              hopCount: routeSummary.hopCount,
+              poolIds: routeSummary.poolIds,
+              hasAggHookPool: routeSummary.hasAggHookPool,
+              aggHookPoolCount: routeSummary.aggHookPoolCount,
+              quoteAmount: quote.amount.toString(),
+              gasCostInQuoteToken:
+                quote.gasDetails?.gasCostInQuoteToken?.toString(),
+              gasUse: quote.gasDetails?.gasUse.toString(),
+            };
+          }),
+        });
+        await ctx.metrics.count(
+          buildMetricKey('CachedRoutes.WriteBestQuote'),
+          1,
+          {
+            tags: [
+              `chain:${ChainId[chain.chainId]}`,
+              `tradeType:${tradeType}`,
+              `simulationStatus:${simulationStatusForTag}`,
+              `routeCountBucket:${routeCountBucket}`,
+              `testAggHooks:${options?.testAggHooks}`,
+            ],
+          }
+        );
         await Promise.all(
           bestQuote!.quotes.map(quote =>
             this.cachedRoutesRepository.saveCachedRoutes(
@@ -941,7 +1012,9 @@ export class UniRouteBL implements IUniRoutedBL {
                 : tokenOutCurrencyInfo.wrappedAddress,
               tradeType,
               amountIn,
-              usdBucket
+              usdBucket,
+              ctx,
+              options?.testAggHooks
             )
           )
         );
