@@ -37,6 +37,7 @@ import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
 import {getProtocolForAggHookAddress} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {getHardcodedV4Pools} from '../../../core/pool-discovery/discoverers/hardcoded-v4-pools';
+import {routeSetCountsForLogging} from '../../../lib/observability';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -169,6 +170,69 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     for (const pool of rawPoolsV4) poolsV4Map.set(pool.id, pool);
     for (const pool of rawExternalPools) poolsV4Map.set(pool.id, pool);
     const poolsV4 = Array.from(poolsV4Map.values());
+
+    const externalAggHookPoolsByProtocol: Record<string, number> = {};
+    for (const pool of rawExternalPools) {
+      const hookProtocol = getProtocolForAggHookAddress(
+        (pool as V4PoolInfo).hooks,
+        chain.chainId
+      );
+      const key = hookProtocol ?? 'unknown';
+      externalAggHookPoolsByProtocol[key] =
+        (externalAggHookPoolsByProtocol[key] ?? 0) + 1;
+    }
+
+    ctx.logger.debug('Route pool universe observability', {
+      chainId: chain.chainId,
+      tokenIn: tokenInAddress.toString(),
+      tokenOut: tokenOutAddress.toString(),
+      protocols: protocols.join(',').toLowerCase(),
+      hooksOptions,
+      skipPoolsForTokensCache,
+      hasExternalProtocol: externalProtocolExists,
+      selectedPools: {
+        v2: poolsV2.length,
+        v3: poolsV3.length,
+        rawV4: rawPoolsV4.length,
+        rawExternalAggHooks: rawExternalPools.length,
+        dedupedV4: poolsV4.length,
+      },
+      externalAggHookPoolsByProtocol,
+    });
+
+    await Promise.all([
+      ctx.metrics.count(
+        buildMetricKey('RoutePoolUniverse.SelectedPools'),
+        poolsV2.length,
+        {
+          tags: [`chain:${ChainId[chain.chainId]}`, 'protocol:v2'],
+        }
+      ),
+      ctx.metrics.count(
+        buildMetricKey('RoutePoolUniverse.SelectedPools'),
+        poolsV3.length,
+        {
+          tags: [`chain:${ChainId[chain.chainId]}`, 'protocol:v3'],
+        }
+      ),
+      ctx.metrics.count(
+        buildMetricKey('RoutePoolUniverse.SelectedPools'),
+        poolsV4.length,
+        {
+          tags: [`chain:${ChainId[chain.chainId]}`, 'protocol:v4'],
+        }
+      ),
+      ctx.metrics.count(
+        buildMetricKey('RoutePoolUniverse.SelectedPools'),
+        rawExternalPools.length,
+        {
+          tags: [
+            `chain:${ChainId[chain.chainId]}`,
+            'protocol:external_agg_hooks',
+          ],
+        }
+      ),
+    ]);
 
     await logElapsedTime('FetchPools', fetchPoolsStartTime, ctx, [
       `chain:${ChainId[chain.chainId]}`,
@@ -346,6 +410,16 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     await logElapsedTime('GenerateRoutes', generateRoutesStartTime, ctx, [
       `chain:${ChainId[chain.chainId]}`,
     ]);
+
+    ctx.logger.debug('Generated route universe observability', {
+      chainId: chain.chainId,
+      tokenIn: tokenInAddress.toString(),
+      tokenOut: tokenOutAddress.toString(),
+      protocols: protocols.join(',').toLowerCase(),
+      hooksOptions,
+      hasExternalProtocol: externalProtocolExists,
+      routeCounts: routeSetCountsForLogging(allRoutes, chain.chainId),
+    });
 
     return allRoutes;
   }
