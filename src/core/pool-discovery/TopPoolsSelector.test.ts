@@ -23,6 +23,7 @@ import {
   createNamespaceContext,
   EMPTY_NAMESPACE_CONTEXT,
   ExperimentalHooksNamespace,
+  PermissionedHooksNamespace,
 } from '../../models/hooks/namespaces';
 import {
   BASE_TOKENS_PER_CHAIN,
@@ -601,6 +602,109 @@ describe('BasicTopPoolsSelector', () => {
         );
 
         expect(result.map(p => p.id)).toContain(mockV2Pool.id);
+      });
+    });
+
+    describe('permissioned hook drop', () => {
+      // Sepolia is the only chain with permissionedHookAddress configured.
+      const SEPOLIA_PERMISSIONED_HOOK =
+        '0x2435accb60e5feead7b670c35a02b0de101a4880';
+      const sepoliaTokenIn = new Address(
+        '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'
+      );
+      const sepoliaTokenOut = new Address(
+        '0x41C0d18d34C61e36145491a6e5cf971819f14159'
+      );
+
+      const makePermissionedPool = (id = '0xperm'): V4PoolInfo =>
+        ({
+          id,
+          token0: {id: sepoliaTokenIn.address.toLowerCase()},
+          token1: {id: sepoliaTokenOut.address.toLowerCase()},
+          hooks: SEPOLIA_PERMISSIONED_HOOK,
+          feeTier: '3000',
+          tickSpacing: '60',
+          liquidity: '10000',
+          tvlETH: 5000,
+          tvlUSD: 5000,
+        }) as V4PoolInfo;
+
+      const makeNonPermissionedPool = (id = '0xnorm'): V4PoolInfo =>
+        ({
+          id,
+          token0: {id: sepoliaTokenIn.address.toLowerCase()},
+          token1: {id: sepoliaTokenOut.address.toLowerCase()},
+          hooks: ADDRESS_ZERO,
+          feeTier: '3000',
+          tickSpacing: '60',
+          liquidity: '10000',
+          tvlETH: 5000,
+          tvlUSD: 5000,
+        }) as V4PoolInfo;
+
+      it('drops permissioned pool when namespace is inactive', async () => {
+        const permPool = makePermissionedPool();
+        const normalPool = makeNonPermissionedPool();
+
+        const result = await selector.filterPools(
+          [permPool, normalPool],
+          ChainId.SEPOLIA,
+          sepoliaTokenIn,
+          sepoliaTokenOut,
+          Protocol.V4,
+          undefined,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        );
+
+        const ids = result.map(p => p.id);
+        expect(ids).not.toContain('0xperm');
+        expect(ids).toContain('0xnorm');
+      });
+
+      it('keeps permissioned pool when namespace is active', async () => {
+        const permPool = makePermissionedPool();
+        const nsCtx = createNamespaceContext([
+          new PermissionedHooksNamespace(),
+        ]);
+
+        const result = await selector.filterPools(
+          [permPool],
+          ChainId.SEPOLIA,
+          sepoliaTokenIn,
+          sepoliaTokenOut,
+          Protocol.V4,
+          undefined,
+          nsCtx,
+          ctx
+        );
+
+        expect(result.map(p => p.id)).toContain('0xperm');
+      });
+
+      it('does not affect chains without permissionedHookAddress configured', async () => {
+        // Mainnet chain doesn't set permissionedHookAddress, so a pool
+        // with the same hook address shouldn't be dropped on Mainnet.
+        const poolWithSepoliaHook = makePermissionedPool();
+        // Override token addresses to mainnet (avoid unsupported-token filter).
+        const mainnetPool: V4PoolInfo = {
+          ...poolWithSepoliaHook,
+          token0: {id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'}, // WETH
+          token1: {id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'}, // USDC
+        };
+
+        const result = await selector.filterPools(
+          [mainnetPool],
+          ChainId.MAINNET,
+          new Address('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'),
+          new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'),
+          Protocol.V4,
+          undefined,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        );
+
+        expect(result.map(p => p.id)).toContain('0xperm');
       });
     });
 

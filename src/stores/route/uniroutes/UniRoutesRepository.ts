@@ -17,6 +17,7 @@ import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Fee, V3Pool} from '../../../models/pool/V3Pool';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {
+  buildMetricKey,
   ChainId,
   IUniRouteServiceConfig,
   V2_SUPPORTED,
@@ -24,6 +25,7 @@ import {
 } from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
+import {maybeDropPermissionedPools} from '../../../models/hooks/PermissionedHooks';
 import {
   buildTokenPoolIndex,
   getPoolTVL,
@@ -199,6 +201,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         protocolPoolsMap,
         protocols,
         hooksOptions,
+        nsCtx,
         ctx
       );
       await logElapsedTime(
@@ -364,6 +367,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     protocolPools: Partial<Record<Protocol, UniPoolInfo[]>>,
     protocols: Protocol[],
     hooksOptions: HooksOptions | undefined,
+    nsCtx: RouteNamespaceContext,
     ctx: UniContext
   ): Promise<{
     v2Pools: V2PoolInfo[];
@@ -416,7 +420,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     // If the caller includes an external protocol (e.g. a Curve or Fluid hook),
     // those pools are valid cross-liquidity candidates and must be kept.
     // Pools with unrecognized hooks (regular V4) are always kept.
-    const allV4Pools = rawAllV4Pools.filter(pool => {
+    const protocolFilteredV4Pools = rawAllV4Pools.filter(pool => {
       const hookProtocol = getProtocolForAggHookAddress(
         (pool as V4PoolInfo).hooks,
         chain.chainId
@@ -426,6 +430,15 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         protocols.includes(hookProtocol as Protocol)
       );
     });
+    const allV4Pools = await maybeDropPermissionedPools(
+      protocolFilteredV4Pools as V4PoolInfo[],
+      chain,
+      nsCtx,
+      tokenInAddress,
+      tokenOutAddress,
+      ctx,
+      buildMetricKey('CrossLiquidity.PermissionedPoolDropped')
+    );
 
     const tokenInAddressLower = tokenInAddress.address.toLowerCase();
     const tokenOutAddressLower = tokenOutAddress.address.toLowerCase();

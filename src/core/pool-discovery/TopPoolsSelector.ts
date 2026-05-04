@@ -32,6 +32,7 @@ import {
   getActiveExperiment,
   RouteNamespaceContext,
 } from '../../models/hooks/namespaces';
+import {maybeDropPermissionedPools} from '../../models/hooks/PermissionedHooks';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
 import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
@@ -177,7 +178,24 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       )
     );
 
-    const filteredPools = filteredUnsupportedPools.filter(pool => {
+    const chain =
+      protocol === Protocol.V4
+        ? await this.chainRepository.getChain(chainId)
+        : undefined;
+    const permissionedFilteredPools =
+      chain !== undefined
+        ? await maybeDropPermissionedPools(
+            filteredUnsupportedPools as V4PoolInfo[],
+            chain,
+            nsCtx,
+            tokenIn,
+            tokenOut,
+            ctx,
+            buildMetricKey('TopPoolsSelector.PermissionedPoolDropped')
+          )
+        : filteredUnsupportedPools;
+
+    const filteredPools = permissionedFilteredPools.filter(pool => {
       if (protocol === Protocol.V4) {
         // Exclude agg hook pools regardless of hooksOptions,
         // Because we have separate AggHooksTopPoolsSelector for agg hook pools.
