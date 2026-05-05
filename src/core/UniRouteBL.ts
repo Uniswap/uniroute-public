@@ -144,99 +144,98 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>
   ) {}
 
+  /**
+   * Token Pair Journey Through UniRoute System
+   * =======================================================
+   *
+   * Input: TokenIn/TokenOut pair + Amount + TradeType + QuoteType + ChainId
+   *
+   * CACHED ROUTES CHECK (Fast Quote Type)
+   * ------------------------------------
+   * [Input] ---[Cache Check]---> Cache Hit:  Use cached routes, skip to quote finding
+   *                              Cache Miss: Continue with route discovery
+   *
+   *                              Cache contains:
+   *                              - Previously discovered best routes
+   *                              - For same token pair and chainId
+   *                              - For same protocols
+   *                              - Within expiry window
+   *
+   *                              For detailed implementation see:
+   *                              CachedRoutesRepository class
+   *                              - Redis sorted sets for storage
+   *                              - Async route refresh mechanism (FRESH quote type)
+   *                              - Pool state sanitization
+   *
+   * 1. POOL DISCOVERY & ROUTE CREATION (Skip if cache hit)
+   * ----------------------------------------------------
+   * TokenIn ----[Pool Discovery]----> [Pool1, Pool2, Pool3, ...]
+   *   |
+   * TokenOut                          Each pool contains:
+   *                                   - Protocol (V2/V3/V4)
+   *                                   - Liquidity/Reserves
+   *                                   - Tokens & Decimals
+   *                                   - Fee tiers (V3/V4)
+   *
+   *                                   ⬇
+   *
+   *                                   [Route1]: Pool1 -> Pool2
+   *                                   [Route2]: Pool3
+   *                                   [Route3]: Pool1 -> Pool4 -> Pool5
+   *
+   *                                   RouteBasic[] objects with:
+   *                                   - Path of pools
+   *                                   - Protocol per pool
+   *                                   - Token pairs per hop
+   *
+   * 2. QUOTE FINDING STRATEGY
+   * ------------------------
+   * [Routes] ---[Strategy]---> Best Quote
+   *
+   *                            The provided strategy handles:
+   *                            - Route splitting and combinations
+   *                            - Quote fetching
+   *                            - Gas use estimation
+   *                            - Quote stitching
+   *                            - Top candidate (split) routes selection
+   *
+   *                            See individual strategy implementations for details
+   *                            on their specific quote finding approaches.
+   *
+   * 3. GAS ADJUSTED QUOTE AMOUNT ESTIMATION & QUOTE SELECTION
+   * --------------------------------
+   * Gas adjusted quote estimation and best quote selection
+   * from the optimized set of route combinations.
+   *
+   * 4. SIMULATION & VALIDATION
+   * -------------------------
+   * [Best Quotes] ---[Simulation]---> Valid Quote
+   *
+   *                            Simulation process:
+   *                            - Attempts to simulate each quote in order
+   *                            - Validates transaction execution
+   *                            - Updates gas estimates
+   *                            - Returns first successful simulation
+   *                            - Falls back to next quote if simulation fails
+   *
+   * 5. CACHE UPDATE
+   * --------------
+   * Best QuoteSplit:                Cache Updates:
+   * [Route1_75% + Route2_25%] -->   Route1 cached independently
+   *                                  Route2 cached independently
+   *
+   *                                  Each route is cached separately
+   *                                  regardless of its % in the split,
+   *                                  allowing future reuse in different
+   *                                  combinations
+   *
+   * Output: QuoteResponse with best route(s), amounts, and gas estimates
+   */
   async quote(
     ctx: Context,
     request: QuoteRequest,
     options?: QuoteOptions
   ): Promise<QuoteResponse> {
-    /*
-     * Token Pair Journey Through UniRoute System
-     * =======================================================
-     *
-     * Input: TokenIn/TokenOut pair + Amount + TradeType + QuoteType + ChainId
-     *
-     * CACHED ROUTES CHECK (Fast Quote Type)
-     * ------------------------------------
-     * [Input] ---[Cache Check]---> Cache Hit:  Use cached routes, skip to quote finding
-     *                              Cache Miss: Continue with route discovery
-     *
-     *                              Cache contains:
-     *                              - Previously discovered best routes
-     *                              - For same token pair and chainId
-     *                              - For same protocols
-     *                              - Within expiry window
-     *
-     *                              For detailed implementation see:
-     *                              CachedRoutesRepository class
-     *                              - Redis sorted sets for storage
-     *                              - Async route refresh mechanism (FRESH quote type)
-     *                              - Pool state sanitization
-     *
-     * 1. POOL DISCOVERY & ROUTE CREATION (Skip if cache hit)
-     * ----------------------------------------------------
-     * TokenIn ----[Pool Discovery]----> [Pool1, Pool2, Pool3, ...]
-     *   |
-     * TokenOut                          Each pool contains:
-     *                                   - Protocol (V2/V3/V4)
-     *                                   - Liquidity/Reserves
-     *                                   - Tokens & Decimals
-     *                                   - Fee tiers (V3/V4)
-     *
-     *                                   ⬇
-     *
-     *                                   [Route1]: Pool1 -> Pool2
-     *                                   [Route2]: Pool3
-     *                                   [Route3]: Pool1 -> Pool4 -> Pool5
-     *
-     *                                   RouteBasic[] objects with:
-     *                                   - Path of pools
-     *                                   - Protocol per pool
-     *                                   - Token pairs per hop
-     *
-     * 2. QUOTE FINDING STRATEGY
-     * ------------------------
-     * [Routes] ---[Strategy]---> Best Quote
-     *
-     *                            The provided strategy handles:
-     *                            - Route splitting and combinations
-     *                            - Quote fetching
-     *                            - Gas use estimation
-     *                            - Quote stitching
-     *                            - Top candidate (split) routes selection
-     *
-     *                            See individual strategy implementations for details
-     *                            on their specific quote finding approaches.
-     *
-     * 3. GAS ADJUSTED QUOTE AMOUNT ESTIMATION & QUOTE SELECTION
-     * --------------------------------
-     * Gas adjusted quote estimation and best quote selection
-     * from the optimized set of route combinations.
-     *
-     * 4. SIMULATION & VALIDATION
-     * -------------------------
-     * [Best Quotes] ---[Simulation]---> Valid Quote
-     *
-     *                            Simulation process:
-     *                            - Attempts to simulate each quote in order
-     *                            - Validates transaction execution
-     *                            - Updates gas estimates
-     *                            - Returns first successful simulation
-     *                            - Falls back to next quote if simulation fails
-     *
-     * 5. CACHE UPDATE
-     * --------------
-     * Best QuoteSplit:                Cache Updates:
-     * [Route1_75% + Route2_25%] -->   Route1 cached independently
-     *                                  Route2 cached independently
-     *
-     *                                  Each route is cached separately
-     *                                  regardless of its % in the split,
-     *                                  allowing future reuse in different
-     *                                  combinations
-     *
-     * Output: QuoteResponse with best route(s), amounts, and gas estimates
-     *
-     */
     // Validate request inputs
     const invalidRequestResponse =
       await this.quoteRequestValidator.validateInputs(request, ctx);
@@ -255,41 +254,25 @@ export class UniRouteBL implements IUniRoutedBL {
       );
     };
 
-    // Parse inputs
-    const chain = await this.chainRepository.getChain(request.tokenInChainId)!;
-    const tradeType = EnumUtils.stringToEnum(TradeType, request.tradeType);
-    const originalAmountIn = BigInt(request.amount);
-    let amountIn = BigInt(request.amount);
-    const quoteType = EnumUtils.stringToEnum(QuoteType, request.quoteType);
-    const hooksOptions = EnumUtils.stringToEnum(
-      HooksOptions,
-      request.hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE
-    );
-    const forceMixed = request.forceMixed;
-    const protocols = request.protocols
-      .split(',')
-      .map(p => EnumUtils.stringToEnum(Protocol, p));
-    // Resolve the cache-namespace context once per request.
-    const experiment = options?.stableStableHookEnabled
-      ? Experiment.GuideStar_Stable_Stable
-      : undefined;
-    const nsCtx = resolveNamespaces({
-      protocols,
+    const parsed = await this.parseQuoteRequest(request, options);
+    const {
+      chain,
+      tradeType,
+      originalAmountIn,
+      quoteType,
       hooksOptions,
+      forceMixed,
+      protocols,
       experiment,
-      tokenInAddress: request.tokenInAddress,
-      tokenOutAddress: request.tokenOutAddress,
-      chainId: chain.chainId,
-    });
-    const namespaceLogFields = namespaceFieldsForLogging(
-      nsCtx.allowedNamespaces
-    );
-    const debugLogs = request.debugLogs;
-    const portionBips = request.portionBips;
-    const portionRecipient = request.portionRecipient;
-    const requestBlockNumber = request.blockNumber;
-
-    const requestSource = options?.requestSource?.toLowerCase() || 'unknown';
+      nsCtx,
+      namespaceLogFields,
+      debugLogs,
+      portionBips,
+      portionRecipient,
+      requestBlockNumber,
+      requestSource,
+    } = parsed;
+    let amountIn = originalAmountIn;
     const metricTags = [
       `quoteservice:${this.serviceConfig.QuoteService}`,
       `chain:${ChainId[chain.chainId]}`,
@@ -1201,6 +1184,60 @@ export class UniRouteBL implements IUniRoutedBL {
       });
       throw error;
     }
+  }
+
+  /**
+   * Parses a QuoteRequest + QuoteOptions into the derived values used
+   * throughout quote(). Resolves the chain (the only async step) and
+   * computes the cache-namespace context once per request.
+   */
+  private async parseQuoteRequest(
+    request: QuoteRequest,
+    options?: QuoteOptions
+  ) {
+    const chain = await this.chainRepository.getChain(request.tokenInChainId)!;
+    const tradeType = EnumUtils.stringToEnum(TradeType, request.tradeType);
+    const originalAmountIn = BigInt(request.amount);
+    const quoteType = EnumUtils.stringToEnum(QuoteType, request.quoteType);
+    const hooksOptions = EnumUtils.stringToEnum(
+      HooksOptions,
+      request.hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE
+    );
+    const forceMixed = request.forceMixed;
+    const protocols = request.protocols
+      .split(',')
+      .map(p => EnumUtils.stringToEnum(Protocol, p));
+    const experiment = options?.stableStableHookEnabled
+      ? Experiment.GuideStar_Stable_Stable
+      : undefined;
+    const nsCtx = resolveNamespaces({
+      protocols,
+      hooksOptions,
+      experiment,
+      tokenInAddress: request.tokenInAddress,
+      tokenOutAddress: request.tokenOutAddress,
+      chainId: chain.chainId,
+    });
+    const namespaceLogFields = namespaceFieldsForLogging(
+      nsCtx.allowedNamespaces
+    );
+    return {
+      chain,
+      tradeType,
+      originalAmountIn,
+      quoteType,
+      hooksOptions,
+      forceMixed,
+      protocols,
+      experiment,
+      nsCtx,
+      namespaceLogFields,
+      debugLogs: request.debugLogs,
+      portionBips: request.portionBips,
+      portionRecipient: request.portionRecipient,
+      requestBlockNumber: request.blockNumber,
+      requestSource: options?.requestSource?.toLowerCase() || 'unknown',
+    };
   }
 
   async getCachedRoutes(
