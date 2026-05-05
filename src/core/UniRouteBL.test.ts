@@ -75,7 +75,7 @@ import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
 import {
-  CacheNamespace,
+  EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
 } from '../models/hooks/namespaces';
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
@@ -2026,7 +2026,7 @@ describe('UniRouteBL', () => {
 
       // Cache the route using the repository directly
       await cachedRoutesRepository.saveCachedRoutes(
-        [],
+        EMPTY_NAMESPACE_CONTEXT,
         [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         dummyRoute,
         1, // chainId
@@ -2039,7 +2039,7 @@ describe('UniRouteBL', () => {
 
       // Let's check what's actually in the cache
       const cacheKey = cachedRoutesRepository.constructCachedRouteKey(
-        [],
+        EMPTY_NAMESPACE_CONTEXT,
         [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         1,
         new Address('0x0000000000000000000000000000000000000000'),
@@ -3316,7 +3316,7 @@ describe('UniRouteBL', () => {
       ]);
 
       await cachedRoutesRepository.saveCachedRoutes(
-        [],
+        EMPTY_NAMESPACE_CONTEXT,
         [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         dummyRoute,
         1, // chainId
@@ -4842,7 +4842,7 @@ describe('UniRouteBL', () => {
       }
 
       async getCachedRoutes(
-        _namespaces: readonly CacheNamespace[],
+        _nsCtx: RouteNamespaceContext,
         _chainId: number,
         tokenInCurrencyInfo: CurrencyInfo,
         tokenOutCurrencyInfo: CurrencyInfo
