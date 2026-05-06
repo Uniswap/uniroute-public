@@ -15,7 +15,7 @@ import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from '../interface';
 import {Address} from '../../../models/address/Address';
 import {USDC_MAINNET, USDT_MAINNET} from '../../../lib/tokenUtils';
-import {ITopPoolsSelector} from '../interface';
+import {ITopPoolsSelector, PoolsForTokensCacheDirective} from '../interface';
 import {Context} from '@uniswap/lib-uni/context';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {
@@ -72,7 +72,9 @@ class TestTopPoolsSelectorV2 implements ITopPoolsSelector<V2PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ctx: Context
+    ctx: Context,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    cacheDirective: PoolsForTokensCacheDirective
   ): Promise<V2PoolInfo[]> {
     return Promise.resolve(pools);
   }
@@ -94,7 +96,9 @@ class TestTopPoolsSelectorV3 implements ITopPoolsSelector<V3PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ctx: Context
+    ctx: Context,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    cacheDirective: PoolsForTokensCacheDirective
   ): Promise<V3PoolInfo[]> {
     return Promise.resolve(pools);
   }
@@ -116,7 +120,9 @@ class TestTopPoolsSelectorV4 implements ITopPoolsSelector<V4PoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ctx: Context
+    ctx: Context,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    cacheDirective: PoolsForTokensCacheDirective
   ): Promise<V4PoolInfo[]> {
     return Promise.resolve(pools);
   }

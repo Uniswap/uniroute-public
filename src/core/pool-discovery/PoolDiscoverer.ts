@@ -2,6 +2,7 @@ import {Context} from '@uniswap/lib-uni/context';
 import {
   IPoolDiscoverer,
   ITopPoolsSelector,
+  PoolsForTokensCacheDirective,
   UniPoolInfo,
   V2PoolInfo,
   V3PoolInfo,
@@ -66,7 +67,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
             nsCtx: RouteNamespaceContext,
-            ctx: Context
+            ctx: Context,
+            cacheDirective: PoolsForTokensCacheDirective
           ) =>
             (await topPoolsSelector.filterPools(
               pools,
@@ -76,7 +78,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               protocol,
               hooksOptions,
               nsCtx,
-              ctx
+              ctx,
+              cacheDirective
             )) as V2PoolInfo[],
         };
         protocolPools = await this.v2PoolDiscoverer.getPoolsForTokens(
@@ -102,7 +105,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
             nsCtx: RouteNamespaceContext,
-            ctx: Context
+            ctx: Context,
+            cacheDirective: PoolsForTokensCacheDirective
           ) =>
             (await topPoolsSelector.filterPools(
               pools,
@@ -112,7 +116,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               protocol,
               hooksOptions,
               nsCtx,
-              ctx
+              ctx,
+              cacheDirective
             )) as V3PoolInfo[],
         };
         protocolPools = await this.v3PoolDiscoverer.getPoolsForTokens(
@@ -138,7 +143,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             protocol: Protocol,
             hooksOptions: HooksOptions | undefined,
             nsCtx: RouteNamespaceContext,
-            ctx: Context
+            ctx: Context,
+            cacheDirective: PoolsForTokensCacheDirective
           ) =>
             (await topPoolsSelector.filterPools(
               pools,
@@ -148,7 +154,8 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               protocol,
               hooksOptions,
               nsCtx,
-              ctx
+              ctx,
+              cacheDirective
             )) as V4PoolInfo[],
         };
         protocolPools = await this.v4PoolDiscoverer.getPoolsForTokens(

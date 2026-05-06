@@ -6,7 +6,13 @@ import {
 import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
-import {ITopPoolsSelector, UniPoolInfo} from './interface';
+import {
+  ITopPoolsSelector,
+  markPoolsForTokensUncacheable,
+  PoolsForTokensCacheDirective,
+  PoolsForTokensCacheSkipReason,
+  UniPoolInfo,
+} from './interface';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
@@ -32,8 +38,38 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ctx: Context
+    ctx: Context,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    cacheDirective: PoolsForTokensCacheDirective
   ): Promise<UniPoolInfo[]> {
+    return Promise.resolve(pools);
+  }
+}
+
+/**
+ * Selector that flips cacheDirective.shouldUseCache to false with the
+ * permissioned-hook reason. Stands in for the BasicTopPoolsSelector
+ * branch where maybeDropPermissionedPools flips the directive when the
+ * namespace is inactive but a permissioned-hook pool was encountered.
+ */
+class CacheSuppressingTopPoolsSelector
+  implements ITopPoolsSelector<UniPoolInfo>
+{
+  async filterPools(
+    pools: UniPoolInfo[],
+    _chainId: ChainId,
+    _tokenIn: Address,
+    _tokenOut: Address,
+    _protocol: Protocol,
+    _hooksOptions: HooksOptions | undefined,
+    _nsCtx: RouteNamespaceContext,
+    _ctx: Context,
+    cacheDirective: PoolsForTokensCacheDirective
+  ): Promise<UniPoolInfo[]> {
+    markPoolsForTokensUncacheable(
+      cacheDirective,
+      PoolsForTokensCacheSkipReason.PermissionedHookInactiveNamespace
+    );
     return Promise.resolve(pools);
   }
 }
@@ -315,7 +351,7 @@ describe('BaseCachingPoolDiscoverer', () => {
     ).rejects.toThrow('Unsupported protocol');
   });
 
-  it('should skip cache write, warn, and emit metric when getPoolsForTokens cache value exceeds size limit', async () => {
+  it('should skip cache write, debug-log, and emit SkipWrite metric when getPoolsForTokens cache value exceeds size limit', async () => {
     const chainId = ChainId.MAINNET;
     const protocol = Protocol.V2;
     const tokenIn = new Address('0x1111111111111111111111111111111111111111');
@@ -362,20 +398,30 @@ describe('BaseCachingPoolDiscoverer', () => {
     // is unaffected; only the cache write is skipped.
     expect(pools).toEqual([oversizedPool]);
     expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
-    expect(ctx.logger.warn).toHaveBeenCalledWith(
+    expect(ctx.logger.debug).toHaveBeenCalledWith(
       expect.stringContaining('Skipping getPoolsForTokens cache write'),
-      expect.objectContaining({chainId, protocol})
+      expect.objectContaining({
+        chainId,
+        protocol,
+        reason: PoolsForTokensCacheSkipReason.ValueTooLarge,
+      })
     );
     expect(ctx.metrics.count).toHaveBeenCalledWith(
       expect.stringContaining(
-        'PoolDiscoverer.getPoolsForTokens.Cache.ValueTooLarge'
+        'PoolDiscoverer.getPoolsForTokens.Cache.SkipWrite'
       ),
       1,
-      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+      {
+        tags: [
+          `chain:${chainId}`,
+          `protocol:${protocol}`,
+          `reason:${PoolsForTokensCacheSkipReason.ValueTooLarge}`,
+        ],
+      }
     );
   });
 
-  it('should not throw when getPoolsForTokens cache value is within size limit', async () => {
+  it('should not emit SkipWrite metric when getPoolsForTokens cache value is within size limit', async () => {
     const chainId = ChainId.MAINNET;
     const protocol = Protocol.V2;
     const tokenIn = new Address('0x1111111111111111111111111111111111111111');
@@ -396,11 +442,126 @@ describe('BaseCachingPoolDiscoverer', () => {
     expect(getPoolsForTokensCache.set).toHaveBeenCalledTimes(1);
     expect(ctx.metrics.count).not.toHaveBeenCalledWith(
       expect.stringContaining(
-        'PoolDiscoverer.getPoolsForTokens.Cache.ValueTooLarge'
+        'PoolDiscoverer.getPoolsForTokens.Cache.SkipWrite'
       ),
       expect.anything(),
       expect.anything()
     );
+  });
+
+  it('should skip cache write and emit SkipWrite metric with permissioned-hook reason when selector flips cacheDirective.shouldUseCache to false', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    const suppressingSelector = new CacheSuppressingTopPoolsSelector();
+    const pools = await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      suppressingSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    // Pools are still returned to the caller — only the cache write is skipped.
+    expect(pools.length).toBeGreaterThan(0);
+    expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'PoolDiscoverer.getPoolsForTokens.Cache.SkipWrite'
+      ),
+      1,
+      {
+        tags: [
+          `chain:${chainId}`,
+          `protocol:${protocol}`,
+          `reason:${PoolsForTokensCacheSkipReason.PermissionedHookInactiveNamespace}`,
+        ],
+      }
+    );
+  });
+
+  it('should skip both read and write when caller passes skipPoolsForTokensCache=true and not emit SkipWrite metric', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V2;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      true, // skipPoolsForTokensCache
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    // Caller-opt-out is by design: no read, no write, no SkipWrite metric noise.
+    expect(getPoolsForTokensCache.get).not.toHaveBeenCalled();
+    expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+    expect(ctx.metrics.count).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'PoolDiscoverer.getPoolsForTokens.Cache.SkipWrite'
+      ),
+      expect.anything(),
+      expect.anything()
+    );
+  });
+
+  // Regression for the cross-namespace cache-poisoning hazard called out in
+  // canIncludePermissionedPool: an inactive-namespace request must not seed a
+  // stripped pool list under the namespace-independent POOLSFORTOKENS key, or
+  // a later active-namespace request for the same pair gets served the
+  // stale-stripped list until the entry expires (~2.5 min, hard ceiling 7 days).
+  it('does not poison the namespace-independent POOLSFORTOKENS cache for a later active-namespace request', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    // Request 1: namespace inactive, selector flags shouldCache=false.
+    // Stand-in for the permissioned-hook-drop-while-inactive case.
+    const suppressingSelector = new CacheSuppressingTopPoolsSelector();
+    await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      suppressingSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    // No write means the second request for the same pair will miss the cache
+    // and be re-evaluated (rather than being served the stripped list).
+    expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+
+    // Request 2: same pair, default selector that doesn't suppress caching.
+    // The cache miss path runs again — this is the desired behaviour.
+    await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    // Now the second request, which did not suppress caching, performs the write.
+    expect(getPoolsForTokensCache.set).toHaveBeenCalledTimes(1);
   });
 
   it('should generate different cache keys for different discoverer implementations', () => {

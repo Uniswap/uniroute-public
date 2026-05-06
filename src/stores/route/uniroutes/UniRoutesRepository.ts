@@ -504,7 +504,10 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         protocols.includes(hookProtocol as Protocol)
       );
     });
-    const allV4Pools = await maybeDropPermissionedPools(
+    // UniRoutesRepository does not write to the namespace-independent
+    // POOLSFORTOKENS cache, so the shouldCache signal is irrelevant here —
+    // only filteredPools matters.
+    const {filteredPools: allV4Pools} = await maybeDropPermissionedPools(
       protocolFilteredV4Pools as V4PoolInfo[],
       chain,
       nsCtx,

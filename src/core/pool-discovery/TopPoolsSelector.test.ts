@@ -17,7 +17,12 @@ import {ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
-import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from './interface';
+import {
+  PoolsForTokensCacheSkipReason,
+  V2PoolInfo,
+  V3PoolInfo,
+  V4PoolInfo,
+} from './interface';
 import {HardcodedChainRepository} from '../../stores/chain/hardcoded/HardcodedChainRepository';
 import {
   createNamespaceContext,
@@ -287,7 +292,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V2,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -313,7 +319,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V3,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(5);
@@ -331,7 +338,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -347,7 +355,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V2,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -369,7 +378,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V2,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(0);
@@ -394,7 +404,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V4,
         HooksOptions.HOOKS_INCLUSIVE,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(2);
@@ -423,7 +434,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V4,
         HooksOptions.NO_HOOKS,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -449,7 +461,8 @@ describe('BasicTopPoolsSelector', () => {
         Protocol.V4,
         HooksOptions.HOOKS_ONLY,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -483,7 +496,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           undefined,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const ids = result.map(p => p.id);
@@ -511,7 +525,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           undefined,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const ids = result.map(p => p.id);
@@ -535,7 +550,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           undefined,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         expect(result.map(p => p.id)).toContain('0xnonagg');
@@ -556,7 +572,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const ids = result.map(p => p.id);
@@ -579,7 +596,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           HooksOptions.HOOKS_ONLY,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const ids = result.map(p => p.id);
@@ -598,7 +616,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V2,
           undefined,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         expect(result.map(p => p.id)).toContain(mockV2Pool.id);
@@ -654,7 +673,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           undefined,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const ids = result.map(p => p.id);
@@ -676,7 +696,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           undefined,
           nsCtx,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         expect(result.map(p => p.id)).toContain('0xperm');
@@ -701,7 +722,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           undefined,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         expect(result.map(p => p.id)).toContain('0xperm');
@@ -748,7 +770,8 @@ describe('BasicTopPoolsSelector', () => {
           createNamespaceContext([
             new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
           ]),
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         expect(result.map(p => p.id)).toContain('0xexp');
@@ -776,7 +799,8 @@ describe('BasicTopPoolsSelector', () => {
           Protocol.V4,
           HooksOptions.HOOKS_INCLUSIVE,
           EMPTY_NAMESPACE_CONTEXT,
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const appendedCalls = debugSpy.mock.calls.filter(
@@ -796,7 +820,8 @@ describe('BasicTopPoolsSelector', () => {
           createNamespaceContext([
             new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
           ]),
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         // Result is exactly the V2 pool, no duplicate, no extra appended entry.
@@ -825,7 +850,8 @@ describe('BasicTopPoolsSelector', () => {
           createNamespaceContext([
             new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
           ]),
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         const occurrences = result.filter(p => p.id === '0xexp_hi').length;
@@ -851,7 +877,8 @@ describe('BasicTopPoolsSelector', () => {
           createNamespaceContext([
             new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
           ]),
-          ctx
+          ctx,
+          {shouldUseCache: true}
         );
 
         expect(result.map(p => p.id)).toContain('0xexp_case');
@@ -1498,6 +1525,30 @@ describe('AggHooksTopPoolsSelector', () => {
     expect(lower).not.toContain(NON_AGG_HOOK);
   });
 
+  it('should defensively flip cacheDirective to skip the cache write with reason AggHooksSelector', async () => {
+    // The AGG_HOOKS-only output shares the V4 POOLSFORTOKENS cache key, so
+    // writing it would pollute the regular-V4 cache. Callers normally pass
+    // skipPoolsForTokensCache=true to prevent this — but the selector flips
+    // the directive itself as a backstop for any future caller that forgets.
+    const cacheDirective = {shouldUseCache: true};
+    const pool = makeAggV4Pool('0xagg_direct', TOKEN_IN, TOKEN_OUT);
+    await selector.filterPools(
+      [pool],
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      cacheDirective
+    );
+    expect(cacheDirective).toEqual({
+      shouldUseCache: false,
+      skipReason: PoolsForTokensCacheSkipReason.AggHooksSelector,
+    });
+  });
+
   describe('agg hooks pre-filter', () => {
     it('should return a direct pair when the pool has an agg hook address', async () => {
       const pool = makeAggV4Pool('0xagg_direct', TOKEN_IN, TOKEN_OUT);
@@ -1509,7 +1560,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0xagg_direct');
@@ -1530,7 +1582,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(0);
     });
@@ -1550,7 +1603,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(0);
     });
@@ -1577,7 +1631,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(2);
       expect(result.map(p => p.id)).toContain('0xfluid');
@@ -1603,7 +1658,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       const ids = result.map(p => p.id);
@@ -1622,7 +1678,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -1657,7 +1714,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       const ids = result.map(p => p.id);
@@ -1715,7 +1773,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       // Should include pools — higher TVL pools should be preferred in each category
@@ -1737,7 +1796,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       const ids = result.map(p => p.id);
@@ -1755,7 +1815,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(0);
     });
@@ -1779,7 +1840,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       // With topNOneHopPairs=5, direct pairs + one-hop pairs should be returned.
@@ -1800,7 +1862,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       // topNOneHopPairs=5 allows one-hop pools through
       expect(result).toHaveLength(1);
@@ -1819,7 +1882,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(1);
     });
@@ -1834,7 +1898,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         HooksOptions.HOOKS_INCLUSIVE,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(1);
     });
@@ -1849,7 +1914,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         HooksOptions.HOOKS_ONLY,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(1);
     });
@@ -1864,7 +1930,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         HooksOptions.NO_HOOKS,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
       expect(result).toHaveLength(0);
     });
@@ -1893,7 +1960,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.FLUIDDEXLITE,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       const ids = result.map(p => p.id);
@@ -1923,7 +1991,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.CURVESTABLESWAPNG,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       const ids = result.map(p => p.id);
@@ -1953,7 +2022,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       const ids = result.map(p => p.id);
@@ -1978,7 +2048,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.FLUIDDEXLITE,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(0);
@@ -2005,7 +2076,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       expect(result).toHaveLength(1);
@@ -2027,7 +2099,8 @@ describe('AggHooksTopPoolsSelector', () => {
         Protocol.V4,
         undefined,
         EMPTY_NAMESPACE_CONTEXT,
-        ctx
+        ctx,
+        {shouldUseCache: true}
       );
 
       // tokenIn-only pool is included via one-hop heuristic, but no synthetic

@@ -2,7 +2,15 @@ import {ChainId, defaultPoolSelectionConfig} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
-import {IPoolDiscoverer, ITopPoolsSelector, UniPoolInfo} from './interface';
+import {
+  IPoolDiscoverer,
+  ITopPoolsSelector,
+  markPoolsForTokensUncacheable,
+  PoolsForTokensCacheDirective,
+  PoolsForTokensCacheSkipReason,
+  trackPoolsForTokensCacheSkip,
+  UniPoolInfo,
+} from './interface';
 import {Address} from '../../models/address/Address';
 import {ErrorNotFound, IRedisCache} from '@uniswap/lib-cache';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
@@ -171,9 +179,22 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       tokenOut
     );
 
+    // Single source of truth for whether to write the cache. Initialize
+    // from the caller's skipPoolsForTokensCache intent; the selector and
+    // size-limit check may further flip it during the miss path.
+    const cacheDirective: PoolsForTokensCacheDirective = {shouldUseCache: true};
+    if (skipPoolsForTokensCache) {
+      markPoolsForTokensUncacheable(
+        cacheDirective,
+        PoolsForTokensCacheSkipReason.CallerOptOut
+      );
+    }
+
     let retrievedPools: TPool[] | undefined;
     try {
-      if (!skipPoolsForTokensCache) {
+      // Cache READ also honors the directive — CallerOptOut means bypass
+      // both the read and the write.
+      if (cacheDirective.shouldUseCache) {
         const retrievedPoolsStr =
           await this.getPoolsForTokensCache.get(cacheKey);
         if (retrievedPoolsStr !== undefined) {
@@ -206,7 +227,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       // Filter out pools with unsupported tokens
       retrievedPools = this.filterUnsupportedTokenPools(retrievedPools);
 
-      // use topPoolSelector to filter pools - we need to make sure a small number of pools is returned here
+      // use topPoolSelector to filter pools - we need to make sure a small number of pools is returned here.
+      // The selector may flip cacheDirective.shouldUseCache to signal that the
+      // filtered list is namespace-state-dependent (e.g. permissioned-hook
+      // pools dropped while the namespace is inactive).
       const filterPoolsStartTime = Date.now();
       retrievedPools = await topPoolSelector.filterPools(
         retrievedPools,
@@ -216,7 +240,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         protocol,
         hooksOptions,
         nsCtx,
-        ctx
+        ctx,
+        cacheDirective
       );
       const filterPoolsElapsed = Date.now() - filterPoolsStartTime;
       ctx.logger.debug(
@@ -228,7 +253,6 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
       );
 
-      // now we are ready to cache
       const retrievedPoolsStr = JSON.stringify(retrievedPools);
       const cacheValueBytes = Buffer.byteLength(retrievedPoolsStr, 'utf8');
       ctx.logger.debug(
@@ -246,20 +270,30 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         }
       );
 
-      if (!skipPoolsForTokensCache) {
-        const cacheValueWithinLimit =
-          await this.checkPoolsForTokensCacheValueSize(
-            cacheValueBytes,
-            chainId,
-            protocol,
-            ctx
-          );
-        if (cacheValueWithinLimit) {
-          await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
-            ttl: this.serviceConfig.RedisCache
-              .TokenInOutPoolsCacheEntryTtlSeconds,
-          });
-        }
+      if (cacheValueBytes > POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES) {
+        markPoolsForTokensUncacheable(
+          cacheDirective,
+          PoolsForTokensCacheSkipReason.ValueTooLarge
+        );
+      }
+
+      // Single skip-emission point — fires after all directive mutations are
+      // settled (caller opt-out at init, selector flips during filterPools,
+      // size-limit verdict above). Handles both logging and metrics.
+      await trackPoolsForTokensCacheSkip(cacheDirective, ctx, {
+        discovererName: this.discovererName,
+        cacheKey,
+        chainId,
+        protocol,
+        cacheValueBytes,
+        cacheValueLimitBytes: POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES,
+      });
+
+      if (cacheDirective.shouldUseCache) {
+        await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
+          ttl: this.serviceConfig.RedisCache
+            .TokenInOutPoolsCacheEntryTtlSeconds,
+        });
       }
     }
 
@@ -272,33 +306,6 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     );
 
     return retrievedPools;
-  }
-
-  // Guardrail: returns false (and logs + emits metric) when the serialized
-  // getPoolsForTokens cache value exceeds POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES.
-  // Callers should skip the cache write when this returns false. We don't throw
-  // because cache writes are an optimization: skipping protects Redis from bloat
-  // while keeping the user-facing quote request unaffected.
-  protected async checkPoolsForTokensCacheValueSize(
-    sizeBytes: number,
-    chainId: ChainId,
-    protocol: Protocol,
-    ctx: Context
-  ): Promise<boolean> {
-    if (sizeBytes <= POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES) {
-      return true;
-    }
-    ctx.logger.warn(
-      `[${this.discovererName}] Skipping getPoolsForTokens cache write: value size ` +
-        `${sizeBytes} bytes exceeds limit ${POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES} bytes`,
-      {chainId, protocol, sizeBytes}
-    );
-    await ctx.metrics.count(
-      buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache.ValueTooLarge'),
-      1,
-      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
-    );
-    return false;
   }
 
   public getPoolsCacheKey(chainId: ChainId, protocol: Protocol) {

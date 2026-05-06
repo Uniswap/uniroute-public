@@ -1,6 +1,9 @@
 import {Address} from '../../models/address/Address';
 import {
   ITopPoolsSelector,
+  markPoolsForTokensUncacheable,
+  PoolsForTokensCacheDirective,
+  PoolsForTokensCacheSkipReason,
   UniPoolInfo,
   V2PoolInfo,
   V3PoolInfo,
@@ -151,7 +154,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
     nsCtx: RouteNamespaceContext,
-    ctx: Context
+    ctx: Context,
+    cacheDirective: PoolsForTokensCacheDirective
   ): Promise<UniPoolInfo[]> {
     const experiment = getActiveExperiment(nsCtx);
     ctx.logger.debug(
@@ -182,18 +186,27 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       protocol === Protocol.V4
         ? await this.chainRepository.getChain(chainId)
         : undefined;
-    const permissionedFilteredPools =
-      chain !== undefined
-        ? await maybeDropPermissionedPools(
-            filteredUnsupportedPools as V4PoolInfo[],
-            chain,
-            nsCtx,
-            tokenIn,
-            tokenOut,
-            ctx,
-            buildMetricKey('TopPoolsSelector.PermissionedPoolDropped')
-          )
-        : filteredUnsupportedPools;
+    let permissionedFilteredPools: UniPoolInfo[];
+    if (chain !== undefined) {
+      const dropResult = await maybeDropPermissionedPools(
+        filteredUnsupportedPools as V4PoolInfo[],
+        chain,
+        nsCtx,
+        tokenIn,
+        tokenOut,
+        ctx,
+        buildMetricKey('TopPoolsSelector.PermissionedPoolDropped')
+      );
+      permissionedFilteredPools = dropResult.filteredPools;
+      if (!dropResult.shouldCache) {
+        markPoolsForTokensUncacheable(
+          cacheDirective,
+          PoolsForTokensCacheSkipReason.PermissionedHookInactiveNamespace
+        );
+      }
+    } else {
+      permissionedFilteredPools = filteredUnsupportedPools;
+    }
 
     const filteredPools = permissionedFilteredPools.filter(pool => {
       if (protocol === Protocol.V4) {
@@ -883,8 +896,20 @@ export class AggHooksTopPoolsSelector
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
     _nsCtx: RouteNamespaceContext,
-    ctx: Context
+    ctx: Context,
+    cacheDirective: PoolsForTokensCacheDirective
   ): Promise<UniPoolInfo[]> {
+    // Defensive cache-skip: AggHooks output is an AGG_HOOKS-only subset of
+    // Protocol.V4, but the POOLSFORTOKENS cache key isn't selector-aware, so a
+    // write here would pollute the shared V4 keyspace with AGG_HOOKS-only
+    // results. Callers (UniRoutesRepository) already pass
+    // `skipPoolsForTokensCache=true` which sets `CallerOptOut` first
+    // (and also short-circuits the read); first-reason-wins keeps that intact.
+    // This flip is the backstop for any future caller that forgets the flag.
+    markPoolsForTokensUncacheable(
+      cacheDirective,
+      PoolsForTokensCacheSkipReason.AggHooksSelector
+    );
     // 1. Restrict to agg hook pools only before any selection logic runs.
     // Use protocol-specific list when protocol is an external/agg hook protocol.
     const protocolAddresses = AGG_HOOKS_PER_CHAIN[protocol]?.[chainId];

@@ -17,7 +17,11 @@ import {
   getUniRouteTestConfig,
   IUniRouteServiceConfig,
 } from '../../../lib/config';
-import {ITopPoolsSelector, UniPoolInfo} from '../interface';
+import {
+  ITopPoolsSelector,
+  PoolsForTokensCacheDirective,
+  UniPoolInfo,
+} from '../interface';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {Protocol} from 'src/models/pool/Protocol';
@@ -43,7 +47,9 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    ctx: Context
+    ctx: Context,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    cacheDirective: PoolsForTokensCacheDirective
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ): Promise<any[]> {
     return Promise.resolve(pools);

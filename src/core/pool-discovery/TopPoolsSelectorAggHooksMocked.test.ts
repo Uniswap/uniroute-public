@@ -135,7 +135,8 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     const ids = result.map(p => p.id);
@@ -159,7 +160,8 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result.map(p => p.id)).toContain('non-agg-pool');
@@ -182,7 +184,8 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       Protocol.V4,
       HooksOptions.HOOKS_INCLUSIVE,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     const ids = result.map(p => p.id);
@@ -210,7 +213,8 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result.map(p => p.id)).not.toContain('agg-pool');
@@ -227,7 +231,8 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
       Protocol.V2,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result.map(p => p.id)).toContain('v2-pool');
@@ -263,7 +268,8 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     const ids = result.map(p => p.id);
@@ -287,7 +293,8 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result).toHaveLength(0);
@@ -309,7 +316,8 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result).toHaveLength(0);
@@ -333,7 +341,8 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     // With the refactored multi-hop heuristics, tokenIn-only pools are selected
@@ -355,7 +364,8 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result.map(p => p.id)).toContain('agg-pool');
@@ -378,7 +388,8 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
       Protocol.V4,
       undefined,
       EMPTY_NAMESPACE_CONTEXT,
-      ctx
+      ctx,
+      {shouldUseCache: true}
     );
 
     expect(result.map(p => p.id)).toContain('upper-hook-pool');

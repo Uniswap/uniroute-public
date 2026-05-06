@@ -427,7 +427,9 @@ describe('PoolDiscoverer', () => {
                 TOKEN_OUT,
                 Protocol.V3,
                 undefined,
-                ctx
+                EMPTY_NAMESPACE_CONTEXT,
+                ctx,
+                {shouldUseCache: true}
               );
               return result;
             }
