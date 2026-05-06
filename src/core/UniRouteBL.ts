@@ -482,13 +482,8 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes = cached.usedCachedRoutes;
       }
       if (routes.length === 0) {
-        // Only skip pools for tokens cache if hooks are not inclusive (i.e. pool list might be different than the cached version)
-        const skipPoolsForTokensCache =
-          hooksOptions !== HooksOptions.HOOKS_INCLUSIVE;
-        // Get fresh routes
-        const getRoutesStartTime = Date.now();
-        ctx.logger.debug('Starting getRoutes');
-        routes = await this.routeRepository.getRoutes(
+        routes = await this.fetchFreshRoutes(
+          ctx,
           chain,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
@@ -496,112 +491,57 @@ export class UniRouteBL implements IUniRoutedBL {
           tradeType,
           fotInDirectSwap,
           hooksOptions,
-          skipPoolsForTokensCache,
           nsCtx,
-          ctx,
-          options?.testAggHooks
+          options?.testAggHooks,
+          metricTags
         );
-        await logElapsedTime('GetRoutes', getRoutesStartTime, ctx, metricTags);
       }
 
       metricTags.push(
         `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`
       );
 
-      // On sync cache miss with specific protocols, use reduced search space for lower latency.
-      // When !allProtocolsIncluded, cached routes are never used, so every request does fresh route finding.
-      const effectiveConfig =
-        !usedCachedRoutes &&
-        this.serviceConfig.Lambda.Type === LambdaType.Sync &&
-        this.serviceConfig.QuoteService === QuoteService.UniRoute &&
-        !onlyUniswapProtocolsIncludedAndMixed(protocols)
-          ? {
-              ...this.serviceConfig,
-              RouteFinder: {
-                ...this.serviceConfig.RouteFinder,
-                ...getUniRouteSyncCacheMissRouteFinderOverrides(),
-              },
-            }
-          : this.serviceConfig;
-
-      // Make sure all our routes are valid here.
-      const unfilteredRoutesLength = routes.length;
-      const invalidRoutes: string[] = [];
-      routes = routes.filter(r => {
-        const isValid = isValidRoute(
-          r,
-          chain.chainId,
-          tokenInCurrencyInfo.isNative,
-          tokenOutCurrencyInfo.isNative
-        );
-        if (!isValid) {
-          invalidRoutes.push(r.toString());
-        }
-        return isValid;
-      });
-
-      await ctx.metrics.count(
-        buildMetricKey('InvalidRoutesFiltered'),
-        invalidRoutes.length,
-        {
-          tags: metricTags,
-        }
+      const effectiveConfig = this.selectEffectiveConfig(
+        usedCachedRoutes,
+        protocols
       );
-      if (unfilteredRoutesLength !== routes.length) {
-        ctx.logger.debug('Filtered out invalid routes', {
-          unfilteredRoutesLength,
-          filteredRoutesLength: routes.length,
-          invalidRoutes,
-        });
-      }
 
-      // For EXACT_OUT, filter out routes whose intermediary pools contain FOT tokens.
-      // Direct swap FOT tokens are already rejected above; this handles multi-hop routes
-      // that route through an intermediary FOT token.
+      routes = await this.filterInvalidRoutes(
+        ctx,
+        routes,
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        metricTags
+      );
+
       if (tradeType === TradeType.ExactOut && routes.length > 0) {
-        const preFilterCount = routes.length;
-        const {filteredRoutes, fotIntermediaryTokens} =
-          await filterRoutesWithFotIntermediaryTokens(
-            routes,
-            tokenInCurrencyInfo.wrappedAddress.toString(),
-            tokenOutCurrencyInfo.wrappedAddress.toString(),
-            tokensInfo,
-            this.tokenHandler,
-            chain,
-            ctx
-          );
-        routes = filteredRoutes;
-
-        if (fotIntermediaryTokens.size > 0) {
-          ctx.logger.debug(
-            'Filtered routes with intermediary FOT tokens for EXACT_OUT',
-            {
-              preFilterCount,
-              postFilterCount: routes.length,
-              fotIntermediaryTokens: Array.from(fotIntermediaryTokens),
-            }
-          );
-        }
+        routes = await this.filterFotIntermediaryRoutes(
+          ctx,
+          chain,
+          routes,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          tokensInfo
+        );
       }
 
       if (forceMixed) {
-        ctx.logger.debug('Forcing mixed routes');
-        routes = routes.filter(r => r.protocol === Protocol.MIXED);
-
-        if (routes.length === 0) {
-          ctx.logger.debug('No routes found');
-          return new QuoteResponse({
-            error: {
-              code: 404,
-              message: `No mixed valid routes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
-            },
-            hitsCachedRoutes: usedCachedRoutes,
-            usdBucket: fineGrainedUsdBucket.toString(),
-            debugInfo: debugLogs
-              ? this.constructDebugInfo(routes, [])
-              : undefined,
-          });
+        const forceMixedResult = this.enforceForceMixed(
+          ctx,
+          request,
+          routes,
+          debugLogs,
+          usedCachedRoutes,
+          fineGrainedUsdBucket
+        );
+        if (forceMixedResult.forceMixedNoRouteResponse) {
+          metricTags.push(`status:${QuoteStatus.NoRoute}`);
+          metricTags.push('reason:force_mixed_no_route');
+          await emitCallMetrics(metricTags);
+          return forceMixedResult.forceMixedNoRouteResponse;
         }
+        routes = forceMixedResult.routes;
       }
 
       routes = await this.capRoutesAndObserve(
@@ -1426,6 +1366,190 @@ export class UniRouteBL implements IUniRoutedBL {
       ),
     ]);
     return cappedRoutes;
+  }
+
+  /**
+   * Fetches fresh routes from the route repository when no cached routes
+   * are available. `skipPoolsForTokensCache` is true when hooks are not
+   * inclusive — the resulting pool list may differ from the cached version.
+   */
+  private async fetchFreshRoutes(
+    ctx: Context,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    protocols: Protocol[],
+    tradeType: TradeType,
+    fotInDirectSwap: boolean,
+    hooksOptions: HooksOptions,
+    nsCtx: RouteNamespaceContext,
+    testAggHooks: boolean | undefined,
+    metricTags: string[]
+  ): Promise<RouteBasic<Pool>[]> {
+    const skipPoolsForTokensCache =
+      hooksOptions !== HooksOptions.HOOKS_INCLUSIVE;
+    const getRoutesStartTime = Date.now();
+    ctx.logger.debug('Starting getRoutes');
+    const routes = await this.routeRepository.getRoutes(
+      chain,
+      tokenInCurrencyInfo,
+      tokenOutCurrencyInfo,
+      protocols,
+      tradeType,
+      fotInDirectSwap,
+      hooksOptions,
+      skipPoolsForTokensCache,
+      nsCtx,
+      ctx,
+      testAggHooks
+    );
+    await logElapsedTime('GetRoutes', getRoutesStartTime, ctx, metricTags);
+    return routes;
+  }
+
+  /**
+   * On sync cache miss with specific protocols, returns a config with
+   * reduced RouteFinder search space for lower latency. Otherwise returns
+   * the unmodified service config. When `!allProtocolsIncluded`, cached
+   * routes are never used so every request does fresh route finding.
+   */
+  private selectEffectiveConfig(
+    usedCachedRoutes: boolean,
+    protocols: Protocol[]
+  ): IUniRouteServiceConfig {
+    if (
+      !usedCachedRoutes &&
+      this.serviceConfig.Lambda.Type === LambdaType.Sync &&
+      this.serviceConfig.QuoteService === QuoteService.UniRoute &&
+      !onlyUniswapProtocolsIncludedAndMixed(protocols)
+    ) {
+      return {
+        ...this.serviceConfig,
+        RouteFinder: {
+          ...this.serviceConfig.RouteFinder,
+          ...getUniRouteSyncCacheMissRouteFinderOverrides(),
+        },
+      };
+    }
+    return this.serviceConfig;
+  }
+
+  /**
+   * Drops routes that fail structural validity (wrong chain, native-token
+   * misuse, etc.). Always emits the `InvalidRoutesFiltered` count metric;
+   * also emits a debug log when any routes were dropped.
+   */
+  private async filterInvalidRoutes(
+    ctx: Context,
+    routes: RouteBasic<Pool>[],
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    metricTags: string[]
+  ): Promise<RouteBasic<Pool>[]> {
+    const unfilteredRoutesLength = routes.length;
+    const invalidRoutes: string[] = [];
+    const filteredRoutes = routes.filter(r => {
+      const isValid = isValidRoute(
+        r,
+        chain.chainId,
+        tokenInCurrencyInfo.isNative,
+        tokenOutCurrencyInfo.isNative
+      );
+      if (!isValid) {
+        invalidRoutes.push(r.toString());
+      }
+      return isValid;
+    });
+
+    await ctx.metrics.count(
+      buildMetricKey('InvalidRoutesFiltered'),
+      invalidRoutes.length,
+      {tags: metricTags}
+    );
+    if (unfilteredRoutesLength !== filteredRoutes.length) {
+      ctx.logger.debug('Filtered out invalid routes', {
+        unfilteredRoutesLength,
+        filteredRoutesLength: filteredRoutes.length,
+        invalidRoutes,
+      });
+    }
+    return filteredRoutes;
+  }
+
+  /**
+   * For EXACT_OUT only, drops routes whose intermediary pools contain FOT
+   * tokens. Direct-swap FOT tokens are already rejected upstream; this
+   * handles multi-hop routes routing through an intermediary FOT token.
+   */
+  private async filterFotIntermediaryRoutes(
+    ctx: Context,
+    chain: Chain,
+    routes: RouteBasic<Pool>[],
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tokensInfo: Map<string, Erc20Token | null>
+  ): Promise<RouteBasic<Pool>[]> {
+    const preFilterCount = routes.length;
+    const {filteredRoutes, fotIntermediaryTokens} =
+      await filterRoutesWithFotIntermediaryTokens(
+        routes,
+        tokenInCurrencyInfo.wrappedAddress.toString(),
+        tokenOutCurrencyInfo.wrappedAddress.toString(),
+        tokensInfo,
+        this.tokenHandler,
+        chain,
+        ctx
+      );
+    if (fotIntermediaryTokens.size > 0) {
+      ctx.logger.debug(
+        'Filtered routes with intermediary FOT tokens for EXACT_OUT',
+        {
+          preFilterCount,
+          postFilterCount: filteredRoutes.length,
+          fotIntermediaryTokens: Array.from(fotIntermediaryTokens),
+        }
+      );
+    }
+    return filteredRoutes;
+  }
+
+  /**
+   * Restricts routes to MIXED-protocol only when `forceMixed` is set. If
+   * no mixed routes survive, returns a 404 response for the caller to
+   * propagate (after emitting call metrics).
+   */
+  private enforceForceMixed(
+    ctx: Context,
+    request: QuoteRequest,
+    routes: RouteBasic<Pool>[],
+    debugLogs: boolean,
+    usedCachedRoutes: boolean,
+    fineGrainedUsdBucket: UsdBucketFineGrained
+  ): {
+    routes: RouteBasic<Pool>[];
+    forceMixedNoRouteResponse?: QuoteResponse;
+  } {
+    ctx.logger.debug('Forcing mixed routes');
+    const filteredRoutes = routes.filter(r => r.protocol === Protocol.MIXED);
+    if (filteredRoutes.length === 0) {
+      ctx.logger.debug('No routes found');
+      return {
+        routes: filteredRoutes,
+        forceMixedNoRouteResponse: new QuoteResponse({
+          error: {
+            code: 404,
+            message: `No mixed valid routes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+          },
+          hitsCachedRoutes: usedCachedRoutes,
+          usdBucket: fineGrainedUsdBucket.toString(),
+          debugInfo: debugLogs
+            ? this.constructDebugInfo(filteredRoutes, [])
+            : undefined,
+        }),
+      };
+    }
+    return {routes: filteredRoutes};
   }
 
   async getCachedRoutes(
