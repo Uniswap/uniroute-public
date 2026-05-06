@@ -120,6 +120,7 @@ import {
   summarizeRoutesForLogging,
 } from '../lib/observability';
 import {EMPTY_NAMESPACE_CONTEXT} from '../models/hooks/namespaces';
+import {RouteNamespaceContext} from '../models/hooks/namespaces/CacheNamespace';
 
 /**
  * Inspects the tokensInfo map for the direct-swap pair (tokenIn, tokenOut)
@@ -442,41 +443,31 @@ export class UniRouteBL implements IUniRoutedBL {
         this.serviceConfig.CachedRoutes.Enabled;
 
       let routes: RouteBasic<Pool>[] = [];
-      let usedCachedRoutes: boolean = false;
+      let usedCachedRoutes = false;
       if (quoteType === QuoteType.Fast && shouldCheckCache) {
-        // Check no-route cache first — if a recent async deep search confirmed
-        // no route at or above this amount, short-circuit before calling
-        // getCachedRoutes (which has side effects like triggering async refresh).
-        const amountCliff = await this.noRouteCacheRepository.getAmountCliff(
-          nsCtx,
+        const noRouteResponse = await this.tryNoRouteCacheShortCircuit(
+          ctx,
+          request,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          tradeType,
+          amountIn,
+          fineGrainedUsdBucket,
           protocols,
-          chain.chainId,
-          tokenInCurrencyInfo.wrappedAddress,
-          tokenOutCurrencyInfo.wrappedAddress,
-          tradeType
+          nsCtx,
+          metricTags
         );
-        if (amountCliff !== undefined && amountIn >= amountCliff) {
-          metricTags.push(`status:${QuoteStatus.NoRoute}`);
-          metricTags.push('cachedRoutesStatus:noRouteCacheHit');
-          await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
-            tags: metricTags,
-          });
+        if (noRouteResponse) {
           await emitCallMetrics(metricTags);
-          ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
-          return new QuoteResponse({
-            error: {
-              code: 404,
-              message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
-            },
-            hitsCachedRoutes: false,
-            usdBucket: fineGrainedUsdBucket.toString(),
-          });
+          return noRouteResponse;
         }
 
-        const getCachedRoutesStartTime = Date.now();
-        routes = await this.cachedRoutesRepository.getCachedRoutes(
-          nsCtx,
-          chain.chainId,
+        const cached = await this.tryReadCachedRoutes(
+          ctx,
+          request,
+          options,
+          chain,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
           tradeType,
@@ -484,19 +475,11 @@ export class UniRouteBL implements IUniRoutedBL {
           usdBucket,
           quoteType,
           protocols,
-          request,
-          ctx,
-          options
-        );
-        await logElapsedTime(
-          'GetCachedRoutes',
-          getCachedRoutesStartTime,
-          ctx,
+          nsCtx,
           metricTags
         );
-        if (routes.length > 0) {
-          usedCachedRoutes = true;
-        }
+        routes = cached.routes;
+        usedCachedRoutes = cached.usedCachedRoutes;
       }
       if (routes.length === 0) {
         // Only skip pools for tokens cache if hooks are not inclusive (i.e. pool list might be different than the cached version)
@@ -1311,6 +1294,101 @@ export class UniRouteBL implements IUniRoutedBL {
       blockNumber,
       gasPrice,
     };
+  }
+
+  /**
+   * Consults the no-route negative cache. If a recent async deep search
+   * confirmed no route at or above this amount, short-circuit `quote()` with
+   * a 404 — push status tags, emit `NoRouteCache.Hit`, set the
+   * `x-no-route-cache-hit` response header, and return the response for the
+   * caller to propagate. The caller is responsible for emitting the
+   * top-level call metrics before returning. Returns `undefined` when no
+   * short-circuit fires.
+   */
+  private async tryNoRouteCacheShortCircuit(
+    ctx: Context,
+    request: QuoteRequest,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    amountIn: bigint,
+    fineGrainedUsdBucket: UsdBucketFineGrained,
+    protocols: Protocol[],
+    nsCtx: RouteNamespaceContext,
+    metricTags: string[]
+  ): Promise<QuoteResponse | undefined> {
+    const amountCliff = await this.noRouteCacheRepository.getAmountCliff(
+      nsCtx,
+      protocols,
+      chain.chainId,
+      tokenInCurrencyInfo.wrappedAddress,
+      tokenOutCurrencyInfo.wrappedAddress,
+      tradeType
+    );
+    if (amountCliff === undefined || amountIn < amountCliff) {
+      return undefined;
+    }
+    metricTags.push(`status:${QuoteStatus.NoRoute}`);
+    metricTags.push('cachedRoutesStatus:noRouteCacheHit');
+    await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
+      tags: metricTags,
+    });
+    ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
+    return new QuoteResponse({
+      error: {
+        code: 404,
+        message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+      },
+      hitsCachedRoutes: false,
+      usdBucket: fineGrainedUsdBucket.toString(),
+    });
+  }
+
+  /**
+   * Reads the positive route cache. Returns the cached routes (possibly
+   * empty) and a flag indicating whether the caller should treat them as a
+   * cache hit. Empty results signal the caller to fall through to fresh
+   * route discovery. Side effects inside `getCachedRoutes` (e.g. triggering
+   * an async refresh) are intentional.
+   */
+  private async tryReadCachedRoutes(
+    ctx: Context,
+    request: QuoteRequest,
+    options: QuoteOptions | undefined,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    amountIn: bigint,
+    usdBucket: UsdBucket,
+    quoteType: QuoteType,
+    protocols: Protocol[],
+    nsCtx: RouteNamespaceContext,
+    metricTags: string[]
+  ): Promise<{routes: RouteBasic<Pool>[]; usedCachedRoutes: boolean}> {
+    const getCachedRoutesStartTime = Date.now();
+    const routes = await this.cachedRoutesRepository.getCachedRoutes(
+      nsCtx,
+      chain.chainId,
+      tokenInCurrencyInfo,
+      tokenOutCurrencyInfo,
+      tradeType,
+      amountIn,
+      usdBucket,
+      quoteType,
+      protocols,
+      request,
+      ctx,
+      options
+    );
+    await logElapsedTime(
+      'GetCachedRoutes',
+      getCachedRoutesStartTime,
+      ctx,
+      metricTags
+    );
+    return {routes, usedCachedRoutes: routes.length > 0};
   }
 
   async getCachedRoutes(
