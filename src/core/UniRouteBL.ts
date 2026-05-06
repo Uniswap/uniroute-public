@@ -121,6 +121,62 @@ import {
 } from '../lib/observability';
 import {EMPTY_NAMESPACE_CONTEXT} from '../models/hooks/namespaces';
 
+/**
+ * Inspects the tokensInfo map for the direct-swap pair (tokenIn, tokenOut)
+ * and reports whether either token is fee-on-transfer or has a failed
+ * external transfer.
+ */
+function detectFotInDirectSwap(
+  tokensInfo: Map<string, Erc20Token | null>,
+  tokenInCurrencyInfo: CurrencyInfo,
+  tokenOutCurrencyInfo: CurrencyInfo
+): {fotInDirectSwap: boolean; externalTransferFailedInDirectSwap: boolean} {
+  const directSwapTokens = new Map(
+    Array.from(tokensInfo).filter(([k]) =>
+      [
+        tokenInCurrencyInfo.wrappedAddress.toString(),
+        tokenOutCurrencyInfo.wrappedAddress.toString(),
+      ].includes(k)
+    )
+  );
+  return {
+    fotInDirectSwap: containsFOT(directSwapTokens),
+    externalTransferFailedInDirectSwap:
+      containsExternalTransferFailedTokens(directSwapTokens),
+  };
+}
+
+/**
+ * Computes the USD value of the input amount and the corresponding
+ * cache bucket (coarse) plus fine-grained bucket (metrics).
+ */
+function computeUsdBuckets(
+  chainId: ChainId,
+  amountIn: bigint,
+  tradeType: TradeType,
+  tokenInCurrencyInfo: CurrencyInfo,
+  tokenOutCurrencyInfo: CurrencyInfo,
+  tokensInfo: Map<string, Erc20Token | null>
+): {
+  usdAmount: number | undefined;
+  usdBucket: UsdBucket;
+  fineGrainedUsdBucket: UsdBucketFineGrained;
+} {
+  const usdAmount = calculateUsdAmount(
+    chainId,
+    amountIn,
+    tradeType,
+    tokenInCurrencyInfo.wrappedAddress,
+    tokenOutCurrencyInfo.wrappedAddress,
+    tokensInfo
+  );
+  return {
+    usdAmount,
+    usdBucket: getBucketFromAmount(usdAmount),
+    fineGrainedUsdBucket: getFineGrainedBucketFromAmount(usdAmount),
+  };
+}
+
 export class UniRouteBL implements IUniRoutedBL {
   constructor(
     private readonly serviceConfig: IUniRouteServiceConfig,
@@ -310,80 +366,26 @@ export class UniRouteBL implements IUniRoutedBL {
     });
 
     try {
-      // Start parallel token search operations
-      const tokenSearchStartTime = Date.now();
-      const [tokenInCurrencyInfo, tokenOutCurrencyInfo] = await Promise.all([
-        this.tokenProvider.searchForToken(chain, request.tokenInAddress, ctx),
-        this.tokenProvider.searchForToken(chain, request.tokenOutAddress, ctx),
-      ]);
-      await logElapsedTime(
-        'TokenSearch',
-        tokenSearchStartTime,
+      const {
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tokensInfo,
+        blockNumber,
+        gasPrice,
+      } = await this.fetchRequestData(
         ctx,
+        chain,
+        request,
+        requestBlockNumber,
         metricTags
       );
 
-      // Check if we need to fetch gasPrice based on chain and tokens
-      const needToFetchGasPrice = needsGasPriceFetching(
-        chain.chainId,
-        tokenInCurrencyInfo.wrappedAddress.address,
-        tokenOutCurrencyInfo.wrappedAddress.address
-      );
-
-      // Fetch tokens info and block number in parallel
-      // Those are needed for fot detection, gas estimation and quote conversion to USD.
-      const getTokensStartTime = Date.now();
-      ctx.logger.debug('Starting getTokens and block number fetch');
-
-      const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
-        this.tokenHandler.getTokens(
-          chain,
-          [
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            new Address(getGasToken(chain.chainId).address),
-            ...(usdGasTokensByChain[chain.chainId] ?? []).map(
-              t => new Address(t.address)
-            ),
-          ],
-          ctx
-        ),
-        requestBlockNumber !== undefined
-          ? Promise.resolve(requestBlockNumber)
-          : this.serviceConfig.ResponseRequirements.NeedsBlockNumber
-            ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
-            : Promise.resolve<number>(0),
-        needToFetchGasPrice
-          ? this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
-          : Promise.resolve<BigNumber | undefined>(undefined),
-      ]);
-      // Use gasPriceResult if it is defined and greater than 0, otherwise use undefined
-      const gasPrice =
-        gasPriceResult !== undefined && gasPriceResult.gt(0)
-          ? gasPriceResult.toBigInt()
-          : undefined;
-
-      await logElapsedTime(
-        'GetTokensAndBlockNumber',
-        getTokensStartTime,
-        ctx,
-        metricTags
-      );
-
-      // Check if any of the tokens are FOT, in which case getRoutes implementations must only return V2 routes.
-      // Also check if any of the tokens are FOT with failed external transfer,
-      const directSwapTokens = new Map(
-        Array.from(tokensInfo).filter(([k]) =>
-          [
-            tokenInCurrencyInfo.wrappedAddress.toString(),
-            tokenOutCurrencyInfo.wrappedAddress.toString(),
-          ].includes(k)
-        )
-      );
-      // checks if tokenIn/Out is a FOT token
-      const fotInDirectSwap = containsFOT(directSwapTokens);
-      const externalTransferFailedInDirectSwap =
-        containsExternalTransferFailedTokens(directSwapTokens);
+      const {fotInDirectSwap, externalTransferFailedInDirectSwap} =
+        detectFotInDirectSwap(
+          tokensInfo,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo
+        );
 
       // FOT tokens are not supported for EXACT_OUT trades. Fee-on-transfer tokens
       // take a percentage during each transfer, making exact output guarantees impossible.
@@ -412,19 +414,14 @@ export class UniRouteBL implements IUniRoutedBL {
         amountIn += portionAmount;
       }
 
-      // Calculate usd amount bucket based on the input amount
-      const usdAmount = calculateUsdAmount(
+      const {usdAmount, usdBucket, fineGrainedUsdBucket} = computeUsdBuckets(
         chain.chainId,
         amountIn,
         tradeType,
-        tokenInCurrencyInfo.wrappedAddress,
-        tokenOutCurrencyInfo.wrappedAddress,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
         tokensInfo
       );
-      // Used for caching bucket.
-      const usdBucket = getBucketFromAmount(usdAmount);
-      // Used for metrics granularity.
-      const fineGrainedUsdBucket = getFineGrainedBucketFromAmount(usdAmount);
 
       metricTags.push(`bucket:${fineGrainedUsdBucket}`);
       ctx.logger.debug('Calculated USD amount and bucket', {
@@ -1237,6 +1234,82 @@ export class UniRouteBL implements IUniRoutedBL {
       portionRecipient: request.portionRecipient,
       requestBlockNumber: request.blockNumber,
       requestSource: options?.requestSource?.toLowerCase() || 'unknown',
+    };
+  }
+
+  /**
+   * Fetches the per-request data needed before route discovery: token
+   * currency info (parallel), token metadata + block number + gas price
+   * (parallel). Preserves the two-stage await pattern of the inline code.
+   */
+  private async fetchRequestData(
+    ctx: Context,
+    chain: Chain,
+    request: QuoteRequest,
+    requestBlockNumber: number | undefined,
+    metricTags: string[]
+  ) {
+    // Start parallel token search operations
+    const tokenSearchStartTime = Date.now();
+    const [tokenInCurrencyInfo, tokenOutCurrencyInfo] = await Promise.all([
+      this.tokenProvider.searchForToken(chain, request.tokenInAddress, ctx),
+      this.tokenProvider.searchForToken(chain, request.tokenOutAddress, ctx),
+    ]);
+    await logElapsedTime('TokenSearch', tokenSearchStartTime, ctx, metricTags);
+
+    // Check if we need to fetch gasPrice based on chain and tokens
+    const needToFetchGasPrice = needsGasPriceFetching(
+      chain.chainId,
+      tokenInCurrencyInfo.wrappedAddress.address,
+      tokenOutCurrencyInfo.wrappedAddress.address
+    );
+
+    // Fetch tokens info and block number in parallel
+    // Those are needed for fot detection, gas estimation and quote conversion to USD.
+    const getTokensStartTime = Date.now();
+    ctx.logger.debug('Starting getTokens and block number fetch');
+
+    const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
+      this.tokenHandler.getTokens(
+        chain,
+        [
+          tokenInCurrencyInfo.wrappedAddress,
+          tokenOutCurrencyInfo.wrappedAddress,
+          new Address(getGasToken(chain.chainId).address),
+          ...(usdGasTokensByChain[chain.chainId] ?? []).map(
+            t => new Address(t.address)
+          ),
+        ],
+        ctx
+      ),
+      requestBlockNumber !== undefined
+        ? Promise.resolve(requestBlockNumber)
+        : this.serviceConfig.ResponseRequirements.NeedsBlockNumber
+          ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
+          : Promise.resolve<number>(0),
+      needToFetchGasPrice
+        ? this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
+        : Promise.resolve<BigNumber | undefined>(undefined),
+    ]);
+    // Use gasPriceResult if it is defined and greater than 0, otherwise use undefined
+    const gasPrice =
+      gasPriceResult !== undefined && gasPriceResult.gt(0)
+        ? gasPriceResult.toBigInt()
+        : undefined;
+
+    await logElapsedTime(
+      'GetTokensAndBlockNumber',
+      getTokensStartTime,
+      ctx,
+      metricTags
+    );
+
+    return {
+      tokenInCurrencyInfo,
+      tokenOutCurrencyInfo,
+      tokensInfo,
+      blockNumber,
+      gasPrice,
     };
   }
 
