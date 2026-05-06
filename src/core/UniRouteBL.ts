@@ -604,117 +604,18 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       }
 
-      // Cap routes to effectiveConfig.MaxRoutes (may be reduced on sync cache miss)
-      const routesBeforeEffectiveSlice = routes;
-      if (routes.length > effectiveConfig.RouteFinder.MaxRoutes) {
-        routes = routes.slice(0, effectiveConfig.RouteFinder.MaxRoutes);
-      }
-      const beforeRouteCounts = routeSetCountsForLogging(
-        routesBeforeEffectiveSlice,
-        chain.chainId
-      );
-      const afterRouteCounts = routeSetCountsForLogging(routes, chain.chainId);
-      ctx.logger.debug('Route cap observability', {
-        chainId: chain.chainId,
+      routes = await this.capRoutesAndObserve(
+        ctx,
+        chain,
         tradeType,
         quoteType,
         hooksOptions,
-        protocols: protocols.join(',').toLowerCase(),
-        cachedRoutesStatus: usedCachedRoutes ? 'hit' : 'miss',
-        maxRoutes: effectiveConfig.RouteFinder.MaxRoutes,
-        routeFinderConfig:
-          effectiveConfig !== this.serviceConfig ? 'reduced' : 'original',
-        beforeSlice: beforeRouteCounts,
-        afterSlice: afterRouteCounts,
-        droppedRouteSummaries: summarizeRoutesForLogging(
-          routesBeforeEffectiveSlice
-            .slice(effectiveConfig.RouteFinder.MaxRoutes)
-            .slice(0, 20),
-          chain.chainId
-        ).map(route => ({
-          routeHash: route.routeHash,
-          protocol: route.protocol,
-          hopCount: route.hopCount,
-          hasAggHookPool: route.hasAggHookPool,
-        })),
-      });
-      const routeCapBaseTags = [
-        `chain:${ChainId[chain.chainId]}`,
-        `tradeType:${tradeType}`,
-        `hooksOptions:${hooksOptions}`,
-        `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`,
-        `testAggHooks:${options?.testAggHooks}`,
-      ];
-      const routeCapChainTag = `chain:${ChainId[chain.chainId]}`;
-      const routeCapTestAggHooksTag = `testAggHooks:${options?.testAggHooks}`;
-      await Promise.all([
-        ctx.metrics.count(
-          buildMetricKey('RouteCap.RoutesBeforeSlice.Total'),
-          beforeRouteCounts.totalRoutes,
-          {tags: routeCapBaseTags}
-        ),
-        ctx.metrics.count(
-          buildMetricKey('RouteCap.RoutesAfterSlice.Total'),
-          afterRouteCounts.totalRoutes,
-          {tags: routeCapBaseTags}
-        ),
-        ...Object.entries(beforeRouteCounts.routesByProtocol).map(
-          ([protocol, count]) =>
-            ctx.metrics.count(
-              buildMetricKey('RouteCap.RoutesBeforeSlice.ByProtocol'),
-              count,
-              {
-                tags: [
-                  routeCapChainTag,
-                  routeCapTestAggHooksTag,
-                  `protocol:${protocol.toLowerCase()}`,
-                ],
-              }
-            )
-        ),
-        ...Object.entries(afterRouteCounts.routesByProtocol).map(
-          ([protocol, count]) =>
-            ctx.metrics.count(
-              buildMetricKey('RouteCap.RoutesAfterSlice.ByProtocol'),
-              count,
-              {
-                tags: [
-                  routeCapChainTag,
-                  routeCapTestAggHooksTag,
-                  `protocol:${protocol.toLowerCase()}`,
-                ],
-              }
-            )
-        ),
-        ...Object.entries(beforeRouteCounts.routesByHopCount).map(
-          ([hopCount, count]) =>
-            ctx.metrics.count(
-              buildMetricKey('RouteCap.RoutesBeforeSlice.ByHopCount'),
-              count,
-              {
-                tags: [
-                  routeCapChainTag,
-                  routeCapTestAggHooksTag,
-                  `hopCount:${hopCount}`,
-                ],
-              }
-            )
-        ),
-        ...Object.entries(afterRouteCounts.routesByHopCount).map(
-          ([hopCount, count]) =>
-            ctx.metrics.count(
-              buildMetricKey('RouteCap.RoutesAfterSlice.ByHopCount'),
-              count,
-              {
-                tags: [
-                  routeCapChainTag,
-                  routeCapTestAggHooksTag,
-                  `hopCount:${hopCount}`,
-                ],
-              }
-            )
-        ),
-      ]);
+        protocols,
+        usedCachedRoutes,
+        options?.testAggHooks,
+        routes,
+        effectiveConfig
+      );
 
       // Do some logging
       ctx.logger.debug(`Routes (${routes.length})`, {
@@ -1389,6 +1290,142 @@ export class UniRouteBL implements IUniRoutedBL {
       metricTags
     );
     return {routes, usedCachedRoutes: routes.length > 0};
+  }
+
+  /**
+   * Caps the route list to `effectiveConfig.RouteFinder.MaxRoutes` (which
+   * may be reduced on sync cache miss) and emits route-cap observability:
+   * a debug log with before/after counts + dropped-route summaries, plus
+   * `RouteCap.*` count metrics by total / protocol / hop count. Returns
+   * the (possibly truncated) route list.
+   */
+  private async capRoutesAndObserve(
+    ctx: Context,
+    chain: Chain,
+    tradeType: TradeType,
+    quoteType: QuoteType,
+    hooksOptions: HooksOptions,
+    protocols: Protocol[],
+    usedCachedRoutes: boolean,
+    testAggHooks: boolean | undefined,
+    routes: RouteBasic<Pool>[],
+    effectiveConfig: IUniRouteServiceConfig
+  ): Promise<RouteBasic<Pool>[]> {
+    const routesBeforeEffectiveSlice = routes;
+    const cappedRoutes =
+      routes.length > effectiveConfig.RouteFinder.MaxRoutes
+        ? routes.slice(0, effectiveConfig.RouteFinder.MaxRoutes)
+        : routes;
+    const beforeRouteCounts = routeSetCountsForLogging(
+      routesBeforeEffectiveSlice,
+      chain.chainId
+    );
+    const afterRouteCounts = routeSetCountsForLogging(
+      cappedRoutes,
+      chain.chainId
+    );
+    ctx.logger.debug('Route cap observability', {
+      chainId: chain.chainId,
+      tradeType,
+      quoteType,
+      hooksOptions,
+      protocols: protocols.join(',').toLowerCase(),
+      cachedRoutesStatus: usedCachedRoutes ? 'hit' : 'miss',
+      maxRoutes: effectiveConfig.RouteFinder.MaxRoutes,
+      routeFinderConfig:
+        effectiveConfig !== this.serviceConfig ? 'reduced' : 'original',
+      beforeSlice: beforeRouteCounts,
+      afterSlice: afterRouteCounts,
+      droppedRouteSummaries: summarizeRoutesForLogging(
+        routesBeforeEffectiveSlice
+          .slice(effectiveConfig.RouteFinder.MaxRoutes)
+          .slice(0, 20),
+        chain.chainId
+      ).map(route => ({
+        routeHash: route.routeHash,
+        protocol: route.protocol,
+        hopCount: route.hopCount,
+        hasAggHookPool: route.hasAggHookPool,
+      })),
+    });
+    const routeCapBaseTags = [
+      `chain:${ChainId[chain.chainId]}`,
+      `tradeType:${tradeType}`,
+      `hooksOptions:${hooksOptions}`,
+      `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`,
+      `testAggHooks:${testAggHooks}`,
+    ];
+    const routeCapChainTag = `chain:${ChainId[chain.chainId]}`;
+    const routeCapTestAggHooksTag = `testAggHooks:${testAggHooks}`;
+    await Promise.all([
+      ctx.metrics.count(
+        buildMetricKey('RouteCap.RoutesBeforeSlice.Total'),
+        beforeRouteCounts.totalRoutes,
+        {tags: routeCapBaseTags}
+      ),
+      ctx.metrics.count(
+        buildMetricKey('RouteCap.RoutesAfterSlice.Total'),
+        afterRouteCounts.totalRoutes,
+        {tags: routeCapBaseTags}
+      ),
+      ...Object.entries(beforeRouteCounts.routesByProtocol).map(
+        ([protocol, count]) =>
+          ctx.metrics.count(
+            buildMetricKey('RouteCap.RoutesBeforeSlice.ByProtocol'),
+            count,
+            {
+              tags: [
+                routeCapChainTag,
+                routeCapTestAggHooksTag,
+                `protocol:${protocol.toLowerCase()}`,
+              ],
+            }
+          )
+      ),
+      ...Object.entries(afterRouteCounts.routesByProtocol).map(
+        ([protocol, count]) =>
+          ctx.metrics.count(
+            buildMetricKey('RouteCap.RoutesAfterSlice.ByProtocol'),
+            count,
+            {
+              tags: [
+                routeCapChainTag,
+                routeCapTestAggHooksTag,
+                `protocol:${protocol.toLowerCase()}`,
+              ],
+            }
+          )
+      ),
+      ...Object.entries(beforeRouteCounts.routesByHopCount).map(
+        ([hopCount, count]) =>
+          ctx.metrics.count(
+            buildMetricKey('RouteCap.RoutesBeforeSlice.ByHopCount'),
+            count,
+            {
+              tags: [
+                routeCapChainTag,
+                routeCapTestAggHooksTag,
+                `hopCount:${hopCount}`,
+              ],
+            }
+          )
+      ),
+      ...Object.entries(afterRouteCounts.routesByHopCount).map(
+        ([hopCount, count]) =>
+          ctx.metrics.count(
+            buildMetricKey('RouteCap.RoutesAfterSlice.ByHopCount'),
+            count,
+            {
+              tags: [
+                routeCapChainTag,
+                routeCapTestAggHooksTag,
+                `hopCount:${hopCount}`,
+              ],
+            }
+          )
+      ),
+    ]);
+    return cappedRoutes;
   }
 
   async getCachedRoutes(
