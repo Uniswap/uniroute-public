@@ -573,99 +573,24 @@ export class UniRouteBL implements IUniRoutedBL {
           .map(r => r.toString()),
       });
 
-      // Get best quote based on the given quote strategy
-      const bestQuoteCandidates =
-        await this.quoteStrategy.findBestQuoteCandidates(
-          ctx,
-          chain,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          amountIn,
-          tradeType,
-          protocols,
-          effectiveConfig,
-          routes,
-          tokensInfo,
-          metricTags,
-          requestBlockNumber,
-          options?.testAggHooks
-        );
-
-      ctx.logger.debug(
-        `Best Quote Candidates (${bestQuoteCandidates.length}):`,
-        {
-          candidates: bestQuoteCandidates.map(candidate => ({
-            route: candidate.quotes.map(q => ({
-              routeString: q.route.toString(),
-              amount: q.amount.toString(),
-            })),
-          })),
-        }
-      );
-
-      // Update quotes with gas costs to USD / quote token
-      if (this.serviceConfig.GasEstimation.Enabled) {
-        const startGasUpdateTime = Date.now();
-        await this.gasConverter.updateQuotesGasDetails(
-          chain.chainId,
-          tradeType === TradeType.ExactIn
-            ? tokenOutCurrencyInfo.wrappedAddress.toString()
-            : tokenInCurrencyInfo.wrappedAddress.toString(),
-          tokensInfo,
-          bestQuoteCandidates,
-          ctx,
-          requestBlockNumber
-        );
-        await logElapsedTime(
-          'UpdateQuotesGasDetails',
-          startGasUpdateTime,
-          ctx,
-          metricTags
-        );
-      }
-
-      // Select top N best quotes
-      let topNQuotes: QuoteSplit[] = [];
-      if (bestQuoteCandidates.length > 0) {
-        const getBestQuotesStartTime = Date.now();
-        topNQuotes = await this.quoteSelector.getBestQuotes(
-          bestQuoteCandidates,
-          tradeType,
-          this.serviceConfig.Simulation.TopNQuotes,
-          metricTags,
-          ctx
-        );
-        await logElapsedTime(
-          'SelectorGetBestQuotes',
-          getBestQuotesStartTime,
-          ctx,
-          metricTags
-        );
-      }
-
-      // Simulate quotes one by one (from best quote to worst) until we find a valid one
-      // Pass requestBlockNumber (not the resolved blockNumber) to simulation.
-      // When the user doesn't provide a block number, requestBlockNumber is undefined,
-      // which causes simulation backends (Tenderly, eth_estimateGas) to use 'latest'.
-      // The resolved blockNumber is only used for the response and for pool/quote fetching.
-      const bestQuote = await this.simulateAndPopulateBestQuote(
+      const {bestQuoteCandidates, bestQuote} = await this.runQuotePipeline(
+        ctx,
         chain,
         tokenInCurrencyInfo,
         tokenOutCurrencyInfo,
         amountIn,
         tradeType,
-        topNQuotes,
+        protocols,
+        effectiveConfig,
+        routes,
         tokensInfo,
         request,
-        ctx,
+        options,
         metricTags,
-        gasPrice,
         requestBlockNumber,
-        options?.permit2Disabled ?? false,
-        options?.universalRouterVersion
+        gasPrice
       );
 
-      // Finally update best route's pools with latest pool information
       let status = QuoteStatus.Pending;
       if (bestQuote) {
         ctx.logger.debug('Best quote:', {
@@ -674,111 +599,31 @@ export class UniRouteBL implements IUniRoutedBL {
             amount: q.amount.toString(),
           })),
         });
-
         status = QuoteStatus.Success;
 
-        if (options?.stableStableHookEnabled) {
-          const guideStarHookAddresses = new Set(
-            (EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] ?? []).map(
-              addr => addr.toLowerCase()
-            )
-          );
-          const matched = bestQuote.quotes.some(quote =>
-            quote.route.path.some(
-              pool =>
-                pool instanceof V4Pool &&
-                pool.hooks !== undefined &&
-                guideStarHookAddresses.has(pool.hooks.toLowerCase())
-            )
-          );
-          await ctx.metrics.count(
-            buildMetricKey('BestQuote.GuideStarStableStableHookMatch'),
-            1,
-            {
-              tags: [
-                ...metricTags,
-                `chainId:${chain.chainId}`,
-                `matched:${matched}`,
-              ],
-            }
-          );
-        }
-
-        for (const quote of bestQuote.quotes) {
-          const aggHookPool = quote.route.path.find(
-            pool =>
-              pool instanceof V4Pool &&
-              pool.hooks &&
-              getProtocolForAggHookAddress(pool.hooks, chain.chainId) !==
-                undefined
-          ) as V4Pool | undefined;
-          if (aggHookPool) {
-            if (!isExternalProtocol(protocols) || !options?.testAggHooks) {
-              ctx.logger.warn(
-                'Best quote route contains unexpected agg hook pool',
-                {
-                  chainId: chain.chainId,
-                  hooksAddress: aggHookPool.hooks,
-                  hitsCachedRoutes: usedCachedRoutes,
-                  protocols,
-                  ...metricTags,
-                  testAggHooks: options?.testAggHooks,
-                }
-              );
-              await ctx.metrics.count(
-                buildMetricKey('BestQuote.AggHookPoolLeak'),
-                1,
-                {
-                  tags: [
-                    ...metricTags,
-                    `hitsCachedRoutes:${usedCachedRoutes}`,
-                    `testAggHooks:${options?.testAggHooks}`,
-                  ],
-                }
-              );
-            } else {
-              await ctx.metrics.count(
-                buildMetricKey('BestQuote.AggHookPoolExpected'),
-                1,
-                {
-                  tags: [
-                    ...metricTags,
-                    `hitsCachedRoutes:${usedCachedRoutes}`,
-                    `testAggHooks:${options?.testAggHooks}`,
-                  ],
-                }
-              );
-            }
-          }
-        }
-
-        // Only update pool details if required AND simulation hasn't already refreshed them.
-        // When simulation ran (SUCCESS or FAILED), updateQuoteSplitWithFreshPoolDetails was
-        // already called inside simulateAndPopulateBestQuote, so repeating it here is redundant.
-        const poolsAlreadyFresh =
-          bestQuote.simulationResult?.status !== undefined &&
-          bestQuote.simulationResult?.status !== SimulationStatus.UNATTEMPTED;
-
-        if (
-          this.serviceConfig.ResponseRequirements.NeedsUpToDatePoolsInfo &&
-          !poolsAlreadyFresh
-        ) {
-          const startUpdatePoolsTime = Date.now();
-          await updateQuoteSplitWithFreshPoolDetails(
-            this.freshPoolDetailsWrapper,
-            bestQuote,
-            chain,
-            ctx,
-            metricTags,
-            requestBlockNumber
-          );
-          await logElapsedTime(
-            'MainUpdateBestQuotePoolsWithFreshDetails',
-            startUpdatePoolsTime,
-            ctx,
-            metricTags
-          );
-        }
+        await this.emitGuideStarMetricIfApplicable(
+          ctx,
+          chain,
+          bestQuote,
+          options,
+          metricTags
+        );
+        await this.emitAggHookLeakMetrics(
+          ctx,
+          chain,
+          bestQuote,
+          protocols,
+          usedCachedRoutes,
+          options,
+          metricTags
+        );
+        await this.refreshBestQuotePoolDetailsIfNeeded(
+          ctx,
+          chain,
+          bestQuote,
+          metricTags,
+          requestBlockNumber
+        );
       } else {
         status = QuoteStatus.NoRoute;
       }
@@ -1550,6 +1395,267 @@ export class UniRouteBL implements IUniRoutedBL {
       };
     }
     return {routes: filteredRoutes};
+  }
+
+  /**
+   * Runs the four-stage quote pipeline against the prepared routes:
+   *   1. Strategy: enumerate quote candidates from the route set.
+   *   2. Gas adjustment: compute USD-denominated gas costs per candidate
+   *      (skipped when GasEstimation is disabled).
+   *   3. Selector: pick the top N candidates worth simulating.
+   *   4. Simulation: simulate each top candidate in order until one
+   *      succeeds, returning the chosen `bestQuote` (or `undefined` if
+   *      none simulated successfully or no candidates existed).
+   *
+   * Returns both the full candidate list (needed downstream for debug
+   * info) and the simulated best quote.
+   */
+  private async runQuotePipeline(
+    ctx: Context,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    amountIn: bigint,
+    tradeType: TradeType,
+    protocols: Protocol[],
+    effectiveConfig: IUniRouteServiceConfig,
+    routes: RouteBasic<Pool>[],
+    tokensInfo: Map<string, Erc20Token | null>,
+    request: QuoteRequest,
+    options: QuoteOptions | undefined,
+    metricTags: string[],
+    requestBlockNumber: number | undefined,
+    gasPrice: bigint | undefined
+  ): Promise<{
+    bestQuoteCandidates: QuoteSplit[];
+    bestQuote: QuoteSplit | undefined;
+  }> {
+    const bestQuoteCandidates =
+      await this.quoteStrategy.findBestQuoteCandidates(
+        ctx,
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        amountIn,
+        tradeType,
+        protocols,
+        effectiveConfig,
+        routes,
+        tokensInfo,
+        metricTags,
+        requestBlockNumber,
+        options?.testAggHooks
+      );
+
+    ctx.logger.debug(`Best Quote Candidates (${bestQuoteCandidates.length}):`, {
+      candidates: bestQuoteCandidates.map(candidate => ({
+        route: candidate.quotes.map(q => ({
+          routeString: q.route.toString(),
+          amount: q.amount.toString(),
+        })),
+      })),
+    });
+
+    if (this.serviceConfig.GasEstimation.Enabled) {
+      const startGasUpdateTime = Date.now();
+      await this.gasConverter.updateQuotesGasDetails(
+        chain.chainId,
+        tradeType === TradeType.ExactIn
+          ? tokenOutCurrencyInfo.wrappedAddress.toString()
+          : tokenInCurrencyInfo.wrappedAddress.toString(),
+        tokensInfo,
+        bestQuoteCandidates,
+        ctx,
+        requestBlockNumber
+      );
+      await logElapsedTime(
+        'UpdateQuotesGasDetails',
+        startGasUpdateTime,
+        ctx,
+        metricTags
+      );
+    }
+
+    let topNQuotes: QuoteSplit[] = [];
+    if (bestQuoteCandidates.length > 0) {
+      const getBestQuotesStartTime = Date.now();
+      topNQuotes = await this.quoteSelector.getBestQuotes(
+        bestQuoteCandidates,
+        tradeType,
+        this.serviceConfig.Simulation.TopNQuotes,
+        metricTags,
+        ctx
+      );
+      await logElapsedTime(
+        'SelectorGetBestQuotes',
+        getBestQuotesStartTime,
+        ctx,
+        metricTags
+      );
+    }
+
+    // Pass requestBlockNumber (not the resolved blockNumber) to simulation.
+    // When the user doesn't provide a block number, requestBlockNumber is
+    // undefined, which causes simulation backends (Tenderly, eth_estimateGas)
+    // to use 'latest'. The resolved blockNumber is only used for the response
+    // and for pool/quote fetching.
+    const bestQuote = await this.simulateAndPopulateBestQuote(
+      chain,
+      tokenInCurrencyInfo,
+      tokenOutCurrencyInfo,
+      amountIn,
+      tradeType,
+      topNQuotes,
+      tokensInfo,
+      request,
+      ctx,
+      metricTags,
+      gasPrice,
+      requestBlockNumber,
+      options?.permit2Disabled ?? false,
+      options?.universalRouterVersion
+    );
+
+    return {bestQuoteCandidates, bestQuote};
+  }
+
+  /**
+   * Emits the GuideStar Stable-Stable experiment metric when the request
+   * opted into the experiment, tagging whether the chosen route actually
+   * traversed a GuideStar hook pool.
+   */
+  private async emitGuideStarMetricIfApplicable(
+    ctx: Context,
+    chain: Chain,
+    bestQuote: QuoteSplit,
+    options: QuoteOptions | undefined,
+    metricTags: string[]
+  ): Promise<void> {
+    if (!options?.stableStableHookEnabled) {
+      return;
+    }
+    const guideStarHookAddresses = new Set(
+      (EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] ?? []).map(addr =>
+        addr.toLowerCase()
+      )
+    );
+    const matched = bestQuote.quotes.some(quote =>
+      quote.route.path.some(
+        pool =>
+          pool instanceof V4Pool &&
+          pool.hooks !== undefined &&
+          guideStarHookAddresses.has(pool.hooks.toLowerCase())
+      )
+    );
+    await ctx.metrics.count(
+      buildMetricKey('BestQuote.GuideStarStableStableHookMatch'),
+      1,
+      {
+        tags: [...metricTags, `chainId:${chain.chainId}`, `matched:${matched}`],
+      }
+    );
+  }
+
+  /**
+   * Walks the best quote's pools looking for agg-hook pools. For each one
+   * found, emits either `BestQuote.AggHookPoolLeak` (unexpected: pool is in
+   * the route but the request didn't authorise external protocols / test
+   * agg hooks) or `BestQuote.AggHookPoolExpected` (expected: agg hooks are
+   * being exercised intentionally).
+   */
+  private async emitAggHookLeakMetrics(
+    ctx: Context,
+    chain: Chain,
+    bestQuote: QuoteSplit,
+    protocols: Protocol[],
+    usedCachedRoutes: boolean,
+    options: QuoteOptions | undefined,
+    metricTags: string[]
+  ): Promise<void> {
+    for (const quote of bestQuote.quotes) {
+      const aggHookPool = quote.route.path.find(
+        pool =>
+          pool instanceof V4Pool &&
+          pool.hooks &&
+          getProtocolForAggHookAddress(pool.hooks, chain.chainId) !== undefined
+      ) as V4Pool | undefined;
+      if (!aggHookPool) {
+        continue;
+      }
+      if (!isExternalProtocol(protocols) || !options?.testAggHooks) {
+        ctx.logger.warn('Best quote route contains unexpected agg hook pool', {
+          chainId: chain.chainId,
+          hooksAddress: aggHookPool.hooks,
+          hitsCachedRoutes: usedCachedRoutes,
+          protocols,
+          ...metricTags,
+          testAggHooks: options?.testAggHooks,
+        });
+        await ctx.metrics.count(
+          buildMetricKey('BestQuote.AggHookPoolLeak'),
+          1,
+          {
+            tags: [
+              ...metricTags,
+              `hitsCachedRoutes:${usedCachedRoutes}`,
+              `testAggHooks:${options?.testAggHooks}`,
+            ],
+          }
+        );
+      } else {
+        await ctx.metrics.count(
+          buildMetricKey('BestQuote.AggHookPoolExpected'),
+          1,
+          {
+            tags: [
+              ...metricTags,
+              `hitsCachedRoutes:${usedCachedRoutes}`,
+              `testAggHooks:${options?.testAggHooks}`,
+            ],
+          }
+        );
+      }
+    }
+  }
+
+  /**
+   * Refreshes the best quote's pool details when the response contract
+   * requires up-to-date pools AND simulation didn't already refresh them.
+   * Simulation (when it ran with status SUCCESS or FAILED) already calls
+   * `updateQuoteSplitWithFreshPoolDetails` internally, so a second refresh
+   * here would be redundant.
+   */
+  private async refreshBestQuotePoolDetailsIfNeeded(
+    ctx: Context,
+    chain: Chain,
+    bestQuote: QuoteSplit,
+    metricTags: string[],
+    requestBlockNumber: number | undefined
+  ): Promise<void> {
+    const poolsAlreadyFresh =
+      bestQuote.simulationResult?.status !== undefined &&
+      bestQuote.simulationResult?.status !== SimulationStatus.UNATTEMPTED;
+    if (
+      !this.serviceConfig.ResponseRequirements.NeedsUpToDatePoolsInfo ||
+      poolsAlreadyFresh
+    ) {
+      return;
+    }
+    const startUpdatePoolsTime = Date.now();
+    await updateQuoteSplitWithFreshPoolDetails(
+      this.freshPoolDetailsWrapper,
+      bestQuote,
+      chain,
+      ctx,
+      metricTags,
+      requestBlockNumber
+    );
+    await logElapsedTime(
+      'MainUpdateBestQuotePoolsWithFreshDetails',
+      startUpdatePoolsTime,
+      ctx,
+      metricTags
+    );
   }
 
   async getCachedRoutes(
