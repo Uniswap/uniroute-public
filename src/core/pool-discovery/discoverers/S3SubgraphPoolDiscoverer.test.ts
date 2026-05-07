@@ -4,8 +4,7 @@ import {
   S3SubgraphPoolDiscovererV4,
 } from './S3SubgraphPoolDiscoverer';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
-import AWS from 'aws-sdk';
-import {AWSError} from 'aws-sdk';
+import {S3Client} from '@aws-sdk/client-s3';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {
   getUniRouteTestConfig,
@@ -17,32 +16,27 @@ import {Context} from '@uniswap/lib-uni/context';
 import {readFileSync} from 'fs';
 import {join} from 'path';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
-import {Request} from 'aws-sdk/lib/request';
-import {GetObjectOutput} from 'aws-sdk/clients/s3';
 import {V2PoolInfo} from '../interface';
+import {sdkStreamMixin} from '@smithy/util-stream';
+import {Readable} from 'stream';
 
 const mockConfig: IUniRouteServiceConfig = getUniRouteTestConfig();
 const mockContext: Context = buildTestContext();
 
 // Helper to read test data
 const readTestData = (filename: string): Buffer => {
-  return readFileSync(join(process.cwd(), 'tests/data', filename));
+  const testDataPath = join(process.cwd(), 'tests/data', filename);
+  return readFileSync(testDataPath);
 };
 
-// Helper to create a mock S3 request
-const createMockRequest = (responseData: GetObjectOutput) =>
-  ({
-    promise: vi.fn().mockResolvedValue(responseData),
-    abort: vi.fn(),
-    createReadStream: vi.fn(),
-    eachPage: vi.fn(),
-    isPageable: vi.fn(),
-    send: vi.fn(),
-    on: vi.fn(),
-  }) as unknown as Request<GetObjectOutput, AWSError>;
+// Helper to create a mock S3 response with stream body
+const createMockResponse = (body?: Buffer) => ({
+  Body: body ? sdkStreamMixin(Readable.from(body)) : undefined,
+  $metadata: {},
+});
 
 describe('S3SubgraphPoolDiscoverer', () => {
-  let s3Client: AWS.S3;
+  let s3Client: S3Client;
 
   beforeEach(() => {
     // Reset all mocks
@@ -50,8 +44,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
 
     // Mock S3 client
     s3Client = {
-      getObject: vi.fn().mockReturnValue(createMockRequest({})),
-    } as unknown as AWS.S3;
+      send: vi.fn().mockResolvedValue(createMockResponse()),
+    } as unknown as S3Client;
   });
 
   describe('V2 Pool Discovery', () => {
@@ -81,8 +75,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
 
     it('should correctly parse V2 pools from gzipped data', async () => {
       const gzippedData = readTestData('v2-pools.json.gz');
-      vi.mocked(s3Client.getObject).mockReturnValue(
-        createMockRequest({Body: gzippedData})
+      vi.mocked(s3Client.send).mockResolvedValue(
+        createMockResponse(gzippedData) as never
       );
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore - protected method access for testing
@@ -158,8 +152,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
 
     it('should correctly parse V3 pools from gzipped data', async () => {
       const gzippedData = readTestData('v3-pools.json.gz');
-      vi.mocked(s3Client.getObject).mockReturnValue(
-        createMockRequest({Body: gzippedData})
+      vi.mocked(s3Client.send).mockResolvedValue(
+        createMockResponse(gzippedData) as never
       );
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore - protected method access for testing
@@ -207,8 +201,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
 
     it('should correctly parse V4 pools from gzipped data', async () => {
       const gzippedData = readTestData('v4-pools.json.gz');
-      vi.mocked(s3Client.getObject).mockReturnValue(
-        createMockRequest({Body: gzippedData})
+      vi.mocked(s3Client.send).mockResolvedValue(
+        createMockResponse(gzippedData) as never
       );
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore - protected method access for testing
@@ -257,8 +251,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
     });
 
     it('should handle missing S3 data gracefully', async () => {
-      vi.mocked(s3Client.getObject).mockReturnValue(
-        createMockRequest({Body: undefined})
+      vi.mocked(s3Client.send).mockResolvedValue(
+        createMockResponse(undefined) as never
       );
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore - protected method access for testing
@@ -272,15 +266,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
     });
 
     it('should handle S3 errors gracefully', async () => {
-      vi.mocked(s3Client.getObject).mockReturnValue({
-        promise: vi.fn().mockRejectedValue(new Error('S3 error')),
-        abort: vi.fn(),
-        createReadStream: vi.fn(),
-        eachPage: vi.fn(),
-        isPageable: vi.fn(),
-        send: vi.fn(),
-        on: vi.fn(),
-      } as unknown as Request<GetObjectOutput, AWSError>);
+      vi.mocked(s3Client.send).mockRejectedValue(new Error('S3 error'));
 
       // eslint-disable-next-line @typescript-eslint/ban-ts-comment
       // @ts-ignore - protected method access for testing

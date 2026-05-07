@@ -6,7 +6,7 @@ import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
-import AWS from 'aws-sdk';
+import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 import _ from 'lodash';
 
@@ -51,7 +51,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
     protected unsupportedTokens: Set<string>,
-    protected readonly s3: AWS.S3
+    protected readonly s3: S3Client
   ) {
     super(
       serviceConfig,
@@ -95,12 +95,12 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         protocol
       );
       const before = Date.now();
-      const response = await this.s3
-        .getObject({
+      const response = await this.s3.send(
+        new GetObjectCommand({
           Bucket: this.serviceConfig.S3.poolBucketName,
           Key: s3Key,
         })
-        .promise();
+      );
       const after = Date.now();
 
       ctx.logger.debug(
@@ -115,18 +115,19 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         }
       );
 
-      const {Body: poolsBuffer} = response;
+      const {Body: bodyStream} = response;
 
-      if (!poolsBuffer) {
+      if (!bodyStream) {
         ctx.logger.warn('No pools data found in S3', {chainId, protocol});
         return [];
       }
 
+      // Convert stream to Buffer
+      const poolsBuffer = Buffer.from(await bodyStream.transformToByteArray());
+
       // Decompress and parse the data
       const before2 = Date.now();
-      const poolString = zlib
-        .inflateSync(poolsBuffer as Buffer)
-        .toString('utf-8');
+      const poolString = zlib.inflateSync(poolsBuffer).toString('utf-8');
       const poolsData = JSON.parse(poolString) as TPoolData[];
       const after2 = Date.now();
 
