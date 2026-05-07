@@ -217,7 +217,7 @@ export const getUniRouteSyncConfig = (
       MaxHopsExtended: __PLACEHOLDER__, // Disabled for sync (same as MaxHops)
       MinRoutesThreshold: __PLACEHOLDER__, // Disabled for sync
       MaxExtendedRoutes: __PLACEHOLDER__, // Disabled for sync
-      MaxRoutes: __PLACEHOLDER__,
+      MaxRoutes: 100,
       MaxSplits: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitPercentage: __PLACEHOLDER__,
@@ -305,7 +305,7 @@ export const getQuickRouteSyncConfig = (
       MaxHopsExtended: __PLACEHOLDER__, // Disabled for sync (same as MaxHops)
       MinRoutesThreshold: __PLACEHOLDER__, // Disabled for sync
       MaxExtendedRoutes: __PLACEHOLDER__, // Disabled for sync
-      MaxRoutes: __PLACEHOLDER__,
+      MaxRoutes: 100,
       MaxSplits: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitPercentage: __PLACEHOLDER__,
@@ -372,7 +372,7 @@ export const getUniRouteAsyncConfig = (
       MaxHopsExtended: __PLACEHOLDER__,
       MinRoutesThreshold: __PLACEHOLDER__,
       MaxExtendedRoutes: __PLACEHOLDER__,
-      MaxRoutes: __PLACEHOLDER__,
+      MaxRoutes: 600,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitTimeoutMs: __PLACEHOLDER__,
     },
@@ -396,7 +396,7 @@ export const getQuickRouteAsyncConfig = (
 export const getUniRouteSyncCacheMissRouteFinderOverrides = (): Partial<
   IUniRouteServiceConfig['RouteFinder']
 > => ({
-  MaxRoutes: __PLACEHOLDER__,
+  MaxRoutes: 50,
   MaxSplits: __PLACEHOLDER__,
   RouteSplitPercentage: __PLACEHOLDER__,
   RouteSplitTimeoutMs: __PLACEHOLDER__,
