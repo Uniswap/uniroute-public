@@ -638,41 +638,28 @@ export class UniRouteBL implements IUniRoutedBL {
       );
       await emitCallMetrics(metricTags);
 
-      if (status === QuoteStatus.NoRoute) {
-        // No-route cache write — only from async path.
-        if (
-          !usedCachedRoutes &&
-          shouldCheckCache &&
-          this.serviceConfig.Lambda.Type === LambdaType.Async
-        ) {
-          const wrote = await this.noRouteCacheRepository.setAmountCliff(
-            nsCtx,
-            protocols,
-            chain.chainId,
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            tradeType,
-            amountIn
-          );
-          if (wrote) {
-            await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
-              tags: metricTags,
-            });
-          }
-          // Clear pending refresh so the next sync request at a lower amount
-          // can trigger a new async refresh to ratchet down the amountCliff.
-          await this.cachedRoutesRepository.deletePendingRefresh(
-            nsCtx,
-            protocols,
-            chain.chainId,
-            tokenInCurrencyInfo.wrappedAddress,
-            tokenOutCurrencyInfo.wrappedAddress,
-            tradeType,
-            amountIn,
-            usdBucket
-          );
-        }
+      await this.writeCachesIfAsync(
+        status,
+        bestQuote,
+        ctx,
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        amountIn,
+        usdBucket,
+        quoteType,
+        hooksOptions,
+        protocols,
+        nsCtx,
+        namespaceLogFields,
+        usedCachedRoutes,
+        shouldCheckCache,
+        options,
+        metricTags
+      );
 
+      if (status === QuoteStatus.NoRoute) {
         return new QuoteResponse({
           error: {
             code: 404,
@@ -684,116 +671,6 @@ export class UniRouteBL implements IUniRoutedBL {
             ? this.constructDebugInfo(routes, bestQuoteCandidates)
             : undefined,
         });
-      }
-
-      // if this was a cache miss + all protocols searched + the simulation didn't fail + is async call, cache the best quote's route(s)
-      if (
-        !usedCachedRoutes &&
-        // TODO: replace with requestedProtocolsToHitCache once we have enabled agg hooks caching write
-        (onlyUniswapProtocolsIncludedAndMixed(protocols) ||
-          (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
-            this.serviceConfig.CachedRoutes.AggHooksWriteEnabled)) &&
-        this.serviceConfig.Lambda.Type === LambdaType.Async &&
-        bestQuote?.simulationResult?.status !== SimulationStatus.FAILED &&
-        this.serviceConfig.CachedRoutes.Enabled
-      ) {
-        const bestQuoteRouteCount = bestQuote!.quotes.length;
-        const simulationStatusForTag =
-          bestQuote?.simulationResult?.status !== undefined
-            ? SimulationStatus[bestQuote.simulationResult.status]
-            : 'none';
-        const routeCountBucket =
-          bestQuoteRouteCount === 0
-            ? '0'
-            : bestQuoteRouteCount === 1
-              ? '1'
-              : bestQuoteRouteCount <= 3
-                ? '2-3'
-                : bestQuoteRouteCount <= 5
-                  ? '4-5'
-                  : bestQuoteRouteCount <= 10
-                    ? '6-10'
-                    : '>10';
-        ctx.logger.debug('Cached route write observability', {
-          chainId: chain.chainId,
-          tradeType,
-          quoteType,
-          hooksOptions,
-          protocols: protocols.join(',').toLowerCase(),
-          amountIn: amountIn.toString(),
-          usdBucket,
-          ...namespaceLogFields,
-          bestQuoteRouteCount,
-          simulationStatus: bestQuote?.simulationResult?.status,
-          routeSummaries: bestQuote!.quotes.map(quote => {
-            const routeSummary = summarizeRouteForLogging(
-              quote.route,
-              chain.chainId
-            );
-            return {
-              routeHash: routeSummary.routeHash,
-              routeString: routeSummary.routeString,
-              protocol: routeSummary.protocol,
-              percentage: routeSummary.percentage,
-              hopCount: routeSummary.hopCount,
-              poolIds: routeSummary.poolIds,
-              hasAggHookPool: routeSummary.hasAggHookPool,
-              aggHookPoolCount: routeSummary.aggHookPoolCount,
-              quoteAmount: quote.amount.toString(),
-              gasCostInQuoteToken:
-                quote.gasDetails?.gasCostInQuoteToken?.toString(),
-              gasUse: quote.gasDetails?.gasUse.toString(),
-            };
-          }),
-        });
-        await ctx.metrics.count(
-          buildMetricKey('CachedRoutes.WriteBestQuote'),
-          1,
-          {
-            tags: [
-              `chain:${ChainId[chain.chainId]}`,
-              `tradeType:${tradeType}`,
-              `simulationStatus:${simulationStatusForTag}`,
-              `routeCountBucket:${routeCountBucket}`,
-              `testAggHooks:${options?.testAggHooks}`,
-            ],
-          }
-        );
-        await Promise.all(
-          bestQuote!.quotes.map(quote =>
-            this.cachedRoutesRepository.saveCachedRoutes(
-              nsCtx,
-              protocols,
-              quote.route,
-              chain.chainId,
-              tokenInCurrencyInfo.isNative
-                ? new Address(ADDRESS_ZERO)
-                : tokenInCurrencyInfo.wrappedAddress,
-              tokenOutCurrencyInfo.isNative
-                ? new Address(ADDRESS_ZERO)
-                : tokenOutCurrencyInfo.wrappedAddress,
-              tradeType,
-              amountIn,
-              usdBucket,
-              ctx,
-              options?.testAggHooks
-            )
-          )
-        );
-        await this.cachedRoutesRepository.deletePendingRefresh(
-          nsCtx,
-          protocols,
-          chain.chainId,
-          tokenInCurrencyInfo.isNative
-            ? new Address(ADDRESS_ZERO)
-            : tokenInCurrencyInfo.wrappedAddress,
-          tokenOutCurrencyInfo.isNative
-            ? new Address(ADDRESS_ZERO)
-            : tokenOutCurrencyInfo.wrappedAddress,
-          tradeType,
-          amountIn,
-          usdBucket
-        );
       }
 
       // Construct debugLogs if requested
@@ -1655,6 +1532,264 @@ export class UniRouteBL implements IUniRoutedBL {
       startUpdatePoolsTime,
       ctx,
       metricTags
+    );
+  }
+
+  /**
+   * Async-mode dispatcher for cache writes. Centralises the
+   * `Lambda.Type === Async` gate so the inner helpers focus on their own
+   * conditions. Picks the writer based on `status`: a NoRoute outcome
+   * persists the negative cache, a successful outcome persists the route
+   * cache. No-op when running in sync mode.
+   */
+  private async writeCachesIfAsync(
+    status: QuoteStatus,
+    bestQuote: QuoteSplit | undefined,
+    ctx: Context,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    amountIn: bigint,
+    usdBucket: UsdBucket,
+    quoteType: QuoteType,
+    hooksOptions: HooksOptions,
+    protocols: Protocol[],
+    nsCtx: RouteNamespaceContext,
+    namespaceLogFields: ReturnType<typeof namespaceFieldsForLogging>,
+    usedCachedRoutes: boolean,
+    shouldCheckCache: boolean,
+    options: QuoteOptions | undefined,
+    metricTags: string[]
+  ): Promise<void> {
+    if (this.serviceConfig.Lambda.Type !== LambdaType.Async) {
+      return;
+    }
+    if (status === QuoteStatus.NoRoute) {
+      await this.maybeWriteNoRouteCache(
+        ctx,
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        amountIn,
+        usdBucket,
+        protocols,
+        nsCtx,
+        usedCachedRoutes,
+        shouldCheckCache,
+        metricTags
+      );
+    } else {
+      await this.maybeWriteRouteCache(
+        ctx,
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        amountIn,
+        usdBucket,
+        quoteType,
+        hooksOptions,
+        protocols,
+        nsCtx,
+        namespaceLogFields,
+        usedCachedRoutes,
+        options,
+        bestQuote
+      );
+    }
+  }
+
+  /**
+   * No-route negative cache write. Called from the async dispatcher only.
+   * When a deep search confirms no route exists at this amount and the
+   * cache key wasn't already responsible for the hit, set the amount cliff
+   * so future sync requests at this amount or higher can short-circuit
+   * without re-running the search. Also clears the pending refresh marker
+   * so the next sync request at a *lower* amount can trigger a fresh
+   * refresh and ratchet the cliff down.
+   */
+  private async maybeWriteNoRouteCache(
+    ctx: Context,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    amountIn: bigint,
+    usdBucket: UsdBucket,
+    protocols: Protocol[],
+    nsCtx: RouteNamespaceContext,
+    usedCachedRoutes: boolean,
+    shouldCheckCache: boolean,
+    metricTags: string[]
+  ): Promise<void> {
+    if (usedCachedRoutes || !shouldCheckCache) {
+      return;
+    }
+    const wrote = await this.noRouteCacheRepository.setAmountCliff(
+      nsCtx,
+      protocols,
+      chain.chainId,
+      tokenInCurrencyInfo.wrappedAddress,
+      tokenOutCurrencyInfo.wrappedAddress,
+      tradeType,
+      amountIn
+    );
+    if (wrote) {
+      await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {
+        tags: metricTags,
+      });
+    }
+    // Clear pending refresh so the next sync request at a lower amount
+    // can trigger a new async refresh to ratchet down the amountCliff.
+    await this.cachedRoutesRepository.deletePendingRefresh(
+      nsCtx,
+      protocols,
+      chain.chainId,
+      tokenInCurrencyInfo.wrappedAddress,
+      tokenOutCurrencyInfo.wrappedAddress,
+      tradeType,
+      amountIn,
+      usdBucket
+    );
+  }
+
+  /**
+   * Best-quote route cache write. Called from the async dispatcher only.
+   * When the deep search produced a non-failed simulation result, persist
+   * each constituent route into the bucketed cache so future sync requests
+   * for this token-pair / amount bucket can use them. No-op when caching
+   * is disabled, when the request used cached routes (avoid double-write),
+   * when external protocols are present without `AggHooksWriteEnabled`,
+   * or when simulation explicitly failed.
+   *
+   * Emits a `Cached route write observability` debug log + a
+   * `CachedRoutes.WriteBestQuote` count metric tagged with simulation
+   * status and a coarse route-count bucket.
+   */
+  private async maybeWriteRouteCache(
+    ctx: Context,
+    chain: Chain,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    amountIn: bigint,
+    usdBucket: UsdBucket,
+    quoteType: QuoteType,
+    hooksOptions: HooksOptions,
+    protocols: Protocol[],
+    nsCtx: RouteNamespaceContext,
+    namespaceLogFields: ReturnType<typeof namespaceFieldsForLogging>,
+    usedCachedRoutes: boolean,
+    options: QuoteOptions | undefined,
+    bestQuote: QuoteSplit | undefined
+  ): Promise<void> {
+    if (
+      usedCachedRoutes ||
+      // TODO: replace with requestedProtocolsToHitCache once we have enabled agg hooks caching write
+      !(
+        onlyUniswapProtocolsIncludedAndMixed(protocols) ||
+        (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
+          this.serviceConfig.CachedRoutes.AggHooksWriteEnabled)
+      ) ||
+      bestQuote?.simulationResult?.status === SimulationStatus.FAILED ||
+      !this.serviceConfig.CachedRoutes.Enabled
+    ) {
+      return;
+    }
+    const bestQuoteRouteCount = bestQuote!.quotes.length;
+    const simulationStatusForTag =
+      bestQuote?.simulationResult?.status !== undefined
+        ? SimulationStatus[bestQuote.simulationResult.status]
+        : 'none';
+    const routeCountBucket =
+      bestQuoteRouteCount === 0
+        ? '0'
+        : bestQuoteRouteCount === 1
+          ? '1'
+          : bestQuoteRouteCount <= 3
+            ? '2-3'
+            : bestQuoteRouteCount <= 5
+              ? '4-5'
+              : bestQuoteRouteCount <= 10
+                ? '6-10'
+                : '>10';
+    ctx.logger.debug('Cached route write observability', {
+      chainId: chain.chainId,
+      tradeType,
+      quoteType,
+      hooksOptions,
+      protocols: protocols.join(',').toLowerCase(),
+      amountIn: amountIn.toString(),
+      usdBucket,
+      ...namespaceLogFields,
+      bestQuoteRouteCount,
+      simulationStatus: bestQuote?.simulationResult?.status,
+      routeSummaries: bestQuote!.quotes.map(quote => {
+        const routeSummary = summarizeRouteForLogging(
+          quote.route,
+          chain.chainId
+        );
+        return {
+          routeHash: routeSummary.routeHash,
+          routeString: routeSummary.routeString,
+          protocol: routeSummary.protocol,
+          percentage: routeSummary.percentage,
+          hopCount: routeSummary.hopCount,
+          poolIds: routeSummary.poolIds,
+          hasAggHookPool: routeSummary.hasAggHookPool,
+          aggHookPoolCount: routeSummary.aggHookPoolCount,
+          quoteAmount: quote.amount.toString(),
+          gasCostInQuoteToken:
+            quote.gasDetails?.gasCostInQuoteToken?.toString(),
+          gasUse: quote.gasDetails?.gasUse.toString(),
+        };
+      }),
+    });
+    await ctx.metrics.count(buildMetricKey('CachedRoutes.WriteBestQuote'), 1, {
+      tags: [
+        `chain:${ChainId[chain.chainId]}`,
+        `tradeType:${tradeType}`,
+        `simulationStatus:${simulationStatusForTag}`,
+        `routeCountBucket:${routeCountBucket}`,
+        `testAggHooks:${options?.testAggHooks}`,
+      ],
+    });
+    await Promise.all(
+      bestQuote!.quotes.map(quote =>
+        this.cachedRoutesRepository.saveCachedRoutes(
+          nsCtx,
+          protocols,
+          quote.route,
+          chain.chainId,
+          tokenInCurrencyInfo.isNative
+            ? new Address(ADDRESS_ZERO)
+            : tokenInCurrencyInfo.wrappedAddress,
+          tokenOutCurrencyInfo.isNative
+            ? new Address(ADDRESS_ZERO)
+            : tokenOutCurrencyInfo.wrappedAddress,
+          tradeType,
+          amountIn,
+          usdBucket,
+          ctx,
+          options?.testAggHooks
+        )
+      )
+    );
+    await this.cachedRoutesRepository.deletePendingRefresh(
+      nsCtx,
+      protocols,
+      chain.chainId,
+      tokenInCurrencyInfo.isNative
+        ? new Address(ADDRESS_ZERO)
+        : tokenInCurrencyInfo.wrappedAddress,
+      tokenOutCurrencyInfo.isNative
+        ? new Address(ADDRESS_ZERO)
+        : tokenOutCurrencyInfo.wrappedAddress,
+      tradeType,
+      amountIn,
+      usdBucket
     );
   }
 
