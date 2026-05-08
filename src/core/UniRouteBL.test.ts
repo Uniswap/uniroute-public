@@ -4639,6 +4639,51 @@ describe('UniRouteBL', () => {
       expectOriginalConfig(strategySpy.mock.calls[0][7], serviceConfig);
     });
 
+    it('should use original RouteFinder config on sync cache miss when all uniswap protocols are present alongside external protocols', async () => {
+      // Full uniswap-native set + external protocols (e.g. CurveStableSwap) — the agg-hooks shadow shape.
+      // Should NOT trigger the reduced config: with all uniswap natives available, the
+      // search space is rich enough to warrant the full RouteFinder budget.
+      const request = new QuoteRequest({
+        ...baseRequest,
+        protocols: 'v2,v3,v4,mixed,CurveStableSwap',
+        tradeType: 'EXACT_IN',
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+      expect(response.hitsCachedRoutes).toBe(false);
+
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      expectOriginalConfig(strategySpy.mock.calls[0][7], serviceConfig);
+    });
+
     it('should use original RouteFinder config on sync cache hit', async () => {
       const request = new QuoteRequest({
         ...baseRequest,

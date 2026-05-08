@@ -40,6 +40,7 @@ import {Pool} from '../models/pool/Pool';
 import {IQuoteSelector} from './quote/selector/IQuoteSelector';
 import {
   onlyUniswapProtocolsIncludedAndMixed,
+  allUniswapNativeProtocolsIncludedAndMixed,
   convertCurrencyInfoToSdkCurrency,
   erc20TokenToSdkToken,
   fetchAllInvolvedTokens,
@@ -1130,10 +1131,11 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * On sync cache miss with specific protocols, returns a config with
-   * reduced RouteFinder search space for lower latency. Otherwise returns
-   * the unmodified service config. When `!allProtocolsIncluded`, cached
-   * routes are never used so every request does fresh route finding.
+   * On sync cache miss, returns a config with reduced RouteFinder search
+   * space for lower latency when the protocol set is incomplete (missing
+   * one of v2/v3/v4/mixed, or external-only). Requests that include the
+   * full Uniswap-native set fall through to the unmodified service config
+   * regardless of whether external protocols are also present.
    */
   private selectEffectiveConfig(
     usedCachedRoutes: boolean,
@@ -1143,7 +1145,7 @@ export class UniRouteBL implements IUniRoutedBL {
       !usedCachedRoutes &&
       this.serviceConfig.Lambda.Type === LambdaType.Sync &&
       this.serviceConfig.QuoteService === QuoteService.UniRoute &&
-      !onlyUniswapProtocolsIncludedAndMixed(protocols)
+      !allUniswapNativeProtocolsIncludedAndMixed(protocols)
     ) {
       return {
         ...this.serviceConfig,
