@@ -8,23 +8,39 @@ import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {WRAPPED_NATIVE_CURRENCY} from '../../lib/tokenUtils';
 import {Address} from '../../models/address/Address';
 import {TradeType} from '../../models/quote/TradeType';
-import {Pool} from '../../models/pool/Pool';
 import {Protocol} from '../../models/pool/Protocol';
+import {V4Pool} from '../../models/pool/V4Pool';
+import {STABLE_SWAP_NG} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
 
-class MockPool extends Pool {
+// Extends V4Pool so `pool instanceof V4Pool` is true — required by
+// `isAggHookPool` / `routeUsesAggHook` to recognize hooked pools in tests.
+// The protocol getter is overridden back to V3 for parity with the original
+// MockPool behavior the rest of the test suite relies on.
+class MockPool extends V4Pool {
   constructor(
-    public readonly token0: Address,
-    public readonly token1: Address,
-    public readonly address: Address
+    token0: Address,
+    token1: Address,
+    address: Address,
+    hooks?: string
   ) {
-    super(token0, token1, address);
+    super(
+      token0,
+      token1,
+      500,
+      10,
+      hooks ?? '0x0000000000000000000000000000000000000000',
+      0n,
+      address.address,
+      0n,
+      0n
+    );
   }
 
-  get protocol(): Protocol {
+  override get protocol(): Protocol {
     return Protocol.V3;
   }
 
-  toString(): string {
+  override toString(): string {
     return `MockPool(${this.address})`;
   }
 }
@@ -73,9 +89,10 @@ describe('QuoteBestSplitFinder', () => {
   const createMockPool = (
     token0: Address,
     token1: Address,
-    address: string
+    address: string,
+    hooks?: string
   ): MockPool =>
-    new MockPool(token0, token1, new Address(address.padEnd(42, '0')));
+    new MockPool(token0, token1, new Address(address.padEnd(42, '0')), hooks);
 
   const createMockRoute = (
     pools: MockPool[],
@@ -320,6 +337,85 @@ describe('QuoteBestSplitFinder', () => {
       expect(mockContext.logger.warn).toHaveBeenCalledWith(
         expect.stringContaining('Timed out after')
       );
+
+      dateNowSpy.mockRestore();
+    });
+
+    it('does not infer convergence from a truncated level when timeout fires mid-recursion', async () => {
+      // Repro of the regression the timed-out-level guard fixes: if
+      // generateCombinationsForLevel is cut off mid-recursion the level's
+      // "improvement" reads as 0% (it never reached the better combinations),
+      // and the low-improvement early-exit branch must not interpret that as
+      // convergence — earlyExitReason must stay 'timeout', not flip to
+      // 'low_improvement'.
+
+      // Eight distinct pools across percentages 25/50/75/100 give level 4
+      // (four 25% routes) a non-empty search space without sharing pools.
+      const pools = Array.from({length: 8}, (_, i) =>
+        createMockPool(
+          mockToken0,
+          mockToken1,
+          `0x${(0x11 + i).toString(16)}000000000000000000000000000000000000`
+        )
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>();
+      percentageToQuotes.set(100, [
+        createMockQuote(createMockRoute([pools[0]!], 100), 100n),
+      ]);
+      percentageToQuotes.set(75, [
+        createMockQuote(createMockRoute([pools[1]!], 75), 80n),
+      ]);
+      percentageToQuotes.set(50, [
+        createMockQuote(createMockRoute([pools[2]!], 50), 55n),
+        createMockQuote(createMockRoute([pools[3]!], 50), 50n),
+      ]);
+      percentageToQuotes.set(25, [
+        createMockQuote(createMockRoute([pools[4]!], 25), 28n),
+        createMockQuote(createMockRoute([pools[5]!], 25), 27n),
+        createMockQuote(createMockRoute([pools[6]!], 25), 26n),
+        createMockQuote(createMockRoute([pools[7]!], 25), 25n),
+      ]);
+
+      // Mock Date.now to let levels 2-3 complete then trip timeout deeper in
+      // the recursion. The exact call count needed is implementation-detail-
+      // sensitive; 50 free calls comfortably covers levels 1-3 for this small
+      // search space, and any later call returns past the timeout horizon.
+      const startTime = 1_000_000;
+      const timeoutMs = 100;
+      let calls = 0;
+      const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+        calls += 1;
+        if (calls === 1) return startTime;
+        if (calls < 50) return startTime + 1; // well within timeoutMs
+        return startTime + timeoutMs + 1;
+      });
+
+      await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        25,
+        4,
+        100,
+        timeoutMs,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      const debugCalls = (mockContext.logger.debug as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      const hasLowImprovementExit = debugCalls.some(
+        ([msg]) =>
+          typeof msg === 'string' && msg.includes('Improvement less than 0.01%')
+      );
+      expect(hasLowImprovementExit).toBe(false);
+
+      const observabilityCall = debugCalls.find(
+        ([msg]) =>
+          typeof msg === 'string' &&
+          msg === 'QuoteBestSplitFinder observability'
+      );
+      expect(observabilityCall?.[1]?.earlyExitReason).toBe('timeout');
 
       dateNowSpy.mockRestore();
     });
@@ -1446,6 +1542,213 @@ describe('QuoteBestSplitFinder', () => {
         tokenD.address
       );
       expect(resultD).toBe(false);
+    });
+  });
+
+  describe('agg-hook partition (MAX_VALID_QUOTES_PER_CLASS)', () => {
+    // Sourced from the allowlist file so the test stays valid if the
+    // canonical address ever changes.
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    it('keeps top-K from both classes when both are populated (up to 2K returned)', async () => {
+      // Two no-hook pools and two agg-hook pools. Pre-partition the global
+      // top-K=2 would be filled entirely by the agg-hook leaders. With the
+      // per-class partition each class independently keeps its top K, so
+      // all four leaders survive.
+      const noHookPool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xa000000000000000000000000000000000000000'
+      );
+      const noHookPool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xa100000000000000000000000000000000000000'
+      );
+      const hookPool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xb000000000000000000000000000000000000000',
+        aggHookAddr
+      );
+      const hookPool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xb100000000000000000000000000000000000000',
+        aggHookAddr
+      );
+
+      const hookRouteHi = createMockRoute([hookPool1], 50);
+      const hookRouteLo = createMockRoute([hookPool2], 50);
+      const noHookRouteHi = createMockRoute([noHookPool1], 50);
+      const noHookRouteLo = createMockRoute([noHookPool2], 50);
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(hookRouteHi, 1000n),
+              createMockQuote(hookRouteLo, 990n),
+              createMockQuote(noHookRouteHi, 980n),
+              createMockQuote(noHookRouteLo, 970n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET
+      );
+
+      expect(stats.returnedCount).toBe(4);
+      const returnedRoutes = stats.quotes.map(q => q.route);
+      expect(returnedRoutes).toContain(noHookRouteHi);
+      expect(returnedRoutes).toContain(noHookRouteLo);
+      expect(returnedRoutes).toContain(hookRouteHi);
+      expect(returnedRoutes).toContain(hookRouteLo);
+    });
+
+    it('caps each class at K independently (top-K within class)', async () => {
+      // Three agg-hook routes and one no-hook — agg-hook class is capped
+      // at K=2 (drops the lowest), no-hook class returns its sole route.
+      const noHookPool = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xe000000000000000000000000000000000000000'
+      );
+      const hookPool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xe100000000000000000000000000000000000000',
+        aggHookAddr
+      );
+      const hookPool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xe200000000000000000000000000000000000000',
+        aggHookAddr
+      );
+      const hookPool3 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xe300000000000000000000000000000000000000',
+        aggHookAddr
+      );
+
+      const noHookRoute = createMockRoute([noHookPool], 50);
+      const hookRoute1 = createMockRoute([hookPool1], 50);
+      const hookRoute2 = createMockRoute([hookPool2], 50);
+      const hookRoute3 = createMockRoute([hookPool3], 50);
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(hookRoute1, 1000n),
+              createMockQuote(hookRoute2, 990n),
+              createMockQuote(hookRoute3, 980n),
+              createMockQuote(noHookRoute, 970n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET
+      );
+
+      expect(stats.returnedCount).toBe(3);
+      const returnedRoutes = stats.quotes.map(q => q.route);
+      expect(returnedRoutes).toContain(noHookRoute);
+      expect(returnedRoutes).toContain(hookRoute1);
+      expect(returnedRoutes).toContain(hookRoute2);
+      expect(returnedRoutes).not.toContain(hookRoute3);
+    });
+
+    it('gives all K slots to the agg-hook class when no no-hook quote is present', async () => {
+      const hookPool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xc000000000000000000000000000000000000000',
+        aggHookAddr
+      );
+      const hookPool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xc100000000000000000000000000000000000000',
+        aggHookAddr
+      );
+      const hookPool3 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xc200000000000000000000000000000000000000',
+        aggHookAddr
+      );
+
+      const r1 = createMockRoute([hookPool1], 50);
+      const r2 = createMockRoute([hookPool2], 50);
+      const r3 = createMockRoute([hookPool3], 50);
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(r1, 1000n),
+              createMockQuote(r2, 990n),
+              createMockQuote(r3, 980n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      expect(stats.quotes.map(q => q.route)).toEqual([r1, r2]);
+    });
+
+    it('matches pre-partition behavior when no agg-hook pools are present', async () => {
+      // Pre-partition top-K=2 cap: 3 no-hook quotes -> top 2 returned.
+      const pool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xd000000000000000000000000000000000000000'
+      );
+      const pool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xd100000000000000000000000000000000000000'
+      );
+      const pool3 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xd200000000000000000000000000000000000000'
+      );
+
+      const r1 = createMockRoute([pool1], 50);
+      const r2 = createMockRoute([pool2], 50);
+      const r3 = createMockRoute([pool3], 50);
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(r1, 1000n),
+              createMockQuote(r2, 990n),
+              createMockQuote(r3, 980n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      expect(stats.quotes.map(q => q.route)).toEqual([r1, r2]);
     });
   });
 });

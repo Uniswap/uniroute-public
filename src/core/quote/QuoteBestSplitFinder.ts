@@ -8,21 +8,26 @@ import {ChainId} from '../../lib/config';
 import {buildMetricKey} from '../../lib/config';
 import {IQuoteBestSplitFinder} from './IQuoteBestSplitFinder';
 import {TradeType} from '../../models/quote/TradeType';
+import {routeUsesAggHook} from '../../lib/observability';
 
 export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
 {
   /**
-   * Maximum number of quotes to return per percentage after filtering for validity, while constructing splits.
-   * In getBestUnusedQuotes, we:
-   * 1. First filter quotes to only include those that:
-   *    - Don't share any pools with routes already in the combination
-   *    - Don't have ETH/WETH token conflicts with routes already in the combination
-   * 2. Then take the top N quotes from these valid quotes, where N is this constant
-   * This helps limit the number of combinations to explore while ensuring we only combine
-   * independent (non-overlapping) routes.
+   * Maximum number of quotes to return *per route class* per percentage,
+   * after filtering for validity, while constructing splits. Routes are
+   * partitioned into no-hook vs agg-hook (V4 hooked) classes and the top
+   * K from each are returned. When both classes are populated this yields
+   * up to 2K candidates per percentage; when only one class has valid
+   * quotes (e.g. legacy `protocols=v2,v3,v4,mixed` requests), it
+   * degenerates to top-K total and the branching factor matches the
+   * pre-partition behavior.
+   *
+   * The partition exists because agg-hook routes were displacing
+   * high-yielding no-hook routes from the top-K slot in some sub-trees,
+   * producing strictly worse quotes when external protocols were enabled.
    */
-  private readonly MAX_VALID_QUOTES_PER_PERCENTAGE = 2;
+  private readonly MAX_VALID_QUOTES_PER_CLASS = 2;
   // Improvement threshold percentage to continue searching to next level (0.01%)
   private readonly MIN_IMPROVEMENT_PCT_PER_LEVEL = 0.01;
   // Minimum number of split levels to try before exiting early
@@ -129,12 +134,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   }
 
   /**
-   * Gets the best available quotes for a given percentage that haven't been used in the current combination
-   * @param percentage The percentage to get quotes for
-   * @param percentageToSortedQuotes Map of percentages to their sorted quotes
-   * @param usedRoutes Routes that are already used in the current combination
-   * @param chainId The chain ID
-   * @returns Array of best available quotes
+   * Returns the top valid quotes for a given percentage that don't conflict
+   * with routes already in the current combination.
+   *
+   * Quotes are partitioned into two classes (no-hook vs agg-hook V4 pools)
+   * and the top `MAX_VALID_QUOTES_PER_CLASS` of each are returned. See the
+   * docstring on the constant for rationale.
    */
   private getBestUnusedQuotesStats(
     percentage: number,
@@ -156,11 +161,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         !this.hasEthWethTokenConflict(route, usedRoutes, chainId)
       );
     });
-    // Then return only top MAX_VALID_QUOTES_PER_PERCENTAGE quotes
-    const returnedQuotes = validQuotes.slice(
-      0,
-      this.MAX_VALID_QUOTES_PER_PERCENTAGE
-    );
+
+    // Partition by class. `validQuotes` preserves the input order (which is
+    // sorted by amount upstream), so each class is already amount-sorted.
+    const noHookQuotes: QuoteBasic[] = [];
+    const aggHookQuotes: QuoteBasic[] = [];
+    for (const quote of validQuotes) {
+      const route = quote.route as RouteBasic<TPool>;
+      if (routeUsesAggHook(route, chainId)) {
+        aggHookQuotes.push(quote);
+      } else {
+        noHookQuotes.push(quote);
+      }
+    }
+
+    // Each class gets up to K slots independently. With both classes
+    // populated this yields up to 2K candidates per percentage step.
+    const returnedQuotes = [
+      ...noHookQuotes.slice(0, this.MAX_VALID_QUOTES_PER_CLASS),
+      ...aggHookQuotes.slice(0, this.MAX_VALID_QUOTES_PER_CLASS),
+    ];
     return {
       quotes: returnedQuotes,
       totalCount: quotes.length,
@@ -480,7 +500,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       const previousResultLength = result.length;
       // Reset current level best amount before processing new level
       currentLevelBestAmount = previousLevelBestAmount;
+      // Snapshot the timeout flag to detect mid-level truncation. If
+      // generateCombinationsForLevel sets `timedOut`, this level's results are
+      // partial — we must not infer convergence from the partial improvement.
+      const wasTimedOutBeforeLevel = timedOut;
       await generateCombinationsForLevel(level, 100, []);
+      const wasTruncatedThisLevel = !wasTimedOutBeforeLevel && timedOut;
 
       const unfilteredResultLength = result.length;
 
@@ -524,10 +549,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           `QuoteBestSplitFinder: Level ${level} improvement: ${improvement.toFixed(5)}%`
         );
 
-        // Exit if improvement is less than 0.01%, but only if we've tried at least 3 splits
+        // Exit if improvement is less than 0.01%, but only if we've tried at
+        // least 3 splits and this level finished generating combinations. A
+        // level whose recursion was cut off by the split-finder timeout
+        // produces a partial result whose 0% "improvement" is meaningless;
+        // the loop's top-of-iteration `!timedOut` guard will end the search
+        // anyway, so we just skip the spurious low-improvement exit here.
         if (
           level >= this.MIN_SPLIT_LEVELS_BEFORE_EARLY_EXIT &&
-          improvement < this.MIN_IMPROVEMENT_PCT_PER_LEVEL
+          improvement < this.MIN_IMPROVEMENT_PCT_PER_LEVEL &&
+          !wasTruncatedThisLevel
         ) {
           ctx.logger.debug(
             `QuoteBestSplitFinder: Improvement less than 0.01% at level ${level}, exiting early`

@@ -120,6 +120,7 @@ import {
   summarizeRouteForLogging,
   summarizeRoutesForLogging,
 } from '../lib/observability';
+import {capRoutesByAggHookClass} from '../lib/routeCap';
 import {EMPTY_NAMESPACE_CONTEXT} from '../models/hooks/namespaces';
 import {RouteNamespaceContext} from '../models/hooks/namespaces/CacheNamespace';
 
@@ -975,10 +976,12 @@ export class UniRouteBL implements IUniRoutedBL {
     effectiveConfig: IUniRouteServiceConfig
   ): Promise<RouteBasic<Pool>[]> {
     const routesBeforeEffectiveSlice = routes;
-    const cappedRoutes =
-      routes.length > effectiveConfig.RouteFinder.MaxRoutes
-        ? routes.slice(0, effectiveConfig.RouteFinder.MaxRoutes)
-        : routes;
+    const routeCapResult = capRoutesByAggHookClass(
+      routes,
+      effectiveConfig.RouteFinder.MaxRoutes,
+      chain.chainId
+    );
+    const cappedRoutes = routeCapResult.routes;
     const beforeRouteCounts = routeSetCountsForLogging(
       routesBeforeEffectiveSlice,
       chain.chainId
@@ -987,6 +990,7 @@ export class UniRouteBL implements IUniRoutedBL {
       cappedRoutes,
       chain.chainId
     );
+    const retainedRoutes = new Set(cappedRoutes);
     ctx.logger.debug('Route cap observability', {
       chainId: chain.chainId,
       tradeType,
@@ -995,13 +999,18 @@ export class UniRouteBL implements IUniRoutedBL {
       protocols: protocols.join(',').toLowerCase(),
       cachedRoutesStatus: usedCachedRoutes ? 'hit' : 'miss',
       maxRoutes: effectiveConfig.RouteFinder.MaxRoutes,
+      capMode: routeCapResult.usedAggHookPartition
+        ? 'per_agg_hook_class'
+        : 'global',
+      noAggHookRoutesRetained: routeCapResult.noAggHookRoutesRetained,
+      aggHookRoutesRetained: routeCapResult.aggHookRoutesRetained,
       routeFinderConfig:
         effectiveConfig !== this.serviceConfig ? 'reduced' : 'original',
       beforeSlice: beforeRouteCounts,
       afterSlice: afterRouteCounts,
       droppedRouteSummaries: summarizeRoutesForLogging(
         routesBeforeEffectiveSlice
-          .slice(effectiveConfig.RouteFinder.MaxRoutes)
+          .filter(route => !retainedRoutes.has(route))
           .slice(0, 20),
         chain.chainId
       ).map(route => ({
