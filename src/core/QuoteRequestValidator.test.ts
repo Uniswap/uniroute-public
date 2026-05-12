@@ -1,6 +1,11 @@
 import {describe, expect, it, beforeEach, vi} from 'vitest';
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-import {QuoteRequest, QuoteResponse} from '../../gen/uniroute/v1/api_pb';
+
+import {
+  QuoteRequest,
+  RawStateOverride,
+  StateOverride,
+  TokenBalanceOverride,
+} from '../../gen/uniroute/v1/api_pb';
 import {QuoteRequestValidator} from './QuoteRequestValidator';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
@@ -502,6 +507,222 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error).toBeDefined();
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe('Amount must be greater than zero');
+    });
+
+    describe('stateOverrides', () => {
+      const VALID_SLOT =
+        '0x0000000000000000000000000000000000000000000000000000000000000005';
+      const VALID_VALUE =
+        '0x0000000000000000000000000000000000000000000000000000000000000001';
+
+      function setupValidChain() {
+        const mockChain = createMockChain(ChainId.MAINNET);
+        vi.mocked(mockChainRepository.getChain).mockResolvedValue(mockChain);
+        vi.mocked(mockTokenProvider.searchForToken).mockImplementation(
+          async (chain, tokenRaw) => {
+            if (tokenRaw === '0x1111111111111111111111111111111111111111') {
+              return new CurrencyInfo(
+                false,
+                new Address('0x1111111111111111111111111111111111111111')
+              );
+            }
+            return new CurrencyInfo(
+              false,
+              new Address('0x2222222222222222222222222222222222222222')
+            );
+          }
+        );
+      }
+
+      it('accepts a well-formed TokenBalanceOverride + RawStateOverride pair', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1000',
+              }),
+            },
+          }),
+          new StateOverride({
+            kind: {
+              case: 'rawState',
+              value: new RawStateOverride({
+                contractAddress: '0x3333333333333333333333333333333333333333',
+                stateDiff: {[VALID_SLOT]: VALID_VALUE},
+                codeOverride: '0x60aa',
+              }),
+            },
+          }),
+        ];
+
+        const result = await validator.validateInputs(request, ctx);
+        expect(result).toBeUndefined();
+      });
+
+      it('rejects > 16 entries', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = Array.from(
+          {length: 17},
+          () =>
+            new StateOverride({
+              kind: {
+                case: 'tokenBalance',
+                value: new TokenBalanceOverride({
+                  tokenAddress: '0x0000000000000000000000000000000000000000',
+                  accountAddress: '0x000000000000000000000000000000000000dEaD',
+                  amount: '1',
+                }),
+              },
+            })
+        );
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/exceeds max of 16/);
+      });
+
+      it('rejects invalid hex slot in RawStateOverride.stateDiff', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'rawState',
+              value: new RawStateOverride({
+                contractAddress: '0x3333333333333333333333333333333333333333',
+                stateDiff: {'0xnothex': VALID_VALUE},
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/slot must be 32-byte hex/);
+      });
+
+      it('rejects codeOverride larger than the contract size cap', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        // Over 24KB + 0x prefix.
+        const tooLarge = '0x' + 'aa'.repeat(24577);
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'rawState',
+              value: new RawStateOverride({
+                contractAddress: '0x3333333333333333333333333333333333333333',
+                stateDiff: {},
+                codeOverride: tooLarge,
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/exceeds max byte size/);
+      });
+
+      it('rejects balanceMappingSlot above uint256 max', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1',
+                balanceMappingSlot: (1n << 256n).toString(),
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/uint256/);
+      });
+
+      it('requires balanceMappingSlot for ERC-20 TokenBalanceOverride', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1',
+                // balanceMappingSlot omitted
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(
+          /balanceMappingSlot is required/
+        );
+      });
+
+      it('rejects amounts above uint256 max', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        const overUint256 = (1n << 256n).toString();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: overUint256,
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/uint256/);
+      });
+
+      it('rejects pathologically long amount strings', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1'.repeat(81),
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/at most 80 digits/);
+      });
+
+      it('rejects invalid addresses on TokenBalanceOverride', async () => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: 'not-an-address',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.message).toMatch(/must be a valid address/);
+      });
     });
   });
 });
