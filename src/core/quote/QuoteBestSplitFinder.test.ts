@@ -1545,16 +1545,16 @@ describe('QuoteBestSplitFinder', () => {
     });
   });
 
-  describe('agg-hook partition (MAX_VALID_QUOTES_PER_CLASS)', () => {
+  describe('agg-hook partition (MAX_VALID_QUOTES_PER_PERCENTAGE)', () => {
     // Sourced from the allowlist file so the test stays valid if the
     // canonical address ever changes.
     const aggHookAddr = STABLE_SWAP_NG[0]!;
 
-    it('keeps top-K from both classes when both are populated (up to 2K returned)', async () => {
+    it('reserves at least one slot for the no-hook class when both are populated', async () => {
       // Two no-hook pools and two agg-hook pools. Pre-partition the global
       // top-K=2 would be filled entirely by the agg-hook leaders. With the
-      // per-class partition each class independently keeps its top K, so
-      // all four leaders survive.
+      // partition the budget is split between classes (no-hook gets the
+      // ceiling slot when K is odd; for K=2 each class gets exactly 1).
       const noHookPool1 = createMockPool(
         mockToken0,
         mockToken1,
@@ -1578,6 +1578,8 @@ describe('QuoteBestSplitFinder', () => {
         aggHookAddr
       );
 
+      // Sorted by amount desc — both leaders are agg-hook routes. The
+      // partition still keeps the top no-hook route in the candidate set.
       const hookRouteHi = createMockRoute([hookPool1], 50);
       const hookRouteLo = createMockRoute([hookPool2], 50);
       const noHookRouteHi = createMockRoute([noHookPool1], 50);
@@ -1600,17 +1602,19 @@ describe('QuoteBestSplitFinder', () => {
         ChainId.MAINNET
       );
 
-      expect(stats.returnedCount).toBe(4);
+      expect(stats.returnedCount).toBe(2);
       const returnedRoutes = stats.quotes.map(q => q.route);
+      // One slot per class — top no-hook + top agg-hook.
       expect(returnedRoutes).toContain(noHookRouteHi);
-      expect(returnedRoutes).toContain(noHookRouteLo);
       expect(returnedRoutes).toContain(hookRouteHi);
-      expect(returnedRoutes).toContain(hookRouteLo);
+      expect(returnedRoutes).not.toContain(noHookRouteLo);
+      expect(returnedRoutes).not.toContain(hookRouteLo);
     });
 
-    it('caps each class at K independently (top-K within class)', async () => {
-      // Three agg-hook routes and one no-hook — agg-hook class is capped
-      // at K=2 (drops the lowest), no-hook class returns its sole route.
+    it('total returned across classes never exceeds K (branching factor preserved)', async () => {
+      // Branching factor is the bug-fix dial: doubling per-percentage candidates
+      // when both classes are populated would explode the level-N search space
+      // and starve the optimal split before the timeout. K stays constant.
       const noHookPool = createMockPool(
         mockToken0,
         mockToken1,
@@ -1628,17 +1632,10 @@ describe('QuoteBestSplitFinder', () => {
         '0xe200000000000000000000000000000000000000',
         aggHookAddr
       );
-      const hookPool3 = createMockPool(
-        mockToken0,
-        mockToken1,
-        '0xe300000000000000000000000000000000000000',
-        aggHookAddr
-      );
 
       const noHookRoute = createMockRoute([noHookPool], 50);
       const hookRoute1 = createMockRoute([hookPool1], 50);
       const hookRoute2 = createMockRoute([hookPool2], 50);
-      const hookRoute3 = createMockRoute([hookPool3], 50);
 
       const stats = finder['getBestUnusedQuotesStats'](
         50,
@@ -1648,8 +1645,7 @@ describe('QuoteBestSplitFinder', () => {
             [
               createMockQuote(hookRoute1, 1000n),
               createMockQuote(hookRoute2, 990n),
-              createMockQuote(hookRoute3, 980n),
-              createMockQuote(noHookRoute, 970n),
+              createMockQuote(noHookRoute, 980n),
             ],
           ],
         ]),
@@ -1657,12 +1653,7 @@ describe('QuoteBestSplitFinder', () => {
         ChainId.MAINNET
       );
 
-      expect(stats.returnedCount).toBe(3);
-      const returnedRoutes = stats.quotes.map(q => q.route);
-      expect(returnedRoutes).toContain(noHookRoute);
-      expect(returnedRoutes).toContain(hookRoute1);
-      expect(returnedRoutes).toContain(hookRoute2);
-      expect(returnedRoutes).not.toContain(hookRoute3);
+      expect(stats.returnedCount).toBe(2);
     });
 
     it('gives all K slots to the agg-hook class when no no-hook quote is present', async () => {

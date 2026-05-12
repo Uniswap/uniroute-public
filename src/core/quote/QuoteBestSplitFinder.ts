@@ -14,20 +14,19 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
 {
   /**
-   * Maximum number of quotes to return *per route class* per percentage,
-   * after filtering for validity, while constructing splits. Routes are
-   * partitioned into no-hook vs agg-hook (V4 hooked) classes and the top
-   * K from each are returned. When both classes are populated this yields
-   * up to 2K candidates per percentage; when only one class has valid
-   * quotes (e.g. legacy `protocols=v2,v3,v4,mixed` requests), it
-   * degenerates to top-K total and the branching factor matches the
-   * pre-partition behavior.
+   * Maximum number of quotes to return per percentage, after filtering for
+   * validity, while constructing splits. The total returned across both route
+   * classes never exceeds this — branching factor at every recursion level
+   * stays the same regardless of whether agg-hook protocols are enabled.
    *
-   * The partition exists because agg-hook routes were displacing
-   * high-yielding no-hook routes from the top-K slot in some sub-trees,
-   * producing strictly worse quotes when external protocols were enabled.
+   * When both no-hook and agg-hook valid quotes are available at a percentage,
+   * the budget is split so each class always gets at least one slot (no-hook
+   * gets the extra when K is odd). When only one class has valid quotes, all
+   * K slots go to that class. This guarantees that high-yielding agg-hook
+   * routes can no longer evict every native Uniswap route from the candidate
+   * set without inflating the search space.
    */
-  private readonly MAX_VALID_QUOTES_PER_CLASS = 2;
+  private readonly MAX_VALID_QUOTES_PER_PERCENTAGE = 2;
   // Improvement threshold percentage to continue searching to next level (0.01%)
   private readonly MIN_IMPROVEMENT_PCT_PER_LEVEL = 0.01;
   // Minimum number of split levels to try before exiting early
@@ -138,8 +137,11 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * with routes already in the current combination.
    *
    * Quotes are partitioned into two classes (no-hook vs agg-hook V4 pools)
-   * and the top `MAX_VALID_QUOTES_PER_CLASS` of each are returned. See the
-   * docstring on the constant for rationale.
+   * and a fixed total of `MAX_VALID_QUOTES_PER_PERCENTAGE` is split between
+   * them. When both classes are populated, each class is guaranteed at least
+   * one slot (no-hook gets the extra when K is odd). When only one class has
+   * valid quotes, all K slots go to that class. See the docstring on the
+   * constant for rationale.
    */
   private getBestUnusedQuotesStats(
     percentage: number,
@@ -175,11 +177,18 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
-    // Each class gets up to K slots independently. With both classes
-    // populated this yields up to 2K candidates per percentage step.
+    const k = this.MAX_VALID_QUOTES_PER_PERCENTAGE;
+    const bothPopulated = noHookQuotes.length > 0 && aggHookQuotes.length > 0;
+    const noHookBudget = bothPopulated
+      ? Math.ceil(k / 2)
+      : noHookQuotes.length > 0
+        ? k
+        : 0;
+    const aggHookBudget = k - noHookBudget;
+
     const returnedQuotes = [
-      ...noHookQuotes.slice(0, this.MAX_VALID_QUOTES_PER_CLASS),
-      ...aggHookQuotes.slice(0, this.MAX_VALID_QUOTES_PER_CLASS),
+      ...noHookQuotes.slice(0, noHookBudget),
+      ...aggHookQuotes.slice(0, aggHookBudget),
     ];
     return {
       quotes: returnedQuotes,
