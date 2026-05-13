@@ -395,6 +395,149 @@ function runStrategyTests(
         bestQuoteCandidates[0].quotes[0].route.path[1].address.toString()
       ).equals('0x5777d92f208679DB4b9778590Fa3CAB3aC9e2168');
     });
+
+    describe('Quote-level dedupe', () => {
+      // RouteFinder duplicates that slip past `BaseRoutesRepository.getRoutes`
+      // would otherwise reach `percentageToSortedQuotes` as multiple quotes
+      // with the same canonical route key at the same percentage. Diagnostic
+      // logs on prod traffic showed this is widespread (up to 140 duplicate
+      // quotes removed per request). The dedupe inside
+      // `findBestQuoteCandidates` collapses them.
+      const poolAddress = new Address(
+        '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'
+      );
+      const otherPoolAddress = new Address(
+        '0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8'
+      );
+
+      const buildQuote = (
+        pct: number,
+        addr: Address,
+        amount: bigint
+      ): QuoteBasic =>
+        new QuoteBasic(
+          new RouteBasic(
+            Protocol.V2,
+            [
+              new V2Pool(
+                tokenInAddress,
+                tokenOutAddress,
+                addr,
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+            ],
+            pct
+          ),
+          amount,
+          undefined
+        );
+
+      it('drops identical quotes at the same percentage and fires the dedupe log', async () => {
+        // Two quotes with same protocol + path + percentage = same route key.
+        // The strategy should keep one and drop the other.
+        const dupedQuote = buildQuote(100, poolAddress, BigInt('2000000000'));
+        const quotes = [
+          dupedQuote,
+          dupedQuote,
+          buildQuote(100, otherPoolAddress, BigInt('1500000000')),
+        ];
+        const strategy = createStrategy(strategyClass, quotes);
+        const testCtx = buildTestContext();
+
+        const candidates = await strategy.findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          serviceConfig,
+          [new RouteBasic(Protocol.V2, [quotes[0].route.path[0]])],
+          new Map(),
+          ['chain:MAINNET', 'tradeType:EXACT_IN']
+        );
+
+        // The dedupe must fire — exactly one duplicate dropped.
+        const dedupeLogs = testCtx.logger.outputs.filter(
+          o => o.msg === 'DeepQuoteStrategy deduped duplicate quotes'
+        );
+        expect(dedupeLogs).toHaveLength(1);
+        expect(dedupeLogs[0].extra).toMatchObject({
+          beforeDedup: 3,
+          afterDedup: 2,
+          duplicatesRemoved: 1,
+        });
+
+        // The downstream percentage map (and thus the 100% candidates here)
+        // must include the two distinct routes, not three near-identical
+        // entries — the top-K budget downstream only had room for distinct
+        // candidates after the dedupe.
+        const seenAmounts = new Set(
+          candidates.map(c => c.quotes[0]?.amount.toString())
+        );
+        expect(seenAmounts.has('2000000000')).toBe(true);
+        expect(seenAmounts.has('1500000000')).toBe(true);
+      });
+
+      it('does not fire the dedupe log when all quotes are unique', async () => {
+        const quotes = [
+          buildQuote(100, poolAddress, BigInt('2000000000')),
+          buildQuote(100, otherPoolAddress, BigInt('1500000000')),
+        ];
+        const strategy = createStrategy(strategyClass, quotes);
+        const testCtx = buildTestContext();
+
+        await strategy.findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          serviceConfig,
+          [new RouteBasic(Protocol.V2, [quotes[0].route.path[0]])],
+          new Map(),
+          ['chain:MAINNET', 'tradeType:EXACT_IN']
+        );
+
+        const dedupeLogs = testCtx.logger.outputs.filter(
+          o => o.msg === 'DeepQuoteStrategy deduped duplicate quotes'
+        );
+        expect(dedupeLogs).toHaveLength(0);
+      });
+
+      it('only collapses duplicates within the same percentage bucket, not across percentages', async () => {
+        // The same canonical path at different percentages is a different
+        // route in the split-finder's eyes (the percentage is part of the
+        // toString). Dedupe must keep both.
+        const quoteAt100 = buildQuote(100, poolAddress, BigInt('2000000000'));
+        const quoteAt50 = buildQuote(50, poolAddress, BigInt('1100000000'));
+        const strategy = createStrategy(strategyClass, [quoteAt100, quoteAt50]);
+        const testCtx = buildTestContext();
+
+        await strategy.findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          serviceConfig,
+          [new RouteBasic(Protocol.V2, [quoteAt100.route.path[0]])],
+          new Map(),
+          ['chain:MAINNET', 'tradeType:EXACT_IN']
+        );
+
+        const dedupeLogs = testCtx.logger.outputs.filter(
+          o => o.msg === 'DeepQuoteStrategy deduped duplicate quotes'
+        );
+        expect(dedupeLogs).toHaveLength(0);
+      });
+    });
   });
 }
 

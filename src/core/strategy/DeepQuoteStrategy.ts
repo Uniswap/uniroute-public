@@ -228,14 +228,42 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     );
     await logElapsedTime('GasEstimate', gasEstimateStartTime, ctx, metricTags);
 
-    // Generate a mapping of percentage to sorted quotes
+    // Generate a mapping of percentage to sorted quotes. Dedup quotes by
+    // their canonical route string within each percentage bucket: diagnostic
+    // logs on WBTC->USDT 10 BTC showed the top no-hook 1-hop route landed
+    // in the same percentage bucket twice, wasting a slot in the K=2
+    // per-percentage budget downstream. Route-layer dedupe in
+    // BaseRoutesRepository catches dupes among the 100%-percentage routes;
+    // this catches anything that slips through later stages (e.g. quote
+    // retries, partition spill).
     const percentageToSortedQuotes = new Map<number, QuoteBasic[]>();
+    const seenByPercentage = new Map<number, Set<string>>();
+    let quoteDuplicatesRemoved = 0;
     for (const quote of quotesWithGas) {
       const percentage = quote.route.percentage;
+      const key = quote.route.toString();
+      let seen = seenByPercentage.get(percentage);
+      if (!seen) {
+        seen = new Set<string>();
+        seenByPercentage.set(percentage, seen);
+      }
+      if (seen.has(key)) {
+        quoteDuplicatesRemoved++;
+        continue;
+      }
+      seen.add(key);
       if (!percentageToSortedQuotes.has(percentage)) {
         percentageToSortedQuotes.set(percentage, []);
       }
       percentageToSortedQuotes.get(percentage)?.push(quote);
+    }
+    if (quoteDuplicatesRemoved > 0) {
+      ctx.logger.debug('DeepQuoteStrategy deduped duplicate quotes', {
+        chainId: chain.chainId,
+        beforeDedup: quotesWithGas.length,
+        afterDedup: quotesWithGas.length - quoteDuplicatesRemoved,
+        duplicatesRemoved: quoteDuplicatesRemoved,
+      });
     }
     // Sort quotes by amount - descending for EXACT_IN, ascending for EXACT_OUT
     for (const percentage of percentageToSortedQuotes.keys()) {
