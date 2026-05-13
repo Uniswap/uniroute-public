@@ -9,6 +9,8 @@ import {
 } from '../lib/config';
 import {HardcodedChainRepository} from '../stores/chain/hardcoded/HardcodedChainRepository';
 import {QuoteRequestValidator} from './QuoteRequestValidator';
+import {QuoteType} from '../models/quote/QuoteType';
+import {QuoteOptions} from './IUniRouteBL';
 import {
   QuoteRequest,
   GetCachedRoutesRequest,
@@ -56,7 +58,10 @@ import {ISimulator, SimulationStatus} from './simulator/ISimulator';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {ArbitrumGasDataProvider} from './gas/gas-data-provider';
 import {BaseProvider} from '@ethersproject/providers';
-import {ICachedRoutesRepository} from 'src/stores/route/uniroutes/ICachedRoutesRepository';
+import {
+  CachedRoutesReadResult,
+  ICachedRoutesRepository,
+} from 'src/stores/route/uniroutes/ICachedRoutesRepository';
 import {
   INoRouteCacheRepository,
   NoRouteCacheRepository,
@@ -66,6 +71,8 @@ import {HooksOptions} from '../models/hooks/HooksOptions';
 import {TokenProvider} from 'src/stores/token/provider/TokenProvider';
 import {TokenList} from '@uniswap/token-lists';
 import {UsdBucket} from '../stores/route/uniroutes/usdBucketUtils';
+import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
+import {HandlerContext} from '@connectrpc/connect';
 import {Trade} from '@uniswap/router-sdk';
 import {Currency, TradeType as SdkTradeType} from '@uniswap/sdk-core';
 import {BigNumber} from '@ethersproject/bignumber';
@@ -647,6 +654,155 @@ describe('UniRouteBL', () => {
 
       const secondResponse = await uniRouteBL.quote(ctx, request);
       expect(secondResponse.hitsCachedRoutes).toBe(false);
+    });
+  });
+
+  // The parallel-cache-reads refactor short-circuits with a 404 only when
+  // BOTH the no-route cliff cache hits AND the positive cached-routes
+  // cache returned nothing. If positive cached routes exist, they win
+  // because they're keyed on the USD bucket (finer-grained than the
+  // amount-cliff scalar) and represent affirmative evidence.
+  describe('no-route cache short-circuit interaction with cached routes', () => {
+    const allProtocols = [
+      Protocol.V2,
+      Protocol.V3,
+      Protocol.V4,
+      Protocol.MIXED,
+    ];
+    const wrappedEth = new Address(
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+    );
+    const usdc = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    const amount = BigInt(baseRequest.amount);
+
+    const buildBL = (
+      strategy: MockedQuoteStrategy = new MockedQuoteStrategy()
+    ) =>
+      new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        strategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap
+      );
+
+    // Minimal Headers stand-in to avoid the lint warning about the
+    // Headers global (Node < 21). The cache-check path only uses
+    // `set`/`get` so a Map-backed shim is sufficient.
+    const buildHandlerContextWithHeaders = (): {
+      handlerContext: HandlerContext;
+      headers: Map<string, string>;
+    } => {
+      const headers = new Map<string, string>();
+      const responseHeader = {
+        set: (k: string, v: string) => headers.set(k, v),
+        get: (k: string) => headers.get(k) ?? null,
+      };
+      const handlerContext = {
+        responseHeader,
+      } as unknown as HandlerContext;
+      return {handlerContext, headers};
+    };
+
+    it('short-circuits with 404 + x-no-route-cache-hit header when cliff hits and route cache is empty', async () => {
+      await noRouteCacheRepository.setAmountCliff(
+        EMPTY_NAMESPACE_CONTEXT,
+        allProtocols,
+        ChainId.MAINNET,
+        wrappedEth,
+        usdc,
+        TradeType.ExactIn,
+        amount
+      );
+
+      const {handlerContext, headers} = buildHandlerContextWithHeaders();
+      const testCtx = buildTestContext(handlerContext);
+      const response = await buildBL().quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      expect(response.error?.code).toBe(404);
+      expect(response.hitsCachedRoutes).toBe(false);
+      expect(headers.get('x-no-route-cache-hit')).toBe('true');
+    });
+
+    it('serves cached routes (not 404) when cliff hits but the positive cache has a route', async () => {
+      // Seed positive route cache for the EXACT_IN / USDC pair / ETH input.
+      const dummyRoute = new RouteBasic(Protocol.V2, [
+        new V2Pool(
+          wrappedEth,
+          usdc,
+          new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+          BigInt('1000000000000'),
+          BigInt('1000000000000')
+        ),
+      ]);
+
+      // The cache check inside quote() runs with a USD bucket derived
+      // from the request amount; saving for every bucket covers it.
+      for (const usdBucket of Object.values(UsdBucket)) {
+        // Save both wrapped+wrapped and ADDRESS_ZERO+wrapped to cover the
+        // native+V4 fan-out (request uses 'ETH' as input).
+        await cachedRoutesRepository.saveCachedRoutes(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          dummyRoute,
+          ChainId.MAINNET,
+          wrappedEth,
+          usdc,
+          TradeType.ExactIn,
+          amount,
+          usdBucket
+        );
+        await cachedRoutesRepository.saveCachedRoutes(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          dummyRoute,
+          ChainId.MAINNET,
+          new Address(ADDRESS_ZERO),
+          usdc,
+          TradeType.ExactIn,
+          amount,
+          usdBucket
+        );
+      }
+
+      await noRouteCacheRepository.setAmountCliff(
+        EMPTY_NAMESPACE_CONTEXT,
+        allProtocols,
+        ChainId.MAINNET,
+        wrappedEth,
+        usdc,
+        TradeType.ExactIn,
+        amount
+      );
+
+      const {handlerContext, headers} = buildHandlerContextWithHeaders();
+      const testCtx = buildTestContext(handlerContext);
+      const response = await buildBL().quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      // Positive cache wins: no short-circuit, no header, hitsCachedRoutes=true.
+      expect(response.error?.code).not.toBe(404);
+      expect(response.hitsCachedRoutes).toBe(true);
+      expect(headers.get('x-no-route-cache-hit')).toBeUndefined();
     });
   });
 
@@ -4878,32 +5034,107 @@ describe('UniRouteBL', () => {
     }
 
     /**
-     * A fake ICachedRoutesRepository whose getCachedRoutes returns one dummy
-     * route, making usedCachedRoutes = true in UniRouteBL.
+     * A fake ICachedRoutesRepository whose readCachedRoutes returns one
+     * dummy route, making usedCachedRoutes = true in UniRouteBL.
      */
     class FakeCachedRoutesRepositoryWithHit implements ICachedRoutesRepository {
       constructCachedRouteKey(): string {
         return 'fake-key';
       }
 
-      async getCachedRoutes(
+      private buildDummyRoute(
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo
+      ): RouteBasic {
+        return new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+        ]);
+      }
+
+      async readCachedRoutes(
         _nsCtx: RouteNamespaceContext,
         _chainId: number,
         tokenInCurrencyInfo: CurrencyInfo,
         tokenOutCurrencyInfo: CurrencyInfo
+      ): Promise<CachedRoutesReadResult> {
+        const route = this.buildDummyRoute(
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo
+        );
+        return {
+          perKeyReads: [
+            {
+              cachedRouteKey: 'fake-key',
+              tokenInAddress: tokenInCurrencyInfo.wrappedAddress,
+              tokenOutAddress: tokenOutCurrencyInfo.wrappedAddress,
+              rawCachedRoutes: [],
+              expiredRawRouteCount: 0,
+              candidateRouteCount: 1,
+              aggHookExcludedCount: 0,
+              validRoutes: [{route, expiresAtMs: Date.now() + 60_000}],
+            },
+          ],
+          totalValidRouteCount: 1,
+        };
+      }
+
+      async processCachedRoutesResult(
+        readResult: CachedRoutesReadResult,
+        _nsCtx: RouteNamespaceContext,
+        _chainId: number,
+        _tradeType: TradeType,
+        _amountIn: bigint,
+        _usdBucket: UsdBucket,
+        _quoteType: QuoteType,
+        _protocols: Protocol[],
+        _request: QuoteRequest,
+        _ctx: Context,
+        _quoteOptions?: QuoteOptions
       ): Promise<RouteBasic[]> {
-        // Return a single V2 route so usedCachedRoutes is set to true.
-        return [
-          new RouteBasic(Protocol.V2, [
-            new V2Pool(
-              tokenInCurrencyInfo.wrappedAddress,
-              tokenOutCurrencyInfo.wrappedAddress,
-              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
-              BigInt('1000000000000'),
-              BigInt('1000000000000')
-            ),
-          ]),
-        ];
+        return readResult.perKeyReads.flatMap(p =>
+          p.validRoutes.map(v => v.route)
+        );
+      }
+
+      async getCachedRoutes(
+        nsCtx: RouteNamespaceContext,
+        chainId: number,
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo,
+        tradeType: TradeType,
+        amountIn: bigint,
+        usdBucket: UsdBucket,
+        quoteType: QuoteType,
+        protocols: Protocol[],
+        request: QuoteRequest,
+        ctx: Context,
+        quoteOptions?: QuoteOptions
+      ): Promise<RouteBasic[]> {
+        const readResult = await this.readCachedRoutes(
+          nsCtx,
+          chainId,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo
+        );
+        return this.processCachedRoutesResult(
+          readResult,
+          nsCtx,
+          chainId,
+          tradeType,
+          amountIn,
+          usdBucket,
+          quoteType,
+          protocols,
+          request,
+          ctx,
+          quoteOptions
+        );
       }
 
       async saveCachedRoutes(): Promise<void> {}

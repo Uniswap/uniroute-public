@@ -447,25 +447,7 @@ export class UniRouteBL implements IUniRoutedBL {
       let routes: RouteBasic<Pool>[] = [];
       let usedCachedRoutes = false;
       if (quoteType === QuoteType.Fast && shouldCheckCache) {
-        const noRouteResponse = await this.tryNoRouteCacheShortCircuit(
-          ctx,
-          request,
-          chain,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          tradeType,
-          amountIn,
-          fineGrainedUsdBucket,
-          protocols,
-          nsCtx,
-          metricTags
-        );
-        if (noRouteResponse) {
-          await emitCallMetrics(metricTags);
-          return noRouteResponse;
-        }
-
-        const cached = await this.tryReadCachedRoutes(
+        const cacheResult = await this.tryReadAndShortCircuitCache(
           ctx,
           request,
           options,
@@ -475,13 +457,18 @@ export class UniRouteBL implements IUniRoutedBL {
           tradeType,
           amountIn,
           usdBucket,
+          fineGrainedUsdBucket,
           quoteType,
           protocols,
           nsCtx,
           metricTags
         );
-        routes = cached.routes;
-        usedCachedRoutes = cached.usedCachedRoutes;
+        if ('shortCircuit' in cacheResult) {
+          await emitCallMetrics(metricTags);
+          return cacheResult.shortCircuit;
+        }
+        routes = cacheResult.routes;
+        usedCachedRoutes = cacheResult.usedCachedRoutes;
       }
       if (routes.length === 0) {
         routes = await this.fetchFreshRoutes(
@@ -862,62 +849,24 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * Consults the no-route negative cache. If a recent async deep search
-   * confirmed no route at or above this amount, short-circuit `quote()` with
-   * a 404 — push status tags, emit `NoRouteCache.Hit`, set the
-   * `x-no-route-cache-hit` response header, and return the response for the
-   * caller to propagate. The caller is responsible for emitting the
-   * top-level call metrics before returning. Returns `undefined` when no
-   * short-circuit fires.
+   * Reads the no-route negative cache and the positive route cache in
+   * parallel, then resolves the interaction:
+   *
+   *   - If the negative cache says "no route at this amount" AND the
+   *     positive cache returned nothing, short-circuit `quote()` with a
+   *     404 (emit `NoRouteCache.Hit`, set `x-no-route-cache-hit`, push
+   *     the `noRouteCacheHit` tag).
+   *   - Otherwise, run the heavy post-processing on the cached-routes
+   *     read result (refresh trigger, score/slice, summary log/metrics)
+   *     and return its output for the caller to use as the route list.
+   *
+   * The parallel light read trades one extra Redis `ZRANGE` per
+   * no-route-cache-hit request (an empty key, typically) for ~5ms p50
+   * removed from the serial cache-check path. The positive cache wins
+   * on conflicts because cached routes are per-USD-bucket positive
+   * evidence, whereas no-route is per-amount-cliff negative evidence.
    */
-  private async tryNoRouteCacheShortCircuit(
-    ctx: Context,
-    request: QuoteRequest,
-    chain: Chain,
-    tokenInCurrencyInfo: CurrencyInfo,
-    tokenOutCurrencyInfo: CurrencyInfo,
-    tradeType: TradeType,
-    amountIn: bigint,
-    fineGrainedUsdBucket: UsdBucketFineGrained,
-    protocols: Protocol[],
-    nsCtx: RouteNamespaceContext,
-    metricTags: string[]
-  ): Promise<QuoteResponse | undefined> {
-    const amountCliff = await this.noRouteCacheRepository.getAmountCliff(
-      nsCtx,
-      protocols,
-      chain.chainId,
-      tokenInCurrencyInfo.wrappedAddress,
-      tokenOutCurrencyInfo.wrappedAddress,
-      tradeType
-    );
-    if (amountCliff === undefined || amountIn < amountCliff) {
-      return undefined;
-    }
-    metricTags.push(`status:${QuoteStatus.NoRoute}`);
-    metricTags.push('cachedRoutesStatus:noRouteCacheHit');
-    await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
-      tags: metricTags,
-    });
-    ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
-    return new QuoteResponse({
-      error: {
-        code: 404,
-        message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
-      },
-      hitsCachedRoutes: false,
-      usdBucket: fineGrainedUsdBucket.toString(),
-    });
-  }
-
-  /**
-   * Reads the positive route cache. Returns the cached routes (possibly
-   * empty) and a flag indicating whether the caller should treat them as a
-   * cache hit. Empty results signal the caller to fall through to fresh
-   * route discovery. Side effects inside `getCachedRoutes` (e.g. triggering
-   * an async refresh) are intentional.
-   */
-  private async tryReadCachedRoutes(
+  private async tryReadAndShortCircuitCache(
     ctx: Context,
     request: QuoteRequest,
     options: QuoteOptions | undefined,
@@ -927,17 +876,93 @@ export class UniRouteBL implements IUniRoutedBL {
     tradeType: TradeType,
     amountIn: bigint,
     usdBucket: UsdBucket,
+    fineGrainedUsdBucket: UsdBucketFineGrained,
     quoteType: QuoteType,
     protocols: Protocol[],
     nsCtx: RouteNamespaceContext,
     metricTags: string[]
-  ): Promise<{routes: RouteBasic<Pool>[]; usedCachedRoutes: boolean}> {
-    const getCachedRoutesStartTime = Date.now();
-    const routes = await this.cachedRoutesRepository.getCachedRoutes(
+  ): Promise<
+    | {shortCircuit: QuoteResponse}
+    | {routes: RouteBasic<Pool>[]; usedCachedRoutes: boolean}
+  > {
+    // Transient Redis read failures are isolated inside readCachedRoutes
+    // (per-key allSettled emits CachedRoutes.PerKeyReadFailed and degrades
+    // to an empty per-key result). Any rejection that bubbles out here is
+    // a configuration error (e.g. assertCacheableProtocols) and should
+    // propagate — Promise.all matches that.
+    const cacheReadStartTime = Date.now();
+    const [amountCliff, readResult] = await Promise.all([
+      this.noRouteCacheRepository.getAmountCliff(
+        nsCtx,
+        protocols,
+        chain.chainId,
+        tokenInCurrencyInfo.wrappedAddress,
+        tokenOutCurrencyInfo.wrappedAddress,
+        tradeType
+      ),
+      this.cachedRoutesRepository.readCachedRoutes(
+        nsCtx,
+        chain.chainId,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        amountIn,
+        usdBucket,
+        protocols,
+        ctx
+      ),
+    ]);
+
+    const noRouteCliffHit =
+      amountCliff !== undefined && amountIn >= amountCliff;
+    const hasCachedRoutes = readResult.totalValidRouteCount > 0;
+
+    // Short-circuit only when both signals agree: no-route cliff hit AND
+    // no positive cached evidence. If cached routes exist we prefer them —
+    // they're keyed on the USD bucket, which is finer-grained than the
+    // amount-cliff scalar.
+    if (noRouteCliffHit && !hasCachedRoutes) {
+      metricTags.push(`status:${QuoteStatus.NoRoute}`);
+      metricTags.push('cachedRoutesStatus:noRouteCacheHit');
+      await ctx.metrics.count(buildMetricKey('NoRouteCache.Hit'), 1, {
+        tags: metricTags,
+      });
+      ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
+      return {
+        shortCircuit: new QuoteResponse({
+          error: {
+            code: 404,
+            message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+          },
+          hitsCachedRoutes: false,
+          usdBucket: fineGrainedUsdBucket.toString(),
+        }),
+      };
+    }
+
+    // Tag the call-level metric so Datadog can break it down by final
+    // status. `Call{noRouteCacheOverride:true}` counts requests where the
+    // cliff was overridden by the positive cache; cross-tabbed with the
+    // existing `status:` tag we get both the rescue rate (status:Success)
+    // and the wasted-work rate (status:NoRoute) without a second metric.
+    //
+    // Caveat worth noting: the positive cache is keyed by USD bucket, not
+    // by `amountIn`, so a cached route from a smaller trade in the same
+    // bucket can override an amount-specific cliff. The downstream
+    // on-chain quoter validates at the requested amount and drops routes
+    // that can't actually serve it, so this trades latency (not
+    // correctness) on genuinely-no-route requests.
+    if (noRouteCliffHit && hasCachedRoutes) {
+      metricTags.push('noRouteCacheOverride:true');
+    }
+
+    // Cache miss OR positive hit: run the heavy post-processing so the
+    // refresh trigger and read-stage metrics fire whether or not we use
+    // the routes. This matches the prior `getCachedRoutes` semantics.
+    const routes = await this.cachedRoutesRepository.processCachedRoutesResult(
+      readResult,
       nsCtx,
       chain.chainId,
-      tokenInCurrencyInfo,
-      tokenOutCurrencyInfo,
       tradeType,
       amountIn,
       usdBucket,
@@ -947,12 +972,21 @@ export class UniRouteBL implements IUniRoutedBL {
       ctx,
       options
     );
+
+    // Preserve the pre-refactor `GetCachedRoutes` metric semantic:
+    // fires only on the non-short-circuit path and brackets the full
+    // cache pipeline (parallel reads + processing). Pre-refactor this
+    // wrapped just the sequential `cachedRoutesRepository.getCachedRoutes`
+    // call; the parallel-read + process structure is the equivalent
+    // unit of work, so existing dashboards/alerts on this metric keep
+    // their meaning.
     await logElapsedTime(
       'GetCachedRoutes',
-      getCachedRoutesStartTime,
+      cacheReadStartTime,
       ctx,
       metricTags
     );
+
     return {routes, usedCachedRoutes: routes.length > 0};
   }
 
