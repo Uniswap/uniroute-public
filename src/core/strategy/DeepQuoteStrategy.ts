@@ -374,18 +374,11 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     });
 
     // Reconstruct QuoteSplit[] from QuoteBasic[] by stitching together the split routes
-    const stitchQuotesStartTime = Date.now();
     ctx.logger.debug('Starting stitchQuotes');
     const stitchedQuotesWithGas = this.routeQuoteAllocator.stitchQuotes(
       quotesWithGas,
       splitRoutes,
       ctx
-    );
-    await logElapsedTime(
-      'StitchQuotes',
-      stitchQuotesStartTime,
-      ctx,
-      metricTags
     );
 
     return stitchedQuotesWithGas;

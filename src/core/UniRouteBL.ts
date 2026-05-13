@@ -785,12 +785,10 @@ export class UniRouteBL implements IUniRoutedBL {
     metricTags: string[]
   ) {
     // Start parallel token search operations
-    const tokenSearchStartTime = Date.now();
     const [tokenInCurrencyInfo, tokenOutCurrencyInfo] = await Promise.all([
       this.tokenProvider.searchForToken(chain, request.tokenInAddress, ctx),
       this.tokenProvider.searchForToken(chain, request.tokenOutAddress, ctx),
     ]);
-    await logElapsedTime('TokenSearch', tokenSearchStartTime, ctx, metricTags);
 
     // Check if we need to fetch gasPrice based on chain and tokens
     const needToFetchGasPrice = needsGasPriceFetching(
@@ -2743,7 +2741,6 @@ export class UniRouteBL implements IUniRoutedBL {
           );
 
         let trade;
-        const buildTradeStartTime = Date.now();
         try {
           trade = buildTrade(
             tokenInCurrency,
@@ -2757,12 +2754,6 @@ export class UniRouteBL implements IUniRoutedBL {
             quoteSplit,
             true, // percentageSumCheck
             ctx
-          );
-          await logElapsedTime(
-            'BuildTrade',
-            buildTradeStartTime,
-            ctx,
-            metricTags
           );
         } catch (error) {
           await ctx.metrics.count(buildMetricKey('buildTradeFailed'), 1, {
@@ -2788,19 +2779,12 @@ export class UniRouteBL implements IUniRoutedBL {
 
         // Get our method parameters
         let methodParameters: SDKMethodParameters;
-        const buildMethodParamsStartTime = Date.now();
         try {
           methodParameters = buildSwapMethodParameters(
             ctx,
             swapOptions!,
             chain.chainId,
             trade
-          );
-          await logElapsedTime(
-            'BuildSwapMethodParameters',
-            buildMethodParamsStartTime,
-            ctx,
-            metricTags
           );
         } catch (error) {
           // Call to UR might fail if not enough reserves in v2 - continue to next quote
