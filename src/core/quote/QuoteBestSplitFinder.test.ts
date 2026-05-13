@@ -1742,4 +1742,417 @@ describe('QuoteBestSplitFinder', () => {
       expect(stats.quotes.map(q => q.route)).toEqual([r1, r2]);
     });
   });
+
+  describe('partition decision instrumentation', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const buildInstrumentation = (
+      overrides?: Partial<{
+        tradeType: TradeType;
+        testAggHooks: boolean | undefined;
+        partitionEvictLogBudget: {remaining: number};
+        soleCandidateLogBudget: {remaining: number};
+        metricTags: string[];
+      }>
+    ) => ({
+      ctx: mockContext,
+      tradeType: TradeType.ExactIn,
+      testAggHooks: true as boolean | undefined,
+      partitionEvictLogBudget: {remaining: 5},
+      soleCandidateLogBudget: {remaining: 5},
+      metricTags: ['chainId:1'],
+      ...overrides,
+    });
+
+    const infoMock = () => mockContext.logger.info as ReturnType<typeof vi.fn>;
+    const metricMock = () =>
+      mockContext.metrics.count as ReturnType<typeof vi.fn>;
+
+    it('emits the bad-case log when EXACT_IN agg-hook winner is worse than displaced no-hook runner-up', () => {
+      const noHookWinner = noHookRouteAt(
+        '0xa000000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xa100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xb000000000000000000000000000000000000000',
+        50
+      );
+
+      // EXACT_IN: higher amount = better. Agg-hook winner (990) trails the
+      // displaced no-hook runner-up (995). The partition put a worse route in.
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 1000n),
+              createMockQuote(noHookRunnerUp, 995n),
+              createMockQuote(aggHook, 990n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const calls = infoMock().mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toBe(
+        'QuoteBestSplitFinder partition evicts better no-hook'
+      );
+      const payload = calls[0][1] as Record<string, unknown>;
+      expect(payload.percentage).toBe(50);
+      expect(payload.tradeType).toBe(TradeType.ExactIn);
+      expect(payload.noHookCount).toBe(2);
+      expect(payload.aggHookCount).toBe(1);
+      expect(payload.noHookBudget).toBe(1);
+      expect(payload.aggHookBudget).toBe(1);
+      expect((payload.aggHookWinner as {amount: string}).amount).toBe('990');
+      expect((payload.noHookRunnerUp as {amount: string}).amount).toBe('995');
+      expect((payload.noHookWinner as {amount: string}).amount).toBe('1000');
+    });
+
+    it('emits the bad-case log when EXACT_OUT agg-hook winner needs more input than displaced no-hook runner-up', () => {
+      // EXACT_OUT: lower amount = better (less input required). Comparison
+      // direction must flip relative to EXACT_IN.
+      const noHookWinner = noHookRouteAt(
+        '0xc000000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xc100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xd000000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 990n),
+              createMockQuote(noHookRunnerUp, 995n),
+              createMockQuote(aggHook, 1000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const calls = infoMock().mock.calls;
+      expect(calls).toHaveLength(1);
+      const payload = calls[0][1] as Record<string, unknown>;
+      expect(payload.tradeType).toBe(TradeType.ExactOut);
+      expect((payload.aggHookWinner as {amount: string}).amount).toBe('1000');
+      expect((payload.noHookRunnerUp as {amount: string}).amount).toBe('995');
+    });
+
+    it('does NOT emit the log when agg-hook winner beats the no-hook runner-up, but still emits the metric', () => {
+      // EXACT_IN: agg-hook winner (1000) > no-hook runner-up (985). Partition
+      // chose well; only the aggregate metric should fire.
+      const aggHook = aggHookRouteAt(
+        '0xe000000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xe100000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xe200000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(aggHook, 1000n),
+              createMockQuote(noHookWinner, 995n),
+              createMockQuote(noHookRunnerUp, 985n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      expect(infoMock().mock.calls).toHaveLength(0);
+      const metricCalls = metricMock().mock.calls;
+      expect(metricCalls).toHaveLength(1);
+      const tags = (metricCalls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('partitionVerdict:agghook_better_or_tie');
+      expect(tags).toContain('testAggHooks:true');
+      expect(tags).toContain(`tradeType:${TradeType.ExactIn}`);
+    });
+
+    it('does not emit log or metric when testAggHooks is false', () => {
+      // Instrumentation is gated on testAggHooks being truthy — baseline
+      // (non-shadow) traffic should never produce these signals.
+      const noHookWinner = noHookRouteAt(
+        '0xf000000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xf100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xf200000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 1000n),
+              createMockQuote(noHookRunnerUp, 995n),
+              createMockQuote(aggHook, 990n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation({
+          testAggHooks: false,
+          tradeType: TradeType.ExactIn,
+        })
+      );
+
+      expect(infoMock().mock.calls).toHaveLength(0);
+      expect(metricMock().mock.calls).toHaveLength(0);
+    });
+
+    it('does not emit when only one class is populated (partition is a no-op)', () => {
+      // bothPopulated=false: nothing to ask about partition quality, so log
+      // and metric are both skipped.
+      const noHookA = noHookRouteAt(
+        '0xaa00000000000000000000000000000000000000',
+        50
+      );
+      const noHookB = noHookRouteAt(
+        '0xab00000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [createMockQuote(noHookA, 1000n), createMockQuote(noHookB, 995n)],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation()
+      );
+
+      expect(infoMock().mock.calls).toHaveLength(0);
+      expect(metricMock().mock.calls).toHaveLength(0);
+    });
+
+    it('does not emit when there is no no-hook runner-up to evict', () => {
+      // 1 no-hook quote fills the entire no-hook budget; there is no displaced
+      // runner-up. The counterfactual question is unanswerable, so both log
+      // and metric are suppressed.
+      const noHook = noHookRouteAt(
+        '0xba00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xbb00000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [createMockQuote(noHook, 1000n), createMockQuote(aggHook, 990n)],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation()
+      );
+
+      expect(infoMock().mock.calls).toHaveLength(0);
+      expect(metricMock().mock.calls).toHaveLength(0);
+    });
+
+    it('respects the per-request partition-evict log budget cap while metric keeps firing', () => {
+      // 7 identical bad-case invocations share one partitionEvictLogBudget
+      // (mirrors how findBestSplits allocates one budget across many DFS
+      // calls). First 5 produce logs; calls 6 and 7 only produce metrics.
+      const aggHook = aggHookRouteAt(
+        '0xca00000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xcb00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xcc00000000000000000000000000000000000000',
+        50
+      );
+
+      const quotesMap = new Map<number, QuoteBasic[]>([
+        [
+          50,
+          [
+            createMockQuote(noHookWinner, 1000n),
+            createMockQuote(noHookRunnerUp, 995n),
+            createMockQuote(aggHook, 990n),
+          ],
+        ],
+      ]);
+
+      const sharedInstr = buildInstrumentation({
+        tradeType: TradeType.ExactIn,
+      });
+      for (let i = 0; i < 7; i++) {
+        finder['getBestUnusedQuotesStats'](
+          50,
+          quotesMap,
+          [],
+          ChainId.MAINNET,
+          sharedInstr
+        );
+      }
+
+      expect(infoMock().mock.calls).toHaveLength(5);
+      expect(metricMock().mock.calls).toHaveLength(7);
+      expect(sharedInstr.partitionEvictLogBudget.remaining).toBe(0);
+    });
+
+    // ----- Sole-candidate instrumentation (the upstream-filter signal) -----
+
+    it('emits sole-candidate log and metric when an agg-hook quote is the only candidate at a percentage', () => {
+      // No no-hook quote at this percentage → bothPopulated=false →
+      // partition can't evict anything; the agg-hook quote "wins by default".
+      // This is the signal that pinpoints upstream filtering.
+      const aggHook = aggHookRouteAt(
+        '0xda00000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([[50, [createMockQuote(aggHook, 990n)]]]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const calls = infoMock().mock.calls;
+      expect(calls).toHaveLength(1);
+      expect(calls[0][0]).toBe(
+        'QuoteBestSplitFinder agg-hook quote selected with no no-hook competitor'
+      );
+      const payload = calls[0][1] as Record<string, unknown>;
+      expect(payload.percentage).toBe(50);
+      expect(payload.tradeType).toBe(TradeType.ExactOut);
+      expect(payload.aggHookCount).toBe(1);
+      expect((payload.aggHookWinner as {amount: string}).amount).toBe('990');
+
+      const metricCalls = metricMock().mock.calls;
+      expect(metricCalls).toHaveLength(1);
+      const tags = (metricCalls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('testAggHooks:true');
+      expect(tags).toContain(`tradeType:${TradeType.ExactOut}`);
+    });
+
+    it('does not emit sole-candidate signals when only no-hook quotes exist', () => {
+      // bothPopulated=false but the lone class is no-hook — this is the
+      // expected baseline case, not a signal of upstream filtering.
+      const noHook = noHookRouteAt(
+        '0xea00000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([[50, [createMockQuote(noHook, 1000n)]]]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation()
+      );
+
+      expect(infoMock().mock.calls).toHaveLength(0);
+      expect(metricMock().mock.calls).toHaveLength(0);
+    });
+
+    it('respects the per-request sole-candidate log budget cap while metric keeps firing', () => {
+      const aggHook = aggHookRouteAt(
+        '0xfa00000000000000000000000000000000000000',
+        50
+      );
+
+      const quotesMap = new Map<number, QuoteBasic[]>([
+        [50, [createMockQuote(aggHook, 990n)]],
+      ]);
+
+      const sharedInstr = buildInstrumentation();
+      for (let i = 0; i < 7; i++) {
+        finder['getBestUnusedQuotesStats'](
+          50,
+          quotesMap,
+          [],
+          ChainId.MAINNET,
+          sharedInstr
+        );
+      }
+
+      expect(infoMock().mock.calls).toHaveLength(5);
+      expect(metricMock().mock.calls).toHaveLength(7);
+      expect(sharedInstr.soleCandidateLogBudget.remaining).toBe(0);
+    });
+
+    it('does not emit sole-candidate signals when testAggHooks is false', () => {
+      const aggHook = aggHookRouteAt(
+        '0x1100000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([[50, [createMockQuote(aggHook, 990n)]]]),
+        [],
+        ChainId.MAINNET,
+        buildInstrumentation({testAggHooks: false})
+      );
+
+      expect(infoMock().mock.calls).toHaveLength(0);
+      expect(metricMock().mock.calls).toHaveLength(0);
+    });
+  });
 });

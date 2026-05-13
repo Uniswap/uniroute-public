@@ -8,7 +8,7 @@ import {ChainId} from '../../lib/config';
 import {buildMetricKey} from '../../lib/config';
 import {IQuoteBestSplitFinder} from './IQuoteBestSplitFinder';
 import {TradeType} from '../../models/quote/TradeType';
-import {routeUsesAggHook} from '../../lib/observability';
+import {routeUsesAggHook, hashForLogging} from '../../lib/observability';
 
 export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
@@ -147,7 +147,15 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     percentage: number,
     percentageToSortedQuotes: Map<number, QuoteBasic[]>,
     usedRoutes: RouteBasic<TPool>[],
-    chainId: ChainId
+    chainId: ChainId,
+    instrumentation?: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      metricTags: string[];
+    }
   ): {
     quotes: QuoteBasic[];
     totalCount: number;
@@ -190,12 +198,176 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       ...noHookQuotes.slice(0, noHookBudget),
       ...aggHookQuotes.slice(0, aggHookBudget),
     ];
+
+    if (instrumentation && instrumentation.testAggHooks) {
+      if (bothPopulated) {
+        this.maybeLogPartitionDecision(
+          percentage,
+          chainId,
+          noHookQuotes,
+          aggHookQuotes,
+          noHookBudget,
+          aggHookBudget,
+          instrumentation
+        );
+      } else if (aggHookQuotes.length > 0 && noHookQuotes.length === 0) {
+        this.maybeLogAggHookSoleCandidate(
+          percentage,
+          chainId,
+          aggHookQuotes,
+          instrumentation
+        );
+      }
+    }
+
     return {
       quotes: returnedQuotes,
       totalCount: quotes.length,
       validCount: validQuotes.length,
       returnedCount: returnedQuotes.length,
     };
+  }
+
+  /**
+   * Investigation-only: confirms whether the K-budget partition is responsible
+   * for evicting a better no-hook quote in favor of an agg-hook quote at a
+   * given percentage step. Emits a metric on every partition decision (with
+   * verdict tag), and a structured log only on the "agg-hook winner is worse
+   * than displaced no-hook runner-up" case, capped per-request.
+   */
+  private maybeLogPartitionDecision(
+    percentage: number,
+    chainId: ChainId,
+    noHookQuotes: QuoteBasic[],
+    aggHookQuotes: QuoteBasic[],
+    noHookBudget: number,
+    aggHookBudget: number,
+    instrumentation: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      metricTags: string[];
+    }
+  ): void {
+    // Without a no-hook runner-up there's nobody to evict — partition was a
+    // no-op on the no-hook side. Skip.
+    if (noHookQuotes.length <= noHookBudget) return;
+    if (aggHookQuotes.length === 0) return;
+
+    const aggHookWinner = aggHookQuotes[0];
+    const noHookRunnerUp = noHookQuotes[noHookBudget];
+    const noHookWinner = noHookQuotes[0];
+
+    // For EXACT_IN, higher amount is better. For EXACT_OUT, lower amount is
+    // better. Compare the agg-hook winner against the no-hook runner-up
+    // (the candidate the partition is implicitly evicting).
+    const isExactIn = instrumentation.tradeType === TradeType.ExactIn;
+    const aggHookWorseThanRunnerUp = isExactIn
+      ? aggHookWinner.amount < noHookRunnerUp.amount
+      : aggHookWinner.amount > noHookRunnerUp.amount;
+
+    const verdictTag = `partitionVerdict:${
+      aggHookWorseThanRunnerUp
+        ? 'agghook_worse_than_runnerup'
+        : 'agghook_better_or_tie'
+    }`;
+    void instrumentation.ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.PartitionDecision'),
+      1,
+      {
+        tags: [
+          ...instrumentation.metricTags,
+          verdictTag,
+          `testAggHooks:${instrumentation.testAggHooks}`,
+          `tradeType:${instrumentation.tradeType}`,
+        ],
+      }
+    );
+
+    if (!aggHookWorseThanRunnerUp) return;
+    if (instrumentation.partitionEvictLogBudget.remaining <= 0) return;
+    instrumentation.partitionEvictLogBudget.remaining -= 1;
+
+    instrumentation.ctx.logger.info(
+      'QuoteBestSplitFinder partition evicts better no-hook',
+      {
+        chainId,
+        percentage,
+        tradeType: instrumentation.tradeType,
+        noHookCount: noHookQuotes.length,
+        aggHookCount: aggHookQuotes.length,
+        noHookBudget,
+        aggHookBudget,
+        aggHookWinner: {
+          routeHash: hashForLogging(aggHookWinner.route.toString()),
+          amount: aggHookWinner.amount.toString(),
+        },
+        noHookRunnerUp: {
+          routeHash: hashForLogging(noHookRunnerUp.route.toString()),
+          amount: noHookRunnerUp.amount.toString(),
+        },
+        noHookWinner: {
+          routeHash: hashForLogging(noHookWinner.route.toString()),
+          amount: noHookWinner.amount.toString(),
+        },
+      }
+    );
+  }
+
+  /**
+   * Investigation-only: catches the case where the agg-hook code path is
+   * selecting an agg-hook quote at a percentage because NO no-hook candidate
+   * is present in `percentageToSortedQuotes` at that percentage — i.e. the
+   * agg-hook quote wins by default, not by partition eviction. This is the
+   * upstream-filter signal: it implicates cached routes / route cap / the
+   * pre-`findBestSplits` percentage-bucket assembly rather than K-budget.
+   */
+  private maybeLogAggHookSoleCandidate(
+    percentage: number,
+    chainId: ChainId,
+    aggHookQuotes: QuoteBasic[],
+    instrumentation: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      metricTags: string[];
+    }
+  ): void {
+    if (aggHookQuotes.length === 0) return;
+    const aggHookWinner = aggHookQuotes[0];
+
+    void instrumentation.ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.AggHookSoleCandidate'),
+      1,
+      {
+        tags: [
+          ...instrumentation.metricTags,
+          `testAggHooks:${instrumentation.testAggHooks}`,
+          `tradeType:${instrumentation.tradeType}`,
+        ],
+      }
+    );
+
+    if (instrumentation.soleCandidateLogBudget.remaining <= 0) return;
+    instrumentation.soleCandidateLogBudget.remaining -= 1;
+
+    instrumentation.ctx.logger.info(
+      'QuoteBestSplitFinder agg-hook quote selected with no no-hook competitor',
+      {
+        chainId,
+        percentage,
+        tradeType: instrumentation.tradeType,
+        aggHookCount: aggHookQuotes.length,
+        aggHookWinner: {
+          routeHash: hashForLogging(aggHookWinner.route.toString()),
+          amount: aggHookWinner.amount.toString(),
+        },
+      }
+    );
   }
 
   /**
@@ -327,6 +499,10 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       droppedByConflict: 0,
       droppedByLimit: 0,
     };
+    // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
+    // maybeLogAggHookSoleCandidate). Metrics fire unconditionally.
+    const partitionEvictLogBudget = {remaining: 5};
+    const soleCandidateLogBudget = {remaining: 5};
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -375,7 +551,15 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         percentage,
         percentageToSortedQuotes,
         currentRoutes,
-        chainId
+        chainId,
+        {
+          ctx,
+          tradeType,
+          testAggHooks,
+          partitionEvictLogBudget,
+          soleCandidateLogBudget,
+          metricTags,
+        }
       );
       bestUnusedQuoteStats.calls++;
       bestUnusedQuoteStats.totalQuotes += stats.totalCount;
