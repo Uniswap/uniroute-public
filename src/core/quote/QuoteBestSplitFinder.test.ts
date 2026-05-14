@@ -1758,7 +1758,11 @@ describe('QuoteBestSplitFinder', () => {
     // is validated separately in its own describe block below.
     let finder: QuoteBestSplitFinder<MockPool>;
     beforeEach(() => {
-      finder = new QuoteBestSplitFinder<MockPool>(10_000n);
+      // Permissive on both BPS and gas-use tolerances so partition fires
+      // for every scenario in this block — we're exercising the
+      // instrumentation log/metric path, not the gas gate (which has its
+      // own dedicated describe block below).
+      finder = new QuoteBestSplitFinder<MockPool>(10_000n, 10_000_000n);
     });
 
     const noHookRouteAt = (addr: string, pct: number) =>
@@ -2676,6 +2680,264 @@ describe('QuoteBestSplitFinder', () => {
       expect(routes).toContain(noHookWinner);
       expect(routes).toContain(aggHook); // within tolerance → kept
       expect(routes).not.toContain(noHookRunnerUp);
+    });
+
+    // ----- Gas-aware competitiveness gate -----
+
+    const createMockQuoteWithGasUse = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasUse: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse,
+        },
+      }) as unknown as QuoteBasic;
+
+    it('drops partition when agg-hook ties on raw but uses more gas than runner-up (default gas tolerance 0n)', () => {
+      // This is the prod-confirmed regression shape: agg-hook ties or
+      // beats no-hook runner-up on raw amount (raw gate passes at tol=0n
+      // because badness<=0), but uses materially more gas. The new gas
+      // gate must reject it. EXACT_OUT.
+      const noHookWinner = noHookRouteAt(
+        '0xaa00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xab00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xac00000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 100n),
+              createMockQuoteWithGasUse(noHookRunnerUp, 1001n, 100n),
+              // Raw 1000n: ties best no-hook → raw gate passes.
+              // gasUse 500n: 400n more than runner-up's 100n → gas gate fails.
+              createMockQuoteWithGasUse(aggHook, 1000n, 500n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).toContain(noHookRunnerUp);
+      expect(routes).not.toContain(aggHook);
+    });
+
+    it('keeps partition when agg-hook ties on raw and uses equal gas', () => {
+      const noHookWinner = noHookRouteAt(
+        '0xba00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xbb00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xbc00000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 100n),
+              createMockQuoteWithGasUse(noHookRunnerUp, 1001n, 100n),
+              // Tied raw + equal gas → partition fires.
+              createMockQuoteWithGasUse(aggHook, 1000n, 100n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).toContain(aggHook);
+      expect(routes).not.toContain(noHookRunnerUp);
+    });
+
+    it('keeps partition when agg-hook uses LESS gas than runner-up', () => {
+      const noHookWinner = noHookRouteAt(
+        '0xca00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xcb00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xcc00000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 200n),
+              createMockQuoteWithGasUse(noHookRunnerUp, 1001n, 200n),
+              createMockQuoteWithGasUse(aggHook, 1000n, 50n), // less gas
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(aggHook);
+    });
+
+    it('honors a non-zero gas tolerance — admits a marginally-more-gas agg-hook within the threshold', () => {
+      // Constructor: raw tolerance 0n, gas tolerance 1000n units.
+      // Agg-hook ties on raw and uses 500 more gas units → within 1000n
+      // gas tolerance → gate passes.
+      const tolerantFinder = new QuoteBestSplitFinder<MockPool>(0n, 1000n);
+
+      const noHookWinner = noHookRouteAt(
+        '0xda00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xdb00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xdc00000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = tolerantFinder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 100n),
+              createMockQuoteWithGasUse(noHookRunnerUp, 1001n, 100n),
+              createMockQuoteWithGasUse(aggHook, 1000n, 600n), // +500 gas
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(aggHook);
+    });
+
+    it('falls back to BPS-only gate when gasUse is absent on either side (preserves pre-fix behavior)', () => {
+      // No gasDetails on the quotes — exactly mirrors how the rest of the
+      // QuoteBestSplitFinder.test.ts suite constructs mocks. Gas gate must
+      // be a no-op so existing test scenarios keep working unchanged.
+      const noHookWinner = noHookRouteAt(
+        '0xea00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xeb00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xec00000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 1000n),
+              createMockQuote(noHookRunnerUp, 1001n),
+              createMockQuote(aggHook, 1000n), // raw-tied, no gas info
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      // BPS-only path → raw tie passes → partition fires.
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(aggHook);
+    });
+
+    it('EXACT_IN: drops partition when agg-hook ties raw but uses more gas', () => {
+      // EXACT_IN: higher amount better. Tied raw + more gas → same gate
+      // reject (gas check is direction-agnostic).
+      const noHookWinner = noHookRouteAt(
+        '0xfa00000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xfb00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xfc00000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1001n, 100n),
+              createMockQuoteWithGasUse(noHookRunnerUp, 1000n, 100n),
+              // EXACT_IN, higher amount best. aggHook=1000 ties runnerUp →
+              // raw gate passes. Gas 500 vs runnerUp 100 → gas gate fails.
+              createMockQuoteWithGasUse(aggHook, 1000n, 500n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).not.toContain(aggHook);
     });
   });
 });

@@ -51,8 +51,41 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    */
   private readonly AGG_HOOK_PARTITION_TOLERANCE_BPS: bigint;
 
-  constructor(aggHookPartitionToleranceBps: bigint = 0n) {
+  /**
+   * Maximum gas units the agg-hook winner is allowed to exceed the no-hook
+   * runner-up by, before the partition is gated off. Direction-agnostic:
+   * lower gas is always better.
+   *
+   * Background: PR #8142 instrumentation in prod (`commit-477b87a`)
+   * showed 7,665 `partition kept higher-gas agg-hook` log emissions in 10
+   * minutes — every observed bad case had an exact gas delta of either
+   * 80,000 (EXACT_OUT) or 97,000 (EXACT_IN) units, spread evenly across
+   * every percentage step (25 → 90). The raw-only gate from PR #8114
+   * correctly admits these quotes as raw-competitive (within 1–2 bps), but
+   * the +80–97k gas overhead per step compounds into the +472k gas
+   * regression observed in the prod loss sample (treatment 1.156M vs
+   * control 684k). At tolerance=0n the gate rejects any agg-hook winner
+   * with strictly more gas use than the displaced no-hook runner-up.
+   *
+   * Bump this if prod shows over-correction (e.g. legitimate agg-hook
+   * routes with a small fixed gas overhead being dropped). Constructor-
+   * settable for tests; default is 0n.
+   *
+   * When `gasDetails.gasUse` is missing on either quote (e.g. unit-test
+   * mocks without gas info), the gas check is skipped and only the BPS
+   * gate applies — preserves the pre-fix behavior for code paths that
+   * don't populate gas. In prod, DeepQuoteStrategy.findBestQuoteCandidates
+   * always populates gasUse before findBestSplits runs.
+   */
+  private readonly AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS: bigint;
+
+  constructor(
+    aggHookPartitionToleranceBps: bigint = 0n,
+    aggHookPartitionGasToleranceUnits: bigint = 0n
+  ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
+    this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
+      aggHookPartitionGasToleranceUnits;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -278,16 +311,28 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   /**
    * Returns true if it's worth reserving a partition slot for the agg-hook
    * class — i.e., the agg-hook winner is at most
-   * `AGG_HOOK_PARTITION_TOLERANCE_BPS` worse than the no-hook quote at the
-   * position the partition would otherwise displace.
+   * `AGG_HOOK_PARTITION_TOLERANCE_BPS` worse than the displaced no-hook
+   * runner-up on raw amount, AND uses at most
+   * `AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS` more gas than the runner-up.
    *
-   * Inputs are pre-sorted by amount in the trade-direction-appropriate order
-   * (best first). `noHookBudgetIfPartitioned` is the count of no-hook quotes
-   * that would be kept under the partition (typically Math.ceil(k/2)); the
-   * "displaced" quote is therefore at `noHookQuotes[noHookBudgetIfPartitioned]`.
+   * Both gates must pass. The raw gate (added in PR #8114) prevents the
+   * partition from evicting a strictly-better no-hook quote on amount. The
+   * gas gate (added here) prevents it from keeping a quote that ties on
+   * raw but burns materially more gas — the residual loss pattern that
+   * PR #8132/#8142 instrumentation captured in prod at ~7,665 occurrences
+   * per 10 minutes (80–97k extra gas units per partition firing).
    *
-   * If no displaced quote exists (`noHookQuotes.length <= noHookBudgetIfPartitioned`),
-   * partition isn't evicting anything — return true.
+   * Inputs are pre-sorted by amount in the trade-direction-appropriate
+   * order (best first). `noHookBudgetIfPartitioned` is the count of
+   * no-hook quotes that would be kept under the partition (typically
+   * Math.ceil(k/2)); the "displaced" quote is therefore at
+   * `noHookQuotes[noHookBudgetIfPartitioned]`.
+   *
+   * If no displaced quote exists (`noHookQuotes.length <=
+   * noHookBudgetIfPartitioned`), partition isn't evicting anything —
+   * return true. If `gasDetails.gasUse` is absent on either side, the gas
+   * gate is skipped and only the BPS gate applies (preserves pre-fix
+   * behavior for code paths that don't populate gas).
    */
   private isAggHookCompetitive(
     aggHookQuotes: QuoteBasic[],
@@ -301,8 +346,9 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     const aggHookWinner = aggHookQuotes[0];
     const noHookRunnerUp = noHookQuotes[noHookBudgetIfPartitioned];
 
-    // Direction-aware "badness" = how much the agg-hook winner is worse than
-    // the no-hook quote the partition would displace.
+    // --- Raw-amount gate (PR #8114) ---
+    // Direction-aware "badness" = how much the agg-hook winner is worse
+    // than the no-hook quote the partition would displace.
     //   EXACT_IN: higher amount is better → badness = runnerUp.amount - winner.amount
     //   EXACT_OUT: lower amount is better → badness = winner.amount - runnerUp.amount
     const badness =
@@ -310,16 +356,34 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         ? noHookRunnerUp.amount - aggHookWinner.amount
         : aggHookWinner.amount - noHookRunnerUp.amount;
 
-    // Non-positive badness means agg-hook is at least as good — always allow.
-    if (badness <= 0n) return true;
+    if (badness > 0n) {
+      // bps comparison without floats:
+      //   (badness / runnerUp.amount) * 10000 <= tolerance
+      //   ↔ badness * 10000 <= tolerance * runnerUp.amount
+      if (
+        badness * 10000n >
+        this.AGG_HOOK_PARTITION_TOLERANCE_BPS * noHookRunnerUp.amount
+      ) {
+        return false;
+      }
+    }
 
-    // bps comparison without floats:
-    //   (badness / runnerUp.amount) * 10000 <= tolerance
-    //   ↔ badness * 10000 <= tolerance * runnerUp.amount
-    return (
-      badness * 10000n <=
-      this.AGG_HOOK_PARTITION_TOLERANCE_BPS * noHookRunnerUp.amount
-    );
+    // --- Gas-use gate (PR #8142 hypothesis confirmation) ---
+    // Direction-agnostic: lower gas is always better. Skip if gas info is
+    // missing on either side — preserves backward compat with code paths
+    // that don't populate gasDetails (notably unit-test mocks).
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+    const noHookGasUse = noHookRunnerUp.gasDetails?.gasUse;
+    if (aggHookGasUse !== undefined && noHookGasUse !== undefined) {
+      if (aggHookGasUse > noHookGasUse) {
+        const gasUseDelta = aggHookGasUse - noHookGasUse;
+        if (gasUseDelta > this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS) {
+          return false;
+        }
+      }
+    }
+
+    return true;
   }
 
   /**
