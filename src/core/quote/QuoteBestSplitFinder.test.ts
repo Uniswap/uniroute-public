@@ -1599,7 +1599,8 @@ describe('QuoteBestSplitFinder', () => {
           ],
         ]),
         [],
-        ChainId.MAINNET
+        ChainId.MAINNET,
+        TradeType.ExactIn
       );
 
       expect(stats.returnedCount).toBe(2);
@@ -1650,7 +1651,8 @@ describe('QuoteBestSplitFinder', () => {
           ],
         ]),
         [],
-        ChainId.MAINNET
+        ChainId.MAINNET,
+        TradeType.ExactIn
       );
 
       expect(stats.returnedCount).toBe(2);
@@ -1693,7 +1695,8 @@ describe('QuoteBestSplitFinder', () => {
           ],
         ]),
         [],
-        ChainId.MAINNET
+        ChainId.MAINNET,
+        TradeType.ExactIn
       );
 
       expect(stats.returnedCount).toBe(2);
@@ -1735,7 +1738,8 @@ describe('QuoteBestSplitFinder', () => {
           ],
         ]),
         [],
-        ChainId.MAINNET
+        ChainId.MAINNET,
+        TradeType.ExactIn
       );
 
       expect(stats.returnedCount).toBe(2);
@@ -1745,6 +1749,17 @@ describe('QuoteBestSplitFinder', () => {
 
   describe('partition decision instrumentation', () => {
     const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    // The behavioral fix (isAggHookCompetitive at tolerance=0) blocks the
+    // partition for any scenario where the agg-hook winner is worse than the
+    // displaced no-hook runner-up. These tests exercise the *instrumentation
+    // log/metric emission code* itself, so we use a very permissive tolerance
+    // that lets the partition fire regardless. The fix's competitiveness gate
+    // is validated separately in its own describe block below.
+    let finder: QuoteBestSplitFinder<MockPool>;
+    beforeEach(() => {
+      finder = new QuoteBestSplitFinder<MockPool>(10_000n);
+    });
 
     const noHookRouteAt = (addr: string, pct: number) =>
       createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
@@ -1806,6 +1821,7 @@ describe('QuoteBestSplitFinder', () => {
         ]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation({tradeType: TradeType.ExactIn})
       );
 
@@ -1856,6 +1872,7 @@ describe('QuoteBestSplitFinder', () => {
         ]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactOut,
         buildInstrumentation({tradeType: TradeType.ExactOut})
       );
 
@@ -1897,6 +1914,7 @@ describe('QuoteBestSplitFinder', () => {
         ]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation({tradeType: TradeType.ExactIn})
       );
 
@@ -1939,6 +1957,7 @@ describe('QuoteBestSplitFinder', () => {
         ]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation({
           testAggHooks: false,
           tradeType: TradeType.ExactIn,
@@ -1971,6 +1990,7 @@ describe('QuoteBestSplitFinder', () => {
         ]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation()
       );
 
@@ -2001,6 +2021,7 @@ describe('QuoteBestSplitFinder', () => {
         ]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation()
       );
 
@@ -2045,6 +2066,7 @@ describe('QuoteBestSplitFinder', () => {
           quotesMap,
           [],
           ChainId.MAINNET,
+          TradeType.ExactIn,
           sharedInstr
         );
       }
@@ -2070,6 +2092,7 @@ describe('QuoteBestSplitFinder', () => {
         new Map<number, QuoteBasic[]>([[50, [createMockQuote(aggHook, 990n)]]]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactOut,
         buildInstrumentation({tradeType: TradeType.ExactOut})
       );
 
@@ -2104,6 +2127,7 @@ describe('QuoteBestSplitFinder', () => {
         new Map<number, QuoteBasic[]>([[50, [createMockQuote(noHook, 1000n)]]]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation()
       );
 
@@ -2128,6 +2152,7 @@ describe('QuoteBestSplitFinder', () => {
           quotesMap,
           [],
           ChainId.MAINNET,
+          TradeType.ExactIn,
           sharedInstr
         );
       }
@@ -2148,11 +2173,264 @@ describe('QuoteBestSplitFinder', () => {
         new Map<number, QuoteBasic[]>([[50, [createMockQuote(aggHook, 990n)]]]),
         [],
         ChainId.MAINNET,
+        TradeType.ExactIn,
         buildInstrumentation({testAggHooks: false})
       );
 
       expect(infoMock().mock.calls).toHaveLength(0);
       expect(metricMock().mock.calls).toHaveLength(0);
+    });
+  });
+
+  describe('agg-hook competitiveness gate', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    it('EXACT_IN: keeps partition when agg-hook winner ties or beats the displaced no-hook runner-up', () => {
+      // Agg-hook winner (1000) >= no-hook runner-up (980). Gate passes →
+      // 1 slot each → returnedCount=2 with both top quotes per class.
+      const aggHook = aggHookRouteAt(
+        '0xa000000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xa100000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xa200000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(aggHook, 1000n),
+              createMockQuote(noHookWinner, 990n),
+              createMockQuote(noHookRunnerUp, 980n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(aggHook);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).not.toContain(noHookRunnerUp);
+    });
+
+    it('EXACT_IN: drops partition when agg-hook winner is worse than displaced no-hook runner-up beyond default tolerance (0 bps)', () => {
+      // Agg-hook (990) < no-hook runner-up (995). Gate fails → all K=2 slots
+      // to no-hook → agg-hook is dropped entirely.
+      const noHookWinner = noHookRouteAt(
+        '0xb000000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xb100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xb200000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 1000n),
+              createMockQuote(noHookRunnerUp, 995n),
+              createMockQuote(aggHook, 990n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).toContain(noHookRunnerUp);
+      expect(routes).not.toContain(aggHook);
+    });
+
+    it('EXACT_OUT: drops partition when agg-hook winner needs more input than displaced no-hook runner-up (direction flip)', () => {
+      // EXACT_OUT: lower amount = better. Agg-hook (1000) > no-hook
+      // runner-up (995) → agg-hook is worse → gate fails → drop.
+      const noHookWinner = noHookRouteAt(
+        '0xc000000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xc100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xc200000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 990n),
+              createMockQuote(noHookRunnerUp, 995n),
+              createMockQuote(aggHook, 1000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).toContain(noHookRunnerUp);
+      expect(routes).not.toContain(aggHook);
+    });
+
+    it('keeps partition when no no-hook runner-up exists (nothing to evict)', () => {
+      // Only 1 no-hook quote fills the entire no-hook budget under the
+      // partition; there is no runner-up to displace, so the gate passes
+      // vacuously and the partition stays on.
+      const noHook = noHookRouteAt(
+        '0xd000000000000000000000000000000000000000',
+        50
+      );
+      const aggHook1 = aggHookRouteAt(
+        '0xd100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook2 = aggHookRouteAt(
+        '0xd200000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(aggHook1, 1000n),
+              createMockQuote(aggHook2, 999n),
+              createMockQuote(noHook, 1n), // far worse, but still no runner-up to evict
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHook);
+      expect(routes).toContain(aggHook1);
+      expect(routes).not.toContain(aggHook2);
+    });
+
+    it('only-agg-hook present: K slots to agg-hook regardless of gate', () => {
+      const aggHook1 = aggHookRouteAt(
+        '0xe000000000000000000000000000000000000000',
+        50
+      );
+      const aggHook2 = aggHookRouteAt(
+        '0xe100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook3 = aggHookRouteAt(
+        '0xe200000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(aggHook1, 1000n),
+              createMockQuote(aggHook2, 990n),
+              createMockQuote(aggHook3, 980n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      expect(stats.quotes.map(q => q.route)).toEqual([aggHook1, aggHook2]);
+    });
+
+    it('honors a non-zero tolerance — admits a marginally-worse agg-hook within X bps', () => {
+      // Constructed with 10 bps tolerance. aggHookWinner is ~5 bps worse than
+      // no-hook runner-up, which is within tolerance → partition stays on.
+      const tolerantFinder = new QuoteBestSplitFinder<MockPool>(10n);
+
+      // EXACT_IN amounts. runnerUp = 10_000_000n, aggHookWinner = 9_995_000n
+      // → badness = 5000, runnerUp = 10_000_000 → 5 bps gap.
+      const noHookWinner = noHookRouteAt(
+        '0xf000000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xf100000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xf200000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = tolerantFinder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 10_000_010n),
+              createMockQuote(noHookRunnerUp, 10_000_000n),
+              createMockQuote(aggHook, 9_995_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).toContain(aggHook); // within tolerance → kept
+      expect(routes).not.toContain(noHookRunnerUp);
     });
   });
 });

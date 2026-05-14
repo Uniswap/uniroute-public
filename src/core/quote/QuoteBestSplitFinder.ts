@@ -32,6 +32,29 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   // Minimum number of split levels to try before exiting early
   private readonly MIN_SPLIT_LEVELS_BEFORE_EARLY_EXIT = 3;
 
+  /**
+   * Maximum bps that the agg-hook winner is allowed to be *worse* than the
+   * no-hook runner-up the partition would displace, before we drop the
+   * partition reservation entirely and give all K slots to no-hook.
+   *
+   * Background: PR #8105 instrumentation on dev confirmed the K-budget
+   * partition was firing the bad-case eviction on every WETH→USDC EXACT_OUT
+   * $1k repro at every DFS percentage step (5, 10, 90, 95) — keeping an
+   * agg-hook quote that was 0.0009–5.66 bps worse than the displaced
+   * no-hook runner-up. With tolerance=0n the partition only fires when the
+   * agg-hook winner is at least tied with the displaced no-hook quote;
+   * tiebreaker-class agg-hook routes still qualify.
+   *
+   * If empirical prod data shows we're over-correcting and dropping useful
+   * agg-hook exploration, bump this up (1n–5n bps) to allow a small
+   * "investment" margin. Constructor-settable for tests; default is 0n.
+   */
+  private readonly AGG_HOOK_PARTITION_TOLERANCE_BPS: bigint;
+
+  constructor(aggHookPartitionToleranceBps: bigint = 0n) {
+    this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
+  }
+
   private routeHasGivenAddressAsInputOrOutput(
     route: RouteBasic<TPool>,
     address: string
@@ -136,18 +159,20 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * Returns the top valid quotes for a given percentage that don't conflict
    * with routes already in the current combination.
    *
-   * Quotes are partitioned into two classes (no-hook vs agg-hook V4 pools)
-   * and a fixed total of `MAX_VALID_QUOTES_PER_PERCENTAGE` is split between
-   * them. When both classes are populated, each class is guaranteed at least
-   * one slot (no-hook gets the extra when K is odd). When only one class has
-   * valid quotes, all K slots go to that class. See the docstring on the
-   * constant for rationale.
+   * Quotes are partitioned into two classes (no-hook vs agg-hook V4 pools).
+   * `MAX_VALID_QUOTES_PER_PERCENTAGE` slots are split between them only when
+   * the agg-hook winner is competitive with the no-hook runner-up the
+   * partition would otherwise displace — gated by `AGG_HOOK_PARTITION_TOLERANCE_BPS`
+   * via `isAggHookCompetitive`. If the agg-hook class fails the gate, all
+   * K slots go to no-hook. When only one class has valid quotes, all K slots
+   * go to that class.
    */
   private getBestUnusedQuotesStats(
     percentage: number,
     percentageToSortedQuotes: Map<number, QuoteBasic[]>,
     usedRoutes: RouteBasic<TPool>[],
     chainId: ChainId,
+    tradeType: TradeType,
     instrumentation?: {
       ctx: UniContext;
       tradeType: TradeType;
@@ -186,9 +211,18 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     }
 
     const k = this.MAX_VALID_QUOTES_PER_PERCENTAGE;
-    const bothPopulated = noHookQuotes.length > 0 && aggHookQuotes.length > 0;
-    const noHookBudget = bothPopulated
-      ? Math.ceil(k / 2)
+    const bothPresent = noHookQuotes.length > 0 && aggHookQuotes.length > 0;
+    const noHookBudgetIfPartitioned = Math.ceil(k / 2);
+    const useBothPopulatedPartition =
+      bothPresent &&
+      this.isAggHookCompetitive(
+        aggHookQuotes,
+        noHookQuotes,
+        noHookBudgetIfPartitioned,
+        tradeType
+      );
+    const noHookBudget = useBothPopulatedPartition
+      ? noHookBudgetIfPartitioned
       : noHookQuotes.length > 0
         ? k
         : 0;
@@ -199,8 +233,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       ...aggHookQuotes.slice(0, aggHookBudget),
     ];
 
+    // Instrumentation is gated on the partition having actually fired
+    // (`useBothPopulatedPartition`), so the "evicts better no-hook" log
+    // accurately describes what happened. The sole-candidate path still
+    // applies when only the agg-hook class is populated.
     if (instrumentation && instrumentation.testAggHooks) {
-      if (bothPopulated) {
+      if (useBothPopulatedPartition) {
         this.maybeLogPartitionDecision(
           percentage,
           chainId,
@@ -226,6 +264,53 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       validCount: validQuotes.length,
       returnedCount: returnedQuotes.length,
     };
+  }
+
+  /**
+   * Returns true if it's worth reserving a partition slot for the agg-hook
+   * class — i.e., the agg-hook winner is at most
+   * `AGG_HOOK_PARTITION_TOLERANCE_BPS` worse than the no-hook quote at the
+   * position the partition would otherwise displace.
+   *
+   * Inputs are pre-sorted by amount in the trade-direction-appropriate order
+   * (best first). `noHookBudgetIfPartitioned` is the count of no-hook quotes
+   * that would be kept under the partition (typically Math.ceil(k/2)); the
+   * "displaced" quote is therefore at `noHookQuotes[noHookBudgetIfPartitioned]`.
+   *
+   * If no displaced quote exists (`noHookQuotes.length <= noHookBudgetIfPartitioned`),
+   * partition isn't evicting anything — return true.
+   */
+  private isAggHookCompetitive(
+    aggHookQuotes: QuoteBasic[],
+    noHookQuotes: QuoteBasic[],
+    noHookBudgetIfPartitioned: number,
+    tradeType: TradeType
+  ): boolean {
+    if (aggHookQuotes.length === 0) return false;
+    if (noHookQuotes.length <= noHookBudgetIfPartitioned) return true;
+
+    const aggHookWinner = aggHookQuotes[0];
+    const noHookRunnerUp = noHookQuotes[noHookBudgetIfPartitioned];
+
+    // Direction-aware "badness" = how much the agg-hook winner is worse than
+    // the no-hook quote the partition would displace.
+    //   EXACT_IN: higher amount is better → badness = runnerUp.amount - winner.amount
+    //   EXACT_OUT: lower amount is better → badness = winner.amount - runnerUp.amount
+    const badness =
+      tradeType === TradeType.ExactIn
+        ? noHookRunnerUp.amount - aggHookWinner.amount
+        : aggHookWinner.amount - noHookRunnerUp.amount;
+
+    // Non-positive badness means agg-hook is at least as good — always allow.
+    if (badness <= 0n) return true;
+
+    // bps comparison without floats:
+    //   (badness / runnerUp.amount) * 10000 <= tolerance
+    //   ↔ badness * 10000 <= tolerance * runnerUp.amount
+    return (
+      badness * 10000n <=
+      this.AGG_HOOK_PARTITION_TOLERANCE_BPS * noHookRunnerUp.amount
+    );
   }
 
   /**
@@ -552,6 +637,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         percentageToSortedQuotes,
         currentRoutes,
         chainId,
+        tradeType,
         {
           ctx,
           tradeType,
