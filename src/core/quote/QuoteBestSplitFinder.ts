@@ -179,6 +179,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       testAggHooks: boolean | undefined;
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): {
@@ -246,6 +247,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           aggHookQuotes,
           noHookBudget,
           aggHookBudget,
+          instrumentation
+        );
+        this.maybeLogPartitionGasAdjustedDecision(
+          percentage,
+          chainId,
+          noHookQuotes,
+          aggHookQuotes,
+          noHookBudget,
           instrumentation
         );
       } else if (aggHookQuotes.length > 0 && noHookQuotes.length === 0) {
@@ -333,6 +342,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       testAggHooks: boolean | undefined;
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -419,6 +429,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       testAggHooks: boolean | undefined;
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -450,6 +461,120 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         aggHookWinner: {
           routeHash: hashForLogging(aggHookWinner.route.toString()),
           amount: aggHookWinner.amount.toString(),
+        },
+      }
+    );
+  }
+
+  /**
+   * Investigation-only: companion to maybeLogPartitionDecision that catches
+   * the case the raw-only gate can't see — when the partition fires because
+   * the agg-hook winner ties or beats the displaced no-hook runner-up on
+   * RAW amount, but is materially worse on GAS-ADJUSTED amount.
+   *
+   * Pre-condition: caller has determined the partition actually fired
+   * (`useBothPopulatedPartition === true`). Direction-aware: for EXACT_IN
+   * the gas-adjusted amount is `amount - gasCostInQuoteToken` (higher is
+   * better), for EXACT_OUT it is `amount + gasCostInQuoteToken` (lower is
+   * better). If gas info is missing on either side, emits the metric with
+   * a `gas_info_missing` tag and skips the log.
+   *
+   * Emits:
+   *   metric `QuoteBestSplitFinder.PartitionGasAdjustedDecision` tagged
+   *     `gasAdjustedVerdict:{agghook_worse_gas_adjusted,agghook_better_or_tie_gas_adjusted,gas_info_missing}`
+   *     + the standard `testAggHooks`/`tradeType`/baseline tags. Fires on
+   *     every partition firing where a no-hook runner-up exists.
+   *   log `'QuoteBestSplitFinder partition kept gas-worse agg-hook'` only
+   *     when verdict is `agghook_worse_gas_adjusted`, capped per request
+   *     via `partitionGasAdjustedLogBudget`.
+   */
+  private maybeLogPartitionGasAdjustedDecision(
+    percentage: number,
+    chainId: ChainId,
+    noHookQuotes: QuoteBasic[],
+    aggHookQuotes: QuoteBasic[],
+    noHookBudget: number,
+    instrumentation: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
+      metricTags: string[];
+    }
+  ): void {
+    // No-hook runner-up at position noHookBudget is the candidate the
+    // partition implicitly evicts. If it doesn't exist, partition wasn't
+    // displacing anyone — nothing to compare gas-adjusted against.
+    if (noHookQuotes.length <= noHookBudget) return;
+    if (aggHookQuotes.length === 0) return;
+
+    const aggHookWinner = aggHookQuotes[0];
+    const noHookRunnerUp = noHookQuotes[noHookBudget];
+
+    const baseTags = [
+      ...instrumentation.metricTags,
+      `testAggHooks:${instrumentation.testAggHooks}`,
+      `tradeType:${instrumentation.tradeType}`,
+    ];
+
+    const aggHookGas = aggHookWinner.gasDetails?.gasCostInQuoteToken;
+    const noHookGas = noHookRunnerUp.gasDetails?.gasCostInQuoteToken;
+    if (aggHookGas === undefined || noHookGas === undefined) {
+      void instrumentation.ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.PartitionGasAdjustedDecision'),
+        1,
+        {tags: [...baseTags, 'gasAdjustedVerdict:gas_info_missing']}
+      );
+      return;
+    }
+
+    const isExactIn = instrumentation.tradeType === TradeType.ExactIn;
+    const aggHookGasAdjusted = isExactIn
+      ? aggHookWinner.amount - aggHookGas
+      : aggHookWinner.amount + aggHookGas;
+    const noHookGasAdjusted = isExactIn
+      ? noHookRunnerUp.amount - noHookGas
+      : noHookRunnerUp.amount + noHookGas;
+
+    // Agg-hook is gas-worse when:
+    //   EXACT_IN: gas-adjusted output is LOWER
+    //   EXACT_OUT: gas-adjusted input is HIGHER
+    const aggHookWorseGasAdjusted = isExactIn
+      ? aggHookGasAdjusted < noHookGasAdjusted
+      : aggHookGasAdjusted > noHookGasAdjusted;
+
+    const verdictTag = aggHookWorseGasAdjusted
+      ? 'gasAdjustedVerdict:agghook_worse_gas_adjusted'
+      : 'gasAdjustedVerdict:agghook_better_or_tie_gas_adjusted';
+    void instrumentation.ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.PartitionGasAdjustedDecision'),
+      1,
+      {tags: [...baseTags, verdictTag]}
+    );
+
+    if (!aggHookWorseGasAdjusted) return;
+    if (instrumentation.partitionGasAdjustedLogBudget.remaining <= 0) return;
+    instrumentation.partitionGasAdjustedLogBudget.remaining -= 1;
+
+    instrumentation.ctx.logger.info(
+      'QuoteBestSplitFinder partition kept gas-worse agg-hook',
+      {
+        chainId,
+        percentage,
+        tradeType: instrumentation.tradeType,
+        aggHookWinner: {
+          routeHash: hashForLogging(aggHookWinner.route.toString()),
+          amount: aggHookWinner.amount.toString(),
+          gasCostInQuoteToken: aggHookGas.toString(),
+          gasAdjustedAmount: aggHookGasAdjusted.toString(),
+        },
+        noHookRunnerUp: {
+          routeHash: hashForLogging(noHookRunnerUp.route.toString()),
+          amount: noHookRunnerUp.amount.toString(),
+          gasCostInQuoteToken: noHookGas.toString(),
+          gasAdjustedAmount: noHookGasAdjusted.toString(),
         },
       }
     );
@@ -585,9 +710,11 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       droppedByLimit: 0,
     };
     // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
-    // maybeLogAggHookSoleCandidate). Metrics fire unconditionally.
+    // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision).
+    // Metrics fire unconditionally.
     const partitionEvictLogBudget = {remaining: 5};
     const soleCandidateLogBudget = {remaining: 5};
+    const partitionGasAdjustedLogBudget = {remaining: 5};
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -644,6 +771,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           testAggHooks,
           partitionEvictLogBudget,
           soleCandidateLogBudget,
+          partitionGasAdjustedLogBudget,
           metricTags,
         }
       );
