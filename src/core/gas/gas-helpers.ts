@@ -23,6 +23,7 @@ import {
   USDC_BRIDGED_AVAX,
   USDC_CELO,
   USDC_LINEA,
+  USDM_MEGAETH,
   USDC_MAINNET,
   USDC_MONAD,
   USDC_NATIVE_ARBITRUM,
@@ -96,6 +97,7 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.XLAYER]: [USDC_XLAYER],
   [ChainId.TEMPO]: [PATHUSD_TEMPO],
   [ChainId.LINEA]: [USDC_LINEA],
+  [ChainId.MEGAETH]: [USDM_MEGAETH],
 };
 
 export type GasPools = {

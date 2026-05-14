@@ -17,6 +17,8 @@ import {Protocol} from '../../../models/pool/Protocol';
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
+// MEGAETH is not in sdk-core — define locally until sdk-core is upgraded
+const CHAIN_ID_MEGAETH = 4326 as ChainId;
 // Protocols listed here are excluded from cached-routes retrieval inside
 // CachedRoutesRepository.  All external (agg hook) protocols are included
 // because production metrics show cached routes still containing agg hook
@@ -159,6 +161,10 @@ export const WETH_HOOKS_ADDRESS_ON_MONAD =
   '0x3fad8a7205f943528915e67cf94fc792c8fce888';
 export const WETH_HOOKS_ADDRESS_ON_ARBITRUM =
   '0x2a4adf825bd96598487dbb6b2d8d882a4eb86888';
+
+// TODO(megaeth): temporary — AGNTTEST/USDm test pool hook; remove once real pools are seeded.
+export const TEST_HOOK_ON_MEGAETH =
+  '0x14faad03bbbc089f694bdfad9826d36f30ce80c4';
 
 export const RENZO_ON_UNICHAIN = '0x09dea99d714a3a19378e3d80d1ad22ca46085080';
 export const AEGIS_ON_UNICHAIN_V1 =
@@ -600,5 +606,6 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.SONEIUM]: [ADDRESS_ZERO],
   [ChainId.XLAYER]: [ADDRESS_ZERO, AEGIS_V3],
   [ChainId.LINEA]: [ADDRESS_ZERO],
+  [CHAIN_ID_MEGAETH]: [ADDRESS_ZERO, TEST_HOOK_ON_MEGAETH],
   [CHAIN_ID_TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
 };

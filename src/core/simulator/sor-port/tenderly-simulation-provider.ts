@@ -159,6 +159,8 @@ const TENDERLY_NODE_API = (chainId: ChainId, tenderlyNodeApiKey: string) => {
       return `https://linea.gateway.tenderly.co/${tenderlyNodeApiKey}`;
     case ChainId.TEMPO:
       return `https://tempo.gateway.tenderly.co/${tenderlyNodeApiKey}`;
+    case ChainId.MEGAETH:
+      return `https://megaeth.gateway.tenderly.co/${tenderlyNodeApiKey}`;
     default:
       throw new Error(
         `ChainId ${chainId} does not correspond to a tenderly node endpoint`

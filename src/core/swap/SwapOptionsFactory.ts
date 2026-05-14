@@ -2,6 +2,7 @@ import {ChainId} from '../../lib/config';
 import {parseDeadline, parseSlippageTolerance} from './shared';
 import {PermitSingle} from '@uniswap/permit2-sdk';
 import {
+  SWAP_PROXY_ADDRESS,
   TokenTransferMode,
   UniversalRouterVersion,
 } from '@uniswap/universal-router-sdk';
@@ -32,6 +33,15 @@ export type SwapOptionsUniversalRouterInput = {
   simulateFromAddress?: string;
   permit2Disabled?: boolean;
 };
+
+function isSwapProxyDeployed(chainId: ChainId): boolean {
+  try {
+    SWAP_PROXY_ADDRESS(chainId);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export class SwapOptionsFactory {
   static createUniversalRouterOptions_2_0(
@@ -85,9 +95,9 @@ export class SwapOptionsFactory {
       computePortionAmount(amountIn, portionBips)
     );
 
-    // SwapProxy (ApproveProxy) only supports ERC20 input — native ETH cannot be
-    // approved, so fall back to Permit2 mode which handles native via msg.value.
-    const useApproveProxy = permit2Disabled && !tokenInIsNative;
+    // Permit2 fallback: native input (ETH can't be approved) and chains without SwapProxy.
+    const useApproveProxy =
+      permit2Disabled && !tokenInIsNative && isSwapProxyDeployed(chainId);
 
     const swapParams: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,

@@ -55,6 +55,7 @@ export enum ChainId {
   XLAYER = __PLACEHOLDER__,
   TEMPO = __PLACEHOLDER__,
   LINEA = __PLACEHOLDER__,
+  MEGAETH = __PLACEHOLDER__,
 }
 
 export interface IUniRouteServiceConfig {
@@ -442,6 +443,7 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.MEGAETH,
 ];
 
 export const V2_SUPPORTED = [
@@ -463,6 +465,7 @@ export const V2_SUPPORTED = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.MEGAETH,
 ];
 
 export const V4_SUPPORTED = [
@@ -486,6 +489,7 @@ export const V4_SUPPORTED = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.MEGAETH,
 ];
 
 export const MIXED_SUPPORTED = [
@@ -504,6 +508,7 @@ export const MIXED_SUPPORTED = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.MEGAETH,
 ];
 
 export const OPTIMISM_STACK_CHAINS = [
@@ -577,6 +582,7 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.XLAYER]: {...defaultPoolSelectionConfig},
   [ChainId.TEMPO]: {...defaultPoolSelectionConfig},
   [ChainId.LINEA]: {...defaultPoolSelectionConfig},
+  [ChainId.MEGAETH]: {...defaultPoolSelectionConfig},
 };
 
 export const aggHooksPoolSelectionPerChainConfig: Record<
@@ -605,6 +611,7 @@ export const aggHooksPoolSelectionPerChainConfig: Record<
   [ChainId.XLAYER]: {...aggHooksPoolSelectionConfig},
   [ChainId.TEMPO]: {...aggHooksPoolSelectionConfig},
   [ChainId.LINEA]: {...aggHooksPoolSelectionConfig},
+  [ChainId.MEGAETH]: {...aggHooksPoolSelectionConfig},
 };
 
 // Mapping of chainId to Set of token addresses that require gasPrice to be passed to simulation
@@ -634,6 +641,7 @@ export const needsGasPriceFetchingMapping: Record<ChainId, Set<string>> = {
   [ChainId.XLAYER]: new Set<string>(),
   [ChainId.TEMPO]: new Set<string>(),
   [ChainId.LINEA]: new Set<string>(),
+  [ChainId.MEGAETH]: new Set<string>(),
 };
 
 export const needsGasPriceFetching = (
