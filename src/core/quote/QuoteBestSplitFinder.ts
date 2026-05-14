@@ -470,23 +470,33 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * Investigation-only: companion to maybeLogPartitionDecision that catches
    * the case the raw-only gate can't see — when the partition fires because
    * the agg-hook winner ties or beats the displaced no-hook runner-up on
-   * RAW amount, but is materially worse on GAS-ADJUSTED amount.
+   * RAW amount, but uses materially MORE GAS (and therefore loses on
+   * gas-adjusted ranking downstream of `findBestSplits`).
+   *
+   * Why compare gas use rather than gas-adjusted amount: `gasCostInQuoteToken`
+   * is populated by `GasConverter.updateQuotesGasDetails` AFTER findBestSplits
+   * returns, so it's undefined at the partition step. `gasDetails.gasUse`
+   * (gas units) is populated by the per-protocol gas estimators when
+   * `DeepQuoteStrategy.findBestQuoteCandidates` builds `quotesWithGas`, so
+   * it's always available here. Both quotes pay the same gas price on the
+   * same chain, so a direct gas-use comparison is a strong proxy for
+   * gas-adjusted cost without needing the quote-token conversion.
    *
    * Pre-condition: caller has determined the partition actually fired
-   * (`useBothPopulatedPartition === true`). Direction-aware: for EXACT_IN
-   * the gas-adjusted amount is `amount - gasCostInQuoteToken` (higher is
-   * better), for EXACT_OUT it is `amount + gasCostInQuoteToken` (lower is
-   * better). If gas info is missing on either side, emits the metric with
-   * a `gas_info_missing` tag and skips the log.
+   * (`useBothPopulatedPartition === true`). If gas info is missing on
+   * either side, emits the metric with a `gas_info_missing` tag and
+   * skips the log.
    *
    * Emits:
    *   metric `QuoteBestSplitFinder.PartitionGasAdjustedDecision` tagged
-   *     `gasAdjustedVerdict:{agghook_worse_gas_adjusted,agghook_better_or_tie_gas_adjusted,gas_info_missing}`
+   *     `gasAdjustedVerdict:{agghook_more_gas_used,agghook_equal_or_less_gas_used,gas_info_missing}`
    *     + the standard `testAggHooks`/`tradeType`/baseline tags. Fires on
-   *     every partition firing where a no-hook runner-up exists.
-   *   log `'QuoteBestSplitFinder partition kept gas-worse agg-hook'` only
-   *     when verdict is `agghook_worse_gas_adjusted`, capped per request
-   *     via `partitionGasAdjustedLogBudget`.
+   *     every partition firing where a no-hook runner-up exists. Metric
+   *     name kept stable so prod dashboards / saved queries keep working;
+   *     the verdict tag values are the meaningful change.
+   *   log `'QuoteBestSplitFinder partition kept higher-gas agg-hook'` only
+   *     when verdict is `agghook_more_gas_used`, capped per request via
+   *     `partitionGasAdjustedLogBudget`.
    */
   private maybeLogPartitionGasAdjustedDecision(
     percentage: number,
@@ -506,7 +516,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   ): void {
     // No-hook runner-up at position noHookBudget is the candidate the
     // partition implicitly evicts. If it doesn't exist, partition wasn't
-    // displacing anyone — nothing to compare gas-adjusted against.
+    // displacing anyone — nothing to compare gas use against.
     if (noHookQuotes.length <= noHookBudget) return;
     if (aggHookQuotes.length === 0) return;
 
@@ -519,9 +529,9 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       `tradeType:${instrumentation.tradeType}`,
     ];
 
-    const aggHookGas = aggHookWinner.gasDetails?.gasCostInQuoteToken;
-    const noHookGas = noHookRunnerUp.gasDetails?.gasCostInQuoteToken;
-    if (aggHookGas === undefined || noHookGas === undefined) {
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+    const noHookGasUse = noHookRunnerUp.gasDetails?.gasUse;
+    if (aggHookGasUse === undefined || noHookGasUse === undefined) {
       void instrumentation.ctx.metrics.count(
         buildMetricKey('QuoteBestSplitFinder.PartitionGasAdjustedDecision'),
         1,
@@ -530,36 +540,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       return;
     }
 
-    const isExactIn = instrumentation.tradeType === TradeType.ExactIn;
-    const aggHookGasAdjusted = isExactIn
-      ? aggHookWinner.amount - aggHookGas
-      : aggHookWinner.amount + aggHookGas;
-    const noHookGasAdjusted = isExactIn
-      ? noHookRunnerUp.amount - noHookGas
-      : noHookRunnerUp.amount + noHookGas;
+    // Lower gas use is better for both trade directions — gas converts to
+    // a quote-token cost via a shared chain gas price, so direct
+    // comparison is direction-agnostic.
+    const aggHookUsesMoreGas = aggHookGasUse > noHookGasUse;
 
-    // Agg-hook is gas-worse when:
-    //   EXACT_IN: gas-adjusted output is LOWER
-    //   EXACT_OUT: gas-adjusted input is HIGHER
-    const aggHookWorseGasAdjusted = isExactIn
-      ? aggHookGasAdjusted < noHookGasAdjusted
-      : aggHookGasAdjusted > noHookGasAdjusted;
-
-    const verdictTag = aggHookWorseGasAdjusted
-      ? 'gasAdjustedVerdict:agghook_worse_gas_adjusted'
-      : 'gasAdjustedVerdict:agghook_better_or_tie_gas_adjusted';
+    const verdictTag = aggHookUsesMoreGas
+      ? 'gasAdjustedVerdict:agghook_more_gas_used'
+      : 'gasAdjustedVerdict:agghook_equal_or_less_gas_used';
     void instrumentation.ctx.metrics.count(
       buildMetricKey('QuoteBestSplitFinder.PartitionGasAdjustedDecision'),
       1,
       {tags: [...baseTags, verdictTag]}
     );
 
-    if (!aggHookWorseGasAdjusted) return;
+    if (!aggHookUsesMoreGas) return;
     if (instrumentation.partitionGasAdjustedLogBudget.remaining <= 0) return;
     instrumentation.partitionGasAdjustedLogBudget.remaining -= 1;
 
     instrumentation.ctx.logger.info(
-      'QuoteBestSplitFinder partition kept gas-worse agg-hook',
+      'QuoteBestSplitFinder partition kept higher-gas agg-hook',
       {
         chainId,
         percentage,
@@ -567,15 +567,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         aggHookWinner: {
           routeHash: hashForLogging(aggHookWinner.route.toString()),
           amount: aggHookWinner.amount.toString(),
-          gasCostInQuoteToken: aggHookGas.toString(),
-          gasAdjustedAmount: aggHookGasAdjusted.toString(),
+          gasUse: aggHookGasUse.toString(),
         },
         noHookRunnerUp: {
           routeHash: hashForLogging(noHookRunnerUp.route.toString()),
           amount: noHookRunnerUp.amount.toString(),
-          gasCostInQuoteToken: noHookGas.toString(),
-          gasAdjustedAmount: noHookGasAdjusted.toString(),
+          gasUse: noHookGasUse.toString(),
         },
+        gasUseDelta: (aggHookGasUse - noHookGasUse).toString(),
       }
     );
   }

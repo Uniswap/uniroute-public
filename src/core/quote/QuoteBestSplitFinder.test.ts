@@ -2191,12 +2191,12 @@ describe('QuoteBestSplitFinder', () => {
       expect(metricMock().mock.calls).toHaveLength(0);
     });
 
-    // ----- Gas-adjusted partition decision instrumentation -----
+    // ----- Gas-use partition decision instrumentation -----
 
     const createMockQuoteWithGas = (
       route: RouteBasic<MockPool>,
       amount: bigint,
-      gasCostInQuoteToken: bigint
+      gasUse: bigint
     ): QuoteBasic =>
       ({
         route,
@@ -2205,16 +2205,18 @@ describe('QuoteBestSplitFinder', () => {
           gasPriceInWei: 1n,
           gasCostInWei: 1n,
           gasCostInEth: 0,
-          gasUse: 1n,
-          gasCostInQuoteToken,
-          gasCostInUSD: 0,
+          gasUse,
+          // gasCostInQuoteToken stays undefined — it's populated by
+          // GasConverter AFTER findBestSplits, so the instrumentation can't
+          // rely on it. Comparison happens against gasDetails.gasUse instead.
         },
       }) as unknown as QuoteBasic;
 
-    it('emits the gas-worse log and metric when partition keeps a gas-worse agg-hook (EXACT_OUT)', () => {
-      // EXACT_OUT: lower input is better. Agg-hook beats no-hook on RAW by
-      // 1n but costs MUCH more gas. The raw-only gate passes (badness<=0)
-      // and the partition fires; the gas-adjusted check then catches it.
+    it('emits the higher-gas log and metric when partition keeps an agg-hook with more gas use (EXACT_OUT)', () => {
+      // EXACT_OUT, raw-tied scenario: agg-hook (1000n) ties no-hook on raw
+      // input but uses far more gas. The raw-only gate passes
+      // (`isAggHookCompetitive` returns true at tolerance=0n because
+      // badness<=0); the partition fires; this instrumentation flags it.
       const noHookWinner = noHookRouteAt(
         '0xaa00000000000000000000000000000000000000',
         50
@@ -2232,18 +2234,18 @@ describe('QuoteBestSplitFinder', () => {
       //   noHookWinner    = 1000n
       //   noHookRunnerUp  = 1001n  (displaced by partition)
       //   aggHookWinner   = 1000n  (raw-ties → gate passes)
-      // Gas costs (in quote token):
-      //   noHookRunnerUp = 1n    → gas-adjusted = 1001 + 1   = 1002n
-      //   aggHookWinner  = 100n  → gas-adjusted = 1000 + 100 = 1100n  (worse)
+      // gasUse:
+      //   noHookRunnerUp  = 100n
+      //   aggHookWinner   = 500n  (5x more gas → verdict agghook_more_gas_used)
       finder['getBestUnusedQuotesStats'](
         50,
         new Map<number, QuoteBasic[]>([
           [
             50,
             [
-              createMockQuoteWithGas(noHookWinner, 1000n, 1n),
-              createMockQuoteWithGas(noHookRunnerUp, 1001n, 1n),
-              createMockQuoteWithGas(aggHook, 1000n, 100n),
+              createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+              createMockQuoteWithGas(noHookRunnerUp, 1001n, 100n),
+              createMockQuoteWithGas(aggHook, 1000n, 500n),
             ],
           ],
         ]),
@@ -2254,19 +2256,15 @@ describe('QuoteBestSplitFinder', () => {
       );
 
       const logs = infoMock().mock.calls.filter(
-        c => c[0] === 'QuoteBestSplitFinder partition kept gas-worse agg-hook'
+        c => c[0] === 'QuoteBestSplitFinder partition kept higher-gas agg-hook'
       );
       expect(logs).toHaveLength(1);
       const payload = logs[0][1] as Record<string, unknown>;
       expect(payload.percentage).toBe(50);
       expect(payload.tradeType).toBe(TradeType.ExactOut);
-      expect(
-        (payload.aggHookWinner as {gasAdjustedAmount: string}).gasAdjustedAmount
-      ).toBe('1100');
-      expect(
-        (payload.noHookRunnerUp as {gasAdjustedAmount: string})
-          .gasAdjustedAmount
-      ).toBe('1002');
+      expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe('500');
+      expect((payload.noHookRunnerUp as {gasUse: string}).gasUse).toBe('100');
+      expect(payload.gasUseDelta).toBe('400');
 
       const gasMetric = metricMock().mock.calls.find(c =>
         (c[2] as {tags: string[]}).tags.some(t =>
@@ -2275,14 +2273,13 @@ describe('QuoteBestSplitFinder', () => {
       );
       expect(gasMetric).toBeDefined();
       const tags = (gasMetric![2] as {tags: string[]}).tags;
-      expect(tags).toContain('gasAdjustedVerdict:agghook_worse_gas_adjusted');
+      expect(tags).toContain('gasAdjustedVerdict:agghook_more_gas_used');
       expect(tags).toContain(`tradeType:${TradeType.ExactOut}`);
     });
 
-    it('emits gas-better metric tag (no log) when agg-hook is competitive on gas-adjusted', () => {
-      // EXACT_IN: higher output better. Agg-hook gives slightly less RAW
-      // output than the no-hook runner-up, but with much lower gas — so
-      // gas-adjusted it ties / beats.
+    it('emits equal-or-less-gas metric tag (no log) when agg-hook uses no more gas than the runner-up', () => {
+      // Agg-hook uses LESS gas than the displaced no-hook runner-up.
+      // Verdict: agghook_equal_or_less_gas_used. No log fires.
       const noHookWinner = noHookRouteAt(
         '0xb000000000000000000000000000000000000000',
         50
@@ -2296,19 +2293,17 @@ describe('QuoteBestSplitFinder', () => {
         50
       );
 
-      // EXACT_IN (descending = best first):
-      //   noHookWinner    = 1000n,  gas 50n  → adjusted 950
-      //   noHookRunnerUp  = 999n,   gas 50n  → adjusted 949
-      //   aggHookWinner   = 999n,   gas 10n  → adjusted 989  (better)
       finder['getBestUnusedQuotesStats'](
         50,
         new Map<number, QuoteBasic[]>([
           [
             50,
             [
-              createMockQuoteWithGas(noHookWinner, 1000n, 50n),
-              createMockQuoteWithGas(noHookRunnerUp, 999n, 50n),
-              createMockQuoteWithGas(aggHook, 999n, 10n),
+              createMockQuoteWithGas(noHookWinner, 1000n, 200n),
+              createMockQuoteWithGas(noHookRunnerUp, 999n, 200n),
+              // EXACT_IN gate uses `amount >= noHookRunnerUp.amount`. 999n
+              // ties so partition fires. gasUse 50n < 200n → equal-or-less.
+              createMockQuoteWithGas(aggHook, 999n, 50n),
             ],
           ],
         ]),
@@ -2319,7 +2314,7 @@ describe('QuoteBestSplitFinder', () => {
       );
 
       const logs = infoMock().mock.calls.filter(
-        c => c[0] === 'QuoteBestSplitFinder partition kept gas-worse agg-hook'
+        c => c[0] === 'QuoteBestSplitFinder partition kept higher-gas agg-hook'
       );
       expect(logs).toHaveLength(0);
       const gasMetric = metricMock().mock.calls.find(c =>
@@ -2330,7 +2325,7 @@ describe('QuoteBestSplitFinder', () => {
       expect(gasMetric).toBeDefined();
       const tags = (gasMetric![2] as {tags: string[]}).tags;
       expect(tags).toContain(
-        'gasAdjustedVerdict:agghook_better_or_tie_gas_adjusted'
+        'gasAdjustedVerdict:agghook_equal_or_less_gas_used'
       );
     });
 
@@ -2378,7 +2373,7 @@ describe('QuoteBestSplitFinder', () => {
       // No log even though gas info is missing — only the bad-case verdict
       // produces a log.
       const logs = infoMock().mock.calls.filter(
-        c => c[0] === 'QuoteBestSplitFinder partition kept gas-worse agg-hook'
+        c => c[0] === 'QuoteBestSplitFinder partition kept higher-gas agg-hook'
       );
       expect(logs).toHaveLength(0);
     });
@@ -2400,9 +2395,9 @@ describe('QuoteBestSplitFinder', () => {
         [
           50,
           [
-            createMockQuoteWithGas(noHookWinner, 1000n, 1n),
-            createMockQuoteWithGas(noHookRunnerUp, 1001n, 1n),
-            createMockQuoteWithGas(aggHook, 1000n, 100n),
+            createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+            createMockQuoteWithGas(noHookRunnerUp, 1001n, 100n),
+            createMockQuoteWithGas(aggHook, 1000n, 500n),
           ],
         ],
       ]);
@@ -2419,7 +2414,7 @@ describe('QuoteBestSplitFinder', () => {
       }
 
       const logs = infoMock().mock.calls.filter(
-        c => c[0] === 'QuoteBestSplitFinder partition kept gas-worse agg-hook'
+        c => c[0] === 'QuoteBestSplitFinder partition kept higher-gas agg-hook'
       );
       expect(logs).toHaveLength(5);
       const gasMetrics = metricMock().mock.calls.filter(c =>
