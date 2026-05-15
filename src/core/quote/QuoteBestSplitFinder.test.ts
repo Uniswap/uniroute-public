@@ -2465,17 +2465,34 @@ describe('QuoteBestSplitFinder', () => {
 
     // ----- Gate early-return leak instrumentation -----
     //
-    // Pattern reproduced from the prod 1k-USDC WETH->USDC EXACT_OUT loss
-    // shape: percentage bucket has exactly 1 no-hook quote and 1 agg-hook
-    // quote. `isAggHookCompetitive` short-circuits at the
-    // `noHookQuotes.length <= noHookBudgetIfPartitioned` early-return,
-    // returning true without running the gas check. The agg-hook gets a
-    // partition slot, but `maybeLogPartitionDecision` and
-    // `maybeLogPartitionGasAdjustedDecision` both skip emission because
-    // their own `noHookQuotes.length <= noHookBudget` guards fire too.
-    // This new instrumentation makes that leak visible.
+    // Pre-fix shape (now closed): percentage bucket had exactly 1
+    // no-hook quote and >=1 agg-hook quote. `isAggHookCompetitive`
+    // short-circuited at `noHookQuotes.length <= noHookBudgetIfPartitioned`
+    // and returned true without running the gas check, admitting a
+    // gas-heavy agg-hook into the partition slot. Post-fix the gate
+    // anchors the gas check on `noHookQuotes[0]` regardless of
+    // displacement, so the gas-bad case is rejected outright.
+    //
+    // The GateEarlyReturnLeak instrumentation is kept in place as a
+    // post-fix validation signal: it fires only when
+    // `useBothPopulatedPartition === true` (i.e. the gate ADMITTED the
+    // agg-hook), so the `gasVerdict:agghook_more_gas_used` tag should
+    // drop to zero in prod with default gas tolerance (0n). Non-zero
+    // gas tolerance configurations may still emit on this tag (within
+    // tolerance) but never reflect a leak.
 
-    it('emits gate-early-return-leak log + metric when noHookQuotes.length == 1 and agg-hook uses more gas', () => {
+    it('rejects agg-hook (no leak emitted) when noHookQuotes.length == 1 and agg-hook uses more gas', () => {
+      // Post-fix: the line-344 early-return is gone. The gate runs the
+      // gas check anchored on noHookQuotes[0]. Agg-hook gas (500n) >
+      // noHookWinner gas (100n) with delta 400n > tolerance 0n → gate
+      // rejects → useBothPopulatedPartition=false → leak instrumentation
+      // is NEVER reached (it's nested under that branch).
+      //
+      // Use a strict (default-tolerance) finder for the rejection
+      // assertion — the surrounding `finder` is constructed with huge
+      // tolerances at line 1765 to make most of this suite's gates
+      // pass-by-default.
+      const strictFinder = new QuoteBestSplitFinder<MockPool>();
       const noHookWinner = noHookRouteAt(
         '0xe000000000000000000000000000000000000000',
         50
@@ -2485,10 +2502,7 @@ describe('QuoteBestSplitFinder', () => {
         50
       );
 
-      // Exactly 1 no-hook + 1 agg-hook → noHookQuotes.length(1) <=
-      // noHookBudgetIfPartitioned(1) → early-return true → partition fires.
-      // Agg-hook gas is much higher than the lone no-hook anchor.
-      finder['getBestUnusedQuotesStats'](
+      const stats = strictFinder['getBestUnusedQuotesStats'](
         50,
         new Map<number, QuoteBasic[]>([
           [
@@ -2505,32 +2519,27 @@ describe('QuoteBestSplitFinder', () => {
         buildInstrumentation({tradeType: TradeType.ExactIn})
       );
 
-      const logs = infoMock().mock.calls.filter(
+      // Agg-hook is rejected; only the no-hook quote is returned.
+      expect(stats.returnedCount).toBe(1);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).not.toContain(aggHook);
+
+      // No leak log or metric — gate rejected before the instrumentation
+      // branch could fire.
+      const leakLogs = infoMock().mock.calls.filter(
         c =>
           c[0] ===
           'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook'
       );
-      expect(logs).toHaveLength(1);
-      const payload = logs[0][1] as Record<string, unknown>;
-      expect(payload.percentage).toBe(50);
-      expect(payload.tradeType).toBe(TradeType.ExactIn);
-      expect(payload.noHookCount).toBe(1);
-      expect(payload.aggHookCount).toBe(1);
-      expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe('500');
-      expect((payload.noHookWinner as {gasUse: string}).gasUse).toBe('100');
-      expect(payload.gasUseDelta).toBe('400');
-
       const leakMetrics = metricMock().mock.calls.filter(c =>
         (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
       );
-      expect(leakMetrics).toHaveLength(1);
-      expect((leakMetrics[0][2] as {tags: string[]}).tags).toContain(
-        'gasVerdict:agghook_more_gas_used'
-      );
+      expect(leakLogs).toHaveLength(0);
+      expect(leakMetrics).toHaveLength(0);
 
-      // Crucial: confirms PartitionDecision and PartitionGasAdjustedDecision
-      // are silent in this case, validating that the leak was previously
-      // invisible in telemetry.
+      // And — same as pre-fix — the older partition logs are still
+      // silent in the no-displacement case.
       const oldEvictLogs = infoMock().mock.calls.filter(
         c => c[0] === 'QuoteBestSplitFinder partition evicts better no-hook'
       );
@@ -2676,6 +2685,13 @@ describe('QuoteBestSplitFinder', () => {
     });
 
     it('respects gateEarlyReturnLeakLogBudget cap while metric keeps firing', () => {
+      // Post-fix, the leak log only fires when the gate ADMITS a
+      // gas-more agg-hook (verdict = agghook_more_gas_used). With
+      // default tolerance=0n the gate rejects such cases, so we use a
+      // tolerant gate (raw tol=0n, gas tol=1000n units) — the gate
+      // passes the agg-hook within tolerance and the leak
+      // instrumentation correctly reports it.
+      const tolerantFinder = new QuoteBestSplitFinder<MockPool>(0n, 1000n);
       const noHookWinner = noHookRouteAt(
         '0xe900000000000000000000000000000000000000',
         50
@@ -2689,6 +2705,8 @@ describe('QuoteBestSplitFinder', () => {
           50,
           [
             createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+            // Gas delta 400 vs noHookWinner.gas(100) — within 1000n
+            // tolerance → gate passes → leak instr fires more_gas.
             createMockQuoteWithGas(aggHook, 1000n, 500n),
           ],
         ],
@@ -2696,7 +2714,7 @@ describe('QuoteBestSplitFinder', () => {
 
       const sharedInstr = buildInstrumentation({tradeType: TradeType.ExactIn});
       for (let i = 0; i < 7; i++) {
-        finder['getBestUnusedQuotesStats'](
+        tolerantFinder['getBestUnusedQuotesStats'](
           50,
           quotesMap,
           [],
@@ -3256,6 +3274,150 @@ describe('QuoteBestSplitFinder', () => {
       expect(stats.returnedCount).toBe(2);
       const routes = stats.quotes.map(q => q.route);
       expect(routes).not.toContain(aggHook);
+    });
+
+    // ----- Post-fix: gas gate runs even when there's no displacement
+    //
+    // These tests directly target the prod 1k-USDC WETH→USDC EXACT_OUT
+    // loss class. Pre-fix the gate took an early-return at
+    // `noHookQuotes.length <= noHookBudgetIfPartitioned`, skipping the
+    // gas check whenever a percentage bucket had exactly 1 no-hook
+    // quote. PR #8182 instrumentation confirmed the leak fired ~100+
+    // times in 3 min on prod with the classic 80k-unit gas delta at
+    // percentages 5, 70, 75, 80, 85, 90. The fix anchors the gas check
+    // against `noHookQuotes[0]` regardless of displacement state.
+
+    it('rejects gas-bad agg-hook when noHookQuotes.length === 1 (prod loss shape)', () => {
+      // The percentage=5 bucket on the prod loss path has exactly 1
+      // no-hook quote (the v3 direct E0554a backup leg) and a Curve+Fluid
+      // v4 agg-hook chain that costs ~80k more gas. Pre-fix the gate
+      // admitted both; post-fix the gas check anchors on the lone
+      // no-hook and rejects the agg-hook.
+      const noHookWinner = noHookRouteAt(
+        '0xab10000000000000000000000000000000000000',
+        5
+      );
+      const aggHook = aggHookRouteAt(
+        '0xab20000000000000000000000000000000000000',
+        5
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        5,
+        new Map<number, QuoteBasic[]>([
+          [
+            5,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 150_000n),
+              // +80k gas delta vs noHookWinner — same magnitude as the
+              // prod GateEarlyReturnLeak emissions captured in PR #8182.
+              createMockQuoteWithGasUse(aggHook, 1000n, 230_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(1);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).not.toContain(aggHook);
+    });
+
+    it('admits agg-hook when noHookQuotes.length === 1 and agg-hook is gas-competitive', () => {
+      // Symmetric case: same bucket shape but agg-hook is genuinely
+      // gas-competitive (equal-or-less). The fix must not over-correct
+      // and exclude every agg-hook in the no-displacement case — only
+      // the gas-bad ones.
+      const noHookWinner = noHookRouteAt(
+        '0xab30000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xab40000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 200_000n),
+              createMockQuoteWithGasUse(aggHook, 1000n, 150_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(2);
+      const routes = stats.quotes.map(q => q.route);
+      expect(routes).toContain(noHookWinner);
+      expect(routes).toContain(aggHook);
+    });
+
+    it('honors non-zero gas tolerance even when noHookQuotes.length === 1', () => {
+      // The gate's gas-tolerance constructor param must apply in the
+      // no-displacement branch too. With 100k unit tolerance, an
+      // 80k-unit gas delta is admitted; a 120k-unit delta is rejected.
+      const tolerantFinder = new QuoteBestSplitFinder<MockPool>(0n, 100_000n);
+      const noHookWinner = noHookRouteAt(
+        '0xab50000000000000000000000000000000000000',
+        50
+      );
+      const aggHookWithinTol = aggHookRouteAt(
+        '0xab60000000000000000000000000000000000000',
+        50
+      );
+
+      const stats = tolerantFinder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 150_000n),
+              // +80k → within 100k tolerance → admitted.
+              createMockQuoteWithGasUse(aggHookWithinTol, 1000n, 230_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+      expect(stats.returnedCount).toBe(2);
+      expect(stats.quotes.map(q => q.route)).toContain(aggHookWithinTol);
+
+      // And the matching reject case at the same tolerance.
+      const aggHookOverTol = aggHookRouteAt(
+        '0xab70000000000000000000000000000000000000',
+        50
+      );
+      const stats2 = tolerantFinder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGasUse(noHookWinner, 1000n, 150_000n),
+              // +120k → outside 100k tolerance → rejected.
+              createMockQuoteWithGasUse(aggHookOverTol, 1000n, 270_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+      expect(stats2.returnedCount).toBe(1);
+      expect(stats2.quotes.map(q => q.route)).not.toContain(aggHookOverTol);
     });
   });
 });

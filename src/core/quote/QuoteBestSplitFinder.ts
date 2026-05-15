@@ -342,14 +342,35 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * Inputs are pre-sorted by amount in the trade-direction-appropriate
    * order (best first). `noHookBudgetIfPartitioned` is the count of
    * no-hook quotes that would be kept under the partition (typically
-   * Math.ceil(k/2)); the "displaced" quote is therefore at
-   * `noHookQuotes[noHookBudgetIfPartitioned]`.
+   * Math.ceil(k/2)); the displaced quote (when one exists) is therefore
+   * at `noHookQuotes[noHookBudgetIfPartitioned]`.
    *
-   * If no displaced quote exists (`noHookQuotes.length <=
-   * noHookBudgetIfPartitioned`), partition isn't evicting anything —
-   * return true. If `gasDetails.gasUse` is absent on either side, the gas
-   * gate is skipped and only the BPS gate applies (preserves pre-fix
-   * behavior for code paths that don't populate gas).
+   * Anchoring:
+   *   raw-bps gate runs ONLY when displacement happens (a runner-up
+   *     exists at `noHookQuotes[noHookBudgetIfPartitioned]`). If no
+   *     runner-up exists, nothing is being evicted, so the raw badness
+   *     comparison has no meaningful anchor — skip the raw check.
+   *   gas-use gate runs ALWAYS against `noHookQuotes[0]` (best no-hook
+   *     in the bucket), regardless of whether displacement happens. The
+   *     reason: even when no no-hook is being displaced, the agg-hook
+   *     still gets a partition slot alongside the surviving no-hook(s),
+   *     and downstream `scoreAndSortCombinations` ranks splits by raw
+   *     amount only — so a gas-heavier agg-hook can still surface in
+   *     the final split. Anchoring against the best no-hook (rather
+   *     than the runner-up) reflects the alternative DFS would pick if
+   *     agg-hook were excluded from the candidate set.
+   *
+   * Pre-fix (PR #8161) anchored gas against `noHookRunnerUp` and
+   * short-circuited via `noHookQuotes.length <= noHookBudgetIfPartitioned`,
+   * which skipped the gas check entirely when no displacement happened.
+   * Prod telemetry from PR #8182's `GateEarlyReturnLeak` metric
+   * recorded 100+ leak emissions in the first 3 min of the fixed
+   * deploy, with sample gas deltas matching the 80k/97k pattern seen
+   * pre-PR-#8161 — proving the leak was the proximate cause of the
+   * residual ~50/min losses.
+   *
+   * If `gasDetails.gasUse` is absent on either side, the gas gate is
+   * skipped (preserves test-mock compatibility).
    */
   private isAggHookCompetitive(
     aggHookQuotes: QuoteBasic[],
@@ -358,39 +379,53 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     tradeType: TradeType
   ): boolean {
     if (aggHookQuotes.length === 0) return false;
-    if (noHookQuotes.length <= noHookBudgetIfPartitioned) return true;
+    // Defensive: caller's `bothPresent` check guarantees noHookQuotes
+    // is non-empty before invoking. Guard the array-access below
+    // regardless so this stays safe in isolation.
+    if (noHookQuotes.length === 0) return true;
 
     const aggHookWinner = aggHookQuotes[0];
-    const noHookRunnerUp = noHookQuotes[noHookBudgetIfPartitioned];
+    const noHookWinner = noHookQuotes[0];
+    const noHookRunnerUp =
+      noHookQuotes.length > noHookBudgetIfPartitioned
+        ? noHookQuotes[noHookBudgetIfPartitioned]
+        : undefined;
 
     // --- Raw-amount gate (PR #8114) ---
-    // Direction-aware "badness" = how much the agg-hook winner is worse
-    // than the no-hook quote the partition would displace.
-    //   EXACT_IN: higher amount is better → badness = runnerUp.amount - winner.amount
-    //   EXACT_OUT: lower amount is better → badness = winner.amount - runnerUp.amount
-    const badness =
-      tradeType === TradeType.ExactIn
-        ? noHookRunnerUp.amount - aggHookWinner.amount
-        : aggHookWinner.amount - noHookRunnerUp.amount;
+    // Scoped to the displacement case: only meaningful when a no-hook
+    // quote is actually being kicked out. With k=2 and
+    // noHookBudgetIfPartitioned=1, this fires iff noHookQuotes.length>=2.
+    if (noHookRunnerUp !== undefined) {
+      // Direction-aware "badness" = how much the agg-hook winner is worse
+      // than the no-hook quote the partition would displace.
+      //   EXACT_IN: higher amount is better → badness = runnerUp.amount - winner.amount
+      //   EXACT_OUT: lower amount is better → badness = winner.amount - runnerUp.amount
+      const badness =
+        tradeType === TradeType.ExactIn
+          ? noHookRunnerUp.amount - aggHookWinner.amount
+          : aggHookWinner.amount - noHookRunnerUp.amount;
 
-    if (badness > 0n) {
-      // bps comparison without floats:
-      //   (badness / runnerUp.amount) * 10000 <= tolerance
-      //   ↔ badness * 10000 <= tolerance * runnerUp.amount
-      if (
-        badness * 10000n >
-        this.AGG_HOOK_PARTITION_TOLERANCE_BPS * noHookRunnerUp.amount
-      ) {
-        return false;
+      if (badness > 0n) {
+        // bps comparison without floats:
+        //   (badness / runnerUp.amount) * 10000 <= tolerance
+        //   ↔ badness * 10000 <= tolerance * runnerUp.amount
+        if (
+          badness * 10000n >
+          this.AGG_HOOK_PARTITION_TOLERANCE_BPS * noHookRunnerUp.amount
+        ) {
+          return false;
+        }
       }
     }
 
-    // --- Gas-use gate (PR #8142 hypothesis confirmation) ---
-    // Direction-agnostic: lower gas is always better. Skip if gas info is
-    // missing on either side — preserves backward compat with code paths
-    // that don't populate gasDetails (notably unit-test mocks).
+    // --- Gas-use gate (PR #8161, extended to anchor on `noHookWinner`) ---
+    // Direction-agnostic: lower gas is always better. Anchor is the
+    // best no-hook in the bucket — the alternative DFS would pick if
+    // agg-hook were excluded. Skip if gas info is missing on either
+    // side (preserves backward compat with code paths that don't
+    // populate gasDetails, notably unit-test mocks).
     const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
-    const noHookGasUse = noHookRunnerUp.gasDetails?.gasUse;
+    const noHookGasUse = noHookWinner.gasDetails?.gasUse;
     if (aggHookGasUse !== undefined && noHookGasUse !== undefined) {
       if (aggHookGasUse > noHookGasUse) {
         const gasUseDelta = aggHookGasUse - noHookGasUse;
