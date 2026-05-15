@@ -1780,6 +1780,7 @@ describe('QuoteBestSplitFinder', () => {
         partitionEvictLogBudget: {remaining: number};
         soleCandidateLogBudget: {remaining: number};
         partitionGasAdjustedLogBudget: {remaining: number};
+        gateEarlyReturnLeakLogBudget: {remaining: number};
         metricTags: string[];
       }>
     ) => ({
@@ -1789,6 +1790,7 @@ describe('QuoteBestSplitFinder', () => {
       partitionEvictLogBudget: {remaining: 5},
       soleCandidateLogBudget: {remaining: 5},
       partitionGasAdjustedLogBudget: {remaining: 5},
+      gateEarlyReturnLeakLogBudget: {remaining: 5},
       metricTags: ['chainId:1'],
       ...overrides,
     });
@@ -2010,10 +2012,13 @@ describe('QuoteBestSplitFinder', () => {
       expect(metricMock().mock.calls).toHaveLength(0);
     });
 
-    it('does not emit when there is no no-hook runner-up to evict', () => {
-      // 1 no-hook quote fills the entire no-hook budget; there is no displaced
-      // runner-up. The counterfactual question is unanswerable, so both log
-      // and metric are suppressed.
+    it('does not emit partition-evict signals when there is no no-hook runner-up to evict', () => {
+      // 1 no-hook quote fills the entire no-hook budget; there is no
+      // displaced runner-up. The PartitionDecision /
+      // PartitionGasAdjustedDecision counterfactuals are unanswerable so
+      // both stay silent. The new GateEarlyReturnLeak instrumentation,
+      // however, is specifically designed to fire here (gas_info_missing
+      // verdict since gasDetails is not populated on these mock quotes).
       const noHook = noHookRouteAt(
         '0xba00000000000000000000000000000000000000',
         50
@@ -2037,8 +2042,36 @@ describe('QuoteBestSplitFinder', () => {
         buildInstrumentation()
       );
 
-      expect(infoMock().mock.calls).toHaveLength(0);
-      expect(metricMock().mock.calls).toHaveLength(0);
+      // Old partition-evict log is silent (no displaced runner-up).
+      const evictLogs = infoMock().mock.calls.filter(
+        c => c[0] === 'QuoteBestSplitFinder partition evicts better no-hook'
+      );
+      const higherGasLogs = infoMock().mock.calls.filter(
+        c => c[0] === 'QuoteBestSplitFinder partition kept higher-gas agg-hook'
+      );
+      expect(evictLogs).toHaveLength(0);
+      expect(higherGasLogs).toHaveLength(0);
+
+      // Old PartitionDecision / PartitionGasAdjustedDecision metrics are
+      // silent (their emitters early-return on the same condition).
+      const oldMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(
+          t =>
+            t.startsWith('partitionVerdict:') ||
+            t.startsWith('gasAdjustedVerdict:')
+        )
+      );
+      expect(oldMetrics).toHaveLength(0);
+
+      // New leak instrumentation correctly fires with gas_info_missing
+      // (no gasDetails on these mock quotes).
+      const leakMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(leakMetrics).toHaveLength(1);
+      expect((leakMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:gas_info_missing'
+      );
     });
 
     it('respects the per-request partition-evict log budget cap while metric keeps firing', () => {
@@ -2428,6 +2461,291 @@ describe('QuoteBestSplitFinder', () => {
       );
       expect(gasMetrics).toHaveLength(7);
       expect(sharedInstr.partitionGasAdjustedLogBudget.remaining).toBe(0);
+    });
+
+    // ----- Gate early-return leak instrumentation -----
+    //
+    // Pattern reproduced from the prod 1k-USDC WETH->USDC EXACT_OUT loss
+    // shape: percentage bucket has exactly 1 no-hook quote and 1 agg-hook
+    // quote. `isAggHookCompetitive` short-circuits at the
+    // `noHookQuotes.length <= noHookBudgetIfPartitioned` early-return,
+    // returning true without running the gas check. The agg-hook gets a
+    // partition slot, but `maybeLogPartitionDecision` and
+    // `maybeLogPartitionGasAdjustedDecision` both skip emission because
+    // their own `noHookQuotes.length <= noHookBudget` guards fire too.
+    // This new instrumentation makes that leak visible.
+
+    it('emits gate-early-return-leak log + metric when noHookQuotes.length == 1 and agg-hook uses more gas', () => {
+      const noHookWinner = noHookRouteAt(
+        '0xe000000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xe100000000000000000000000000000000000000',
+        50
+      );
+
+      // Exactly 1 no-hook + 1 agg-hook → noHookQuotes.length(1) <=
+      // noHookBudgetIfPartitioned(1) → early-return true → partition fires.
+      // Agg-hook gas is much higher than the lone no-hook anchor.
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+              createMockQuoteWithGas(aggHook, 1000n, 500n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const logs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook'
+      );
+      expect(logs).toHaveLength(1);
+      const payload = logs[0][1] as Record<string, unknown>;
+      expect(payload.percentage).toBe(50);
+      expect(payload.tradeType).toBe(TradeType.ExactIn);
+      expect(payload.noHookCount).toBe(1);
+      expect(payload.aggHookCount).toBe(1);
+      expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe('500');
+      expect((payload.noHookWinner as {gasUse: string}).gasUse).toBe('100');
+      expect(payload.gasUseDelta).toBe('400');
+
+      const leakMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(leakMetrics).toHaveLength(1);
+      expect((leakMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:agghook_more_gas_used'
+      );
+
+      // Crucial: confirms PartitionDecision and PartitionGasAdjustedDecision
+      // are silent in this case, validating that the leak was previously
+      // invisible in telemetry.
+      const oldEvictLogs = infoMock().mock.calls.filter(
+        c => c[0] === 'QuoteBestSplitFinder partition evicts better no-hook'
+      );
+      const oldHigherGasLogs = infoMock().mock.calls.filter(
+        c => c[0] === 'QuoteBestSplitFinder partition kept higher-gas agg-hook'
+      );
+      expect(oldEvictLogs).toHaveLength(0);
+      expect(oldHigherGasLogs).toHaveLength(0);
+    });
+
+    it('emits gate-early-return-leak metric with equal-or-less-gas verdict (no log) when agg-hook is gas-neutral', () => {
+      // Same early-return path, but agg-hook gas <= no-hook gas. Metric
+      // still fires (so DD can count overall early-return-path frequency)
+      // but no log emitted (verdict tag does not indicate harm).
+      const noHookWinner = noHookRouteAt(
+        '0xe200000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xe300000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGas(noHookWinner, 1000n, 500n),
+              createMockQuoteWithGas(aggHook, 1000n, 100n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const logs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook'
+      );
+      expect(logs).toHaveLength(0);
+
+      const leakMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(leakMetrics).toHaveLength(1);
+      expect((leakMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:agghook_equal_or_less_gas_used'
+      );
+    });
+
+    it('emits gate-early-return-leak metric with gas_info_missing verdict when gasUse is undefined', () => {
+      // Same early-return path, but no gas info available. Metric fires
+      // with a sentinel tag so we can size the population for which the
+      // gas comparison is undefined (e.g. unit-test paths) vs definitive.
+      const noHookWinner = noHookRouteAt(
+        '0xe400000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xe500000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuote(noHookWinner, 1000n),
+              createMockQuote(aggHook, 1000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const leakMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(leakMetrics).toHaveLength(1);
+      expect((leakMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:gas_info_missing'
+      );
+    });
+
+    it('does not emit gate-early-return-leak when partition runs with displacement (noHookQuotes.length > noHookBudget)', () => {
+      // 2 no-hook + 1 agg-hook → noHookQuotes.length(2) >
+      // noHookBudgetIfPartitioned(1) → gate runs full check (not early-
+      // return). The leak instrumentation must not fire here, since the
+      // existing PartitionDecision / PartitionGasAdjustedDecision logs
+      // already cover this path.
+      const noHookWinner = noHookRouteAt(
+        '0xe600000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xe700000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xe800000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+              createMockQuoteWithGas(noHookRunnerUp, 999n, 100n),
+              createMockQuoteWithGas(aggHook, 1000n, 500n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const leakLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook'
+      );
+      const leakMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(leakLogs).toHaveLength(0);
+      expect(leakMetrics).toHaveLength(0);
+    });
+
+    it('respects gateEarlyReturnLeakLogBudget cap while metric keeps firing', () => {
+      const noHookWinner = noHookRouteAt(
+        '0xe900000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xea00000000000000000000000000000000000000',
+        50
+      );
+      const quotesMap = new Map<number, QuoteBasic[]>([
+        [
+          50,
+          [
+            createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+            createMockQuoteWithGas(aggHook, 1000n, 500n),
+          ],
+        ],
+      ]);
+
+      const sharedInstr = buildInstrumentation({tradeType: TradeType.ExactIn});
+      for (let i = 0; i < 7; i++) {
+        finder['getBestUnusedQuotesStats'](
+          50,
+          quotesMap,
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          sharedInstr
+        );
+      }
+
+      const leakLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook'
+      );
+      const leakMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(leakLogs).toHaveLength(5);
+      expect(leakMetrics).toHaveLength(7);
+      expect(sharedInstr.gateEarlyReturnLeakLogBudget.remaining).toBe(0);
+    });
+
+    // ----- Sole-candidate gasUse log payload -----
+
+    it('includes agg-hook gasUse in the sole-candidate log payload when populated', () => {
+      const aggHook = aggHookRouteAt(
+        '0xeb00000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [50, [createMockQuoteWithGas(aggHook, 990n, 750n)]],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const logs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder agg-hook quote selected with no no-hook competitor'
+      );
+      expect(logs).toHaveLength(1);
+      const payload = logs[0][1] as Record<string, unknown>;
+      expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe('750');
     });
   });
 

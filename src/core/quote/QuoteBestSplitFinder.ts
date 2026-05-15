@@ -213,6 +213,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): {
@@ -290,6 +291,22 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           noHookBudget,
           instrumentation
         );
+        // Investigation: the `isAggHookCompetitive` early-return at "no
+        // displacement happens" skips the gas check entirely, so an agg-hook
+        // quote with materially higher gas use still gets a slot when
+        // `noHookQuotes.length <= noHookBudgetIfPartitioned`. The existing
+        // PartitionDecision / PartitionGasAdjustedDecision instrumentation
+        // both short-circuit on the same condition, so this case is
+        // currently invisible in prod telemetry. Fire a dedicated signal.
+        if (noHookQuotes.length <= noHookBudgetIfPartitioned) {
+          this.maybeLogGateEarlyReturnLeak(
+            percentage,
+            chainId,
+            noHookQuotes,
+            aggHookQuotes,
+            instrumentation
+          );
+        }
       } else if (aggHookQuotes.length > 0 && noHookQuotes.length === 0) {
         this.maybeLogAggHookSoleCandidate(
           percentage,
@@ -407,6 +424,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -494,6 +512,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -515,6 +534,10 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     if (instrumentation.soleCandidateLogBudget.remaining <= 0) return;
     instrumentation.soleCandidateLogBudget.remaining -= 1;
 
+    // Include gasUse so DD analytics can correlate sole-candidate firings
+    // with the high-gas Curve+Fluid path observed in prod losses (no
+    // no-hook competitor exists to anchor a relative comparison, so we log
+    // the absolute gas-use to let queries filter by magnitude).
     instrumentation.ctx.logger.info(
       'QuoteBestSplitFinder agg-hook quote selected with no no-hook competitor',
       {
@@ -525,6 +548,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         aggHookWinner: {
           routeHash: hashForLogging(aggHookWinner.route.toString()),
           amount: aggHookWinner.amount.toString(),
+          gasUse: aggHookWinner.gasDetails?.gasUse?.toString(),
         },
       }
     );
@@ -575,6 +599,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionEvictLogBudget: {remaining: number};
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -636,6 +661,115 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         noHookRunnerUp: {
           routeHash: hashForLogging(noHookRunnerUp.route.toString()),
           amount: noHookRunnerUp.amount.toString(),
+          gasUse: noHookGasUse.toString(),
+        },
+        gasUseDelta: (aggHookGasUse - noHookGasUse).toString(),
+      }
+    );
+  }
+
+  /**
+   * Investigation-only: catches the case where `isAggHookCompetitive` returns
+   * true via its "no displacement" early-return — i.e.
+   * `noHookQuotes.length <= noHookBudgetIfPartitioned` (typically exactly 1
+   * no-hook quote at the percentage with k=2). The gate's gas check is
+   * skipped in that branch, so an agg-hook winner with materially higher
+   * gas use still gets a partition slot alongside the lone no-hook quote.
+   * Once both classes sit in the per-percentage candidate set, the upstream
+   * DFS scores combinations by RAW amount only, so the gas-heavy agg-hook
+   * can win a 1–2 bps raw advantage and surface in the final split.
+   *
+   * Pre-existing `maybeLogPartitionDecision` and
+   * `maybeLogPartitionGasAdjustedDecision` both short-circuit on the same
+   * `noHookQuotes.length <= noHookBudget` condition (see their guards) so
+   * this case is invisible in `PartitionDecision` /
+   * `PartitionGasAdjustedDecision` telemetry. This method fires a dedicated
+   * metric and log to make the leak visible without changing any decision
+   * behavior.
+   *
+   * Pre-condition: caller has determined `useBothPopulatedPartition === true`
+   * AND `noHookQuotes.length <= noHookBudgetIfPartitioned` (the gate's
+   * early-return path). The comparison anchor is `noHookQuotes[0]` — the
+   * best no-hook in the bucket — since the partition is admitting agg-hook
+   * alongside it without any gas check.
+   *
+   * Emits:
+   *   metric `QuoteBestSplitFinder.GateEarlyReturnLeak` tagged with
+   *     `gasVerdict:{agghook_more_gas_used,agghook_equal_or_less_gas_used,gas_info_missing}`
+   *     + standard tags. Fires on every early-return-path partition firing.
+   *   log `'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook'`
+   *     only when verdict is `agghook_more_gas_used`, capped per request via
+   *     `gateEarlyReturnLeakLogBudget`.
+   */
+  private maybeLogGateEarlyReturnLeak(
+    percentage: number,
+    chainId: ChainId,
+    noHookQuotes: QuoteBasic[],
+    aggHookQuotes: QuoteBasic[],
+    instrumentation: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
+      metricTags: string[];
+    }
+  ): void {
+    if (aggHookQuotes.length === 0 || noHookQuotes.length === 0) return;
+
+    const aggHookWinner = aggHookQuotes[0];
+    const noHookWinner = noHookQuotes[0];
+
+    const baseTags = [
+      ...instrumentation.metricTags,
+      `testAggHooks:${instrumentation.testAggHooks}`,
+      `tradeType:${instrumentation.tradeType}`,
+    ];
+
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+    const noHookGasUse = noHookWinner.gasDetails?.gasUse;
+    if (aggHookGasUse === undefined || noHookGasUse === undefined) {
+      void instrumentation.ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.GateEarlyReturnLeak'),
+        1,
+        {tags: [...baseTags, 'gasVerdict:gas_info_missing']}
+      );
+      return;
+    }
+
+    const aggHookUsesMoreGas = aggHookGasUse > noHookGasUse;
+
+    const verdictTag = aggHookUsesMoreGas
+      ? 'gasVerdict:agghook_more_gas_used'
+      : 'gasVerdict:agghook_equal_or_less_gas_used';
+    void instrumentation.ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.GateEarlyReturnLeak'),
+      1,
+      {tags: [...baseTags, verdictTag]}
+    );
+
+    if (!aggHookUsesMoreGas) return;
+    if (instrumentation.gateEarlyReturnLeakLogBudget.remaining <= 0) return;
+    instrumentation.gateEarlyReturnLeakLogBudget.remaining -= 1;
+
+    instrumentation.ctx.logger.info(
+      'QuoteBestSplitFinder gate early-return admitted higher-gas agg-hook',
+      {
+        chainId,
+        percentage,
+        tradeType: instrumentation.tradeType,
+        noHookCount: noHookQuotes.length,
+        aggHookCount: aggHookQuotes.length,
+        aggHookWinner: {
+          routeHash: hashForLogging(aggHookWinner.route.toString()),
+          amount: aggHookWinner.amount.toString(),
+          gasUse: aggHookGasUse.toString(),
+        },
+        noHookWinner: {
+          routeHash: hashForLogging(noHookWinner.route.toString()),
+          amount: noHookWinner.amount.toString(),
           gasUse: noHookGasUse.toString(),
         },
         gasUseDelta: (aggHookGasUse - noHookGasUse).toString(),
@@ -773,11 +907,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       droppedByLimit: 0,
     };
     // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
-    // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision).
-    // Metrics fire unconditionally.
+    // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision,
+    // maybeLogGateEarlyReturnLeak). Metrics fire unconditionally.
     const partitionEvictLogBudget = {remaining: 5};
     const soleCandidateLogBudget = {remaining: 5};
     const partitionGasAdjustedLogBudget = {remaining: 5};
+    const gateEarlyReturnLeakLogBudget = {remaining: 5};
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -835,6 +970,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           partitionEvictLogBudget,
           soleCandidateLogBudget,
           partitionGasAdjustedLogBudget,
+          gateEarlyReturnLeakLogBudget,
           metricTags,
         }
       );
