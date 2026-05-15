@@ -24,6 +24,7 @@ import {Logger} from './sor-providers/util/log';
 import {IMetric} from './sor-providers/util/metric';
 
 import {
+  AGG_HOOKS_ON_BASE,
   AGG_HOOKS_ON_MAINNET,
   AGG_HOOKS_ON_TEMPO,
 } from './util/aggHooksAddressesAllowlist';
@@ -197,6 +198,12 @@ export function createChainProtocols(
     ? new ethers.providers.StaticJsonRpcProvider(
         `${uniRpcEndpoint}/rpc/${ChainId.MAINNET}`,
         ChainId.MAINNET
+      )
+    : undefined;
+  const baseEthersProvider = uniRpcEndpoint
+    ? new ethers.providers.StaticJsonRpcProvider(
+        `${uniRpcEndpoint}/rpc/${ChainId.BASE}`,
+        ChainId.BASE
       )
     : undefined;
   const tempoEthersProvider = uniRpcEndpoint
@@ -872,6 +879,20 @@ export function createChainProtocols(
         logger,
         metric
       ),
+      aggHooksProvider: baseEthersProvider
+        ? new AggHooksSubgraphProvider(
+            ChainId.BASE,
+            AGG_HOOKS_ON_BASE,
+            baseEthersProvider,
+            3,
+            90000,
+            true,
+            v4SubgraphUrlOverride(ChainId.BASE),
+            process.env.GRAPH_BEARER_TOKEN,
+            logger,
+            metric
+          )
+        : undefined,
     },
     {
       protocol: Protocol.V4,
