@@ -214,6 +214,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): {
@@ -312,6 +313,23 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           percentage,
           chainId,
           aggHookQuotes,
+          instrumentation
+        );
+        // Cross-bucket gas comparison: now that PR #8195 has closed the
+        // K-budget gate's early-return leak in prod, the residual loss
+        // bursts (peak ~48/10min vs pre-fix peak ~193/10min) come from
+        // this sole-candidate path — where no no-hook quote exists at
+        // the current percentage to anchor the gate. Compare the agg-
+        // hook winner against the cheapest no-hook quote present at any
+        // OTHER percentage (the alternative DFS would pick if we
+        // excluded agg-hook entirely from this trade) so we can prove
+        // the residual mechanism in prod telemetry before drafting a
+        // fix.
+        this.maybeLogAggHookSoleCandidateGasComparison(
+          percentage,
+          chainId,
+          aggHookQuotes,
+          percentageToSortedQuotes,
           instrumentation
         );
       }
@@ -460,6 +478,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -548,6 +567,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -585,6 +605,153 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           amount: aggHookWinner.amount.toString(),
           gasUse: aggHookWinner.gasDetails?.gasUse?.toString(),
         },
+      }
+    );
+  }
+
+  /**
+   * Investigation-only: companion to maybeLogAggHookSoleCandidate that
+   * cross-references the agg-hook winner's gas use against the cheapest
+   * no-hook quote present at ANY other percentage in
+   * `percentageToSortedQuotes`. The cheapest-anywhere no-hook is the
+   * "fallback alternative" — what DFS would have available if agg-hook
+   * were excluded entirely from the trade — so a sole-candidate firing
+   * where the agg-hook is materially more gas than the cheapest no-hook
+   * elsewhere is strong evidence that the bucket-level absence of a
+   * no-hook competitor is letting a gas-bad route in.
+   *
+   * This is the post-PR-#8195 residual signal: with the K-budget gate
+   * early-return leak closed, prod still sees ~30-48 UniRoute-wins per
+   * 10-min burst (vs ~150-190 pre-#8195) on the same Curve+Fluid v4
+   * chain shape. Those bursts come from this code path — the gate has
+   * no anchor when `noHookQuotes.length === 0`. This emission lets us
+   * size the harmful sole-candidate population in prod before we draft
+   * the next fix (likely an absolute-gas threshold or per-percentage
+   * route-cap balancing upstream).
+   *
+   * Emits:
+   *   metric `QuoteBestSplitFinder.AggHookSoleCandidateGasComparison`
+   *     tagged `gasVerdict:{agghook_more_gas, agghook_equal_or_less_gas,
+   *     no_nohook_anywhere, gas_info_missing}` + standard tags. Fires on
+   *     every sole-candidate firing where this method is invoked.
+   *   log `'QuoteBestSplitFinder agg-hook sole-candidate is gas-worse
+   *     than best no-hook elsewhere'` only when verdict is
+   *     `agghook_more_gas`, capped per request via
+   *     `soleCandidateGasComparisonLogBudget`. Carries route hashes,
+   *     percentages, and gas-use values for downstream correlation
+   *     with the residual UniRoute-wins shape.
+   */
+  private maybeLogAggHookSoleCandidateGasComparison(
+    percentage: number,
+    chainId: ChainId,
+    aggHookQuotes: QuoteBasic[],
+    percentageToSortedQuotes: Map<number, QuoteBasic[]>,
+    instrumentation: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
+      metricTags: string[];
+    }
+  ): void {
+    if (aggHookQuotes.length === 0) return;
+    const aggHookWinner = aggHookQuotes[0];
+
+    const baseTags = [
+      ...instrumentation.metricTags,
+      `testAggHooks:${instrumentation.testAggHooks}`,
+      `tradeType:${instrumentation.tradeType}`,
+    ];
+
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+
+    // Scan every bucket in percentageToSortedQuotes for the cheapest
+    // no-hook quote (smallest gasUse). This is direction-agnostic
+    // (lower gas always better) and trade-agnostic (we don't try to
+    // reason about raw amount across percentages — that's DFS's job).
+    let cheapestNoHookQuote: QuoteBasic | undefined;
+    let cheapestNoHookGasUse: bigint | undefined;
+    for (const bucket of percentageToSortedQuotes.values()) {
+      for (const quote of bucket) {
+        const route = quote.route as RouteBasic<TPool>;
+        if (routeUsesAggHook(route, chainId)) continue;
+        const gasUse = quote.gasDetails?.gasUse;
+        if (gasUse === undefined) continue;
+        if (
+          cheapestNoHookGasUse === undefined ||
+          gasUse < cheapestNoHookGasUse
+        ) {
+          cheapestNoHookGasUse = gasUse;
+          cheapestNoHookQuote = quote;
+        }
+      }
+    }
+
+    if (cheapestNoHookGasUse === undefined) {
+      void instrumentation.ctx.metrics.count(
+        buildMetricKey(
+          'QuoteBestSplitFinder.AggHookSoleCandidateGasComparison'
+        ),
+        1,
+        {tags: [...baseTags, 'gasVerdict:no_nohook_anywhere']}
+      );
+      return;
+    }
+    if (aggHookGasUse === undefined) {
+      void instrumentation.ctx.metrics.count(
+        buildMetricKey(
+          'QuoteBestSplitFinder.AggHookSoleCandidateGasComparison'
+        ),
+        1,
+        {tags: [...baseTags, 'gasVerdict:gas_info_missing']}
+      );
+      return;
+    }
+
+    const aggHookUsesMoreGas = aggHookGasUse > cheapestNoHookGasUse;
+
+    const verdictTag = aggHookUsesMoreGas
+      ? 'gasVerdict:agghook_more_gas'
+      : 'gasVerdict:agghook_equal_or_less_gas';
+    void instrumentation.ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.AggHookSoleCandidateGasComparison'),
+      1,
+      {tags: [...baseTags, verdictTag]}
+    );
+
+    if (!aggHookUsesMoreGas) return;
+    if (instrumentation.soleCandidateGasComparisonLogBudget.remaining <= 0) {
+      return;
+    }
+    instrumentation.soleCandidateGasComparisonLogBudget.remaining -= 1;
+
+    // cheapestNoHookQuote is guaranteed defined here (we early-returned
+    // above when cheapestNoHookGasUse was undefined and they're set
+    // together inside the scan loop).
+    const cheapestNoHookRoute = cheapestNoHookQuote!.route as RouteBasic<TPool>;
+    instrumentation.ctx.logger.info(
+      'QuoteBestSplitFinder agg-hook sole-candidate is gas-worse than best no-hook elsewhere',
+      {
+        chainId,
+        percentage,
+        tradeType: instrumentation.tradeType,
+        aggHookCount: aggHookQuotes.length,
+        aggHookWinner: {
+          routeHash: hashForLogging(aggHookWinner.route.toString()),
+          amount: aggHookWinner.amount.toString(),
+          gasUse: aggHookGasUse.toString(),
+        },
+        cheapestNoHookElsewhere: {
+          routeHash: hashForLogging(cheapestNoHookRoute.toString()),
+          percentage: cheapestNoHookRoute.percentage,
+          amount: cheapestNoHookQuote!.amount.toString(),
+          gasUse: cheapestNoHookGasUse.toString(),
+        },
+        gasUseDelta: (aggHookGasUse - cheapestNoHookGasUse).toString(),
       }
     );
   }
@@ -635,6 +802,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -749,6 +917,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       soleCandidateLogBudget: {remaining: number};
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -943,11 +1112,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     };
     // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
     // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision,
-    // maybeLogGateEarlyReturnLeak). Metrics fire unconditionally.
+    // maybeLogGateEarlyReturnLeak, maybeLogAggHookSoleCandidateGasComparison).
+    // Metrics fire unconditionally.
     const partitionEvictLogBudget = {remaining: 5};
     const soleCandidateLogBudget = {remaining: 5};
     const partitionGasAdjustedLogBudget = {remaining: 5};
     const gateEarlyReturnLeakLogBudget = {remaining: 5};
+    const soleCandidateGasComparisonLogBudget = {remaining: 5};
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -1006,6 +1177,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           soleCandidateLogBudget,
           partitionGasAdjustedLogBudget,
           gateEarlyReturnLeakLogBudget,
+          soleCandidateGasComparisonLogBudget,
           metricTags,
         }
       );

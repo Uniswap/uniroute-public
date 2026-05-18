@@ -1781,6 +1781,7 @@ describe('QuoteBestSplitFinder', () => {
         soleCandidateLogBudget: {remaining: number};
         partitionGasAdjustedLogBudget: {remaining: number};
         gateEarlyReturnLeakLogBudget: {remaining: number};
+        soleCandidateGasComparisonLogBudget: {remaining: number};
         metricTags: string[];
       }>
     ) => ({
@@ -1791,6 +1792,7 @@ describe('QuoteBestSplitFinder', () => {
       soleCandidateLogBudget: {remaining: 5},
       partitionGasAdjustedLogBudget: {remaining: 5},
       gateEarlyReturnLeakLogBudget: {remaining: 5},
+      soleCandidateGasComparisonLogBudget: {remaining: 5},
       metricTags: ['chainId:1'],
       ...overrides,
     });
@@ -2154,7 +2156,15 @@ describe('QuoteBestSplitFinder', () => {
       expect(payload.aggHookCount).toBe(1);
       expect((payload.aggHookWinner as {amount: string}).amount).toBe('990');
 
-      const metricCalls = metricMock().mock.calls;
+      // Filter to the original AggHookSoleCandidate metric only; the new
+      // AggHookSoleCandidateGasComparison metric (gasVerdict: tag) is
+      // exercised by its own tests below.
+      const metricCalls = metricMock().mock.calls.filter(
+        c =>
+          !(c[2] as {tags: string[]}).tags.some(t =>
+            t.startsWith('gasVerdict:')
+          )
+      );
       expect(metricCalls).toHaveLength(1);
       const tags = (metricCalls[0][2] as {tags: string[]}).tags;
       expect(tags).toContain('testAggHooks:true');
@@ -2204,8 +2214,17 @@ describe('QuoteBestSplitFinder', () => {
         );
       }
 
+      // Original AggHookSoleCandidate metric: one emission per call.
+      // Filter out the new AggHookSoleCandidateGasComparison emissions
+      // (gasVerdict: tag) which are tested separately below.
+      const soleCandidateMetricCalls = metricMock().mock.calls.filter(
+        c =>
+          !(c[2] as {tags: string[]}).tags.some(t =>
+            t.startsWith('gasVerdict:')
+          )
+      );
       expect(infoMock().mock.calls).toHaveLength(5);
-      expect(metricMock().mock.calls).toHaveLength(7);
+      expect(soleCandidateMetricCalls).toHaveLength(7);
       expect(sharedInstr.soleCandidateLogBudget.remaining).toBe(0);
     });
 
@@ -2764,6 +2783,265 @@ describe('QuoteBestSplitFinder', () => {
       expect(logs).toHaveLength(1);
       const payload = logs[0][1] as Record<string, unknown>;
       expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe('750');
+    });
+
+    // ----- Sole-candidate gas-comparison instrumentation -----
+    //
+    // Post-PR-#8195 the K-budget gate's early-return leak is closed but
+    // prod still sees residual UniRoute-wins bursts (~30-48 per 10 min)
+    // on the same Curve+Fluid v4 chain shape. The chain enters via the
+    // sole-candidate path (`noHookQuotes.length === 0` at a percentage),
+    // where no anchor exists for the gate. This instrumentation lets
+    // us prove that residual mechanism in prod by cross-referencing
+    // the sole-candidate agg-hook winner against the cheapest no-hook
+    // quote anywhere in `percentageToSortedQuotes` — i.e. the fallback
+    // DFS would pick if agg-hook were excluded from the trade.
+
+    it('emits gas-comparison log + metric when sole-candidate agg-hook uses more gas than the cheapest no-hook anywhere', () => {
+      const aggHook = aggHookRouteAt(
+        '0xfa10000000000000000000000000000000000000',
+        50
+      );
+      const cheapNoHookElsewhere = noHookRouteAt(
+        '0xfa20000000000000000000000000000000000000',
+        90
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          // Bucket at pct=50: only the agg-hook chain (sole-candidate).
+          [50, [createMockQuoteWithGas(aggHook, 990n, 230_000n)]],
+          // Bucket at pct=90: a no-hook quote with much cheaper gas
+          // (the alternative DFS would pick if agg-hook were excluded).
+          [90, [createMockQuoteWithGas(cheapNoHookElsewhere, 1000n, 150_000n)]],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const logs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder agg-hook sole-candidate is gas-worse than best no-hook elsewhere'
+      );
+      expect(logs).toHaveLength(1);
+      const payload = logs[0][1] as Record<string, unknown>;
+      expect(payload.percentage).toBe(50);
+      expect(payload.tradeType).toBe(TradeType.ExactOut);
+      expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe('230000');
+      expect(
+        (payload.cheapestNoHookElsewhere as {percentage: number}).percentage
+      ).toBe(90);
+      expect((payload.cheapestNoHookElsewhere as {gasUse: string}).gasUse).toBe(
+        '150000'
+      );
+      expect(payload.gasUseDelta).toBe('80000');
+
+      const comparisonMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(comparisonMetrics).toHaveLength(1);
+      expect((comparisonMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:agghook_more_gas'
+      );
+    });
+
+    it('emits gas-comparison metric (no log) when sole-candidate agg-hook uses equal-or-less gas than the cheapest no-hook anywhere', () => {
+      const aggHook = aggHookRouteAt(
+        '0xfa30000000000000000000000000000000000000',
+        50
+      );
+      const expensiveNoHookElsewhere = noHookRouteAt(
+        '0xfa40000000000000000000000000000000000000',
+        90
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [50, [createMockQuoteWithGas(aggHook, 990n, 100_000n)]],
+          [
+            90,
+            [createMockQuoteWithGas(expensiveNoHookElsewhere, 1000n, 300_000n)],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const logs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder agg-hook sole-candidate is gas-worse than best no-hook elsewhere'
+      );
+      expect(logs).toHaveLength(0);
+
+      const comparisonMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(comparisonMetrics).toHaveLength(1);
+      expect((comparisonMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:agghook_equal_or_less_gas'
+      );
+    });
+
+    it('emits gas-comparison metric with no_nohook_anywhere verdict when no no-hook exists at any percentage', () => {
+      const aggHook = aggHookRouteAt(
+        '0xfa50000000000000000000000000000000000000',
+        50
+      );
+      const otherAggHook = aggHookRouteAt(
+        '0xfa60000000000000000000000000000000000000',
+        80
+      );
+
+      // Every quote in percentageToSortedQuotes is agg-hook — no
+      // cheapest no-hook fallback exists anywhere.
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [50, [createMockQuoteWithGas(aggHook, 990n, 230_000n)]],
+          [80, [createMockQuoteWithGas(otherAggHook, 1000n, 162_000n)]],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const comparisonMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(comparisonMetrics).toHaveLength(1);
+      expect((comparisonMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:no_nohook_anywhere'
+      );
+    });
+
+    it('emits gas-comparison metric with gas_info_missing verdict when agg-hook winner has no gas details (but a no-hook with gas exists elsewhere)', () => {
+      const aggHook = aggHookRouteAt(
+        '0xfa70000000000000000000000000000000000000',
+        50
+      );
+      const noHookElsewhere = noHookRouteAt(
+        '0xfa80000000000000000000000000000000000000',
+        90
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [50, [createMockQuote(aggHook, 990n)]], // no gasDetails
+          [90, [createMockQuoteWithGas(noHookElsewhere, 1000n, 150_000n)]],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const comparisonMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(comparisonMetrics).toHaveLength(1);
+      expect((comparisonMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasVerdict:gas_info_missing'
+      );
+    });
+
+    it('respects soleCandidateGasComparisonLogBudget cap while metric keeps firing', () => {
+      const aggHook = aggHookRouteAt(
+        '0xfa90000000000000000000000000000000000000',
+        50
+      );
+      const cheapNoHookElsewhere = noHookRouteAt(
+        '0xfaa0000000000000000000000000000000000000',
+        90
+      );
+      const quotesMap = new Map<number, QuoteBasic[]>([
+        [50, [createMockQuoteWithGas(aggHook, 990n, 230_000n)]],
+        [90, [createMockQuoteWithGas(cheapNoHookElsewhere, 1000n, 150_000n)]],
+      ]);
+
+      const sharedInstr = buildInstrumentation({tradeType: TradeType.ExactOut});
+      for (let i = 0; i < 7; i++) {
+        finder['getBestUnusedQuotesStats'](
+          50,
+          quotesMap,
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactOut,
+          sharedInstr
+        );
+      }
+
+      const comparisonLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder agg-hook sole-candidate is gas-worse than best no-hook elsewhere'
+      );
+      const comparisonMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('gasVerdict:'))
+      );
+      expect(comparisonLogs).toHaveLength(5);
+      expect(comparisonMetrics).toHaveLength(7);
+      expect(sharedInstr.soleCandidateGasComparisonLogBudget.remaining).toBe(0);
+    });
+
+    it('does not emit gas-comparison signals when bothPresent (only fires on the sole-candidate path)', () => {
+      // bothPresent=true → partition decision path, not sole-candidate.
+      // The new instrumentation must not fire — it's nested inside the
+      // `noHookQuotes.length === 0` branch of getBestUnusedQuotesStats.
+      const aggHook = aggHookRouteAt(
+        '0xfab0000000000000000000000000000000000000',
+        50
+      );
+      const noHook = noHookRouteAt(
+        '0xfac0000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGas(noHook, 1000n, 100_000n),
+              createMockQuoteWithGas(aggHook, 990n, 230_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut,
+        buildInstrumentation({tradeType: TradeType.ExactOut})
+      );
+
+      const comparisonLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder agg-hook sole-candidate is gas-worse than best no-hook elsewhere'
+      );
+      const comparisonMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(
+          t =>
+            t.startsWith('gasVerdict:') &&
+            // gasVerdict is also used by GateEarlyReturnLeak so disambiguate
+            // by verdict value: the new metric uses agghook_more_gas (not
+            // agghook_more_gas_used).
+            (t === 'gasVerdict:agghook_more_gas' ||
+              t === 'gasVerdict:agghook_equal_or_less_gas' ||
+              t === 'gasVerdict:no_nohook_anywhere')
+        )
+      );
+      expect(comparisonLogs).toHaveLength(0);
+      expect(comparisonMetrics).toHaveLength(0);
     });
   });
 
