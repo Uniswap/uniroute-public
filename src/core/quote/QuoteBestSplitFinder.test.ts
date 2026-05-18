@@ -3974,4 +3974,284 @@ describe('QuoteBestSplitFinder', () => {
       );
     });
   });
+
+  describe('chosen-split gas-comparison instrumentation', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const createMockQuoteWithGas = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasUse: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    const infoMock = () => mockContext.logger.info as ReturnType<typeof vi.fn>;
+    const metricMock = () =>
+      mockContext.metrics.count as ReturnType<typeof vi.fn>;
+
+    const splitMetricCalls = () =>
+      metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('splitVerdict:'))
+      );
+    const splitLogCalls = () =>
+      infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder chosen split has agg-hook with worse gas than no-hook alternative'
+      );
+
+    it('emits empty_result verdict when no combinations exist', () => {
+      finder['maybeLogChosenSplitGasComparison'](
+        [],
+        new Map(),
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      expect(splitMetricCalls()).toHaveLength(1);
+      expect((splitMetricCalls()[0][2] as {tags: string[]}).tags).toContain(
+        'splitVerdict:empty_result'
+      );
+      expect(splitLogCalls()).toHaveLength(0);
+    });
+
+    it('emits nohook_only verdict when chosen split has no agg-hook routes', () => {
+      const r1 = noHookRouteAt(
+        '0xa110000000000000000000000000000000000000',
+        100
+      );
+      const result = [[r1]];
+      const quoteMap = buildQuoteMap([createMockQuoteWithGas(r1, 1000n, 100n)]);
+
+      finder['maybeLogChosenSplitGasComparison'](
+        result,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      expect(splitMetricCalls()).toHaveLength(1);
+      expect((splitMetricCalls()[0][2] as {tags: string[]}).tags).toContain(
+        'splitVerdict:nohook_only'
+      );
+      expect(splitLogCalls()).toHaveLength(0);
+    });
+
+    it('emits agghook_no_alternative verdict when chosen has agg-hook and result has no no-hook combination', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa120000000000000000000000000000000000000',
+        100
+      );
+      const otherAggHook = aggHookRouteAt(
+        '0xa130000000000000000000000000000000000000',
+        100
+      );
+      const result = [[aggHook], [otherAggHook]];
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 250_000n),
+        createMockQuoteWithGas(otherAggHook, 999n, 240_000n),
+      ]);
+
+      finder['maybeLogChosenSplitGasComparison'](
+        result,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      expect(splitMetricCalls()).toHaveLength(1);
+      expect((splitMetricCalls()[0][2] as {tags: string[]}).tags).toContain(
+        'splitVerdict:agghook_no_alternative'
+      );
+      expect(splitLogCalls()).toHaveLength(0);
+    });
+
+    it('emits agghook_chosen_lower_gas verdict (no log) when agg-hook split uses lower or equal gas than the no-hook alternative', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa140000000000000000000000000000000000000',
+        100
+      );
+      const noHookAlt = noHookRouteAt(
+        '0xa150000000000000000000000000000000000000',
+        100
+      );
+      // Chosen is agg-hook with 100 gas; alternative is no-hook with 200 gas.
+      // The agg-hook is gas-better (legitimate).
+      const result = [[aggHook], [noHookAlt]];
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 100n),
+        createMockQuoteWithGas(noHookAlt, 999n, 200n),
+      ]);
+
+      finder['maybeLogChosenSplitGasComparison'](
+        result,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      expect(splitMetricCalls()).toHaveLength(1);
+      expect((splitMetricCalls()[0][2] as {tags: string[]}).tags).toContain(
+        'splitVerdict:agghook_chosen_lower_gas'
+      );
+      expect(splitLogCalls()).toHaveLength(0);
+    });
+
+    it('emits agghook_chosen_higher_gas verdict + log when agg-hook split uses MORE gas than the no-hook alternative (suspected residual)', () => {
+      // The prod loss pattern: chosen split contains a hooked leg
+      // (e.g. Fluid 90%) with higher gas; a pure-no-hook alternative
+      // (e.g. v3 100% direct) exists with lower gas. DFS picked the
+      // hooked split because it has marginally higher raw amount.
+      const aggHookLeg = aggHookRouteAt(
+        '0xa160000000000000000000000000000000000000',
+        90
+      );
+      const aggHookSidekick = noHookRouteAt(
+        '0xa170000000000000000000000000000000000000',
+        10
+      );
+      const noHookAlt = noHookRouteAt(
+        '0xa180000000000000000000000000000000000000',
+        100
+      );
+
+      const chosen = [aggHookLeg, aggHookSidekick];
+      const altCombination = [noHookAlt];
+      const result = [chosen, altCombination];
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHookLeg, 950n, 700_000n),
+        createMockQuoteWithGas(aggHookSidekick, 100n, 100_000n),
+        createMockQuoteWithGas(noHookAlt, 1000n, 350_000n),
+      ]);
+
+      finder['maybeLogChosenSplitGasComparison'](
+        result,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      const metrics = splitMetricCalls();
+      expect(metrics).toHaveLength(1);
+      expect((metrics[0][2] as {tags: string[]}).tags).toContain(
+        'splitVerdict:agghook_chosen_higher_gas'
+      );
+
+      const logs = splitLogCalls();
+      expect(logs).toHaveLength(1);
+      const payload = logs[0][1] as Record<string, unknown>;
+      // Chosen total raw = 950 + 100 = 1050; gas = 700k + 100k = 800k.
+      expect((payload.chosenSplit as {rawTotal: string}).rawTotal).toBe('1050');
+      expect((payload.chosenSplit as {gasTotal: string}).gasTotal).toBe(
+        '800000'
+      );
+      expect((payload.noHookAlternative as {rawTotal: string}).rawTotal).toBe(
+        '1000'
+      );
+      expect((payload.noHookAlternative as {gasTotal: string}).gasTotal).toBe(
+        '350000'
+      );
+      // Delta = 800k - 350k = 450k.
+      expect(payload.gasTotalDelta).toBe('450000');
+      expect(payload.rawTotalDelta).toBe('50');
+    });
+
+    it('emits gas_info_missing verdict when any leg in the chosen split has no gasUse', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa190000000000000000000000000000000000000',
+        100
+      );
+      const result = [[aggHook]];
+      // Quote without gasDetails.
+      const quote: QuoteBasic = {route: aggHook, amount: 1000n} as QuoteBasic;
+      const quoteMap = buildQuoteMap([quote]);
+
+      finder['maybeLogChosenSplitGasComparison'](
+        result,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      expect(splitMetricCalls()).toHaveLength(1);
+      expect((splitMetricCalls()[0][2] as {tags: string[]}).tags).toContain(
+        'splitVerdict:gas_info_missing'
+      );
+      expect(splitLogCalls()).toHaveLength(0);
+    });
+
+    it('does not emit when testAggHooks is false', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa1a0000000000000000000000000000000000000',
+        100
+      );
+      const noHookAlt = noHookRouteAt(
+        '0xa1b0000000000000000000000000000000000000',
+        100
+      );
+      const result = [[aggHook], [noHookAlt]];
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 700_000n),
+        createMockQuoteWithGas(noHookAlt, 999n, 200_000n),
+      ]);
+
+      finder['maybeLogChosenSplitGasComparison'](
+        result,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        false, // testAggHooks=false → instrumentation should be silent
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+
+      expect(splitMetricCalls()).toHaveLength(0);
+      expect(splitLogCalls()).toHaveLength(0);
+    });
+  });
 });

@@ -1585,6 +1585,186 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }),
     ]);
 
+    // Chosen-split gas comparison: PR #8161/#8195/#8272 closed the per-
+    // percentage gates. Post-PR-#8272 prod still shows
+    // `winnerByGasAdjustedQuote=UniRoute` at ~35/10min with different
+    // hook shapes than the Curve+Fluid v4 chain — Tempo/Fluid combos
+    // distributed across larger percentage allocations. Hypothesis: the
+    // residual is at the SPLIT-LEVEL ranking — `scoreAndSortCombinations`
+    // ranks combinations by RAW amount only, so a marginally-raw-better
+    // agg-hook combination can outrank a no-hook combination that uses
+    // materially less gas. This instrumentation compares the chosen
+    // top-ranked split against the best no-hook-only combination in
+    // `result` so we can confirm or rule out that hypothesis in prod
+    // before drafting another fix.
+    this.maybeLogChosenSplitGasComparison(
+      result,
+      quoteMap,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags
+    );
+
     return result;
+  }
+
+  /**
+   * Investigation-only: at the end of `findBestSplits`, compare the
+   * chosen top-ranked split against the best no-hook-only alternative
+   * present in the candidate set. Emits one metric per call (verdict
+   * tag covers every branch) and one log per call on the harmful
+   * verdict.
+   *
+   * Verdict tags:
+   *   `nohook_only`              chosen split has zero agg-hook routes
+   *   `agghook_no_alternative`   chosen split has agg-hook AND no
+   *                              pure-no-hook combination exists in
+   *                              the candidate set
+   *   `agghook_chosen_lower_gas` chosen split has agg-hook AND a
+   *                              no-hook alternative existed with
+   *                              equal or higher gas (legitimate)
+   *   `agghook_chosen_higher_gas` chosen split has agg-hook AND a
+   *                               no-hook alternative existed with
+   *                               strictly lower gas (the suspected
+   *                               residual loss mechanism)
+   *   `empty_result`             result has no combinations
+   *   `gas_info_missing`         a route in the chosen or alternative
+   *                              combination has no gasUse; comparison
+   *                              would be undefined
+   */
+  private maybeLogChosenSplitGasComparison(
+    result: RouteBasic<TPool>[][],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[]
+  ): void {
+    if (!testAggHooks) return;
+
+    const baseTags = [
+      ...metricTags,
+      `testAggHooks:${testAggHooks}`,
+      `tradeType:${tradeType}`,
+    ];
+    const emitMetric = (verdict: string): void => {
+      void ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.ChosenSplitGasComparison'),
+        1,
+        {tags: [...baseTags, `splitVerdict:${verdict}`]}
+      );
+    };
+
+    if (result.length === 0) {
+      emitMetric('empty_result');
+      return;
+    }
+
+    // Compute stats (raw total + gas total + hasAggHook) for one
+    // combination. Returns undefined when any route in the combination
+    // is missing gasUse — we can't make a defensible comparison.
+    const statsFor = (
+      combination: RouteBasic<TPool>[]
+    ):
+      | {rawTotal: bigint; gasTotal: bigint; hasAggHook: boolean}
+      | undefined => {
+      let rawTotal = 0n;
+      let gasTotal = 0n;
+      let hasAggHook = false;
+      for (const route of combination) {
+        const quote = quoteMap.get(route);
+        if (!quote) return undefined;
+        const gasUse = quote.gasDetails?.gasUse;
+        if (gasUse === undefined) return undefined;
+        rawTotal += quote.amount;
+        gasTotal += gasUse;
+        if (routeUsesAggHook(route, chainId)) hasAggHook = true;
+      }
+      return {rawTotal, gasTotal, hasAggHook};
+    };
+
+    const chosenStats = statsFor(result[0]);
+    if (chosenStats === undefined) {
+      emitMetric('gas_info_missing');
+      return;
+    }
+
+    if (!chosenStats.hasAggHook) {
+      emitMetric('nohook_only');
+      return;
+    }
+
+    // Scan for the best no-hook-only alternative (highest-ranked
+    // combination with no agg-hook routes). `result` is already
+    // sorted by raw amount in the trade-direction-appropriate order
+    // (cf. `scoreAndSortCombinations`), so the first match is the
+    // best raw alternative.
+    let noHookAltStats:
+      | {rawTotal: bigint; gasTotal: bigint; hasAggHook: boolean}
+      | undefined;
+    let noHookAltCombination: RouteBasic<TPool>[] | undefined;
+    for (let i = 1; i < result.length; i++) {
+      const stats = statsFor(result[i]);
+      if (stats === undefined) continue;
+      if (stats.hasAggHook) continue;
+      noHookAltStats = stats;
+      noHookAltCombination = result[i];
+      break;
+    }
+
+    if (noHookAltStats === undefined) {
+      emitMetric('agghook_no_alternative');
+      return;
+    }
+
+    if (chosenStats.gasTotal <= noHookAltStats.gasTotal) {
+      emitMetric('agghook_chosen_lower_gas');
+      return;
+    }
+
+    emitMetric('agghook_chosen_higher_gas');
+
+    // Log the harmful case once per request with enough detail to
+    // correlate with the trading-service `winnerByGasAdjustedQuote`
+    // signal.
+    ctx.logger.info(
+      'QuoteBestSplitFinder chosen split has agg-hook with worse gas than no-hook alternative',
+      {
+        chainId,
+        tradeType,
+        chosenSplit: {
+          rawTotal: chosenStats.rawTotal.toString(),
+          gasTotal: chosenStats.gasTotal.toString(),
+          legCount: result[0].length,
+          legs: result[0].map(route => ({
+            routeHash: hashForLogging(route.toString()),
+            percentage: route.percentage,
+            usesAggHook: routeUsesAggHook(route, chainId),
+            amount: quoteMap.get(route)?.amount.toString(),
+            gasUse: quoteMap.get(route)?.gasDetails?.gasUse?.toString(),
+          })),
+        },
+        noHookAlternative: {
+          rawTotal: noHookAltStats.rawTotal.toString(),
+          gasTotal: noHookAltStats.gasTotal.toString(),
+          legCount: noHookAltCombination!.length,
+          legs: noHookAltCombination!.map(route => ({
+            routeHash: hashForLogging(route.toString()),
+            percentage: route.percentage,
+            amount: quoteMap.get(route)?.amount.toString(),
+            gasUse: quoteMap.get(route)?.gasDetails?.gasUse?.toString(),
+          })),
+        },
+        gasTotalDelta: (
+          chosenStats.gasTotal - noHookAltStats.gasTotal
+        ).toString(),
+        rawTotalDelta: (
+          chosenStats.rawTotal - noHookAltStats.rawTotal
+        ).toString(),
+      }
+    );
   }
 }
