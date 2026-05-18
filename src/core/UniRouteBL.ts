@@ -46,6 +46,7 @@ import {
   fetchAllInvolvedTokens,
   logElapsedTime,
   protocolToPoolTypeString,
+  sanitizeRequestSourceTag,
   updateQuoteSplitWithFreshPoolDetails,
   isExternalProtocol,
   UNISWAP_NATIVE_PROTOCOLS,
@@ -346,7 +347,7 @@ export class UniRouteBL implements IUniRoutedBL {
       `protocols:${protocols.sort().join('_').toLowerCase()}`,
       `strategy:${this.quoteStrategy.name()}`,
       `hooksOptions:${hooksOptions}`,
-      `requestSource:${requestSource}`,
+      `requestSource:${sanitizeRequestSourceTag(requestSource)}`,
     ];
 
     await ctx.metrics.count(buildMetricKey('QuoteRequest.Experiment'), 1, {
