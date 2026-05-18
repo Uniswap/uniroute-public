@@ -305,6 +305,260 @@ describe('Simulator', () => {
       expect(getBalanceSpy).toHaveBeenCalledWith(USER_ADDRESS);
     });
 
+    it('skips the live ERC-20 balance check when an override has a matching balanceTarget on tokenIn', async () => {
+      const balanceOfSpy = vi.mocked(mockTokenContract.balanceOf);
+      // Live check would say 0 → INSUFFICIENT_BALANCE; overrides must rescue it.
+      balanceOfSpy.mockResolvedValue(BigNumber.from(0));
+      vi.mocked(mockTokenContract.allowance).mockResolvedValue(
+        BigNumber.from(2000)
+      );
+
+      const metricsCtx = {
+        logger: ctx.logger,
+        metrics: {count: vi.fn(), dist: vi.fn()},
+      } as unknown as Context;
+
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        metricsCtx,
+        undefined,
+        undefined,
+        [
+          {
+            contractAddress: USDC_ADDRESS,
+            stateDiff: new Map([
+              [
+                '0x0000000000000000000000000000000000000000000000000000000000000001',
+                '0x0000000000000000000000000000000000000000000000000000000000000064',
+              ],
+            ]),
+            balanceTarget: {account: USER_ADDRESS, amount: 5000n},
+          },
+        ]
+      );
+
+      expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+      expect(balanceOfSpy).not.toHaveBeenCalled();
+      expect(metricsCtx.metrics.count).toHaveBeenCalledWith(
+        'SimulationBalanceCheckSkipped',
+        1,
+        expect.objectContaining({tags: ['chain:1']})
+      );
+    });
+
+    it('still runs the live balance check when overrides do not cover (from, tokenIn)', async () => {
+      vi.mocked(mockTokenContract.balanceOf).mockResolvedValue(
+        BigNumber.from(0)
+      );
+
+      const metricsCtx = {
+        logger: ctx.logger,
+        metrics: {count: vi.fn(), dist: vi.fn()},
+      } as unknown as Context;
+
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        metricsCtx,
+        undefined,
+        undefined,
+        [
+          {
+            contractAddress: '0x9999999999999999999999999999999999999999',
+            stateDiff: new Map([
+              [
+                '0x0000000000000000000000000000000000000000000000000000000000000001',
+                '0x0000000000000000000000000000000000000000000000000000000000000064',
+              ],
+            ]),
+            balanceTarget: {account: USER_ADDRESS, amount: 5000n},
+          },
+        ]
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.INSUFFICIENT_BALANCE
+      );
+      expect(metricsCtx.metrics.count).not.toHaveBeenCalledWith(
+        'SimulationBalanceCheckSkipped',
+        expect.anything(),
+        expect.anything()
+      );
+    });
+
+    it('does NOT skip the live balance check for a bare RawStateOverride on tokenIn (no balanceTarget)', async () => {
+      const balanceOfSpy = vi.mocked(mockTokenContract.balanceOf);
+      balanceOfSpy.mockResolvedValue(BigNumber.from(0));
+
+      const metricsCtx = {
+        logger: ctx.logger,
+        metrics: {count: vi.fn(), dist: vi.fn()},
+      } as unknown as Context;
+
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        metricsCtx,
+        undefined,
+        undefined,
+        [
+          {
+            contractAddress: USDC_ADDRESS,
+            // stateDiff on tokenIn but NO balanceTarget — e.g. a RawStateOverride
+            // touching an allowance/totalSupply slot. Must not suppress the live check.
+            stateDiff: new Map([
+              [
+                '0x0000000000000000000000000000000000000000000000000000000000000007',
+                '0x0000000000000000000000000000000000000000000000000000000000000064',
+              ],
+            ]),
+          },
+        ]
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.INSUFFICIENT_BALANCE
+      );
+      expect(balanceOfSpy).toHaveBeenCalled();
+    });
+
+    // Duplicate same-slot writes are rejected upstream at the BL via
+    // `detectDuplicateResolvedWrites` (covered in StateOverrideResolver
+    // tests), so the simulator never sees colliding bundles. No
+    // simulator-side conflict test is needed.
+
+    it('DOES skip when other overrides on the same contract touch only codeOverride or unrelated slots', async () => {
+      const balanceOfSpy = vi.mocked(mockTokenContract.balanceOf);
+      balanceOfSpy.mockResolvedValue(BigNumber.from(0));
+      vi.mocked(mockTokenContract.allowance).mockResolvedValue(
+        BigNumber.from(2000)
+      );
+
+      const metricsCtx = {
+        logger: ctx.logger,
+        metrics: {count: vi.fn(), dist: vi.fn()},
+      } as unknown as Context;
+
+      const balanceSlot =
+        '0x0000000000000000000000000000000000000000000000000000000000000001';
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        metricsCtx,
+        undefined,
+        undefined,
+        [
+          {
+            contractAddress: USDC_ADDRESS,
+            stateDiff: new Map([
+              [
+                balanceSlot,
+                '0x0000000000000000000000000000000000000000000000000000000000001388',
+              ],
+            ]),
+            balanceTarget: {
+              account: USER_ADDRESS,
+              amount: 5000n,
+              slot: balanceSlot,
+            },
+          },
+          {
+            // Same contract, but ONLY a codeOverride — doesn't touch storage.
+            contractAddress: USDC_ADDRESS,
+            codeOverride: '0xdead',
+          },
+          {
+            // Same contract, stateDiff but DIFFERENT slot (e.g. allowance).
+            contractAddress: USDC_ADDRESS,
+            stateDiff: new Map([
+              [
+                '0x000000000000000000000000000000000000000000000000000000000000beef',
+                '0x000000000000000000000000000000000000000000000000000000000000cafe',
+              ],
+            ]),
+          },
+        ]
+      );
+
+      expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+      expect(balanceOfSpy).not.toHaveBeenCalled();
+      expect(metricsCtx.metrics.count).toHaveBeenCalledWith(
+        'SimulationBalanceCheckSkipped',
+        1,
+        expect.objectContaining({tags: ['chain:1']})
+      );
+    });
+
+    it('returns INSUFFICIENT_BALANCE directly when balanceTarget amount is below needed (no live check, no sim)', async () => {
+      // The override is authoritative — if TAPI says "model this account
+      // at amount=1" but the swap needs 1000, sim would revert against
+      // that overridden state regardless of what the live balance shows.
+      // Don't waste a sim call, don't consult the live RPC.
+      const balanceOfSpy = vi.mocked(mockTokenContract.balanceOf);
+      balanceOfSpy.mockResolvedValue(BigNumber.from(99999)); // live would say plenty
+
+      const metricsCtx = {
+        logger: ctx.logger,
+        metrics: {count: vi.fn(), dist: vi.fn()},
+      } as unknown as Context;
+
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        metricsCtx,
+        undefined,
+        undefined,
+        [
+          {
+            contractAddress: USDC_ADDRESS,
+            stateDiff: new Map([
+              [
+                '0x0000000000000000000000000000000000000000000000000000000000000001',
+                '0x0000000000000000000000000000000000000000000000000000000000000001',
+              ],
+            ]),
+            balanceTarget: {
+              account: USER_ADDRESS,
+              amount: 1n,
+              slot: '0x0000000000000000000000000000000000000000000000000000000000000001',
+            }, // < 1000
+          },
+        ]
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.INSUFFICIENT_BALANCE
+      );
+      // Live RPC should NOT have been consulted — override is authoritative.
+      expect(balanceOfSpy).not.toHaveBeenCalled();
+    });
+
     it('should handle errors during balance check', async () => {
       vi.mocked(mockTokenContract.balanceOf).mockRejectedValue(
         new Error('Balance check failed')

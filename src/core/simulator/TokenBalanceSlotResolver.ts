@@ -6,9 +6,18 @@ import {ResolvedStateOverride} from './ResolvedStateOverride';
 export const NATIVE_TOKEN_SENTINEL =
   '0x0000000000000000000000000000000000000000';
 
+export enum SlotResolutionReason {
+  /** balanceMappingSlot was empty for an ERC-20 override. */
+  MissingSlot = 'missing_slot',
+  /** Slot parsed but failed range/format checks. */
+  InvalidSlot = 'invalid_slot',
+  /** Amount parsed but failed range/format checks. */
+  InvalidAmount = 'invalid_amount',
+}
+
 export class SlotResolutionError extends Error {
   constructor(
-    public readonly reason: 'missing_slot' | 'invalid_slot' | 'invalid_amount',
+    public readonly reason: SlotResolutionReason,
     message: string
   ) {
     super(message);
@@ -38,13 +47,13 @@ export class TokenBalanceSlotResolver {
       amount = BigInt(override.amount);
     } catch {
       throw new SlotResolutionError(
-        'invalid_amount',
+        SlotResolutionReason.InvalidAmount,
         `TokenBalanceOverride.amount must be a decimal bigint; got ${override.amount}`
       );
     }
     if (amount < 0n) {
       throw new SlotResolutionError(
-        'invalid_amount',
+        SlotResolutionReason.InvalidAmount,
         'TokenBalanceOverride.amount must be non-negative'
       );
     }
@@ -59,7 +68,7 @@ export class TokenBalanceSlotResolver {
 
     if (override.balanceMappingSlot === '') {
       throw new SlotResolutionError(
-        'missing_slot',
+        SlotResolutionReason.MissingSlot,
         `TokenBalanceOverride for ERC-20 ${override.tokenAddress} requires balanceMappingSlot; supply the storage slot of the token's balances mapping, or use RawStateOverride directly`
       );
     }
@@ -68,13 +77,13 @@ export class TokenBalanceSlotResolver {
       slot = BigInt(override.balanceMappingSlot);
     } catch {
       throw new SlotResolutionError(
-        'invalid_slot',
+        SlotResolutionReason.InvalidSlot,
         `TokenBalanceOverride.balanceMappingSlot must be a decimal bigint; got ${override.balanceMappingSlot}`
       );
     }
     if (slot < 0n) {
       throw new SlotResolutionError(
-        'invalid_slot',
+        SlotResolutionReason.InvalidSlot,
         'TokenBalanceOverride.balanceMappingSlot must be non-negative'
       );
     }

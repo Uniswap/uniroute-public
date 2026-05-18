@@ -3,10 +3,11 @@ import {
   QuoteResponse,
   StateOverride,
 } from '../../gen/uniroute/v1/api_pb';
-import {SUPPORTED_CHAINS} from '../lib/config';
+import {ChainId, SUPPORTED_CHAINS} from '../lib/config';
 import {EnumUtils} from '../lib/EnumUtils';
 import {Protocol} from '../models/pool/Protocol';
 import {isAddress} from 'ethers/lib/utils';
+import {isNativeAddress} from '../lib/helpers';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {Context} from '@uniswap/lib-uni/context';
@@ -43,7 +44,13 @@ export interface IQuoteRequestValidator {
 export class QuoteRequestValidator {
   constructor(
     private readonly chainRepository: IChainRepository,
-    private readonly tokenProvider: ITokenProvider
+    private readonly tokenProvider: ITokenProvider,
+    // Chains where state-override-bearing requests will reach a backend
+    // that supports overrides (eth_simulateV1 or Tenderly node
+    // `tenderly_estimateGasBundle`). Reject overrides on other chains
+    // rather than routing them into a path that would throw at sim time.
+    // Configured by dependencies.ts → `stateOverridesSupportedChains`.
+    private readonly stateOverridesSupportedChains: ChainId[] = []
   ) {}
   // Validates the QuoteRequest.
   // Returns a QuoteResponse with an error if the request is invalid, otherwise returns undefined.
@@ -132,6 +139,8 @@ export class QuoteRequestValidator {
 
     const stateOverrideError = this.validateStateOverrides(
       request.stateOverrides,
+      request.tokenInChainId,
+      request.tokenInAddress,
       ctx
     );
     if (stateOverrideError) {
@@ -179,15 +188,78 @@ export class QuoteRequestValidator {
 
   private validateStateOverrides(
     overrides: StateOverride[],
-
+    chainId: number,
+    tokenInAddress: string,
     _ctx: Context
   ): {message: string; reason: string} | undefined {
     if (overrides.length === 0) return undefined;
+    if (!this.stateOverridesSupportedChains.includes(chainId)) {
+      return {
+        message: `stateOverrides are not supported on chainId ${chainId}`,
+        reason: 'chain_unsupported',
+      };
+    }
     if (overrides.length > MAX_STATE_OVERRIDES) {
       return {
         message: `stateOverrides exceeds max of ${MAX_STATE_OVERRIDES}`,
         reason: 'too_many',
       };
+    }
+    // Reject ALL TokenBalanceOverride entries on mainnet ETH input. The
+    // simulator unconditionally substitutes `from` with
+    // BEACON_CHAIN_DEPOSIT_ADDRESS for that case (backwards-compat
+    // requirement per the rollout plan), so any balance override —
+    // native OR ERC-20 — credits the swapper account that the simulator
+    // never reads. Letting these through would silently produce a
+    // simulation against a different account state than the client
+    // intended. Surface the mismatch at the API boundary.
+    //
+    // RawStateOverride is still allowed: many raw writes (hook
+    // permissions, adapter allowlists, contract code) are independent
+    // of the sender. Clients using sender-dependent raw writes on
+    // mainnet ETH input get unexpected results — accepted tradeoff
+    // until BEACON substitution moves to the TAPI side.
+    //
+    // The API accepts native input as either the zero address OR the
+    // chain's native-currency symbol (e.g. `"ETH"`), so the precheck
+    // must catch both forms.
+    const isMainnetEthInput =
+      chainId === ChainId.MAINNET &&
+      (isNativeAddress(tokenInAddress) ||
+        tokenInAddress.toUpperCase() === 'ETH');
+    if (
+      isMainnetEthInput &&
+      overrides.some(o => o.kind.case === 'tokenBalance')
+    ) {
+      return {
+        message:
+          'TokenBalanceOverride is not supported on mainnet ETH input; simulation uses BEACON_CHAIN_DEPOSIT_ADDRESS as sender so the override would credit an account the simulator never reads',
+        reason: 'token_balance_override_unsupported_for_mainnet_eth_input',
+      };
+    }
+    // Reject multiple TokenBalanceOverride entries that target the same
+    // logical (token, account) pair, even with different
+    // balanceMappingSlot values. Each entry produces a separate storage
+    // write at the resolver level, but only the slot matching the token's
+    // real balance layout is meaningful — the others are dead storage
+    // writes. Picking which one is "authoritative" for the pre-sim guard
+    // would be order-dependent and nondeterministic from the API
+    // consumer's perspective. Forcing the client to pick one collapses
+    // the ambiguity at the boundary.
+    const seenBalanceTargets = new Set<string>();
+    for (const override of overrides) {
+      if (override.kind.case !== 'tokenBalance') continue;
+      const {tokenAddress, accountAddress} = override.kind.value;
+      if (!isAddress(tokenAddress) || !isAddress(accountAddress)) continue;
+      const key = `${tokenAddress.toLowerCase()}:${accountAddress.toLowerCase()}`;
+      if (seenBalanceTargets.has(key)) {
+        return {
+          message:
+            'Multiple TokenBalanceOverride entries for the same (tokenAddress, accountAddress) are not allowed',
+          reason: 'duplicate_balance_target',
+        };
+      }
+      seenBalanceTargets.add(key);
     }
     for (const override of overrides) {
       const kind = override.kind;
@@ -290,6 +362,18 @@ export class QuoteRequestValidator {
           };
         }
         const entries = Object.entries(stateDiff);
+        // Reject no-op entries: a RawStateOverride with neither
+        // stateDiff entries nor a codeOverride applies no state but
+        // would still flip override-path gating (e.g. skips the
+        // eth_estimateGas fast path) and incur extra latency for no
+        // semantic effect. Force the client to omit empty entries.
+        if (entries.length === 0 && codeOverride === undefined) {
+          return {
+            message:
+              'RawStateOverride must contain at least one stateDiff entry or a codeOverride',
+            reason: 'empty_raw_state',
+          };
+        }
         if (entries.length > MAX_STATE_DIFF_ENTRIES) {
           return {
             message: `RawStateOverride.stateDiff exceeds max of ${MAX_STATE_DIFF_ENTRIES} entries`,

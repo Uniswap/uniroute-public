@@ -5,6 +5,7 @@ import {ChainId} from '../../lib/config';
 import {SwapOptionsUniversalRouter} from './sor-port/simulation-provider';
 import {Context} from '@uniswap/lib-uni/context';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
+import {ResolvedStateOverride} from './ResolvedStateOverride';
 
 // Wrapper for the fallback simulator that was ported from SOR as is.
 export class MainSimulator implements ISimulator {
@@ -25,7 +26,8 @@ export class MainSimulator implements ISimulator {
     quoteAmount: bigint,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     const fallbackTenderlySimulator =
       this.fallbackTenderlySimulators.get(chainId)!;
@@ -39,7 +41,8 @@ export class MainSimulator implements ISimulator {
       quoteAmount,
       ctx,
       gasPrice,
-      blockNumber
+      blockNumber,
+      stateOverrides
     );
   }
 }

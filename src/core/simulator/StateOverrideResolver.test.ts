@@ -7,7 +7,10 @@ import {
 } from '../../../gen/uniroute/v1/api_pb';
 import {ChainId} from '../../lib/config';
 import {NATIVE_TOKEN_SENTINEL} from './TokenBalanceSlotResolver';
-import {StateOverrideResolver} from './StateOverrideResolver';
+import {
+  detectDuplicateResolvedWrites,
+  StateOverrideResolver,
+} from './StateOverrideResolver';
 
 function fakeCtx(): Context {
   return {
@@ -207,5 +210,88 @@ describe('StateOverrideResolver', () => {
         tags: expect.arrayContaining(['chain:1']),
       })
     );
+  });
+});
+
+describe('detectDuplicateResolvedWrites', () => {
+  const CONTRACT = '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa';
+  const SLOT_A =
+    '0x0000000000000000000000000000000000000000000000000000000000000001';
+  const SLOT_B =
+    '0x0000000000000000000000000000000000000000000000000000000000000002';
+  const VALUE =
+    '0x0000000000000000000000000000000000000000000000000000000000000064';
+
+  it('returns null for non-overlapping bundle (different contracts)', () => {
+    expect(
+      detectDuplicateResolvedWrites([
+        {contractAddress: CONTRACT, stateDiff: new Map([[SLOT_A, VALUE]])},
+        {
+          contractAddress: '0xBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBb',
+          stateDiff: new Map([[SLOT_A, VALUE]]),
+        },
+      ])
+    ).toBeNull();
+  });
+
+  it('returns null when same contract writes DIFFERENT slots', () => {
+    expect(
+      detectDuplicateResolvedWrites([
+        {contractAddress: CONTRACT, stateDiff: new Map([[SLOT_A, VALUE]])},
+        {contractAddress: CONTRACT, stateDiff: new Map([[SLOT_B, VALUE]])},
+      ])
+    ).toBeNull();
+  });
+
+  it('flags two stateDiff entries that target the same (contract, slot)', () => {
+    expect(
+      detectDuplicateResolvedWrites([
+        {contractAddress: CONTRACT, stateDiff: new Map([[SLOT_A, VALUE]])},
+        {
+          contractAddress: CONTRACT,
+          stateDiff: new Map([[SLOT_A, '0x' + '0'.repeat(64)]]),
+        },
+      ])
+    ).toContain(SLOT_A);
+  });
+
+  it('flags two entries that both set `balance` on the same account', () => {
+    expect(
+      detectDuplicateResolvedWrites([
+        {contractAddress: CONTRACT, balance: 100n},
+        {contractAddress: CONTRACT, balance: 200n},
+      ])
+    ).toContain('balance');
+  });
+
+  it('flags two entries that both set `code` on the same contract', () => {
+    expect(
+      detectDuplicateResolvedWrites([
+        {contractAddress: CONTRACT, codeOverride: '0xdead'},
+        {contractAddress: CONTRACT, codeOverride: '0xbeef'},
+      ])
+    ).toContain('code');
+  });
+
+  it('flags a no-op duplicate (same value) — caller intent is still ambiguous', () => {
+    // The reviewer's edge case: a TokenBalanceOverride + a raw write of
+    // the same slot with the same value. Encoder last-wins ends at the
+    // same state, but two entries claiming the same write is still
+    // ambiguous from the API's perspective — reject so the client knows
+    // to drop one.
+    expect(
+      detectDuplicateResolvedWrites([
+        {
+          contractAddress: CONTRACT,
+          stateDiff: new Map([[SLOT_A, VALUE]]),
+          balanceTarget: {
+            account: '0x000000000000000000000000000000000000dEaD',
+            amount: 100n,
+            slot: SLOT_A,
+          },
+        },
+        {contractAddress: CONTRACT, stateDiff: new Map([[SLOT_A, VALUE]])},
+      ])
+    ).toContain(SLOT_A);
   });
 });

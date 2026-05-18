@@ -55,6 +55,7 @@ import {SwapInfo} from '../models/quote/SwapInfo';
 import {BaseQuoteStrategy} from './strategy/BaseQuoteStrategy';
 import {DummySimulator} from './simulator/DummySimulator';
 import {ISimulator, SimulationStatus} from './simulator/ISimulator';
+import {StateOverrideResolver} from './simulator/StateOverrideResolver';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {ArbitrumGasDataProvider} from './gas/gas-data-provider';
 import {BaseProvider} from '@ethersproject/providers';
@@ -496,6 +497,7 @@ describe('UniRouteBL', () => {
   };
 
   const mockedRpcProviderMap = new Map<ChainId, JsonRpcProvider>();
+  const stateOverrideResolver = new StateOverrideResolver();
 
   // Add a mock provider for MAINNET to prevent undefined errors
   const mockProvider = {
@@ -532,7 +534,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // First call should not use cached routes because cache is empty
@@ -571,7 +574,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -607,7 +611,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // First call should not use cached routes because cache is empty
@@ -646,7 +651,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -697,7 +703,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
     // Minimal Headers stand-in to avoid the lint warning about the
@@ -836,7 +843,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -873,7 +881,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -918,7 +927,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -955,7 +965,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -997,7 +1008,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // Populate the Uniswap cache
@@ -1052,7 +1064,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // First call: cache miss → async saves
@@ -1092,7 +1105,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, mixedRequest);
@@ -1133,7 +1147,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // Mixed protocol first call: cache miss (nothing saved yet for this key)
@@ -1174,7 +1189,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // First call: cache miss → async saves with mixed protocols
@@ -1236,7 +1252,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1281,7 +1298,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1340,7 +1358,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1401,7 +1420,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1464,7 +1484,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1583,7 +1604,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1748,7 +1770,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1845,7 +1868,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1949,7 +1973,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2041,7 +2066,8 @@ describe('UniRouteBL', () => {
         new FailingSimulator(),
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -2087,7 +2113,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -2129,7 +2156,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.getCachedRoutes(ctx, request);
@@ -2166,7 +2194,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // Manually create a dummy route and cache it
@@ -2269,7 +2298,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -2313,7 +2343,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -2357,7 +2388,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -2459,7 +2491,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2573,7 +2606,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2639,7 +2673,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2750,7 +2785,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2862,7 +2898,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2974,7 +3011,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -3078,7 +3116,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -3154,7 +3193,8 @@ describe('UniRouteBL', () => {
         trackingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -3207,7 +3247,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // No universalRouterVersion in options → defaults to V2_0 → simulation runs
@@ -3261,7 +3302,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -3316,7 +3358,8 @@ describe('UniRouteBL', () => {
         failingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -3376,7 +3419,8 @@ describe('UniRouteBL', () => {
         trackingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, requestWithoutSimulate, {
@@ -3419,7 +3463,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.deleteCachedRoutes(ctx, request);
@@ -3457,7 +3502,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // First, manually create a dummy route and cache it
@@ -3586,7 +3632,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -3688,7 +3735,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -3771,7 +3819,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -3854,7 +3903,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -3937,7 +3987,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4006,7 +4057,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4080,7 +4132,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4154,7 +4207,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4228,7 +4282,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4302,7 +4357,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const responseAt100 = await uniRouteBL.quote(ctx, request);
@@ -4370,7 +4426,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const responseAtNeg100 = await uniRouteBLNeg100.quote(ctx, request);
@@ -4436,7 +4493,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const responseAt0 = await uniRouteBL0.quote(ctx, request);
@@ -4598,7 +4656,8 @@ describe('UniRouteBL', () => {
         preservingSimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4656,7 +4715,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -4742,7 +4802,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4784,7 +4845,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // Sync + cache miss + all protocols = should NOT use reduced config
@@ -4830,7 +4892,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4868,7 +4931,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
       await asyncBL.quote(ctx, request);
 
@@ -4897,7 +4961,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await syncBL.quote(ctx, request);
@@ -4935,7 +5000,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // Async + cache miss should NOT use reduced config even with partial protocols
@@ -4979,7 +5045,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // QuickRoute sync + cache miss + partial protocols should NOT use reduced config
@@ -5180,7 +5247,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5220,7 +5288,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5264,7 +5333,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5309,7 +5379,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5354,7 +5425,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5406,7 +5478,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5458,7 +5531,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -5510,7 +5584,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // External protocol without testAggHooks — treated as unexpected.
@@ -5567,7 +5642,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       // External protocol + testAggHooks=true — this is the expected path.
@@ -5632,7 +5708,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5668,7 +5745,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5760,7 +5838,8 @@ describe('UniRouteBL', () => {
         dummySimulator,
         quoteRequestValidator,
         tokenProvider,
-        mockedRpcProviderMap
+        mockedRpcProviderMap,
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);

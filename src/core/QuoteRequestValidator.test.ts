@@ -38,7 +38,8 @@ describe('QuoteRequestValidator', () => {
 
     validator = new QuoteRequestValidator(
       mockChainRepository,
-      mockTokenProvider
+      mockTokenProvider,
+      [ChainId.MAINNET, ChainId.BASE, ChainId.SEPOLIA]
     );
   });
 
@@ -562,6 +563,235 @@ describe('QuoteRequestValidator', () => {
 
         const result = await validator.validateInputs(request, ctx);
         expect(result).toBeUndefined();
+      });
+
+      it('rejects stateOverrides on an unsupported chain', async () => {
+        // Validator was constructed with [MAINNET, BASE, SEPOLIA] as the
+        // override-supported allowlist; POLYGON is outside it. Even a
+        // perfectly well-formed override bundle must be rejected so we
+        // don't route it into a sim backend that can't apply overrides.
+        const mockChain = createMockChain(ChainId.POLYGON);
+        vi.mocked(mockChainRepository.getChain).mockResolvedValue(mockChain);
+        const request = createValidRequest();
+        request.tokenInChainId = ChainId.POLYGON;
+        request.tokenOutChainId = ChainId.POLYGON;
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toMatch(/not supported on chainId/);
+      });
+
+      it('rejects ERC-20 TokenBalanceOverride on mainnet ETH input (broadened rule — any tokenBalance fails)', async () => {
+        // ALL TokenBalanceOverride entries are rejected on mainnet ETH
+        // input, not just native ones. ERC-20 balance overrides credit
+        // the swapper's slot, but the simulator runs as BEACON so the
+        // override is wasted regardless of token kind.
+        setupValidChain();
+        const request = createValidRequest();
+        request.tokenInAddress = 'ETH';
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                // ERC-20 (USDC) — not native.
+                tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1000000',
+                balanceMappingSlot: '9',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toMatch(/BEACON_CHAIN_DEPOSIT_ADDRESS/);
+      });
+
+      it('rejects native TokenBalanceOverride on mainnet ETH input (zero address form)', async () => {
+        // BEACON_CHAIN_DEPOSIT_ADDRESS substitution on mainnet ETH input
+        // means simulation never reads the swapper's native balance.
+        // Accepting this combination would either falsely reject pre-sim
+        // (override < needed) or falsely succeed (override >= needed)
+        // without the override actually applying. Surface at the API.
+        setupValidChain();
+        const request = createValidRequest();
+        request.tokenInAddress = '0x0000000000000000000000000000000000000000';
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1000000000000000000',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toMatch(/BEACON_CHAIN_DEPOSIT_ADDRESS/);
+      });
+
+      it('rejects native TokenBalanceOverride on mainnet ETH input (symbol form)', async () => {
+        // The API also accepts the native-currency symbol as
+        // `tokenInAddress`. The guard must catch both forms — clients
+        // commonly send `"ETH"` rather than the zero address.
+        setupValidChain();
+        const request = createValidRequest();
+        request.tokenInAddress = 'ETH';
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1000000000000000000',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toMatch(/BEACON_CHAIN_DEPOSIT_ADDRESS/);
+      });
+
+      it('allows native TokenBalanceOverride on non-mainnet (e.g. Sepolia)', async () => {
+        // Sepolia: swapper is always `from`, so native overrides are
+        // real. Must not be caught by the mainnet-specific guard.
+        const mockChain = createMockChain(ChainId.SEPOLIA);
+        vi.mocked(mockChainRepository.getChain).mockResolvedValue(mockChain);
+        vi.mocked(mockTokenProvider.searchForToken).mockImplementation(
+          async (chain, tokenRaw) => {
+            return new CurrencyInfo(
+              tokenRaw === '0x0000000000000000000000000000000000000000',
+              new Address(
+                tokenRaw === '0x0000000000000000000000000000000000000000'
+                  ? '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'
+                  : '0x2222222222222222222222222222222222222222'
+              )
+            );
+          }
+        );
+        const request = createValidRequest();
+        request.tokenInChainId = ChainId.SEPOLIA;
+        request.tokenOutChainId = ChainId.SEPOLIA;
+        request.tokenInAddress = '0x0000000000000000000000000000000000000000';
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1000000000000000000',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result).toBeUndefined();
+      });
+
+      it('allows native TokenBalanceOverride on mainnet ERC-20 input', async () => {
+        // Mainnet ERC-20 input: swapper is still `from` (no BEACON swap),
+        // so a native override on the swapper is real (e.g. fund gas).
+        setupValidChain();
+        const request = createValidRequest();
+        // tokenInAddress is a non-native ERC-20 (already set non-native
+        // by createValidRequest with 0x1111...).
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1000000000000000000',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result).toBeUndefined();
+      });
+
+      it('rejects duplicate (token, account) across TokenBalanceOverride entries', async () => {
+        // Even with different balanceMappingSlot values, two entries
+        // targeting the same logical balance are ambiguous: only one
+        // slot is the token's real balance slot, and the pre-sim guard
+        // would pick a candidate by request order. Force the client to
+        // collapse the ambiguity.
+        setupValidChain();
+        const request = createValidRequest();
+        const sharedToken = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+        const sharedAccount = '0x000000000000000000000000000000000000dEaD';
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: sharedToken,
+                accountAddress: sharedAccount,
+                amount: '1000',
+                balanceMappingSlot: '5',
+              }),
+            },
+          }),
+          new StateOverride({
+            kind: {
+              case: 'tokenBalance',
+              value: new TokenBalanceOverride({
+                tokenAddress: sharedToken,
+                accountAddress: sharedAccount,
+                amount: '2000',
+                balanceMappingSlot: '10',
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toMatch(/Multiple TokenBalanceOverride/);
+      });
+
+      it('rejects an empty RawStateOverride (no stateDiff and no codeOverride)', async () => {
+        // A rawState entry with valid contractAddress but no actual
+        // state writes is a no-op that would still flip override-path
+        // gating (skipping the eth_estimateGas fast path, etc.) for no
+        // semantic effect. Reject so clients don't pay latency for an
+        // empty payload.
+        setupValidChain();
+        const request = createValidRequest();
+        request.stateOverrides = [
+          new StateOverride({
+            kind: {
+              case: 'rawState',
+              value: new RawStateOverride({
+                contractAddress: '0x3333333333333333333333333333333333333333',
+                // stateDiff and codeOverride both omitted.
+              }),
+            },
+          }),
+        ];
+        const result = await validator.validateInputs(request, ctx);
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toMatch(
+          /at least one stateDiff entry or a codeOverride/
+        );
       });
 
       it('rejects > 16 entries', async () => {

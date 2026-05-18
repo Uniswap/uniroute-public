@@ -13,6 +13,7 @@ import {TradeType} from '../../../models/quote/TradeType';
 import {GasConverter} from '../../gas/converter/GasConverter';
 import {BigNumber} from '@ethersproject/bignumber';
 import {SimulationStatus} from '../ISimulator';
+import {ResolvedStateOverride} from '../ResolvedStateOverride';
 
 // We multiply eth estimate gas by this to add a buffer for gas limits
 const DEFAULT_ESTIMATE_MULTIPLIER = 1.2;
@@ -39,6 +40,10 @@ export class EthEstimateGasSimulator extends Simulator {
     ctx: Context,
     blockNumber?: number
   ): Promise<QuoteSplit> {
+    // `stateOverrides` is intentionally not threaded here — `eth_estimateGas`
+    // state-override support is a non-standard Geth extension and provider-
+    // dependent. Override-bearing requests are routed to eth_simulateV1 /
+    // Tenderly upstream in `FallbackTenderlySimulator`.
     let estimatedGasUsed: BigNumber;
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
       if (
@@ -47,7 +52,9 @@ export class EthEstimateGasSimulator extends Simulator {
       ) {
         // w/o this gas estimate differs by a lot depending on if user holds enough native balance
         // always estimate gas as if user holds enough balance
-        // so that gas estimate is consistent for UniswapX
+        // so that gas estimate is consistent for UniswapX. Override-bearing
+        // requests never reach this fast path — FallbackTenderlySimulator
+        // routes them to eth_simulateV1/Tenderly where overrides apply.
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       ctx.logger.info('Simulating using eth_estimateGas on Universal Router', {
@@ -142,7 +149,8 @@ export class EthEstimateGasSimulator extends Simulator {
     quoteSplit: QuoteSplit,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    _stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     const inputAmount = quoteSplit.swapInfo!.inputAmount;
     if (

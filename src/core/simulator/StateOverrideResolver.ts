@@ -127,3 +127,40 @@ export class StateOverrideResolver {
     return undefined;
   }
 }
+
+/**
+ * Detects duplicate writes across a resolved bundle. Two entries collide
+ * when they target the same `(contractAddress, slot)`, `(contractAddress,
+ * balance)`, or `(contractAddress, code)` field. The encoder applies
+ * same-target writes last-wins, so any duplicate is ambiguous from the
+ * client's perspective: caller intent is unclear, and a same-value
+ * duplicate would otherwise confuse the pre-sim balance guard. Returns
+ * a human-readable target identifier on collision, or `null` if all
+ * targets are unique.
+ */
+export function detectDuplicateResolvedWrites(
+  resolved: ResolvedStateOverride[]
+): string | null {
+  const seen = new Set<string>();
+  for (const o of resolved) {
+    const contract = o.contractAddress.toLowerCase();
+    if (o.stateDiff) {
+      for (const slot of o.stateDiff.keys()) {
+        const key = `${contract}:slot:${slot.toLowerCase()}`;
+        if (seen.has(key)) return `${contract}/slot/${slot}`;
+        seen.add(key);
+      }
+    }
+    if (o.balance !== undefined) {
+      const key = `${contract}:balance`;
+      if (seen.has(key)) return `${contract}/balance`;
+      seen.add(key);
+    }
+    if (o.codeOverride !== undefined) {
+      const key = `${contract}:code`;
+      if (seen.has(key)) return `${contract}/code`;
+      seen.add(key);
+    }
+  }
+  return null;
+}

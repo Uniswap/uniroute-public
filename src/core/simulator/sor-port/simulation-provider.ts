@@ -16,10 +16,25 @@ import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {ChainId} from '../../../lib/config';
 import {CurrencyInfo} from '../../../models/currency/CurrencyInfo';
 import {SimulationStatus} from '../ISimulator';
+import {ResolvedStateOverride} from '../ResolvedStateOverride';
 
 export enum SwapType {
   UNIVERSAL_ROUTER,
   SWAP_ROUTER_02, // Not supported in UniRoute
+}
+
+/**
+ * Result of the pre-sim balance-override probe (`evaluateBalanceOverride`).
+ * Decides whether to skip the live RPC balance check, return
+ * INSUFFICIENT_BALANCE directly, or fall through to the live check.
+ */
+export enum BalanceOverrideOutcome {
+  /** balanceTarget covers (fromAddress, tokenIn) with amount >= needed. */
+  Sufficient = 'override-sufficient',
+  /** balanceTarget covers the pair but amount < needed; skip sim. */
+  Insufficient = 'override-insufficient',
+  /** No matching balanceTarget; fall through to live RPC check. */
+  NoAuthoritativeOverride = 'no-authoritative-override',
 }
 
 // Swap options for Universal Router and Permit2.
@@ -68,9 +83,45 @@ export abstract class Simulator {
     quoteAmount: bigint,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
+    const balanceOverrideOutcome = this.evaluateBalanceOverride(
+      fromAddress,
+      quoteSplit.swapInfo!.tradeType,
+      tokenInCurrencyInfo,
+      inputAmount,
+      quoteAmount,
+      stateOverrides
+    );
+
+    // Override says the account is not funded enough — sim would revert
+    // against the overridden state, no point spending a Tenderly call.
+    if (balanceOverrideOutcome === BalanceOverrideOutcome.Insufficient) {
+      ctx.logger.info(
+        'Authoritative balance override is below needed amount; skipping sim.'
+      );
+      return {
+        ...quoteSplit,
+        simulationResult: {
+          estimatedGasUsed: 0n,
+          estimatedGasUsedInQuoteToken: 0n,
+          estimatedGasUsedInUSD: 0,
+          status: SimulationStatus.INSUFFICIENT_BALANCE,
+          description:
+            'State override sets account balance below needed amount.',
+        },
+      };
+    }
+
+    if (balanceOverrideOutcome === BalanceOverrideOutcome.Sufficient) {
+      await ctx.metrics.count('SimulationBalanceCheckSkipped', 1, {
+        tags: [`chain:${this.chainId}`],
+      });
+    }
+
     if (
+      balanceOverrideOutcome === BalanceOverrideOutcome.Sufficient ||
       // we assume we always have enough eth mainnet balance because we use beacon address later
       (tokenInCurrencyInfo.isNative && this.chainId === ChainId.MAINNET) ||
       (await this.userHasSufficientBalance(
@@ -93,7 +144,8 @@ export abstract class Simulator {
           quoteSplit,
           ctx,
           gasPrice,
-          blockNumber
+          blockNumber,
+          stateOverrides
         );
       } catch (e) {
         ctx.logger.error('Error simulating transaction', {e});
@@ -129,8 +181,66 @@ export abstract class Simulator {
     quoteSplit: QuoteSplit,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit>;
+
+  /**
+   * Decide how to handle the pre-sim balance check when state overrides
+   * are in play. The override is treated as authoritative — if TAPI says
+   * "this account has X balance", we evaluate against X, not against
+   * the live on-chain balance.
+   *
+   * Returns one of (see `BalanceOverrideOutcome`):
+   *   - Sufficient: a balanceTarget covers (fromAddress, tokenIn) with
+   *     amount >= needed. Skip the live check, run sim.
+   *   - Insufficient: a balanceTarget covers the pair but its amount is
+   *     < needed. Don't waste a sim call — sim would revert against the
+   *     overridden state regardless. Return INSUFFICIENT_BALANCE directly.
+   *   - NoAuthoritativeOverride: no balanceTarget for the pair. Fall
+   *     through to the live RPC balance check.
+   *
+   * We rely on the resolver-issued `balanceTarget` rather than a string
+   * match on `stateDiff` keys — a bare stateDiff entry on the input-token
+   * contract isn't proof the swapper's balance slot was funded (could be
+   * an allowance slot, totalSupply, etc.).
+   *
+   * Same-slot collisions across entries are rejected upstream at the BL
+   * via `detectDuplicateResolvedWrites`, so each (contract, slot/balance)
+   * target is written by at most one entry by the time we get here. We
+   * therefore don't need to reason about last-wins ordering.
+   */
+  private evaluateBalanceOverride(
+    fromAddress: string,
+    tradeType: TradeType,
+    tokenInCurrencyInfo: CurrencyInfo,
+    inputAmount: bigint,
+    quoteAmount: bigint,
+    stateOverrides?: ResolvedStateOverride[]
+  ): BalanceOverrideOutcome {
+    if (!stateOverrides || stateOverrides.length === 0) {
+      return BalanceOverrideOutcome.NoAuthoritativeOverride;
+    }
+    const neededAmount =
+      tradeType === TradeType.ExactIn ? inputAmount : quoteAmount;
+    const from = fromAddress.toLowerCase();
+    const tokenInWrapped =
+      tokenInCurrencyInfo.wrappedAddress.address.toLowerCase();
+
+    for (const o of stateOverrides) {
+      if (!o.balanceTarget) continue;
+      if (o.balanceTarget.account.toLowerCase() !== from) continue;
+      if (tokenInCurrencyInfo.isNative) {
+        if (o.balance === undefined) continue;
+      } else if (o.contractAddress.toLowerCase() !== tokenInWrapped) {
+        continue;
+      }
+      return o.balanceTarget.amount >= neededAmount
+        ? BalanceOverrideOutcome.Sufficient
+        : BalanceOverrideOutcome.Insufficient;
+    }
+    return BalanceOverrideOutcome.NoAuthoritativeOverride;
+  }
 
   protected async userHasSufficientBalance(
     fromAddress: string,

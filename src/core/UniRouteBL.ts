@@ -78,6 +78,11 @@ import {usdGasTokensByChain} from './gas/gas-helpers';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
 import {ISimulator, SimulationStatus} from './simulator/ISimulator';
+import {ResolvedStateOverride} from './simulator/ResolvedStateOverride';
+import {
+  StateOverrideResolver,
+  detectDuplicateResolvedWrites,
+} from './simulator/StateOverrideResolver';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {IQuoteRequestValidator} from './QuoteRequestValidator';
@@ -200,7 +205,8 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly simulator: ISimulator,
     private readonly quoteRequestValidator: IQuoteRequestValidator,
     private readonly tokenProvider: ITokenProvider,
-    private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>
+    private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
+    private readonly stateOverrideResolver: StateOverrideResolver
   ) {}
 
   /**
@@ -405,6 +411,64 @@ export class UniRouteBL implements IUniRoutedBL {
         });
       }
 
+      // Resolve client-supplied state overrides. The validator gates every
+      // shape the resolver can throw on, so a non-zero failedCount in the
+      // production path means validator ↔ resolver drift (server bug) —
+      // fail fast with a 4xx so the drift surfaces immediately instead of
+      // silently simulating against incomplete state.
+      //
+      // Post-resolve we also reject any bundle whose resolved entries
+      // collide on the same (contract, slot), (contract, balance), or
+      // (contract, code) write. The encoder applies last-wins, so a
+      // duplicate is ambiguous from the client's perspective and would
+      // either silently overwrite earlier intent or (for a same-value
+      // no-op) cause the pre-sim guard to false-fallback to live RPC.
+      // Failing fast at validation keeps both the simulator path and the
+      // pre-sim guard simple.
+      let resolvedStateOverrides: ResolvedStateOverride[] | undefined;
+      if (request.stateOverrides.length > 0) {
+        const result = await this.stateOverrideResolver.resolve(
+          request.stateOverrides,
+          chain.chainId,
+          ctx
+        );
+        if (result.failedCount > 0) {
+          metricTags.push(`status:${QuoteStatus.NoRoute}`);
+          metricTags.push('reason:state_override_resolve_failed');
+          await emitCallMetrics(metricTags);
+          return new QuoteResponse({
+            error: {
+              code: 400,
+              message: `${result.failedCount} state override(s) could not be resolved; check STATE_OVERRIDE_NOT_APPLIED logs for per-entry detail`,
+            },
+            hitsCachedRoutes: false,
+          });
+        }
+        const collision = detectDuplicateResolvedWrites(result.resolved);
+        if (collision) {
+          metricTags.push(`status:${QuoteStatus.NoRoute}`);
+          metricTags.push('reason:state_override_duplicate_write');
+          await emitCallMetrics(metricTags);
+          return new QuoteResponse({
+            error: {
+              code: 400,
+              message: `Duplicate state override write at ${collision}; each (contract, slot/balance/code) target must be written by at most one entry`,
+            },
+            hitsCachedRoutes: false,
+          });
+        }
+        resolvedStateOverrides = result.resolved;
+        if (resolvedStateOverrides.length > 0) {
+          await ctx.metrics.count(
+            'SimulationStateOverridesApplied',
+            resolvedStateOverrides.length,
+            {
+              tags: [`chain:${chain.chainId}`],
+            }
+          );
+        }
+      }
+
       // Do portion adjustments if needed for ExactOut.
       if (tradeType === TradeType.ExactOut) {
         const portionAmount = getPortionAmount(
@@ -577,7 +641,8 @@ export class UniRouteBL implements IUniRoutedBL {
         options,
         metricTags,
         requestBlockNumber,
-        gasPrice
+        gasPrice,
+        resolvedStateOverrides
       );
 
       let status = QuoteStatus.Pending;
@@ -1345,7 +1410,8 @@ export class UniRouteBL implements IUniRoutedBL {
     options: QuoteOptions | undefined,
     metricTags: string[],
     requestBlockNumber: number | undefined,
-    gasPrice: bigint | undefined
+    gasPrice: bigint | undefined,
+    resolvedStateOverrides: ResolvedStateOverride[] | undefined
   ): Promise<{
     bestQuoteCandidates: QuoteSplit[];
     bestQuote: QuoteSplit | undefined;
@@ -1433,7 +1499,8 @@ export class UniRouteBL implements IUniRoutedBL {
       gasPrice,
       requestBlockNumber,
       options?.permit2Disabled ?? false,
-      options?.universalRouterVersion
+      options?.universalRouterVersion,
+      resolvedStateOverrides
     );
 
     return {bestQuoteCandidates, bestQuote};
@@ -2644,7 +2711,8 @@ export class UniRouteBL implements IUniRoutedBL {
     gasPrice?: bigint,
     blockNumber?: number,
     permit2Disabled: boolean = false,
-    universalRouterVersion?: UniversalRouterVersion
+    universalRouterVersion?: UniversalRouterVersion,
+    resolvedStateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit | undefined> {
     if (topNQuotes.length === 0) {
       return undefined;
@@ -2886,7 +2954,8 @@ export class UniRouteBL implements IUniRoutedBL {
           simulationQuote.quotes.reduce((sum, quote) => sum + quote.amount, 0n),
           ctx,
           gasPrice,
-          blockNumber
+          blockNumber,
+          resolvedStateOverrides
         );
 
         // Log simulation latency and status

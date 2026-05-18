@@ -17,6 +17,11 @@ import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {TradeType} from '../../../models/quote/TradeType';
 import {GasConverter} from '../../gas/converter/GasConverter';
 import {SimulationStatus} from '../ISimulator';
+import {ResolvedStateOverride} from '../ResolvedStateOverride';
+import {
+  encodeGethStateOverrides,
+  GethStateOverrideMap,
+} from './stateOverrideEncoders';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {constants} from 'ethers';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
@@ -32,6 +37,7 @@ interface BlockStateCalls {
 
 interface BlockStateCall {
   calls: SimulateV1Call[];
+  stateOverrides?: GethStateOverrideMap;
 }
 
 interface SimulateV1Call {
@@ -99,7 +105,8 @@ export class EthSimulateV1Simulator extends Simulator {
     quoteSplit: QuoteSplit,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     let estimatedGasUsed: bigint;
     const estimateMultiplier =
@@ -113,7 +120,11 @@ export class EthSimulateV1Simulator extends Simulator {
       ) {
         // w/o this gas estimate differs by a lot depending on if user holds enough native balance
         // always estimate gas as if user holds enough balance
-        // so that gas estimate is consistent for UniswapX
+        // so that gas estimate is consistent for UniswapX. Override-bearing
+        // requests still hit this branch — backwards-compat requirement;
+        // any client-supplied balanceTarget on the swapper's native is
+        // intentionally ignored on mainnet ETH input since BEACON funding
+        // handles the sim.
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       const erc20Interface = ERC20__factory.createInterface();
@@ -197,8 +208,10 @@ export class EthSimulateV1Simulator extends Simulator {
         callCount: expectedCallCount,
       });
       try {
+        const overrideMap = encodeGethStateOverrides(stateOverrides);
         const blockStateCall: BlockStateCall = {
           calls: allCalls,
+          ...(overrideMap ? {stateOverrides: overrideMap} : {}),
         };
         const blockStateCalls: BlockStateCalls = {
           blockStateCalls: [blockStateCall],
@@ -364,10 +377,19 @@ export class EthSimulateV1Simulator extends Simulator {
 
     gasPrice?: bigint,
 
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     const inputAmount = quoteSplit.swapInfo!.inputAmount;
+    const hasOverrides = !!stateOverrides && stateOverrides.length > 0;
+    // Bypass the live-allowance precheck when state overrides are in
+    // play — the client may be supplying an allowance/code override to
+    // make approval succeed at sim time, which the live-RPC check
+    // wouldn't see. If the override doesn't actually fix approval, sim
+    // returns the real revert reason (more informative than a generic
+    // NOT_APPROVED short-circuit).
     if (
+      hasOverrides ||
       quoteSplit.swapInfo!.tokenInIsNative ||
       (await this.checkTokenApproved(
         fromAddress,
@@ -384,7 +406,8 @@ export class EthSimulateV1Simulator extends Simulator {
         quoteSplit,
         ctx,
         gasPrice,
-        blockNumber
+        blockNumber,
+        stateOverrides
       );
     } else {
       ctx.logger.info('Token not approved, skipping simulation');

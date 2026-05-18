@@ -20,6 +20,13 @@ import {
 } from './simulation-provider';
 import {Context} from '@uniswap/lib-uni/context';
 import {BEACON_CHAIN_DEPOSIT_ADDRESS, MAX_UINT160} from '../../../lib/helpers';
+import {ResolvedStateOverride} from '../ResolvedStateOverride';
+import {
+  encodeGethStateOverrides,
+  encodeTenderlyStateObjects,
+  GethStateOverrideMap,
+  TenderlyStateObjects,
+} from './stateOverrideEncoders';
 import {breakDownTenderlySimulationError} from './tenderlySimulationErrorBreakDown';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {ChainId} from '../../../lib/config';
@@ -97,6 +104,7 @@ type TenderlySimulationRequest = {
   block_number?: number;
   save_if_fails?: boolean;
   gas_price?: string; // hex
+  state_objects?: TenderlyStateObjects;
 };
 
 type EthJsonRpcRequestBody = {
@@ -119,7 +127,9 @@ type TenderlyNodeEstimateGasBundleBody = {
   id: number;
   jsonrpc: string;
   method: string;
-  params: Array<Array<EthJsonRpcRequestBody> | blockNumber>;
+  params: Array<
+    Array<EthJsonRpcRequestBody> | blockNumber | GethStateOverrideMap
+  >;
 };
 
 const TENDERLY_BATCH_SIMULATE_API = (
@@ -161,6 +171,8 @@ const TENDERLY_NODE_API = (chainId: ChainId, tenderlyNodeApiKey: string) => {
       return `https://tempo.gateway.tenderly.co/${tenderlyNodeApiKey}`;
     case ChainId.MEGAETH:
       return `https://megaeth.gateway.tenderly.co/${tenderlyNodeApiKey}`;
+    case ChainId.SEPOLIA:
+      return `https://sepolia.gateway.tenderly.co/${tenderlyNodeApiKey}`;
     default:
       throw new Error(
         `ChainId ${chainId} does not correspond to a tenderly node endpoint`
@@ -218,14 +230,21 @@ export class FallbackTenderlySimulator extends Simulator {
     quoteSplit: QuoteSplit,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
+    const hasOverrides = !!stateOverrides && stateOverrides.length > 0;
+
+    // eth_estimateGas state-override support is a non-standard Geth extension
+    // and provider-dependent. When overrides are present, skip the
+    // eth_estimateGas fast-path entirely — never silently drop overrides.
     // Make call to eth estimate gas if possible
     // For erc20s, we must check if the token allowance is sufficient
     // Skip eth_estimateGas for chains without a native token (e.g. Tempo) —
     // these chains use an ERC-20 as their gas token, causing eth_estimateGas
     // to revert with ETH_TRANSFER_FAILED.
     if (
+      !hasOverrides &&
       hasNativeToken(this.chainId) &&
       (quoteSplit.swapInfo!.tokenInIsNative ||
         (await this.checkTokenApproved(
@@ -268,7 +287,8 @@ export class FallbackTenderlySimulator extends Simulator {
             quoteSplit,
             ctx,
             gasPrice,
-            blockNumber
+            blockNumber,
+            stateOverrides
           );
 
         return ethSimulateV1Result;
@@ -279,7 +299,8 @@ export class FallbackTenderlySimulator extends Simulator {
           quoteSplit,
           ctx,
           gasPrice,
-          blockNumber
+          blockNumber,
+          stateOverrides
         );
 
         return tenderlyResult;
@@ -351,7 +372,8 @@ export class TenderlySimulator extends Simulator {
     quoteSplit: QuoteSplit,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     const chainId = this.chainId;
 
@@ -391,7 +413,11 @@ export class TenderlySimulator extends Simulator {
       this.overrideEstimateMultiplier[chainId] ?? DEFAULT_ESTIMATE_MULTIPLIER;
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
-      // simulating from beacon chain deposit address that should always hold **enough balance**
+      // simulating from beacon chain deposit address that should always hold **enough balance**.
+      // Unconditional on mainnet ETH input — backwards-compat requirement.
+      // Override-bearing requests on mainnet ETH still swap to BEACON; any
+      // client-supplied native balanceTarget on the swapper is
+      // intentionally ignored here since BEACON funding handles sim.
       if (
         quoteSplit.swapInfo!.tokenInIsNative &&
         this.chainId === ChainId.MAINNET
@@ -494,7 +520,7 @@ export class TenderlySimulator extends Simulator {
 
       if (useSimulationApi) {
         const {data: resp, status: httpStatus} =
-          await this.requestSimulationApi(simulationCalls, ctx);
+          await this.requestSimulationApi(simulationCalls, ctx, stateOverrides);
 
         const simulationLatency = Date.now() - before;
 
@@ -579,7 +605,11 @@ export class TenderlySimulator extends Simulator {
         }
       } else {
         const {data: resp, status: httpStatus} =
-          await this.requestNodeSimulation(simulationCalls, ctx);
+          await this.requestNodeSimulation(
+            simulationCalls,
+            ctx,
+            stateOverrides
+          );
 
         const simulationLatency = Date.now() - before;
 
@@ -675,7 +705,8 @@ export class TenderlySimulator extends Simulator {
                 const {data: resp, status: httpStatus} =
                   await this.requestSimulationApi(
                     simulationCallsWithSaveIfFails,
-                    ctx
+                    ctx,
+                    stateOverrides
                   );
 
                 ctx.logger.info(
@@ -819,7 +850,8 @@ export class TenderlySimulator extends Simulator {
 
   private async requestNodeSimulation(
     simulationCalls: TenderlySimulationRequest[],
-    ctx: Context
+    ctx: Context,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<{data: TenderlyResponseEstimateGasBundle; status: number}> {
     const nodeEndpoint = TENDERLY_NODE_API(
       this.chainId,
@@ -832,6 +864,7 @@ export class TenderlySimulator extends Simulator {
       swap.block_number !== undefined
         ? '0x' + swap.block_number.toString(16)
         : 'latest';
+    const overrideMap = encodeGethStateOverrides(stateOverrides);
     const body: TenderlyNodeEstimateGasBundleBody = {
       id: 1,
       jsonrpc: '2.0',
@@ -846,6 +879,7 @@ export class TenderlySimulator extends Simulator {
           }),
         })),
         blockNumber,
+        ...(overrideMap ? [overrideMap] : []),
       ],
     };
 
@@ -897,7 +931,8 @@ export class TenderlySimulator extends Simulator {
 
   private async requestSimulationApi(
     simulationCalls: TenderlySimulationRequest[],
-    ctx: Context
+    ctx: Context,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<{data: TenderlyResponseUniversalRouter; status: number}> {
     const url = TENDERLY_BATCH_SIMULATE_API(
       this.tenderlyBaseUrl,
@@ -905,8 +940,26 @@ export class TenderlySimulator extends Simulator {
       this.tenderlyProject
     );
 
+    // Sim API treats `state_objects` per-call; apply the same overrides to
+    // every call in the bundle (approvals + swap) so state persists across
+    // the bundle.
+    //
+    // HAZARD (currently unreachable): if an override touches a slot that
+    // an earlier call in the bundle ALSO mutates (e.g. an allowance slot
+    // overridden alongside a prepended approval), the later call's
+    // `state_objects` re-seeds the slot to the override value, discarding
+    // the prior call's mutation. Not reachable on any chain in
+    // `stateOverridesSupportedChains` today — those chains all route to
+    // `eth_simulateV1Simulator` upstream — but worth revisiting if a
+    // future chain lands in TENDERLY_SIMULATION_API_ONLY_CHAINS without
+    // also being in `ethSimulateV1SupportedChains`.
+    const stateObjects = encodeTenderlyStateObjects(stateOverrides);
+    const callsWithOverrides = stateObjects
+      ? simulationCalls.map(call => ({...call, state_objects: stateObjects}))
+      : simulationCalls;
+
     const body: TenderlySimulationBody = {
-      simulations: simulationCalls,
+      simulations: callsWithOverrides,
       estimate_gas: true,
     };
 

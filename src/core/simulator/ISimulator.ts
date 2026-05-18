@@ -3,6 +3,7 @@ import {ChainId} from '../../lib/config';
 import {SwapOptionsUniversalRouter} from './sor-port/simulation-provider';
 import {Context} from '@uniswap/lib-uni/context';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
+import {ResolvedStateOverride} from './ResolvedStateOverride';
 
 export enum SimulationStatus {
   UNATTEMPTED = 'UNATTEMPTED',
@@ -35,6 +36,7 @@ export interface ISimulator {
     quoteAmount: bigint,
     ctx: Context,
     gasPrice?: bigint,
-    blockNumber?: number
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit>;
 }
