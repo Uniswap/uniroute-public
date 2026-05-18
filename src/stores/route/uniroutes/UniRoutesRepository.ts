@@ -159,7 +159,6 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       poolPromises.push(Promise.resolve([]));
     }
 
-    const fetchPoolsStartTime = Date.now();
     const [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] =
       await Promise.all(poolPromises);
 
@@ -232,10 +231,6 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           ],
         }
       ),
-    ]);
-
-    await logElapsedTime('FetchPools', fetchPoolsStartTime, ctx, [
-      `chain:${ChainId[chain.chainId]}`,
     ]);
 
     // Get cross-liquidity pools if mixed routes are enabled and multiple protocols are requested
@@ -329,7 +324,6 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     // - we could load latest pool info from poolRepository and then use RouteFinder but
     //   this would be slower and more expensive.
     // We only need to load latest pool info for the route we select in the end.
-    const generateRoutesStartTime = Date.now();
     const allRoutes = await this.routeFinder.generateRoutes(
       chain.chainId,
       [
@@ -407,10 +401,6 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       generateMixedRoutes,
       ctx
     );
-    await logElapsedTime('GenerateRoutes', generateRoutesStartTime, ctx, [
-      `chain:${ChainId[chain.chainId]}`,
-    ]);
-
     ctx.logger.debug('Generated route universe observability', {
       chainId: chain.chainId,
       tokenIn: tokenInAddress.toString(),
