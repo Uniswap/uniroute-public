@@ -79,13 +79,57 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    */
   private readonly AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS: bigint;
 
+  /**
+   * Maximum gas units a SOLE-CANDIDATE agg-hook winner is allowed to
+   * exceed the cheapest no-hook quote anywhere in
+   * `percentageToSortedQuotes` by, before the agg-hook is dropped
+   * from the candidate set at that percentage step.
+   *
+   * Background: PR #8195 closed the K-budget gate's early-return leak.
+   * Residual UniRoute-wins bursts on prod (~30-48 per 10 min, peaks at
+   * ~60/min during agg-hook-rich traffic) come from the sole-candidate
+   * path — when `noHookQuotes.length === 0 && aggHookQuotes.length > 0`
+   * at a percentage bucket, the gate has no anchor and the existing
+   * code admits agg-hook by default. PR #8248 instrumentation
+   * (`AggHookSoleCandidateGasComparison{gasVerdict:agghook_more_gas}`)
+   * sampled 200+ emissions in 3 min on prod with gas deltas clustering
+   * at 65k-97k units vs the cheapest no-hook anywhere — the same gas-
+   * overhead signature seen pre-PR-#8195 in the leak data, matching
+   * the Curve+Fluid v4 chain shape.
+   *
+   * Anchor: cheapest no-hook quote across all percentages in
+   * `percentageToSortedQuotes`. That's the alternative DFS would pick
+   * if agg-hook were excluded entirely from the trade. Comparing the
+   * agg-hook leg's gas to this whole-trade fallback is direction- and
+   * percentage-agnostic: per-route gas is dominated by routing/hop
+   * cost, not by the trade's notional size, so a single-hop direct
+   * route at percentage=100 (~97k gas) is a meaningful baseline
+   * against a 70%-allocation agg-hook leg (~162k gas).
+   *
+   * Defaults to 0n (strict — reject any extra gas). Constructor-
+   * settable for tests. Bump this if prod data shows legitimate
+   * agg-hook sole candidates being dropped (e.g. small fixed
+   * overhead routes that are still net-better than the no-hook
+   * fallback after raw-amount comparison downstream).
+   *
+   * When the agg-hook winner has no `gasDetails.gasUse`, OR there is
+   * no no-hook quote anywhere in `percentageToSortedQuotes` to anchor
+   * against, the gate admits — preserves test-mock compatibility and
+   * avoids leaving a trade with no route when agg-hook is the only
+   * option.
+   */
+  private readonly AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS: bigint;
+
   constructor(
     aggHookPartitionToleranceBps: bigint = 0n,
-    aggHookPartitionGasToleranceUnits: bigint = 0n
+    aggHookPartitionGasToleranceUnits: bigint = 0n,
+    aggHookSoleCandidateGasToleranceUnits: bigint = 0n
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
       aggHookPartitionGasToleranceUnits;
+    this.AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS =
+      aggHookSoleCandidateGasToleranceUnits;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -257,12 +301,39 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         noHookBudgetIfPartitioned,
         tradeType
       );
-    const noHookBudget = useBothPopulatedPartition
-      ? noHookBudgetIfPartitioned
-      : noHookQuotes.length > 0
-        ? k
-        : 0;
-    const aggHookBudget = k - noHookBudget;
+    // Sole-candidate gate: when only agg-hook quotes are present at
+    // this percentage, the K-budget partition gate has no no-hook
+    // anchor and would otherwise admit agg-hook by default. Compare
+    // against the cheapest no-hook quote anywhere in
+    // `percentageToSortedQuotes` (the alternative DFS would pick if
+    // agg-hook were excluded from the trade) and reject when the
+    // delta exceeds tolerance. See PR #8248 instrumentation for the
+    // prod evidence.
+    const useAggHookSoleCandidate =
+      !bothPresent &&
+      noHookQuotes.length === 0 &&
+      aggHookQuotes.length > 0 &&
+      this.isAggHookSoleCandidateCompetitive(
+        aggHookQuotes,
+        percentageToSortedQuotes,
+        chainId
+      );
+
+    let noHookBudget = 0;
+    let aggHookBudget = 0;
+    if (useBothPopulatedPartition) {
+      noHookBudget = noHookBudgetIfPartitioned;
+      aggHookBudget = k - noHookBudgetIfPartitioned;
+    } else if (noHookQuotes.length > 0) {
+      // Either bothPresent + gate rejected (agg-hook is gas-bad vs
+      // displaced runner-up), or no-hook-only bucket. Either way, all
+      // K slots go to no-hook.
+      noHookBudget = k;
+    } else if (useAggHookSoleCandidate) {
+      aggHookBudget = k;
+    }
+    // else: noHookQuotes.length === 0 && sole-candidate gate rejected.
+    // Both budgets stay 0; bucket has no usable candidates.
 
     const returnedQuotes = [
       ...noHookQuotes.slice(0, noHookBudget),
@@ -331,6 +402,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           aggHookQuotes,
           percentageToSortedQuotes,
           instrumentation
+        );
+        // Sole-candidate gate decision (companion to PartitionDecision):
+        // tells us in prod telemetry how often the gate admitted vs
+        // rejected. The `verdict` tag should track the harmful-case
+        // suppression rate post-fix — admitted should drop relative to
+        // the volume of AggHookSoleCandidateGasComparison emissions
+        // with verdict `agghook_more_gas`.
+        void instrumentation.ctx.metrics.count(
+          buildMetricKey('QuoteBestSplitFinder.SoleCandidateDecision'),
+          1,
+          {
+            tags: [
+              ...instrumentation.metricTags,
+              `testAggHooks:${instrumentation.testAggHooks}`,
+              `tradeType:${instrumentation.tradeType}`,
+              `soleCandidateVerdict:${
+                useAggHookSoleCandidate ? 'admitted' : 'rejected'
+              }`,
+            ],
+          }
         );
       }
     }
@@ -453,6 +544,70 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
+    return true;
+  }
+
+  /**
+   * Returns true if a sole-candidate agg-hook winner (i.e. no no-hook
+   * quote present at this percentage bucket) is competitive enough on
+   * gas to keep in the candidate set. Anchored against the cheapest
+   * no-hook quote anywhere in `percentageToSortedQuotes` — see
+   * `AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS` for the design
+   * rationale and prod evidence.
+   *
+   * Defensive admissions (returns true):
+   *   - `aggHookQuotes.length === 0` (caller guarantees > 0, but
+   *     guard the array access anyway)
+   *   - agg-hook winner has no `gasDetails.gasUse` — preserves test-
+   *     mock compatibility
+   *   - no no-hook quote with gas info exists anywhere — agg-hook is
+   *     the only option for this trade; rejecting it would leave the
+   *     bucket with no candidates and produce a worse user outcome
+   *     than admitting a gas-bad route
+   *
+   * Rejects (returns false) when:
+   *   `aggHookGasUse - cheapestNoHookGasUse > AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS`
+   */
+  private isAggHookSoleCandidateCompetitive(
+    aggHookQuotes: QuoteBasic[],
+    percentageToSortedQuotes: Map<number, QuoteBasic[]>,
+    chainId: ChainId
+  ): boolean {
+    if (aggHookQuotes.length === 0) return false;
+    const aggHookWinner = aggHookQuotes[0];
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+    if (aggHookGasUse === undefined) return true;
+
+    // Find the cheapest no-hook quote anywhere by gasUse. O(total
+    // quotes) — typical buckets are ~5-10 quotes across ~20
+    // percentages, so this is a small constant per sole-candidate
+    // firing.
+    let cheapestNoHookGasUse: bigint | undefined;
+    for (const bucket of percentageToSortedQuotes.values()) {
+      for (const quote of bucket) {
+        const route = quote.route as RouteBasic<TPool>;
+        if (routeUsesAggHook(route, chainId)) continue;
+        const gasUse = quote.gasDetails?.gasUse;
+        if (gasUse === undefined) continue;
+        if (
+          cheapestNoHookGasUse === undefined ||
+          gasUse < cheapestNoHookGasUse
+        ) {
+          cheapestNoHookGasUse = gasUse;
+        }
+      }
+    }
+
+    // No fallback exists; admit agg-hook so the trade has at least
+    // one route.
+    if (cheapestNoHookGasUse === undefined) return true;
+
+    if (aggHookGasUse > cheapestNoHookGasUse) {
+      const gasUseDelta = aggHookGasUse - cheapestNoHookGasUse;
+      if (gasUseDelta > this.AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS) {
+        return false;
+      }
+    }
     return true;
   }
 

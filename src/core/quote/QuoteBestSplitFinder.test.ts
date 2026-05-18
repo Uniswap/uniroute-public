@@ -2156,13 +2156,16 @@ describe('QuoteBestSplitFinder', () => {
       expect(payload.aggHookCount).toBe(1);
       expect((payload.aggHookWinner as {amount: string}).amount).toBe('990');
 
-      // Filter to the original AggHookSoleCandidate metric only; the new
-      // AggHookSoleCandidateGasComparison metric (gasVerdict: tag) is
-      // exercised by its own tests below.
+      // Filter to the original AggHookSoleCandidate metric only; the
+      // newer AggHookSoleCandidateGasComparison (gasVerdict: tag) and
+      // SoleCandidateDecision (soleCandidateVerdict: tag) metrics are
+      // exercised by their own tests below.
       const metricCalls = metricMock().mock.calls.filter(
         c =>
-          !(c[2] as {tags: string[]}).tags.some(t =>
-            t.startsWith('gasVerdict:')
+          !(c[2] as {tags: string[]}).tags.some(
+            t =>
+              t.startsWith('gasVerdict:') ||
+              t.startsWith('soleCandidateVerdict:')
           )
       );
       expect(metricCalls).toHaveLength(1);
@@ -2215,12 +2218,15 @@ describe('QuoteBestSplitFinder', () => {
       }
 
       // Original AggHookSoleCandidate metric: one emission per call.
-      // Filter out the new AggHookSoleCandidateGasComparison emissions
-      // (gasVerdict: tag) which are tested separately below.
+      // Filter out the newer AggHookSoleCandidateGasComparison
+      // (gasVerdict: tag) and SoleCandidateDecision
+      // (soleCandidateVerdict: tag) emissions tested separately.
       const soleCandidateMetricCalls = metricMock().mock.calls.filter(
         c =>
-          !(c[2] as {tags: string[]}).tags.some(t =>
-            t.startsWith('gasVerdict:')
+          !(c[2] as {tags: string[]}).tags.some(
+            t =>
+              t.startsWith('gasVerdict:') ||
+              t.startsWith('soleCandidateVerdict:')
           )
       );
       expect(infoMock().mock.calls).toHaveLength(5);
@@ -3696,6 +3702,276 @@ describe('QuoteBestSplitFinder', () => {
       );
       expect(stats2.returnedCount).toBe(1);
       expect(stats2.quotes.map(q => q.route)).not.toContain(aggHookOverTol);
+    });
+
+    // ----- Sole-candidate gas gate (this PR) -----
+    //
+    // PR #8195 closed the K-budget gate's early-return leak (bothPresent
+    // case with exactly 1 no-hook). The remaining loss-burst path is the
+    // sole-candidate branch where `noHookQuotes.length === 0 &&
+    // aggHookQuotes.length > 0`: the existing code admits agg-hook by
+    // default because there's no no-hook anchor at the percentage. PR
+    // #8248 instrumentation captured 200+ harmful sole-candidate firings
+    // in 3 min of prod with the same Curve+Fluid v4 gas signature.
+    //
+    // The fix extends the gate's gas-use check to this branch using the
+    // cheapest no-hook quote anywhere in `percentageToSortedQuotes` as
+    // the anchor.
+
+    it('rejects sole-candidate agg-hook when gas exceeds cheapest no-hook anywhere (prod loss shape)', () => {
+      // Mirrors the dominant prod PR-#8248 emission: agg-hook at pct=85
+      // uses 162k gas; cheapest no-hook anywhere is a 100% direct route
+      // at pct=100 with 97k gas. Delta = 65k > tolerance 0n → reject.
+      const aggHook = aggHookRouteAt(
+        '0xfb10000000000000000000000000000000000000',
+        85
+      );
+      const cheapestNoHookElsewhere = noHookRouteAt(
+        '0xfb20000000000000000000000000000000000000',
+        100
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          [85, [createMockQuoteWithGasUse(aggHook, 1000n, 162_000n)]],
+          [
+            100,
+            [
+              createMockQuoteWithGasUse(
+                cheapestNoHookElsewhere,
+                1000n,
+                97_000n
+              ),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(0);
+      expect(stats.quotes.map(q => q.route)).not.toContain(aggHook);
+    });
+
+    it('admits sole-candidate agg-hook when gas is competitive with cheapest no-hook anywhere', () => {
+      // Symmetric case: agg-hook uses fewer gas units than the cheapest
+      // no-hook fallback. Gate admits.
+      const aggHook = aggHookRouteAt(
+        '0xfb30000000000000000000000000000000000000',
+        85
+      );
+      const expensiveNoHookElsewhere = noHookRouteAt(
+        '0xfb40000000000000000000000000000000000000',
+        100
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          [85, [createMockQuoteWithGasUse(aggHook, 1000n, 90_000n)]],
+          [
+            100,
+            [
+              createMockQuoteWithGasUse(
+                expensiveNoHookElsewhere,
+                1000n,
+                100_000n
+              ),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(1);
+      expect(stats.quotes.map(q => q.route)).toContain(aggHook);
+    });
+
+    it('admits sole-candidate agg-hook when no no-hook exists anywhere (trade has no fallback)', () => {
+      // The cross-bucket scan finds no no-hook anywhere. Rejecting the
+      // agg-hook would leave the trade with no route, so the gate
+      // admits.
+      const aggHook = aggHookRouteAt(
+        '0xfb50000000000000000000000000000000000000',
+        85
+      );
+      const otherAggHook = aggHookRouteAt(
+        '0xfb60000000000000000000000000000000000000',
+        70
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          [85, [createMockQuoteWithGasUse(aggHook, 1000n, 230_000n)]],
+          [70, [createMockQuoteWithGasUse(otherAggHook, 1000n, 162_000n)]],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(1);
+      expect(stats.quotes.map(q => q.route)).toContain(aggHook);
+    });
+
+    it('admits sole-candidate agg-hook when gas info is missing (preserves test-mock compatibility)', () => {
+      // No gasDetails on the agg-hook → gate skips the comparison and
+      // admits. Mirrors how unit-test fixtures elsewhere in this suite
+      // construct mocks without gas info.
+      const aggHook = aggHookRouteAt(
+        '0xfb70000000000000000000000000000000000000',
+        85
+      );
+      const noHookElsewhere = noHookRouteAt(
+        '0xfb80000000000000000000000000000000000000',
+        100
+      );
+
+      const stats = finder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          [85, [createMockQuote(aggHook, 1000n)]], // no gasDetails
+          [100, [createMockQuoteWithGasUse(noHookElsewhere, 1000n, 97_000n)]],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+
+      expect(stats.returnedCount).toBe(1);
+      expect(stats.quotes.map(q => q.route)).toContain(aggHook);
+    });
+
+    it('honors non-zero gas tolerance on the sole-candidate path', () => {
+      // Tolerance 100k. 65k delta admitted; 120k delta rejected.
+      const tolerantFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        100_000n
+      );
+      const cheapestNoHookElsewhere = noHookRouteAt(
+        '0xfb90000000000000000000000000000000000000',
+        100
+      );
+      const aggHookWithinTol = aggHookRouteAt(
+        '0xfba0000000000000000000000000000000000000',
+        85
+      );
+
+      const stats = tolerantFinder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          // +65k delta → within 100k tolerance → admitted.
+          [85, [createMockQuoteWithGasUse(aggHookWithinTol, 1000n, 162_000n)]],
+          [
+            100,
+            [
+              createMockQuoteWithGasUse(
+                cheapestNoHookElsewhere,
+                1000n,
+                97_000n
+              ),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+      expect(stats.returnedCount).toBe(1);
+      expect(stats.quotes.map(q => q.route)).toContain(aggHookWithinTol);
+
+      const aggHookOverTol = aggHookRouteAt(
+        '0xfbb0000000000000000000000000000000000000',
+        85
+      );
+      const stats2 = tolerantFinder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          // +120k delta → outside 100k tolerance → rejected.
+          [85, [createMockQuoteWithGasUse(aggHookOverTol, 1000n, 217_000n)]],
+          [
+            100,
+            [
+              createMockQuoteWithGasUse(
+                cheapestNoHookElsewhere,
+                1000n,
+                97_000n
+              ),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut
+      );
+      expect(stats2.returnedCount).toBe(0);
+      expect(stats2.quotes.map(q => q.route)).not.toContain(aggHookOverTol);
+    });
+
+    it('emits SoleCandidateDecision metric with verdict reflecting gate outcome', () => {
+      // Verifies the dedicated decision-tracking metric (companion to
+      // PartitionDecision) fires once per sole-candidate firing with
+      // the verdict tag set to admitted/rejected.
+      const aggHookRejected = aggHookRouteAt(
+        '0xfbc0000000000000000000000000000000000000',
+        85
+      );
+      const cheapestNoHookElsewhere = noHookRouteAt(
+        '0xfbd0000000000000000000000000000000000000',
+        100
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        85,
+        new Map<number, QuoteBasic[]>([
+          [85, [createMockQuoteWithGasUse(aggHookRejected, 1000n, 162_000n)]],
+          [
+            100,
+            [
+              createMockQuoteWithGasUse(
+                cheapestNoHookElsewhere,
+                1000n,
+                97_000n
+              ),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactOut,
+        // testAggHooks must be true for the decision metric to emit;
+        // build a minimal instrumentation shim that mirrors the suite
+        // helper used in the partition-decision tests.
+        {
+          ctx: mockContext,
+          tradeType: TradeType.ExactOut,
+          testAggHooks: true,
+          partitionEvictLogBudget: {remaining: 5},
+          soleCandidateLogBudget: {remaining: 5},
+          partitionGasAdjustedLogBudget: {remaining: 5},
+          gateEarlyReturnLeakLogBudget: {remaining: 5},
+          soleCandidateGasComparisonLogBudget: {remaining: 5},
+          metricTags: ['chainId:1'],
+        }
+      );
+
+      const decisionMetrics = (
+        mockContext.metrics.count as ReturnType<typeof vi.fn>
+      ).mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('soleCandidateVerdict:')
+        )
+      );
+      expect(decisionMetrics).toHaveLength(1);
+      expect((decisionMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'soleCandidateVerdict:rejected'
+      );
     });
   });
 });
