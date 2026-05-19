@@ -42,18 +42,34 @@ class TestGasConverter implements IGasConverter {
     quoteTokenAddress: string,
     tokensInfo: Map<string, Erc20Token | null>,
     quotes: QuoteSplit[],
+    ctx: Context
+  ): Promise<void> {
+    await this.updateQuoteBasicsGasDetails(
+      chainId,
+      quoteTokenAddress,
+      tokensInfo,
+      quotes.flatMap(split => split.quotes),
+      ctx
+    );
+  }
+
+  async updateQuoteBasicsGasDetails(
+    chainId: ChainId,
+
+    quoteTokenAddress: string,
+
+    tokensInfo: Map<string, Erc20Token | null>,
+    quotes: QuoteBasic[],
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<void> {
-    for (const quoteSplit of quotes) {
-      for (const quote of quoteSplit.quotes) {
-        if (quote.gasDetails) {
-          quote.gasDetails.gasCostInQuoteToken =
-            quote.route.path[0].address.toString() ===
-            '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'
-              ? BigInt('200000000') // $200 for first quote
-              : BigInt('99000000'); // $99 for second quote
-        }
+    for (const quote of quotes) {
+      if (quote.gasDetails) {
+        quote.gasDetails.gasCostInQuoteToken =
+          quote.route.path[0].address.toString() ===
+          '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'
+            ? BigInt('200000000') // $200 for first quote
+            : BigInt('99000000'); // $99 for second quote
       }
     }
   }
@@ -257,7 +273,7 @@ function runStrategyTests(
       ).equals('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640');
     });
 
-    it('should return quotes sorted by raw amount', async () => {
+    it('should return quotes sorted by gas-adjusted amount (EXACT_IN: raw - gasCostInQuoteToken)', async () => {
       const quotes = [
         new QuoteBasic(
           new RouteBasic(Protocol.V2, [
@@ -309,21 +325,25 @@ function runStrategyTests(
       expect(bestQuoteCandidates).toBeDefined();
       expect(bestQuoteCandidates.length).toBeGreaterThan(0);
 
-      // First quote should be the one with highest raw amount
+      // Gas-adjusted ranking (after this PR makes scoreAndSortCombinations
+      // gas-aware):
+      //   Quote-1 raw 2,000,000,000 − $200 gas (200,000,000) = 1,800,000,000
+      //   Quote-2 raw 1,900,000,000 − $99 gas  ( 99,000,000) = 1,801,000,000
+      // Quote-2 wins gas-adjusted despite having a lower raw amount —
+      // exactly the property the new ranking gives us.
       expect(bestQuoteCandidates[0].quotes[0].amount).equals(
-        BigInt('2000000000')
-      );
-      expect(
-        bestQuoteCandidates[0].quotes[0].route.path[0].address.toString()
-      ).equals('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640');
-
-      // Second quote should be the one with lower raw amount
-      expect(bestQuoteCandidates[1].quotes[0].amount).equals(
         BigInt('1900000000')
       );
       expect(
-        bestQuoteCandidates[1].quotes[0].route.path[0].address.toString()
+        bestQuoteCandidates[0].quotes[0].route.path[0].address.toString()
       ).equals('0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8');
+
+      expect(bestQuoteCandidates[1].quotes[0].amount).equals(
+        BigInt('2000000000')
+      );
+      expect(
+        bestQuoteCandidates[1].quotes[0].route.path[0].address.toString()
+      ).equals('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640');
     });
 
     it('should handle mixed routes (V2 + V3)', async () => {

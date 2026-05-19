@@ -228,6 +228,34 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     );
     await logElapsedTime('GasEstimate', gasEstimateStartTime, ctx, metricTags);
 
+    // Populate gasCostInQuoteToken on each quote BEFORE the split-finder
+    // ranks combinations. `QuoteBestSplitFinder.scoreAndSortCombinations`
+    // ranks combinations by gas-adjusted total amount when this is
+    // populated, and falls back to raw amount when it isn't. Prior to
+    // this call ordering, the gas conversion happened only post-split in
+    // `UniRouteBL`, leaving `findBestSplits` ranking by raw amount alone
+    // and producing the residual gas-bad split losses captured by
+    // PR #8285 (`agghook_chosen_higher_gas` verdict in prod).
+    if (serviceConfig.GasEstimation.Enabled) {
+      const startGasConvTime = Date.now();
+      await this.gasConverter.updateQuoteBasicsGasDetails(
+        chain.chainId,
+        tradeType === TradeType.ExactIn
+          ? tokenOutCurrencyInfo.wrappedAddress.toString()
+          : tokenInCurrencyInfo.wrappedAddress.toString(),
+        tokensInfo,
+        quotesWithGas,
+        ctx,
+        blockNumber
+      );
+      await logElapsedTime(
+        'UpdateQuoteBasicsGasDetailsPreSplit',
+        startGasConvTime,
+        ctx,
+        metricTags
+      );
+    }
+
     // Generate a mapping of percentage to sorted quotes. Dedup quotes by
     // their canonical route string within each percentage bucket: diagnostic
     // logs on WBTC->USDT 10 BTC showed the top no-hook 1-hop route landed

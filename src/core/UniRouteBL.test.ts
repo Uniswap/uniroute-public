@@ -4687,6 +4687,7 @@ describe('UniRouteBL', () => {
       const updateGasSpy = vi.fn().mockResolvedValue(undefined);
       const gasConverter: IGasConverter = {
         updateQuotesGasDetails: updateGasSpy,
+        updateQuoteBasicsGasDetails: vi.fn().mockResolvedValue(undefined),
       };
 
       // Config with GasEstimation disabled

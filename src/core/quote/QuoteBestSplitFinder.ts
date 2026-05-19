@@ -1137,11 +1137,38 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   }
 
   /**
-   * Scores and sorts route combinations based on total quote amounts
+   * Scores and sorts route combinations by gas-adjusted total quote
+   * amount when `gasCostInQuoteToken` is populated on each leg's
+   * gasDetails, otherwise falls back to raw total amount.
+   *
+   * Direction-aware:
+   *   EXACT_IN  → score = sum(amount) - sum(gasCostInQuoteToken)
+   *               (user receives output, so gas reduces the effective
+   *               output amount)
+   *   EXACT_OUT → score = sum(amount) + sum(gasCostInQuoteToken)
+   *               (user pays input, so gas increases the effective
+   *               input amount)
+   *
+   * Fallback behavior preserves backward compat for unit tests that
+   * construct `QuoteBasic` without `gasDetails` populated: if ANY
+   * route in the combination lacks `gasCostInQuoteToken`, that
+   * combination is scored on raw amount alone. Mixing populated and
+   * unpopulated quotes within a single combination would produce a
+   * skewed comparison.
+   *
+   * Why gas-adjusted at this layer (rather than only post-split in
+   * the selector): `filterAndSortResults` truncates to
+   * `maxSplitRoutes` (default 5) using this score function, so a
+   * gas-good combination with marginally worse raw amount can be
+   * dropped before reaching the selector. PR #8285 prod telemetry
+   * confirmed this is the dominant residual loss mechanism after
+   * PR #8272.
+   *
    * @param combinations Array of route combinations to score and sort
    * @param quoteMap Pre-computed map of routes to quotes for O(1) lookup
    * @param tradeType The trade type to determine sorting direction
-   * @returns Sorted array of route combinations (descending for ExactIn, ascending for ExactOut)
+   * @returns Sorted array of route combinations
+   *   (descending for ExactIn, ascending for ExactOut)
    */
   private scoreAndSortCombinations(
     combinations: RouteBasic<TPool>[][],
@@ -1149,15 +1176,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     tradeType: TradeType
   ): RouteBasic<TPool>[][] {
     const scoredCombinations = combinations.map(combination => {
-      const totalAmount = combination.reduce(
-        (sum, route) => sum + (quoteMap.get(route)?.amount || 0n),
-        0n
-      );
-
-      return {
-        combination,
-        score: totalAmount,
-      };
+      let totalAmount = 0n;
+      let totalGasCostInQuoteToken = 0n;
+      let allGasPopulated = true;
+      for (const route of combination) {
+        const quote = quoteMap.get(route);
+        if (!quote) continue;
+        totalAmount += quote.amount;
+        const gasCostInQuoteToken = quote.gasDetails?.gasCostInQuoteToken;
+        if (gasCostInQuoteToken === undefined) {
+          allGasPopulated = false;
+        } else {
+          totalGasCostInQuoteToken += gasCostInQuoteToken;
+        }
+      }
+      const score = allGasPopulated
+        ? tradeType === TradeType.ExactIn
+          ? totalAmount - totalGasCostInQuoteToken
+          : totalAmount + totalGasCostInQuoteToken
+        : totalAmount;
+      return {combination, score};
     });
 
     // Sort by score - descending for EXACT_IN, ascending for EXACT_OUT

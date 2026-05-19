@@ -4254,4 +4254,167 @@ describe('QuoteBestSplitFinder', () => {
       expect(splitLogCalls()).toHaveLength(0);
     });
   });
+
+  describe('gas-adjusted scoreAndSortCombinations', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const createMockQuoteWithGasAdj = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasCostInQuoteToken: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse: 0n,
+          gasCostInQuoteToken,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    it('EXACT_IN: ranks combinations by raw - gasCostInQuoteToken (gas-good split beats raw-better/gas-bad split)', () => {
+      // Mirrors the prod PR #8285 finding: chosen split has slightly
+      // better raw but materially worse gas — under gas-adjusted
+      // scoring, the no-hook alternative now wins.
+      const aggHookLeg = aggHookRouteAt(
+        '0xfd10000000000000000000000000000000000000',
+        100
+      );
+      const noHookAlt = noHookRouteAt(
+        '0xfd20000000000000000000000000000000000000',
+        100
+      );
+      const aggHookCombo = [aggHookLeg];
+      const altCombo = [noHookAlt];
+
+      const quoteMap = buildQuoteMap([
+        // Agg-hook: raw 1,050, gas $100 → gas-adj 950
+        createMockQuoteWithGasAdj(aggHookLeg, 1050n, 100n),
+        // No-hook: raw 1,000, gas $10 → gas-adj 990 (wins)
+        createMockQuoteWithGasAdj(noHookAlt, 1000n, 10n),
+      ]);
+
+      const sorted = finder['scoreAndSortCombinations'](
+        [aggHookCombo, altCombo],
+        quoteMap,
+        TradeType.ExactIn
+      );
+      expect(sorted[0]).toBe(altCombo);
+      expect(sorted[1]).toBe(aggHookCombo);
+    });
+
+    it('EXACT_OUT: ranks combinations by raw + gasCostInQuoteToken (lower gas-adj cost wins)', () => {
+      const aggHookLeg = aggHookRouteAt(
+        '0xfd30000000000000000000000000000000000000',
+        100
+      );
+      const noHookAlt = noHookRouteAt(
+        '0xfd40000000000000000000000000000000000000',
+        100
+      );
+      const aggHookCombo = [aggHookLeg];
+      const altCombo = [noHookAlt];
+
+      const quoteMap = buildQuoteMap([
+        // EXACT_OUT: lower amount better. Agg-hook: raw 1,000 + 100 gas
+        //                                            = effective input 1,100
+        createMockQuoteWithGasAdj(aggHookLeg, 1000n, 100n),
+        // No-hook: raw 1,050 + 10 gas = effective input 1,060 (wins)
+        createMockQuoteWithGasAdj(noHookAlt, 1050n, 10n),
+      ]);
+
+      const sorted = finder['scoreAndSortCombinations'](
+        [aggHookCombo, altCombo],
+        quoteMap,
+        TradeType.ExactOut
+      );
+      expect(sorted[0]).toBe(altCombo);
+      expect(sorted[1]).toBe(aggHookCombo);
+    });
+
+    it('falls back to raw-only ranking when ANY leg lacks gasCostInQuoteToken (backward compat)', () => {
+      // Existing tests construct QuoteBasic without gasDetails; this
+      // makes sure those test scenarios still see raw-only sorting and
+      // don't get re-ordered by spurious gas comparisons.
+      const r1 = noHookRouteAt(
+        '0xfd50000000000000000000000000000000000000',
+        100
+      );
+      const r2 = noHookRouteAt(
+        '0xfd60000000000000000000000000000000000000',
+        100
+      );
+      const combo1 = [r1];
+      const combo2 = [r2];
+
+      const quoteMap = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      // No gasDetails on either quote.
+      quoteMap.set(r1, {route: r1, amount: 2000n} as QuoteBasic);
+      quoteMap.set(r2, {route: r2, amount: 1500n} as QuoteBasic);
+
+      const sorted = finder['scoreAndSortCombinations'](
+        [combo1, combo2],
+        quoteMap,
+        TradeType.ExactIn
+      );
+      // Raw-only: 2000 > 1500 → combo1 first.
+      expect(sorted[0]).toBe(combo1);
+      expect(sorted[1]).toBe(combo2);
+    });
+
+    it('sums leg gasCostInQuoteToken across all routes in a multi-leg combination', () => {
+      // Verifies the per-combination sum: total gas = sum of leg gas.
+      const r1 = noHookRouteAt(
+        '0xfd70000000000000000000000000000000000000',
+        60
+      );
+      const r2 = noHookRouteAt(
+        '0xfd80000000000000000000000000000000000000',
+        40
+      );
+      const altR = noHookRouteAt(
+        '0xfd90000000000000000000000000000000000000',
+        100
+      );
+      const multiLegCombo = [r1, r2];
+      const singleLegAlt = [altR];
+
+      // Multi-leg total: raw 600+400=1000, gas 50+50=100 → gas-adj 900
+      // Single-leg     : raw 950,        gas 10        → gas-adj 940 (wins)
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasAdj(r1, 600n, 50n),
+        createMockQuoteWithGasAdj(r2, 400n, 50n),
+        createMockQuoteWithGasAdj(altR, 950n, 10n),
+      ]);
+
+      const sorted = finder['scoreAndSortCombinations'](
+        [multiLegCombo, singleLegAlt],
+        quoteMap,
+        TradeType.ExactIn
+      );
+      expect(sorted[0]).toBe(singleLegAlt);
+      expect(sorted[1]).toBe(multiLegCombo);
+    });
+  });
 });
