@@ -335,6 +335,51 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       ...metricTags,
       `testAggHooks:${testAggHooks}`,
     ];
+    // Bucket-level distribution metrics. The route-cap fix (PR #8301)
+    // gave no-hook routes the full MaxRoutes budget but didn't move the
+    // residual UniRoute-wins-by-gas-adjusted rate on prod. Top losing
+    // hash `ab69b143` is `winnerMismatchRawVsGasAdjusted:false` —
+    // treatment is worse than control on BOTH raw AND gas-adjusted, yet
+    // uniroute still picks it. That implies the gas-adj-better route
+    // control finds isn't in treatment's candidate set — i.e., the
+    // divergence happens upstream of `findBestSplits` (pool discovery /
+    // route enumeration / quote fetch / cached-routes hit-miss differ
+    // between testAggHooks=true and testAggHooks=false runs).
+    //
+    // These metrics expose per-percentage bucket counts as queryable
+    // distributions so we can diff treatment vs control on the same
+    // chain/tradeType: if `avg:NoHookQuotesAtPercentage.dist{...
+    // testagghooks:true}` is smaller than the testagghooks:false
+    // counterpart at any percentage, the route enumeration / quote
+    // fetch is dropping no-hook quotes specifically when agg-hooks are
+    // enabled. Per-percentage tag has 20 distinct values (5..100 in 5%
+    // steps); combined with chain (~20) / tradeType (2) /
+    // testagghooks (2-3) the dimension cardinality is bounded
+    // (~2400 combinations) and well within DD's tag-cardinality budget.
+    const noHookQuoteCountTotal = percentageBucketSummary.reduce(
+      (sum, bucket) => sum + (bucket.quoteCount - bucket.aggHookQuoteCount),
+      0
+    );
+    const percentageBucketDistEmissions = percentageBucketSummary.flatMap(
+      bucket => {
+        const perBucketTags = [
+          ...deepQuoteStrategyMetricTags,
+          `percentage:${bucket.percentage}`,
+        ];
+        return [
+          ctx.metrics.dist(
+            buildMetricKey('DeepQuoteStrategy.NoHookQuotesAtPercentage.dist'),
+            bucket.quoteCount - bucket.aggHookQuoteCount,
+            {tags: perBucketTags}
+          ),
+          ctx.metrics.dist(
+            buildMetricKey('DeepQuoteStrategy.AggHookQuotesAtPercentage.dist'),
+            bucket.aggHookQuoteCount,
+            {tags: perBucketTags}
+          ),
+        ];
+      }
+    );
     await Promise.all([
       ctx.metrics.count(
         buildMetricKey('DeepQuoteStrategy.PctRoutes'),
@@ -351,6 +396,26 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
         v3OnlyQuoteCountTotal,
         {tags: deepQuoteStrategyMetricTags}
       ),
+      // Per-request total no-hook / agg-hook counts as distributions —
+      // gives avg/max/min/p95 across calls without per-percentage tag
+      // cardinality. The cleanest single signal for "is treatment's
+      // overall no-hook universe smaller than control's?".
+      ctx.metrics.dist(
+        buildMetricKey('DeepQuoteStrategy.NoHookQuoteCountTotal.dist'),
+        noHookQuoteCountTotal,
+        {tags: deepQuoteStrategyMetricTags}
+      ),
+      ctx.metrics.dist(
+        buildMetricKey('DeepQuoteStrategy.AggHookQuoteCountTotal.dist'),
+        aggHookQuoteCountTotal,
+        {tags: deepQuoteStrategyMetricTags}
+      ),
+      ctx.metrics.dist(
+        buildMetricKey('DeepQuoteStrategy.PercentageBucketCount.dist'),
+        percentageBucketSummary.length,
+        {tags: deepQuoteStrategyMetricTags}
+      ),
+      ...percentageBucketDistEmissions,
     ]);
 
     // Use QuoteBestSplitFinder to find optimal route combinations
