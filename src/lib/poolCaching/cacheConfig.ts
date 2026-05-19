@@ -48,7 +48,7 @@ export const v4SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
     case ChainId.UNICHAIN:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_UNICHAIN_V4_ID}`;
     case ChainId.BNB:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BNB_V4_ID}`;
+      return `https://gateway.thegraph.com/api/subgraphs/id/${process.env.GRAPH_BNB_V4_ID}`;
     case ChainId.BLAST:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BLAST_V4_ID}`;
     case ChainId.MAINNET:
@@ -79,19 +79,21 @@ export const v3SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
     case ChainId.MAINNET:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ETHEREUM_V3_ID}`;
     case ChainId.ARBITRUM_ONE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ARBITRUM_V3_ID}`;
+      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_ARBITRUM_V3_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_ARBITRUM_V3_INDEX_ID}`;
+    // TODO(ROUTE-1201): migrate POLYGON V3 to TheGraph once Ellipfra new version is synced.
     case ChainId.POLYGON:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_POLYGON_V3_ID}`;
+    // TODO(ROUTE-1201): migrate OPTIMISM V3 to TheGraph once Ellipfra new version is synced.
     case ChainId.OPTIMISM:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_OPTIMISM_V3_ID}`;
     case ChainId.AVALANCHE:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_AVALANCHE_V3_ID}`;
     case ChainId.BNB:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BNB_V3_ID}`;
+      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BNB_V3_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BNB_V3_INDEX_ID}`;
     case ChainId.BLAST:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BLAST_V3_ID}`;
     case ChainId.BASE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BASE_V3_ID}`;
+      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BASE_V3_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BASE_V3_INDEX_ID}`;
     case ChainId.CELO:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_CELO_V3_ID}`;
     case ChainId.WORLDCHAIN:
@@ -122,7 +124,7 @@ export const v3SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
 export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
   switch (chainId) {
     case ChainId.MAINNET:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_ETHEREUM_V2_ID}`;
+      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_MAINNET_V2_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_MAINNET_V2_INDEX_ID}`;
     case ChainId.ARBITRUM_ONE:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_ARBITRUM_V2_ID}`;
     case ChainId.POLYGON:
@@ -136,7 +138,7 @@ export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
     case ChainId.BLAST:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_BLAST_V2_ID}`;
     case ChainId.BASE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_BASE_V2_ID}`;
+      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BASE_V2_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BASE_V2_INDEX_ID}`;
     case ChainId.WORLDCHAIN:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_WORLDCHAIN_V2_ID}`;
     case ChainId.UNICHAIN_SEPOLIA:
@@ -244,7 +246,7 @@ export function createChainProtocols(
         v3TrackedEthThreshold,
         v3UntrackedUsdThreshold,
         v3SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metric
       ),
@@ -312,7 +314,7 @@ export function createChainProtocols(
         v3TrackedEthThreshold,
         v3UntrackedUsdThreshold,
         v3SubgraphUrlOverride(ChainId.BNB),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metric
       ),
@@ -346,7 +348,7 @@ export function createChainProtocols(
         v3BaseTrackedEthThreshold,
         v3UntrackedUsdThreshold,
         v3SubgraphUrlOverride(ChainId.BASE),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metric
       ),
@@ -525,17 +527,17 @@ export function createChainProtocols(
     {
       protocol: Protocol.V2,
       chainId: ChainId.MAINNET,
-      timeout: 840000,
+      timeout: 1200000,
       provider: new V2SubgraphProvider(
         ChainId.MAINNET,
         5,
-        900000,
+        1200000,
         true,
         1000,
         v2TrackedEthThreshold,
         v2UntrackedUsdThreshold,
         v2SubgraphUrlOverride(ChainId.MAINNET),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metric
       ),
@@ -639,11 +641,11 @@ export function createChainProtocols(
         5,
         900000,
         true,
-        10000,
+        3000,
         v2BaseTrackedEthThreshold,
         v2UntrackedUsdThreshold,
         v2SubgraphUrlOverride(ChainId.BASE),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metric
       ),
@@ -1074,7 +1076,7 @@ export function createChainProtocols(
         v4TrackedEthThreshold,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.BNB),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metric
       ),

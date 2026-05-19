@@ -77,13 +77,13 @@ async function cachePoolsForChainProtocol(
       const v2MainnetSubgraphProvider = new V2SubgraphProvider(
         ChainId.MAINNET,
         5,
-        900000,
+        1200000,
         true,
         1000,
         v2TrackedEthThreshold,
         0, // wstETH/DOG reserveUSD is 0, but the pool balance is sufficiently high
         v2SubgraphUrlOverride(ChainId.MAINNET),
-        undefined,
+        process.env.GRAPH_BEARER_TOKEN,
         logger,
         metricInstance
       );
