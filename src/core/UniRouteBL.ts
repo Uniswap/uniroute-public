@@ -1127,6 +1127,9 @@ export class UniRouteBL implements IUniRoutedBL {
     ];
     const routeCapChainTag = `chain:${ChainId[chain.chainId]}`;
     const routeCapTestAggHooksTag = `testAggHooks:${testAggHooks}`;
+    const capModeTag = `capMode:${
+      routeCapResult.usedAggHookPartition ? 'per_agg_hook_class' : 'global'
+    }`;
     await Promise.all([
       ctx.metrics.count(
         buildMetricKey('RouteCap.RoutesBeforeSlice.Total'),
@@ -1138,6 +1141,30 @@ export class UniRouteBL implements IUniRoutedBL {
         afterRouteCounts.totalRoutes,
         {tags: routeCapBaseTags}
       ),
+      // Per-class retained-route counts. Existing
+      // `RoutesAfterSlice.Total` reports total kept across classes; these
+      // two split that total by class so we can see whether agg-hook
+      // routing is correctly admitting full no-hook + additional
+      // agg-hook (after PR #8301) vs the prior 50/50-split policy.
+      // Emitted as distributions so DD can report avg/p50/p95/max per
+      // request — the right shape for "how much room does no-hook
+      // typically have" rather than total routes/sec.
+      ctx.metrics.dist(
+        buildMetricKey('RouteCap.NoHookRoutesRetained.dist'),
+        routeCapResult.noAggHookRoutesRetained,
+        {tags: [...routeCapBaseTags, capModeTag]}
+      ),
+      ctx.metrics.dist(
+        buildMetricKey('RouteCap.AggHookRoutesRetained.dist'),
+        routeCapResult.aggHookRoutesRetained,
+        {tags: [...routeCapBaseTags, capModeTag]}
+      ),
+      // Count of cap decisions split by mode — lets us answer "how
+      // often does the partition branch actually fire" in DD without
+      // having to dig debug logs.
+      ctx.metrics.count(buildMetricKey('RouteCap.Decision'), 1, {
+        tags: [...routeCapBaseTags, capModeTag],
+      }),
       ...Object.entries(beforeRouteCounts.routesByProtocol).map(
         ([protocol, count]) =>
           ctx.metrics.count(
