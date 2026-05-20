@@ -1288,6 +1288,17 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     let result: RouteBasic<TPool>[][] = [];
     let currentLevelBestAmount = 0n;
     let previousLevelBestAmount = 0n;
+    // (A) cumulative best-combination tracking — which combination owns
+    // currentLevelBestAmount, and at which level it was first added. Lets us
+    // distinguish "search converged" from "ran out of time at L4" by comparing
+    // bestFoundAtLevel against the final level reached.
+    let bestCombinationKey: string | null = null;
+    let bestFoundAtLevel = 0;
+    let currentSearchLevel = 1;
+    // (B) discovery-level map — first level at which each unique combination
+    // key was added. Used to log the discovery level of the top results when
+    // findBestSplits returns.
+    const combinationFirstSeenLevel = new Map<string, number>();
     const startTime = Date.now();
     let timedOut = false;
     let earlyExitReason:
@@ -1337,6 +1348,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       const key = getCombinationKey(routes);
       if (!combinations.has(key)) {
         combinations.add(key);
+        combinationFirstSeenLevel.set(key, currentSearchLevel);
         result.push([...routes]);
 
         // Calculate total amount for this combination using pre-computed map
@@ -1349,6 +1361,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         // Update best amount if this combination is better
         if (totalAmount > currentLevelBestAmount) {
           currentLevelBestAmount = totalAmount;
+          bestCombinationKey = key;
+          bestFoundAtLevel = currentSearchLevel;
         }
       }
     };
@@ -1403,6 +1417,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     ctx.logger.debug(
       `QuoteBestSplitFinder: after level 1 we got ${result.length} route combinations`
     );
+    ctx.logger.debug('QuoteBestSplitFinder level snapshot', {
+      level: 1,
+      bestAmount: currentLevelBestAmount.toString(),
+      bestCombinationKey,
+      bestFoundAtLevel,
+      combinationsFound: result.length,
+      elapsedMs: Date.now() - startTime,
+    });
 
     // Helper function to generate combinations level by level
     const generateCombinationsForLevel = async (
@@ -1495,6 +1517,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
 
     // Generate combinations level by level, from 2 splits up to maxSplits
     for (let level = 2; level <= maxSplits && !timedOut; level++) {
+      currentSearchLevel = level;
       await ctx.metrics.count(
         buildMetricKey(`QuoteBestSplitFinder.Level.Invocations.${level}`),
         1,
@@ -1526,6 +1549,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       ctx.logger.debug(
         `QuoteBestSplitFinder: after level ${level} we got ${unfilteredResultLength} route combinations`
       );
+      ctx.logger.debug('QuoteBestSplitFinder level snapshot', {
+        level,
+        bestAmount: currentLevelBestAmount.toString(),
+        bestCombinationKey,
+        bestFoundAtLevel,
+        combinationsFound: unfilteredResultLength,
+        newCombinationsThisLevel: unfilteredResultLength - previousResultLength,
+        elapsedMs: Date.now() - startTime,
+        timedOut,
+      });
 
       // Filter and sort results after each level to keep array size manageable
       result = this.filterAndSortResults(
@@ -1594,6 +1627,30 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       );
     }
 
+    // (B) Final-winner discovery levels: which level each of the top-N results
+    // was first discovered. If the eventual winner appears at L2 or L3, that
+    // proves later-level search wasn't load-bearing for this request.
+    const topResultsDiscoveryLevels = result
+      .slice(0, Math.min(5, result.length))
+      .map((combination, idx) => {
+        const key = getCombinationKey(combination);
+        const totalAmount = combination.reduce(
+          (sum, route) => sum + (quoteMap.get(route)?.amount ?? 0n),
+          0n
+        );
+        return {
+          rank: idx,
+          firstSeenAtLevel: combinationFirstSeenLevel.get(key) ?? null,
+          amount: totalAmount.toString(),
+          numRoutes: combination.length,
+        };
+      });
+    ctx.logger.debug('QuoteBestSplitFinder top results discovery levels', {
+      bestFoundAtLevel,
+      bestAmount: currentLevelBestAmount.toString(),
+      topResultsDiscoveryLevels,
+    });
+
     ctx.logger.debug('QuoteBestSplitFinder observability', {
       chainId,
       percentageStep,
@@ -1605,6 +1662,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       earlyExitReason,
       combinationsFound: result.length,
       bestUnusedQuoteStats,
+      bestFoundAtLevel,
+      bestAmount: currentLevelBestAmount.toString(),
     });
     const earlyExitTag = `earlyExitReason:${earlyExitReason ?? 'normal'}`;
     await Promise.all([
