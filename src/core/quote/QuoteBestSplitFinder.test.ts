@@ -1783,6 +1783,13 @@ describe('QuoteBestSplitFinder', () => {
         gateEarlyReturnLeakLogBudget: {remaining: number};
         soleCandidateGasComparisonLogBudget: {remaining: number};
         partitionAnchorAnalysisLogBudget: {remaining: number};
+        aggHookAttribution: {
+          firedPartitionKeptHigherGas: boolean;
+          firedSoleCandidateAdmit: boolean;
+          firedSoleCandidateGasWorse: boolean;
+          firedChosenSplitGasWorse: boolean;
+          firedAnchorSubOptimal: boolean;
+        };
         metricTags: string[];
       }>
     ) => ({
@@ -1795,6 +1802,13 @@ describe('QuoteBestSplitFinder', () => {
       gateEarlyReturnLeakLogBudget: {remaining: 5},
       soleCandidateGasComparisonLogBudget: {remaining: 5},
       partitionAnchorAnalysisLogBudget: {remaining: 5},
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: false,
+        firedSoleCandidateAdmit: false,
+        firedSoleCandidateGasWorse: false,
+        firedChosenSplitGasWorse: false,
+        firedAnchorSubOptimal: false,
+      },
       metricTags: ['chainId:1'],
       ...overrides,
     });
@@ -4224,6 +4238,13 @@ describe('QuoteBestSplitFinder', () => {
           gateEarlyReturnLeakLogBudget: {remaining: 5},
           soleCandidateGasComparisonLogBudget: {remaining: 5},
           partitionAnchorAnalysisLogBudget: {remaining: 5},
+          aggHookAttribution: {
+            firedPartitionKeptHigherGas: false,
+            firedSoleCandidateAdmit: false,
+            firedSoleCandidateGasWorse: false,
+            firedChosenSplitGasWorse: false,
+            firedAnchorSubOptimal: false,
+          },
           metricTags: ['chainId:1'],
         }
       );
@@ -4302,7 +4323,8 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         true,
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       expect(splitMetricCalls()).toHaveLength(1);
@@ -4327,7 +4349,8 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         true,
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       expect(splitMetricCalls()).toHaveLength(1);
@@ -4359,7 +4382,8 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         true,
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       expect(splitMetricCalls()).toHaveLength(1);
@@ -4393,7 +4417,8 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         true,
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       expect(splitMetricCalls()).toHaveLength(1);
@@ -4437,7 +4462,8 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         true,
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       const metrics = splitMetricCalls();
@@ -4482,7 +4508,8 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         true,
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       expect(splitMetricCalls()).toHaveLength(1);
@@ -4514,11 +4541,672 @@ describe('QuoteBestSplitFinder', () => {
         mockContext,
         false, // testAggHooks=false → instrumentation should be silent
         TradeType.ExactIn,
-        ['chainId:1']
+        ['chainId:1'],
+        {firedChosenSplitGasWorse: false}
       );
 
       expect(splitMetricCalls()).toHaveLength(0);
       expect(splitLogCalls()).toHaveLength(0);
+    });
+  });
+
+  describe('agg-hook winner attribution (catch-all)', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const createMockQuoteWithGas = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasUse: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    const buildAttribution = (
+      overrides?: Partial<{
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      }>
+    ) => ({
+      firedPartitionKeptHigherGas: false,
+      firedSoleCandidateAdmit: false,
+      firedSoleCandidateGasWorse: false,
+      firedChosenSplitGasWorse: false,
+      firedAnchorSubOptimal: false,
+      ...overrides,
+    });
+
+    const infoMock = () => mockContext.logger.info as ReturnType<typeof vi.fn>;
+    const metricMock = () =>
+      mockContext.metrics.count as ReturnType<typeof vi.fn>;
+
+    const attributionMetricCalls = () =>
+      metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t => t.startsWith('attributed:'))
+      );
+    const attributionLogCalls = () =>
+      infoMock().mock.calls.filter(
+        c => c[0] === 'QuoteBestSplitFinder agg-hook selected as winner'
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa000000000000000000000000000000000000000',
+        50
+      );
+      const noHook = noHookRouteAt(
+        '0xa100000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 200n),
+        createMockQuoteWithGas(noHook, 990n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      expect(attributionMetricCalls()).toHaveLength(0);
+      expect(attributionLogCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when the chosen split has no agg-hook leg', () => {
+      const noHook1 = noHookRouteAt(
+        '0xa200000000000000000000000000000000000000',
+        50
+      );
+      const noHook2 = noHookRouteAt(
+        '0xa300000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook1, 1000n, 100n),
+        createMockQuoteWithGas(noHook2, 990n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[noHook1, noHook2]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      expect(attributionMetricCalls()).toHaveLength(0);
+      expect(attributionLogCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when result is empty', () => {
+      finder['emitAggHookWinnerAttribution'](
+        [],
+        new Map(),
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      expect(attributionMetricCalls()).toHaveLength(0);
+      expect(attributionLogCalls()).toHaveLength(0);
+    });
+
+    it('fires with attributed:false when no sibling log fired (the residual category)', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa400000000000000000000000000000000000000',
+        50
+      );
+      const noHook = noHookRouteAt(
+        '0xa500000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 500n),
+        createMockQuoteWithGas(noHook, 990n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook], [noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      expect(attributionMetricCalls()).toHaveLength(1);
+      expect(
+        (attributionMetricCalls()[0][2] as {tags: string[]}).tags
+      ).toContain('attributed:false');
+      expect(attributionLogCalls()).toHaveLength(1);
+      const payload = attributionLogCalls()[0][1] as {
+        attribution: {anyFired: boolean};
+      };
+      expect(payload.attribution.anyFired).toBe(false);
+    });
+
+    it('propagates attribution flags from sibling logs into the metric tags and payload', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa600000000000000000000000000000000000000',
+        50
+      );
+      const noHook = noHookRouteAt(
+        '0xa700000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 200n),
+        createMockQuoteWithGas(noHook, 990n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook], [noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution({
+          firedPartitionKeptHigherGas: true,
+          firedAnchorSubOptimal: true,
+        })
+      );
+      expect(attributionMetricCalls()).toHaveLength(1);
+      const metricTags = (attributionMetricCalls()[0][2] as {tags: string[]})
+        .tags;
+      // The 5 firedXxx flags are deliberately excluded from metric
+      // tags (cardinality guard per PR #8341's SRE pager); they live
+      // on the log payload only. The metric carries only bounded
+      // slicers + the attributed summary so its timeseries count
+      // stays orders of magnitude below the 500K threshold.
+      expect(metricTags).toContain('attributed:true');
+      expect(metricTags).toContain('testAggHooks:true');
+      expect(
+        metricTags.some(t => t.startsWith('firedPartitionKeptHigherGas:'))
+      ).toBe(false);
+      expect(metricTags.some(t => t.startsWith('firedAnchorSubOptimal:'))).toBe(
+        false
+      );
+
+      const payload = attributionLogCalls()[0][1] as {
+        attribution: Record<string, boolean>;
+      };
+      expect(payload.attribution.firedPartitionKeptHigherGas).toBe(true);
+      expect(payload.attribution.firedAnchorSubOptimal).toBe(true);
+      expect(payload.attribution.firedSoleCandidateAdmit).toBe(false);
+      expect(payload.attribution.anyFired).toBe(true);
+    });
+
+    it('emits chosen split + best no-hook alternative deltas in the log payload', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa800000000000000000000000000000000000000',
+        50
+      );
+      const noHookBest = noHookRouteAt(
+        '0xa900000000000000000000000000000000000000',
+        50
+      );
+      const noHookWorse = noHookRouteAt(
+        '0xaa00000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1010n, 200n),
+        createMockQuoteWithGas(noHookBest, 1000n, 80n),
+        createMockQuoteWithGas(noHookWorse, 950n, 70n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook], [noHookBest], [noHookWorse]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      const payload = attributionLogCalls()[0][1] as {
+        chosenSplit: {
+          rawTotal: string;
+          gasTotal: string;
+          aggHookLegCount: number;
+          legsWithMissingGas: number;
+        };
+        noHookAlternative: {
+          rawTotal: string;
+          gasTotal: string;
+          rawTotalDelta: string;
+          gasTotalDelta: string;
+        } | null;
+      };
+      expect(payload.chosenSplit.rawTotal).toBe('1010');
+      expect(payload.chosenSplit.gasTotal).toBe('200');
+      expect(payload.chosenSplit.aggHookLegCount).toBe(1);
+      expect(payload.chosenSplit.legsWithMissingGas).toBe(0);
+      // Best (first-encountered) no-hook alternative is noHookBest.
+      expect(payload.noHookAlternative!.rawTotal).toBe('1000');
+      expect(payload.noHookAlternative!.gasTotal).toBe('80');
+      expect(payload.noHookAlternative!.rawTotalDelta).toBe('10');
+      expect(payload.noHookAlternative!.gasTotalDelta).toBe('120');
+    });
+
+    it('emits noHookAlternative=null when no no-hook combination exists', () => {
+      const aggHook1 = aggHookRouteAt(
+        '0xab00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook2 = aggHookRouteAt(
+        '0xac00000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook1, 1000n, 200n),
+        createMockQuoteWithGas(aggHook2, 990n, 200n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook1], [aggHook2]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      const payload = attributionLogCalls()[0][1] as {
+        noHookAlternative: unknown;
+      };
+      expect(payload.noHookAlternative).toBeNull();
+    });
+
+    // Empirical-dev finding: `filterAndSortResults` puts 100%
+    // single-pool routes at result[0] regardless of score, so when the
+    // user-facing winner is a multi-leg split it sits at result[1+].
+    // Both the catch-all and existing sibling #4 (`chosen split has
+    // agg-hook with worse gas`) inspected result[0] only, missing the
+    // winner entirely. The catch-all now scans all of result and
+    // treats the HIGHEST-RAW combination as the winner (matches BL
+    // selection), so it fires even when the agg-hook combo is not at
+    // index 0.
+    it('detects agg-hook winner when it lives at result[i>0] behind a 100% no-hook route', () => {
+      const noHook100 = noHookRouteAt(
+        '0xac10000000000000000000000000000000000000',
+        100
+      );
+      // 5-leg split with agg-hook in one of the legs; total raw beats
+      // the 100% pool's raw total → BL would pick this split.
+      const splitLeg1 = noHookRouteAt(
+        '0xac20000000000000000000000000000000000000',
+        20
+      );
+      const splitLeg2 = aggHookRouteAt(
+        '0xac30000000000000000000000000000000000000',
+        80
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook100, 900n, 100n),
+        createMockQuoteWithGas(splitLeg1, 250n, 100n),
+        createMockQuoteWithGas(splitLeg2, 800n, 300n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        // result[0] = 100% no-hook route (filterAndSort puts it first)
+        // result[1] = split with agg-hook (higher raw total = 1050)
+        [[noHook100], [splitLeg1, splitLeg2]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      expect(attributionMetricCalls()).toHaveLength(1);
+      expect(attributionLogCalls()).toHaveLength(1);
+      const payload = attributionLogCalls()[0][1] as {
+        chosenSplit: {
+          rawTotal: string;
+          gasTotal: string;
+          legCount: number;
+          aggHookLegCount: number;
+          resultIdx: number;
+        };
+        noHookAlternative: {rawTotal: string} | null;
+      };
+      // Highest-raw combination is result[1] (sum 250+800=1050) vs
+      // result[0] (900). Catch-all picks result[1].
+      expect(payload.chosenSplit.resultIdx).toBe(1);
+      expect(payload.chosenSplit.rawTotal).toBe('1050');
+      expect(payload.chosenSplit.legCount).toBe(2);
+      expect(payload.chosenSplit.aggHookLegCount).toBe(1);
+      // No-hook alternative is the 100% route at result[0].
+      expect(payload.noHookAlternative!.rawTotal).toBe('900');
+    });
+
+    it('still uses result[0] when it is the highest-raw combination', () => {
+      const aggHook = aggHookRouteAt(
+        '0xac40000000000000000000000000000000000000',
+        100
+      );
+      const noHook = noHookRouteAt(
+        '0xac50000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 200n),
+        createMockQuoteWithGas(noHook, 900n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook], [noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      const payload = attributionLogCalls()[0][1] as {
+        chosenSplit: {resultIdx: number; rawTotal: string};
+      };
+      expect(payload.chosenSplit.resultIdx).toBe(0);
+      expect(payload.chosenSplit.rawTotal).toBe('1000');
+    });
+  });
+
+  describe('no-hook winner Cat-B attribution (catch-all)', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const createMockQuoteWithGas = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasUse: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    const infoMock = () => mockContext.logger.info as ReturnType<typeof vi.fn>;
+    const metricMock = () =>
+      mockContext.metrics.count as ReturnType<typeof vi.fn>;
+
+    const catBMetricCalls = () =>
+      metricMock().mock.calls.filter(c => {
+        const tags = (c[2] as {tags: string[]}).tags;
+        return (
+          tags.some(t => t.startsWith('attributed:')) &&
+          // Distinguish from Cat-A attribution metric, which shares
+          // the `attributed:` tag prefix. The Cat-B emission also
+          // carries `testAggHooks:true` but only fires once per
+          // findBestSplits — so look for the Cat-B log alongside.
+          true
+        );
+      });
+    const catBLogCalls = () =>
+      infoMock().mock.calls.filter(
+        c =>
+          c[0] === 'QuoteBestSplitFinder no-hook winner with agg-hooks enabled'
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      const noHook = noHookRouteAt(
+        '0xc000000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook, 1000n, 100n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      expect(catBLogCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when the chosen winner contains agg-hook (Cat-A territory)', () => {
+      const aggHook = aggHookRouteAt(
+        '0xc100000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 100n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[aggHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      expect(catBLogCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when result is empty', () => {
+      finder['emitNoHookWinnerCatBAttribution'](
+        [],
+        new Map(),
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      expect(catBLogCalls()).toHaveLength(0);
+    });
+
+    it('fires with attributed:false when no Cat-B mechanism log fired', () => {
+      const noHook = noHookRouteAt(
+        '0xc200000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook, 1000n, 100n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      expect(catBLogCalls()).toHaveLength(1);
+      const payload = catBLogCalls()[0][1] as {
+        attribution: {anyFired: boolean; firedFindBestSplitsTimedOut: boolean};
+      };
+      expect(payload.attribution.anyFired).toBe(false);
+      expect(payload.attribution.firedFindBestSplitsTimedOut).toBe(false);
+    });
+
+    it('propagates firedFindBestSplitsTimedOut into the payload + attributed:true tag', () => {
+      const noHook = noHookRouteAt(
+        '0xc300000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook, 1000n, 100n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: true}
+      );
+      expect(catBLogCalls()).toHaveLength(1);
+      const metricTags = (catBMetricCalls()[0][2] as {tags: string[]}).tags;
+      expect(metricTags).toContain('attributed:true');
+      // Cardinality guard: per-mechanism flag stays off the metric.
+      expect(
+        metricTags.some(t => t.startsWith('firedFindBestSplitsTimedOut:'))
+      ).toBe(false);
+
+      const payload = catBLogCalls()[0][1] as {
+        attribution: {anyFired: boolean; firedFindBestSplitsTimedOut: boolean};
+      };
+      expect(payload.attribution.firedFindBestSplitsTimedOut).toBe(true);
+      expect(payload.attribution.anyFired).toBe(true);
+    });
+
+    it('emits chosen split + best agg-hook alternative deltas in the log payload', () => {
+      const noHookBest = noHookRouteAt(
+        '0xc400000000000000000000000000000000000000',
+        50
+      );
+      const aggHookAlt1 = aggHookRouteAt(
+        '0xc500000000000000000000000000000000000000',
+        50
+      );
+      const aggHookAlt2 = aggHookRouteAt(
+        '0xc600000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHookBest, 1100n, 100n),
+        createMockQuoteWithGas(aggHookAlt1, 1050n, 200n),
+        createMockQuoteWithGas(aggHookAlt2, 1000n, 250n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        // result[0] = no-hook (1100), result[1] = aggHookAlt1 (1050),
+        // result[2] = aggHookAlt2 (1000). Chosen = result[0]; best
+        // agg-hook alt = result[1].
+        [[noHookBest], [aggHookAlt1], [aggHookAlt2]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      const payload = catBLogCalls()[0][1] as {
+        chosenSplit: {
+          rawTotal: string;
+          gasTotal: string;
+          legCount: number;
+          legsWithMissingGas: number;
+          resultIdx: number;
+        };
+        bestAggHookAlternative: {
+          rawTotal: string;
+          gasTotal: string;
+          legCount: number;
+          aggHookLegCount: number;
+          rawTotalDelta: string;
+          gasTotalDelta: string;
+        } | null;
+      };
+      expect(payload.chosenSplit.rawTotal).toBe('1100');
+      expect(payload.chosenSplit.gasTotal).toBe('100');
+      expect(payload.chosenSplit.resultIdx).toBe(0);
+      expect(payload.bestAggHookAlternative!.rawTotal).toBe('1050');
+      expect(payload.bestAggHookAlternative!.gasTotal).toBe('200');
+      expect(payload.bestAggHookAlternative!.aggHookLegCount).toBe(1);
+      expect(payload.bestAggHookAlternative!.rawTotalDelta).toBe('50');
+      expect(payload.bestAggHookAlternative!.gasTotalDelta).toBe('-100');
+    });
+
+    it('emits bestAggHookAlternative=null when result has no agg-hook combinations', () => {
+      const noHook1 = noHookRouteAt(
+        '0xc700000000000000000000000000000000000000',
+        100
+      );
+      const noHook2 = noHookRouteAt(
+        '0xc800000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook1, 1000n, 100n),
+        createMockQuoteWithGas(noHook2, 990n, 100n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[noHook1], [noHook2]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      const payload = catBLogCalls()[0][1] as {
+        bestAggHookAlternative: unknown;
+      };
+      expect(payload.bestAggHookAlternative).toBeNull();
     });
   });
 

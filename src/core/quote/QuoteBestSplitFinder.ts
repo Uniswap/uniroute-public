@@ -260,6 +260,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): {
@@ -663,6 +670,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): void {
@@ -753,6 +767,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): void {
@@ -771,6 +792,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     );
 
+    instrumentation.aggHookAttribution.firedSoleCandidateAdmit = true;
     if (instrumentation.soleCandidateLogBudget.remaining <= 0) return;
     instrumentation.soleCandidateLogBudget.remaining -= 1;
 
@@ -841,6 +863,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): void {
@@ -910,6 +939,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     );
 
     if (!aggHookUsesMoreGas) return;
+    instrumentation.aggHookAttribution.firedSoleCandidateGasWorse = true;
     if (instrumentation.soleCandidateGasComparisonLogBudget.remaining <= 0) {
       return;
     }
@@ -990,6 +1020,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): void {
@@ -1034,6 +1071,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     );
 
     if (!aggHookUsesMoreGas) return;
+    instrumentation.aggHookAttribution.firedPartitionKeptHigherGas = true;
     if (instrumentation.partitionGasAdjustedLogBudget.remaining <= 0) return;
     instrumentation.partitionGasAdjustedLogBudget.remaining -= 1;
 
@@ -1113,6 +1151,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): void {
@@ -1188,6 +1233,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     );
 
     if (!wouldRejectWithLowestAnchor) return;
+    instrumentation.aggHookAttribution.firedAnchorSubOptimal = true;
     if (instrumentation.partitionAnchorAnalysisLogBudget.remaining <= 0) {
       return;
     }
@@ -1272,6 +1318,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
       partitionAnchorAnalysisLogBudget: {remaining: number};
+      aggHookAttribution: {
+        firedPartitionKeptHigherGas: boolean;
+        firedSoleCandidateAdmit: boolean;
+        firedSoleCandidateGasWorse: boolean;
+        firedChosenSplitGasWorse: boolean;
+        firedAnchorSubOptimal: boolean;
+      };
       metricTags: string[];
     }
   ): void {
@@ -1523,6 +1576,17 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     const gateEarlyReturnLeakLogBudget = {remaining: 5};
     const soleCandidateGasComparisonLogBudget = {remaining: 5};
     const partitionAnchorAnalysisLogBudget = {remaining: 5};
+    // Catch-all attribution flags. Each existing harmful-log emission
+    // site flips its corresponding flag when it fires. The end-of-call
+    // `emitAggHookWinnerAttribution` reads them so the residual
+    // (winner=agg-hook AND every flag=false) becomes a single DD query.
+    const aggHookAttribution = {
+      firedPartitionKeptHigherGas: false,
+      firedSoleCandidateAdmit: false,
+      firedSoleCandidateGasWorse: false,
+      firedChosenSplitGasWorse: false,
+      firedAnchorSubOptimal: false,
+    };
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -1586,6 +1650,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           gateEarlyReturnLeakLogBudget,
           soleCandidateGasComparisonLogBudget,
           partitionAnchorAnalysisLogBudget,
+          aggHookAttribution,
           metricTags,
         }
       );
@@ -1902,7 +1967,48 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       ctx,
       testAggHooks,
       tradeType,
-      metricTags
+      metricTags,
+      aggHookAttribution
+    );
+
+    // Catch-all winner attribution: fires whenever testAggHooks=true and
+    // the chosen split contains any agg-hook leg. The 5 sibling logs
+    // emit their own attribution flags into `aggHookAttribution`; this
+    // emission unions them with payload context so the residual
+    // population (winner=agg-hook AND every flag=false) becomes a
+    // single DD query.
+    this.emitAggHookWinnerAttribution(
+      result,
+      quoteMap,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      aggHookAttribution
+    );
+
+    // Cat-B catch-all (symmetric to Cat-A): fires whenever
+    // `testAggHooks=true` AND the chosen winner has NO agg-hook leg.
+    // Trading-service Cat-B (~40% of `winnerByGasAdjustedQuote:UniRoute`
+    // losses) covers the population where treatment lost on both raw
+    // and gas-adjusted — i.e. treatment chose a no-hook winner that's
+    // worse than control's no-hook winner. From inside the treatment
+    // run we don't know what control would have picked, but we can
+    // surface the signals that distinguish "search degraded by the
+    // wider candidate set" from "genuine no-better-quote-exists":
+    // findBestSplits timeout (B1 mechanism), and the best agg-hook
+    // alternative considered (size + raw/gas deltas vs the chosen
+    // no-hook winner).
+    this.emitNoHookWinnerCatBAttribution(
+      result,
+      quoteMap,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      {firedFindBestSplitsTimedOut: timedOut}
     );
 
     return result;
@@ -1939,7 +2045,10 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     ctx: UniContext,
     testAggHooks: boolean | undefined,
     tradeType: TradeType,
-    metricTags: string[]
+    metricTags: string[],
+    aggHookAttribution: {
+      firedChosenSplitGasWorse: boolean;
+    }
   ): void {
     if (!testAggHooks) return;
 
@@ -2024,6 +2133,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     }
 
     emitMetric('agghook_chosen_higher_gas');
+    aggHookAttribution.firedChosenSplitGasWorse = true;
 
     // Log the harmful case once per request with enough detail to
     // correlate with the trading-service `winnerByGasAdjustedQuote`
@@ -2062,6 +2172,358 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         rawTotalDelta: (
           chosenStats.rawTotal - noHookAltStats.rawTotal
         ).toString(),
+      }
+    );
+  }
+
+  /**
+   * Catch-all attribution emission. Fires whenever `testAggHooks=true`
+   * AND the chosen split contains any agg-hook leg. Emits both:
+   *
+   *   - `QuoteBestSplitFinder.AggHookWinnerAttribution` metric tagged
+   *     with each `firedXxx:true|false` flag so DD can size the
+   *     fraction of agg-hook-winners that fire no other verdict log
+   *     (the residual the trading-service Category A query keeps
+   *     attributing to "no log fired").
+   *
+   *   - `QuoteBestSplitFinder agg-hook selected as winner` log with
+   *     attribution flags + payload (chosen split, best no-hook
+   *     alternative, gas/raw deltas, missing-gas leg count).
+   *
+   * Pre-existing per-mechanism logs continue to fire on their specific
+   * harmful verdicts; this emission is additive and self-contained so
+   * a single DD query
+   *
+   *     `@attribution.firedPartitionKeptHigherGas:false
+   *      @attribution.firedSoleCandidateAdmit:false
+   *      @attribution.firedSoleCandidateGasWorse:false
+   *      @attribution.firedChosenSplitGasWorse:false
+   *      @attribution.firedAnchorSubOptimal:false`
+   *
+   * returns the residual population for further investigation.
+   */
+  private emitAggHookWinnerAttribution(
+    result: RouteBasic<TPool>[][],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    aggHookAttribution: {
+      firedPartitionKeptHigherGas: boolean;
+      firedSoleCandidateAdmit: boolean;
+      firedSoleCandidateGasWorse: boolean;
+      firedChosenSplitGasWorse: boolean;
+      firedAnchorSubOptimal: boolean;
+    }
+  ): void {
+    if (!testAggHooks) return;
+    if (result.length === 0) return;
+
+    // The user-facing winner is selected downstream of findBestSplits
+    // by the BL, which picks the combination with the highest raw
+    // amount (matches `quoteAmount` in the response). `result[0]` is
+    // NOT a reliable proxy because `filterAndSortResults` puts 100%
+    // single-pool routes first regardless of score, so when the
+    // winning combination is a split, it lives at `result[1+]`. Scan
+    // the entire result and treat the highest-raw combination as
+    // "the winner" for attribution purposes. This matches what
+    // trading-service Cat-A classification sees.
+    let chosenIdx = 0;
+    let chosenRawTotal = 0n;
+    let chosenGasTotal = 0n;
+    let chosenLegsWithMissingGas = 0;
+    let chosenHasAggHook = false;
+    let chosenAggHookLegCount = 0;
+    for (let i = 0; i < result.length; i++) {
+      let raw = 0n;
+      let gas = 0n;
+      let missingGas = 0;
+      let hasAggHook = false;
+      let aggHookLegCount = 0;
+      for (const route of result[i]) {
+        const quote = quoteMap.get(route);
+        if (!quote) {
+          missingGas++;
+          continue;
+        }
+        raw += quote.amount;
+        const gasUse = quote.gasDetails?.gasUse;
+        if (gasUse === undefined) {
+          missingGas++;
+        } else {
+          gas += gasUse;
+        }
+        if (routeUsesAggHook(route, chainId)) {
+          hasAggHook = true;
+          aggHookLegCount++;
+        }
+      }
+      if (i === 0 || raw > chosenRawTotal) {
+        chosenIdx = i;
+        chosenRawTotal = raw;
+        chosenGasTotal = gas;
+        chosenLegsWithMissingGas = missingGas;
+        chosenHasAggHook = hasAggHook;
+        chosenAggHookLegCount = aggHookLegCount;
+      }
+    }
+    if (!chosenHasAggHook) return;
+    const chosen = result[chosenIdx];
+
+    // Find the highest-raw no-hook-only alternative in the result for
+    // the payload (lets the residual be diagnosed in DD without
+    // another deploy). Best-effort: skip combinations with any
+    // missing gas. Skips the chosen combination itself.
+    let noHookAltRawTotal: bigint | undefined;
+    let noHookAltGasTotal: bigint | undefined;
+    let noHookAltLegCount: number | undefined;
+    for (let i = 0; i < result.length; i++) {
+      if (i === chosenIdx) continue;
+      const combination = result[i];
+      let raw = 0n;
+      let gas = 0n;
+      let hasAggHook = false;
+      let missingGas = false;
+      for (const route of combination) {
+        const quote = quoteMap.get(route);
+        if (!quote || quote.gasDetails?.gasUse === undefined) {
+          missingGas = true;
+          break;
+        }
+        if (routeUsesAggHook(route, chainId)) {
+          hasAggHook = true;
+          break;
+        }
+        raw += quote.amount;
+        gas += quote.gasDetails.gasUse;
+      }
+      if (missingGas || hasAggHook) continue;
+      if (noHookAltRawTotal === undefined || raw > noHookAltRawTotal) {
+        noHookAltRawTotal = raw;
+        noHookAltGasTotal = gas;
+        noHookAltLegCount = combination.length;
+      }
+    }
+
+    const anyFired =
+      aggHookAttribution.firedPartitionKeptHigherGas ||
+      aggHookAttribution.firedSoleCandidateAdmit ||
+      aggHookAttribution.firedSoleCandidateGasWorse ||
+      aggHookAttribution.firedChosenSplitGasWorse ||
+      aggHookAttribution.firedAnchorSubOptimal;
+    // Cardinality guard (cf. PR #8341): the metric tag list excludes
+    // the 5 per-mechanism `firedXxx` flags. Including them would push
+    // explicit-tag combinations to 2^5 × tradeType × chainId × ~auto-tag
+    // multiplier into multi-million-timeseries territory, well above
+    // the 500K SRE pager threshold. Per-mechanism categorization is
+    // available on the log payload via the `attribution` object — DD
+    // log analytics is the right surface for that breakdown. The
+    // metric only sizes the residual rate via `attributed:true|false`.
+    const baseTags = [
+      ...metricTags,
+      `testAggHooks:${testAggHooks}`,
+      `tradeType:${tradeType}`,
+    ];
+    void ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.AggHookWinnerAttribution'),
+      1,
+      {tags: [...baseTags, `attributed:${anyFired}`]}
+    );
+
+    ctx.logger.info('QuoteBestSplitFinder agg-hook selected as winner', {
+      chainId,
+      tradeType,
+      attribution: {...aggHookAttribution, anyFired},
+      chosenSplit: {
+        rawTotal: chosenRawTotal.toString(),
+        gasTotal: chosenGasTotal.toString(),
+        legCount: chosen.length,
+        aggHookLegCount: chosenAggHookLegCount,
+        legsWithMissingGas: chosenLegsWithMissingGas,
+        // Index in `result` array. 0 = filterAndSortResults' top
+        // (often a 100% single-pool route). >0 means the highest-raw
+        // combination was a multi-leg split that sat behind a 100%
+        // route in `result`. Useful for sanity-checking the catch-all
+        // is targeting what the BL actually picks.
+        resultIdx: chosenIdx,
+        winnerRouteHash: hashForLogging(chosen[0].toString()),
+      },
+      noHookAlternative:
+        noHookAltRawTotal !== undefined
+          ? {
+              rawTotal: noHookAltRawTotal.toString(),
+              gasTotal: noHookAltGasTotal!.toString(),
+              legCount: noHookAltLegCount,
+              rawTotalDelta: (chosenRawTotal - noHookAltRawTotal).toString(),
+              gasTotalDelta: (chosenGasTotal - noHookAltGasTotal!).toString(),
+            }
+          : null,
+    });
+  }
+
+  /**
+   * Cat-B catch-all attribution emission, symmetric to
+   * `emitAggHookWinnerAttribution`. Fires whenever `testAggHooks=true`
+   * AND the chosen winner has NO agg-hook leg. Emits both:
+   *
+   *   - `QuoteBestSplitFinder.NoHookWinnerCatBAttribution` metric
+   *     tagged with `attributed:true|false` so DD can size the
+   *     fraction of testAggHooks=true no-hook-winners that fire no
+   *     known Cat-B mechanism log.
+   *
+   *   - `QuoteBestSplitFinder no-hook winner with agg-hooks enabled`
+   *     log with attribution flags + payload (chosen split, best
+   *     agg-hook alternative present in the result, raw/gas deltas).
+   *
+   * Today the only known Cat-B mechanism is the findBestSplits
+   * timeout (PR #8069 investigation surfaced the compute-exhaustion
+   * pattern). Future Cat-B mechanisms (K-budget eviction pressure,
+   * pool-discovery divergence) can be added as additional `firedXxx`
+   * flags without changing the emission cadence.
+   */
+  private emitNoHookWinnerCatBAttribution(
+    result: RouteBasic<TPool>[][],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    noHookCatBAttribution: {
+      firedFindBestSplitsTimedOut: boolean;
+    }
+  ): void {
+    if (!testAggHooks) return;
+    if (result.length === 0) return;
+
+    // Same winner detection as Cat-A: scan all of result for the
+    // highest-raw combination (matches BL selection).
+    let chosenIdx = 0;
+    let chosenRawTotal = 0n;
+    let chosenGasTotal = 0n;
+    let chosenLegsWithMissingGas = 0;
+    let chosenHasAggHook = false;
+    for (let i = 0; i < result.length; i++) {
+      let raw = 0n;
+      let gas = 0n;
+      let missingGas = 0;
+      let hasAggHook = false;
+      for (const route of result[i]) {
+        const quote = quoteMap.get(route);
+        if (!quote) {
+          missingGas++;
+          continue;
+        }
+        raw += quote.amount;
+        const gasUse = quote.gasDetails?.gasUse;
+        if (gasUse === undefined) {
+          missingGas++;
+        } else {
+          gas += gasUse;
+        }
+        if (routeUsesAggHook(route, chainId)) {
+          hasAggHook = true;
+        }
+      }
+      if (i === 0 || raw > chosenRawTotal) {
+        chosenIdx = i;
+        chosenRawTotal = raw;
+        chosenGasTotal = gas;
+        chosenLegsWithMissingGas = missingGas;
+        chosenHasAggHook = hasAggHook;
+      }
+    }
+    // Cat-A's emission handles the agg-hook-winner case; don't
+    // double-emit.
+    if (chosenHasAggHook) return;
+    const chosen = result[chosenIdx];
+
+    // Find the highest-raw combination in result that DOES contain
+    // agg-hook (the "what could have been picked if the BL had
+    // selected differently"). Lets DD log analytics see whether the
+    // agg-hook universe held a competitive alternative.
+    let bestAggHookAltRawTotal: bigint | undefined;
+    let bestAggHookAltGasTotal: bigint | undefined;
+    let bestAggHookAltLegCount: number | undefined;
+    let bestAggHookAltAggHookLegCount: number | undefined;
+    for (let i = 0; i < result.length; i++) {
+      if (i === chosenIdx) continue;
+      const combination = result[i];
+      let raw = 0n;
+      let gas = 0n;
+      let aggHookLegs = 0;
+      let missingGas = false;
+      for (const route of combination) {
+        const quote = quoteMap.get(route);
+        if (!quote || quote.gasDetails?.gasUse === undefined) {
+          missingGas = true;
+          break;
+        }
+        raw += quote.amount;
+        gas += quote.gasDetails.gasUse;
+        if (routeUsesAggHook(route, chainId)) {
+          aggHookLegs++;
+        }
+      }
+      if (missingGas || aggHookLegs === 0) continue;
+      if (
+        bestAggHookAltRawTotal === undefined ||
+        raw > bestAggHookAltRawTotal
+      ) {
+        bestAggHookAltRawTotal = raw;
+        bestAggHookAltGasTotal = gas;
+        bestAggHookAltLegCount = combination.length;
+        bestAggHookAltAggHookLegCount = aggHookLegs;
+      }
+    }
+
+    const anyFired = noHookCatBAttribution.firedFindBestSplitsTimedOut;
+    // Cardinality guard (cf. PR #8341): the metric tag list excludes
+    // the per-mechanism `firedXxx` flags. They live on the log payload
+    // only — DD log analytics is the right surface for per-mechanism
+    // breakdowns.
+    const baseTags = [
+      ...metricTags,
+      `testAggHooks:${testAggHooks}`,
+      `tradeType:${tradeType}`,
+    ];
+    void ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.NoHookWinnerCatBAttribution'),
+      1,
+      {tags: [...baseTags, `attributed:${anyFired}`]}
+    );
+
+    ctx.logger.info(
+      'QuoteBestSplitFinder no-hook winner with agg-hooks enabled',
+      {
+        chainId,
+        tradeType,
+        attribution: {...noHookCatBAttribution, anyFired},
+        chosenSplit: {
+          rawTotal: chosenRawTotal.toString(),
+          gasTotal: chosenGasTotal.toString(),
+          legCount: chosen.length,
+          legsWithMissingGas: chosenLegsWithMissingGas,
+          resultIdx: chosenIdx,
+          winnerRouteHash: hashForLogging(chosen[0].toString()),
+        },
+        bestAggHookAlternative:
+          bestAggHookAltRawTotal !== undefined
+            ? {
+                rawTotal: bestAggHookAltRawTotal.toString(),
+                gasTotal: bestAggHookAltGasTotal!.toString(),
+                legCount: bestAggHookAltLegCount,
+                aggHookLegCount: bestAggHookAltAggHookLegCount,
+                rawTotalDelta: (
+                  chosenRawTotal - bestAggHookAltRawTotal
+                ).toString(),
+                gasTotalDelta: (
+                  chosenGasTotal - bestAggHookAltGasTotal!
+                ).toString(),
+              }
+            : null,
       }
     );
   }
