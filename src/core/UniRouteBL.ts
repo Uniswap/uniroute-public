@@ -1021,21 +1021,50 @@ export class UniRouteBL implements IUniRoutedBL {
     }
 
     // Cache miss OR positive hit: run the heavy post-processing so the
-    // refresh trigger and read-stage metrics fire whether or not we use
-    // the routes. This matches the prior `getCachedRoutes` semantics.
-    const routes = await this.cachedRoutesRepository.processCachedRoutesResult(
-      readResult,
-      nsCtx,
-      chain.chainId,
-      tradeType,
-      amountIn,
-      usdBucket,
-      quoteType,
-      protocols,
-      request,
-      ctx,
-      options
-    );
+    // read-stage metrics fire whether or not we use the routes. The async
+    // refresh is a separate, mode-gated step run in parallel — sync BLs
+    // invoke it; async BLs never do (would recurse since the refresh is
+    // itself an async deep-search request). Refresh failures are logged
+    // and swallowed so a wobbly Redis/SQS read inside the refresh path
+    // can't fail the user's quote.
+    const refreshPromise =
+      this.serviceConfig.Lambda.Type === LambdaType.Sync
+        ? this.cachedRoutesRepository
+            .maybeEnqueueAsyncRefresh(
+              readResult,
+              nsCtx,
+              protocols,
+              chain.chainId,
+              tradeType,
+              amountIn,
+              usdBucket,
+              quoteType,
+              request,
+              ctx,
+              options
+            )
+            .catch((err: unknown) => {
+              ctx.logger.warn('Async refresh enqueue failed', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            })
+        : Promise.resolve();
+    const [routes] = await Promise.all([
+      this.cachedRoutesRepository.processCachedRoutesResult(
+        readResult,
+        nsCtx,
+        chain.chainId,
+        tradeType,
+        amountIn,
+        usdBucket,
+        quoteType,
+        protocols,
+        request,
+        ctx,
+        options
+      ),
+      refreshPromise,
+    ]);
 
     // Preserve the pre-refactor `GetCachedRoutes` metric semantic:
     // fires only on the non-short-circuit path and brackets the full
@@ -1959,15 +1988,14 @@ export class UniRouteBL implements IUniRoutedBL {
       // Check each USD bucket for cached routes
       for (const usdBucket of allUsdBuckets) {
         try {
-          // Get cached routes for this specific bucket using the same logic as the quote method.
-          // Note that `cachedRoutesRepository.getCachedRoutes` contains logic to trigger async update
-          // but since we this endpoint is called with the async serviceConfig, it will not trigger it.
-          // - see `CachedRoutesRepository.validateAndParseCachedRoutes` logic in `CachedRoutesRepository.ts`
-          // - see `UniRouteService.getCachedRoutes` in `src/api/index.ts`
-          const routes = await this.cachedRoutesRepository.getCachedRoutes(
-            // Admin endpoint operates on the base (pure-Uniswap) keyspace —
-            // specialised namespaces aren't surfaced here. See ROUTE-1103
-            // (payload will accept nsCtx when we expand).
+          // Admin inspection — read + process only, no refresh enqueue.
+          // Admin endpoint operates on the base (pure-Uniswap) keyspace —
+          // specialised namespaces aren't surfaced here. See ROUTE-1103
+          // (payload will accept nsCtx when we expand).
+          // TODO: https://linear.app/uniswap/issue/ROUTE-1103/tech-debt-admin-getcachedroutes-request-payload-to-modify-to-accept
+          const adminProtocols = [...UNISWAP_NATIVE_PROTOCOLS]; // All protocols
+          const adminQuoteRequest = new QuoteRequest(); // Empty — we're not doing a full quote
+          const readResult = await this.cachedRoutesRepository.readCachedRoutes(
             EMPTY_NAMESPACE_CONTEXT,
             chain.chainId,
             tokenInCurrencyInfo,
@@ -1975,12 +2003,22 @@ export class UniRouteBL implements IUniRoutedBL {
             tradeType,
             amountIn,
             usdBucket,
-            QuoteType.Fresh,
-            // TODO: https://linear.app/uniswap/issue/ROUTE-1103/tech-debt-admin-getcachedroutes-request-payload-to-modify-to-accept
-            [...UNISWAP_NATIVE_PROTOCOLS], // All protocols
-            new QuoteRequest(), // Empty request since we're not doing a full quote
+            adminProtocols,
             ctx
           );
+          const routes =
+            await this.cachedRoutesRepository.processCachedRoutesResult(
+              readResult,
+              EMPTY_NAMESPACE_CONTEXT,
+              chain.chainId,
+              tradeType,
+              amountIn,
+              usdBucket,
+              QuoteType.Fresh,
+              adminProtocols,
+              adminQuoteRequest,
+              ctx
+            );
 
           if (routes.length > 0) {
             // Convert routes to proto format

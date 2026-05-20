@@ -5170,40 +5170,7 @@ describe('UniRouteBL', () => {
         );
       }
 
-      async getCachedRoutes(
-        nsCtx: RouteNamespaceContext,
-        chainId: number,
-        tokenInCurrencyInfo: CurrencyInfo,
-        tokenOutCurrencyInfo: CurrencyInfo,
-        tradeType: TradeType,
-        amountIn: bigint,
-        usdBucket: UsdBucket,
-        quoteType: QuoteType,
-        protocols: Protocol[],
-        request: QuoteRequest,
-        ctx: Context,
-        quoteOptions?: QuoteOptions
-      ): Promise<RouteBasic[]> {
-        const readResult = await this.readCachedRoutes(
-          nsCtx,
-          chainId,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo
-        );
-        return this.processCachedRoutesResult(
-          readResult,
-          nsCtx,
-          chainId,
-          tradeType,
-          amountIn,
-          usdBucket,
-          quoteType,
-          protocols,
-          request,
-          ctx,
-          quoteOptions
-        );
-      }
+      async maybeEnqueueAsyncRefresh(): Promise<void> {}
 
       async saveCachedRoutes(): Promise<void> {}
 
