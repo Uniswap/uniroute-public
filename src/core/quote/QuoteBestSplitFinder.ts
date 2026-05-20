@@ -259,6 +259,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): {
@@ -361,6 +362,33 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           noHookQuotes,
           aggHookQuotes,
           noHookBudget,
+          instrumentation
+        );
+        // Anchor-analysis instrumentation: PR #8327's prod data showed
+        // gas-cost-per-gas-unit is consistent between control and
+        // treatment runs (~0.298 in WETH→USDC trades), so the residual
+        // UniRoute-wins-by-gas-adj losses aren't from gas-pricing
+        // inconsistency. A specific failing trace
+        // (`7343506789041406327`) showed treatment picked a Fluid-hook
+        // v4 terminal instead of control's lower-gas no-hook v4
+        // terminal at the same 55% bucket, even though the no-hook
+        // v4 was in treatment's universe. Hypothesis: the K-budget
+        // gate anchors on `noHookQuotes[0]` (best by raw amount) but
+        // the LOWEST-GAS no-hook in the bucket is what would have
+        // produced control's preferred combination. When those differ
+        // and the gate's anchor is gas-heavier than the agg-hook
+        // winner, the gate admits agg-hook → DFS evicts the lower-gas
+        // no-hook from K=2 at that percentage.
+        //
+        // This emission compares (a) the agg-hook winner's gas to (b)
+        // the lowest-gas no-hook in the bucket (not the gate's actual
+        // anchor) so prod telemetry can size the population where
+        // anchor choice matters.
+        this.maybeLogPartitionAnchorAnalysis(
+          percentage,
+          chainId,
+          noHookQuotes,
+          aggHookQuotes,
           instrumentation
         );
         // Investigation: the `isAggHookCompetitive` early-return at "no
@@ -634,6 +662,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -723,6 +752,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -810,6 +840,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -958,6 +989,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -1027,6 +1059,172 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   }
 
   /**
+   * Anchor-analysis instrumentation. The K-budget gate compares the
+   * agg-hook winner's gas to `noHookQuotes[0]` (the best no-hook by
+   * raw amount). If a DIFFERENT no-hook in the bucket has materially
+   * lower gas, the gate's anchor choice is sub-optimal — the gate may
+   * admit an agg-hook whose gas is below the raw winner's but above
+   * the bucket's actual minimum. When that happens, DFS's K=2 budget
+   * at this percentage holds the agg-hook in place of the lowest-gas
+   * no-hook, and the final split is gas-heavier than necessary.
+   *
+   * This method does NOT change any gate decision. It only emits
+   * telemetry to size the population where anchor choice would
+   * differ. Tag verdicts:
+   *
+   *   `anchorVerdict:winner_is_lowest_gas`
+   *     The current anchor (`noHookQuotes[0]`) is also the lowest-gas
+   *     no-hook in the bucket. Anchor choice doesn't matter here.
+   *
+   *   `anchorVerdict:lowest_gas_differs_anchor_admits`
+   *     A different no-hook has lower gas than the raw winner.
+   *     Comparing the agg-hook winner to the lowest-gas no-hook would
+   *     hit the gas check (delta > tolerance) and reject — but the
+   *     current anchor admitted because it compared against the
+   *     gas-heavier raw winner.
+   *
+   *   `anchorVerdict:lowest_gas_differs_anchor_neutral`
+   *     A different no-hook has lower gas than the raw winner, but
+   *     the agg-hook winner's gas is still ≤ the lowest-gas no-hook's
+   *     gas. Anchor swap wouldn't change the gate's verdict.
+   *
+   *   `anchorVerdict:gas_info_missing`
+   *     gasDetails.gasUse absent on aggHookWinner or any no-hook.
+   *
+   * Emits a log on `lowest_gas_differs_anchor_admits` with full leg
+   * details, capped per request via `partitionAnchorAnalysisLogBudget`.
+   *
+   * Caller pre-condition: `useBothPopulatedPartition === true` (the
+   * partition is firing — only meaningful in that branch). Caller
+   * guarantees `aggHookQuotes.length > 0` and `noHookQuotes.length > 0`.
+   */
+  private maybeLogPartitionAnchorAnalysis(
+    percentage: number,
+    chainId: ChainId,
+    noHookQuotes: QuoteBasic[],
+    aggHookQuotes: QuoteBasic[],
+    instrumentation: {
+      ctx: UniContext;
+      tradeType: TradeType;
+      testAggHooks: boolean | undefined;
+      partitionEvictLogBudget: {remaining: number};
+      soleCandidateLogBudget: {remaining: number};
+      partitionGasAdjustedLogBudget: {remaining: number};
+      gateEarlyReturnLeakLogBudget: {remaining: number};
+      soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
+      metricTags: string[];
+    }
+  ): void {
+    if (noHookQuotes.length === 0 || aggHookQuotes.length === 0) return;
+
+    const aggHookWinner = aggHookQuotes[0];
+    const noHookWinner = noHookQuotes[0];
+
+    const baseTags = [
+      ...instrumentation.metricTags,
+      `testAggHooks:${instrumentation.testAggHooks}`,
+      `tradeType:${instrumentation.tradeType}`,
+    ];
+
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+    const noHookWinnerGasUse = noHookWinner.gasDetails?.gasUse;
+    if (aggHookGasUse === undefined || noHookWinnerGasUse === undefined) {
+      void instrumentation.ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.PartitionAnchorAnalysis'),
+        1,
+        {tags: [...baseTags, 'anchorVerdict:gas_info_missing']}
+      );
+      return;
+    }
+
+    // Find the no-hook with minimum gasUse in the bucket.
+    let lowestGasNoHook: QuoteBasic = noHookWinner;
+    let lowestGasNoHookGasUse: bigint = noHookWinnerGasUse;
+    for (let i = 1; i < noHookQuotes.length; i++) {
+      const q = noHookQuotes[i];
+      const g = q.gasDetails?.gasUse;
+      if (g === undefined) continue;
+      if (g < lowestGasNoHookGasUse) {
+        lowestGasNoHook = q;
+        lowestGasNoHookGasUse = g;
+      }
+    }
+
+    // Anchor is optimal — no other no-hook has lower gas.
+    if (lowestGasNoHook === noHookWinner) {
+      void instrumentation.ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.PartitionAnchorAnalysis'),
+        1,
+        {tags: [...baseTags, 'anchorVerdict:winner_is_lowest_gas']}
+      );
+      return;
+    }
+
+    // A different no-hook has lower gas. Would the gate's verdict
+    // change if we anchored on it instead of the raw winner?
+    //
+    // The actual gate (`isAggHookCompetitive`) checks
+    //   aggHookGasUse > noHookGasUse  AND
+    //   (aggHookGasUse - noHookGasUse) > AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS
+    // with `noHookGasUse` = `noHookQuotes[0].gas` (raw winner).
+    //
+    // Re-anchored against `lowestGasNoHook`, the gate would reject
+    // when aggHookGasUse > lowestGasNoHookGasUse + tolerance. Use the
+    // same tolerance as the live gate so the verdict reflects the
+    // current configured strictness.
+    const wouldRejectWithLowestAnchor =
+      aggHookGasUse > lowestGasNoHookGasUse &&
+      aggHookGasUse - lowestGasNoHookGasUse >
+        this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS;
+
+    const verdictTag = wouldRejectWithLowestAnchor
+      ? 'anchorVerdict:lowest_gas_differs_anchor_admits'
+      : 'anchorVerdict:lowest_gas_differs_anchor_neutral';
+    void instrumentation.ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.PartitionAnchorAnalysis'),
+      1,
+      {tags: [...baseTags, verdictTag]}
+    );
+
+    if (!wouldRejectWithLowestAnchor) return;
+    if (instrumentation.partitionAnchorAnalysisLogBudget.remaining <= 0) {
+      return;
+    }
+    instrumentation.partitionAnchorAnalysisLogBudget.remaining -= 1;
+
+    instrumentation.ctx.logger.info(
+      'QuoteBestSplitFinder partition anchor sub-optimal — lowest-gas no-hook differs from raw winner',
+      {
+        chainId,
+        percentage,
+        tradeType: instrumentation.tradeType,
+        noHookCount: noHookQuotes.length,
+        aggHookCount: aggHookQuotes.length,
+        aggHookWinner: {
+          routeHash: hashForLogging(aggHookWinner.route.toString()),
+          amount: aggHookWinner.amount.toString(),
+          gasUse: aggHookGasUse.toString(),
+        },
+        noHookWinnerByRaw: {
+          routeHash: hashForLogging(noHookWinner.route.toString()),
+          amount: noHookWinner.amount.toString(),
+          gasUse: noHookWinnerGasUse.toString(),
+        },
+        noHookLowestGas: {
+          routeHash: hashForLogging(lowestGasNoHook.route.toString()),
+          amount: lowestGasNoHook.amount.toString(),
+          gasUse: lowestGasNoHookGasUse.toString(),
+        },
+        gasUseDeltaVsRawWinner: (aggHookGasUse - noHookWinnerGasUse).toString(),
+        gasUseDeltaVsLowestGas: (
+          aggHookGasUse - lowestGasNoHookGasUse
+        ).toString(),
+      }
+    );
+  }
+
+  /**
    * Investigation-only: catches the case where `isAggHookCompetitive` returns
    * true via its "no displacement" early-return — i.e.
    * `noHookQuotes.length <= noHookBudgetIfPartitioned` (typically exactly 1
@@ -1073,6 +1271,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionGasAdjustedLogBudget: {remaining: number};
       gateEarlyReturnLeakLogBudget: {remaining: number};
       soleCandidateGasComparisonLogBudget: {remaining: number};
+      partitionAnchorAnalysisLogBudget: {remaining: number};
       metricTags: string[];
     }
   ): void {
@@ -1323,6 +1522,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     const partitionGasAdjustedLogBudget = {remaining: 5};
     const gateEarlyReturnLeakLogBudget = {remaining: 5};
     const soleCandidateGasComparisonLogBudget = {remaining: 5};
+    const partitionAnchorAnalysisLogBudget = {remaining: 5};
 
     // Pre-compute quote lookup map for O(1) access throughout the function
     const quoteMap = new Map<RouteBasic<TPool>, QuoteBasic>();
@@ -1385,6 +1585,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           partitionGasAdjustedLogBudget,
           gateEarlyReturnLeakLogBudget,
           soleCandidateGasComparisonLogBudget,
+          partitionAnchorAnalysisLogBudget,
           metricTags,
         }
       );

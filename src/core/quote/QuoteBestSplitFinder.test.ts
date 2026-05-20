@@ -1782,6 +1782,7 @@ describe('QuoteBestSplitFinder', () => {
         partitionGasAdjustedLogBudget: {remaining: number};
         gateEarlyReturnLeakLogBudget: {remaining: number};
         soleCandidateGasComparisonLogBudget: {remaining: number};
+        partitionAnchorAnalysisLogBudget: {remaining: number};
         metricTags: string[];
       }>
     ) => ({
@@ -1793,6 +1794,7 @@ describe('QuoteBestSplitFinder', () => {
       partitionGasAdjustedLogBudget: {remaining: 5},
       gateEarlyReturnLeakLogBudget: {remaining: 5},
       soleCandidateGasComparisonLogBudget: {remaining: 5},
+      partitionAnchorAnalysisLogBudget: {remaining: 5},
       metricTags: ['chainId:1'],
       ...overrides,
     });
@@ -1929,18 +1931,44 @@ describe('QuoteBestSplitFinder', () => {
       );
 
       expect(infoMock().mock.calls).toHaveLength(0);
-      const metricCalls = metricMock().mock.calls;
-      // Two metrics fire when partition runs: PartitionDecision (raw verdict)
-      // and PartitionGasAdjustedDecision (gas-adjusted verdict). Mock quotes
-      // lack gasDetails, so the gas-adjusted side emits the gas_info_missing
-      // tag and does not fire its log.
-      expect(metricCalls).toHaveLength(2);
-      const rawTags = (metricCalls[0][2] as {tags: string[]}).tags;
-      expect(rawTags).toContain('partitionVerdict:agghook_better_or_tie');
-      expect(rawTags).toContain('testAggHooks:true');
-      expect(rawTags).toContain(`tradeType:${TradeType.ExactIn}`);
-      const gasTags = (metricCalls[1][2] as {tags: string[]}).tags;
-      expect(gasTags).toContain('gasAdjustedVerdict:gas_info_missing');
+      // Three metrics fire on every partition decision: PartitionDecision
+      // (raw verdict), PartitionGasAdjustedDecision (gas-adjusted
+      // verdict), and PartitionAnchorAnalysis (raw-winner vs lowest-gas
+      // no-hook anchor verdict). Mock quotes lack gasDetails, so both
+      // gas-related sides emit `gas_info_missing` and skip their logs.
+      const partitionDecisionMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('partitionVerdict:')
+        )
+      );
+      const gasAdjustedMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('gasAdjustedVerdict:')
+        )
+      );
+      const anchorAnalysisMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('anchorVerdict:')
+        )
+      );
+      expect(partitionDecisionMetrics).toHaveLength(1);
+      expect(
+        (partitionDecisionMetrics[0][2] as {tags: string[]}).tags
+      ).toContain('partitionVerdict:agghook_better_or_tie');
+      expect(
+        (partitionDecisionMetrics[0][2] as {tags: string[]}).tags
+      ).toContain('testAggHooks:true');
+      expect(
+        (partitionDecisionMetrics[0][2] as {tags: string[]}).tags
+      ).toContain(`tradeType:${TradeType.ExactIn}`);
+      expect(gasAdjustedMetrics).toHaveLength(1);
+      expect((gasAdjustedMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'gasAdjustedVerdict:gas_info_missing'
+      );
+      expect(anchorAnalysisMetrics).toHaveLength(1);
+      expect((anchorAnalysisMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'anchorVerdict:gas_info_missing'
+      );
     });
 
     it('does not emit log or metric when testAggHooks is false', () => {
@@ -2119,9 +2147,11 @@ describe('QuoteBestSplitFinder', () => {
       }
 
       expect(infoMock().mock.calls).toHaveLength(5);
-      // 14 = 7 PartitionDecision + 7 PartitionGasAdjustedDecision metrics
-      // (the latter emits gas_info_missing since mock quotes lack gasDetails).
-      expect(metricMock().mock.calls).toHaveLength(14);
+      // 21 = 7 iterations × 3 metrics per partition decision
+      // (PartitionDecision, PartitionGasAdjustedDecision,
+      // PartitionAnchorAnalysis). The two gas-related metrics emit
+      // gas_info_missing since mock quotes lack gasDetails.
+      expect(metricMock().mock.calls).toHaveLength(21);
       expect(sharedInstr.partitionEvictLogBudget.remaining).toBe(0);
     });
 
@@ -2760,6 +2790,242 @@ describe('QuoteBestSplitFinder', () => {
       expect(leakLogs).toHaveLength(5);
       expect(leakMetrics).toHaveLength(7);
       expect(sharedInstr.gateEarlyReturnLeakLogBudget.remaining).toBe(0);
+    });
+
+    // ----- Partition anchor analysis instrumentation -----
+    //
+    // Caused by the prod trace 7343506789041406327 finding (PR #8327
+    // data): treatment picked a Fluid-hook v4 terminal over a no-hook
+    // v4 terminal at the same percentage bucket, even though the
+    // no-hook v4 was in treatment's universe. The hypothesis: the
+    // K-budget gate anchors on `noHookQuotes[0]` (best-by-raw), but
+    // the LOWEST-GAS no-hook in the bucket has lower gas than the
+    // raw winner. Re-anchoring on the lowest-gas no-hook would
+    // reject the agg-hook in cases where the raw-winner anchor
+    // currently admits it.
+
+    it('emits anchorVerdict:winner_is_lowest_gas when the raw winner is also the lowest-gas no-hook', () => {
+      const aggHook = aggHookRouteAt(
+        '0xb000000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xb100000000000000000000000000000000000000',
+        50
+      );
+      const noHookRunnerUp = noHookRouteAt(
+        '0xb200000000000000000000000000000000000000',
+        50
+      );
+
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              // No-hook winner (best raw=1000) is also lowest gas=100.
+              createMockQuoteWithGas(noHookWinner, 1000n, 100n),
+              // Runner-up has higher gas.
+              createMockQuoteWithGas(noHookRunnerUp, 990n, 300n),
+              createMockQuoteWithGas(aggHook, 1000n, 200n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const anchorMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('anchorVerdict:')
+        )
+      );
+      expect(anchorMetrics).toHaveLength(1);
+      expect((anchorMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'anchorVerdict:winner_is_lowest_gas'
+      );
+    });
+
+    it('emits anchorVerdict:lowest_gas_differs_anchor_admits + log when re-anchoring on lowest-gas no-hook would reject agg-hook', () => {
+      const aggHook = aggHookRouteAt(
+        '0xb300000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xb400000000000000000000000000000000000000',
+        50
+      );
+      const noHookLowGas = noHookRouteAt(
+        '0xb500000000000000000000000000000000000000',
+        50
+      );
+
+      // Permissive finder has 10M-unit gas tolerance; use realistic
+      // bucket-scale gas values (tens of millions) so the gate-verdict
+      // delta against the lowest-gas anchor materially exceeds it.
+      //
+      // No-hook winner (best raw=1000) has gas=50M (gate's current
+      // anchor). A different no-hook has gas=5M (the actual lowest).
+      // Agg-hook gas=20M. Against the raw winner (50M), agg-hook is
+      // gas-better → gate admits. Against the lowest (5M), agg-hook
+      // is gas-worse by 15M > 10M tolerance → gate would reject.
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGas(noHookWinner, 1000n, 50_000_000n),
+              createMockQuoteWithGas(noHookLowGas, 990n, 5_000_000n),
+              createMockQuoteWithGas(aggHook, 1000n, 20_000_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const anchorMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('anchorVerdict:')
+        )
+      );
+      expect(anchorMetrics).toHaveLength(1);
+      expect((anchorMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'anchorVerdict:lowest_gas_differs_anchor_admits'
+      );
+
+      const anchorLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder partition anchor sub-optimal — lowest-gas no-hook differs from raw winner'
+      );
+      expect(anchorLogs).toHaveLength(1);
+      const payload = anchorLogs[0][1] as Record<string, unknown>;
+      expect((payload.aggHookWinner as {gasUse: string}).gasUse).toBe(
+        '20000000'
+      );
+      expect((payload.noHookWinnerByRaw as {gasUse: string}).gasUse).toBe(
+        '50000000'
+      );
+      expect((payload.noHookLowestGas as {gasUse: string}).gasUse).toBe(
+        '5000000'
+      );
+      expect(payload.gasUseDeltaVsRawWinner).toBe('-30000000');
+      expect(payload.gasUseDeltaVsLowestGas).toBe('15000000');
+    });
+
+    it('emits anchorVerdict:lowest_gas_differs_anchor_neutral when lowest-gas anchor also admits the agg-hook', () => {
+      const aggHook = aggHookRouteAt(
+        '0xb600000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xb700000000000000000000000000000000000000',
+        50
+      );
+      const noHookLowGas = noHookRouteAt(
+        '0xb800000000000000000000000000000000000000',
+        50
+      );
+
+      // Permissive finder has 10M-unit gas tolerance. Use bucket-scale
+      // gas values where agg-hook is gas-best (5M), lowest no-hook is
+      // 4M, raw winner is 50M. Even re-anchored on the lowest no-hook
+      // (4M), agg-hook's delta is 1M ≤ 10M tolerance → still admits →
+      // neutral verdict (no change in gate outcome).
+      finder['getBestUnusedQuotesStats'](
+        50,
+        new Map<number, QuoteBasic[]>([
+          [
+            50,
+            [
+              createMockQuoteWithGas(noHookWinner, 1000n, 50_000_000n),
+              createMockQuoteWithGas(noHookLowGas, 990n, 4_000_000n),
+              createMockQuoteWithGas(aggHook, 1000n, 5_000_000n),
+            ],
+          ],
+        ]),
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn,
+        buildInstrumentation({tradeType: TradeType.ExactIn})
+      );
+
+      const anchorMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('anchorVerdict:')
+        )
+      );
+      expect(anchorMetrics).toHaveLength(1);
+      expect((anchorMetrics[0][2] as {tags: string[]}).tags).toContain(
+        'anchorVerdict:lowest_gas_differs_anchor_neutral'
+      );
+
+      const anchorLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder partition anchor sub-optimal — lowest-gas no-hook differs from raw winner'
+      );
+      expect(anchorLogs).toHaveLength(0);
+    });
+
+    it('respects partitionAnchorAnalysisLogBudget cap while metric keeps firing', () => {
+      const aggHook = aggHookRouteAt(
+        '0xb900000000000000000000000000000000000000',
+        50
+      );
+      const noHookWinner = noHookRouteAt(
+        '0xba00000000000000000000000000000000000000',
+        50
+      );
+      const noHookLowGas = noHookRouteAt(
+        '0xbb00000000000000000000000000000000000000',
+        50
+      );
+      // Bucket-scale gas values so anchor-admits verdict fires past
+      // the permissive 10M-unit tolerance on every iteration.
+      const quotesMap = new Map<number, QuoteBasic[]>([
+        [
+          50,
+          [
+            createMockQuoteWithGas(noHookWinner, 1000n, 50_000_000n),
+            createMockQuoteWithGas(noHookLowGas, 990n, 5_000_000n),
+            createMockQuoteWithGas(aggHook, 1000n, 20_000_000n),
+          ],
+        ],
+      ]);
+
+      const sharedInstr = buildInstrumentation({tradeType: TradeType.ExactIn});
+      for (let i = 0; i < 7; i++) {
+        finder['getBestUnusedQuotesStats'](
+          50,
+          quotesMap,
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          sharedInstr
+        );
+      }
+
+      const anchorLogs = infoMock().mock.calls.filter(
+        c =>
+          c[0] ===
+          'QuoteBestSplitFinder partition anchor sub-optimal — lowest-gas no-hook differs from raw winner'
+      );
+      const anchorMetrics = metricMock().mock.calls.filter(c =>
+        (c[2] as {tags: string[]}).tags.some(t =>
+          t.startsWith('anchorVerdict:')
+        )
+      );
+      expect(anchorLogs).toHaveLength(5);
+      expect(anchorMetrics).toHaveLength(7);
+      expect(sharedInstr.partitionAnchorAnalysisLogBudget.remaining).toBe(0);
     });
 
     // ----- Sole-candidate gasUse log payload -----
@@ -3957,6 +4223,7 @@ describe('QuoteBestSplitFinder', () => {
           partitionGasAdjustedLogBudget: {remaining: 5},
           gateEarlyReturnLeakLogBudget: {remaining: 5},
           soleCandidateGasComparisonLogBudget: {remaining: 5},
+          partitionAnchorAnalysisLogBudget: {remaining: 5},
           metricTags: ['chainId:1'],
         }
       );
