@@ -90,7 +90,18 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       arbitrumGasDataProvider,
       freshPoolDetailsWrapper
     );
-    this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>();
+    // Kill-switch for the lowest-gas anchor in the K-budget partition
+    // gate. See `QuoteBestSplitFinder.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR`
+    // for the rationale; default off until the canary deploy validates
+    // the change against prod `PartitionAnchorAnalysis` telemetry.
+    const useLowestGasAnchor =
+      process.env.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR === 'true';
+    this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>(
+      0n,
+      0n,
+      0n,
+      useLowestGasAnchor
+    );
     this.rpcProviderMap = rpcProviderMap ?? new Map();
   }
 

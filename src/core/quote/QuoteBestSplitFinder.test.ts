@@ -4261,6 +4261,265 @@ describe('QuoteBestSplitFinder', () => {
         'soleCandidateVerdict:rejected'
       );
     });
+
+    // ----- Lowest-gas anchor kill-switch -----
+    //
+    // The K-budget partition gas-gate's default anchor is `noHookQuotes[0]`
+    // (best by raw amount). Prod `PartitionAnchorAnalysis` telemetry
+    // (commit-fa30fa0, 60 min) showed that in 47.0% of partition firings
+    // the lowest-gas no-hook in the same bucket differs from the raw
+    // winner AND would reject the agg-hook under the live gas tolerance.
+    // The kill-switch `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR` swaps the
+    // anchor to that lowest-gas quote, matching the alternative DFS would
+    // pick if agg-hook were excluded from the candidate set.
+    //
+    // The bug-shape fixture below mirrors the trace `5715715370883124467`
+    // (LINK→USDT $100k EXACT_IN) where the gate admitted agg-hook 5×
+    // against a raw winner that wasn't the lowest-gas no-hook in the
+    // bucket — producing a Cat-B loss downstream.
+    describe('lowest-gas anchor kill-switch', () => {
+      it('flag off: confirms bug shape — agg-hook admitted by raw-anchor gas gate even when lowest-gas no-hook is cheaper than agg-hook', () => {
+        // Trim down to the actual K-budget bug shape: only enough quotes
+        // that the raw gate has no anchor to evict against (no runner-up
+        // beyond the no-hook budget). Then the gas gate is the only
+        // mechanism — and at default anchor it compares against the raw
+        // winner (200k), not the cheapest gas (100k). aggHook 170k <
+        // 200k → gas-gate passes → partition admits.
+        //
+        // Setup: noHookBudgetIfPartitioned=1, noHookQuotes.length=1 → no
+        // runner-up → raw gate skipped. But we need two no-hook quotes
+        // to demonstrate the anchor-choice mattering. Workaround: use a
+        // displacement that ties on raw so the raw gate vacuously
+        // passes (badness=0), and let the gas gate be decisive.
+        const noHookRawWinner = noHookRouteAt(
+          '0x1b00000000000000000000000000000000000000',
+          50
+        );
+        const noHookCheapestGas = noHookRouteAt(
+          '0x1b10000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x1b20000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = finder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // raw-tied so raw gate's badness=0 (passes vacuously)
+                createMockQuoteWithGasUse(noHookRawWinner, 1000n, 200_000n),
+                createMockQuoteWithGasUse(noHookCheapestGas, 1000n, 100_000n),
+                createMockQuoteWithGasUse(aggHook, 1000n, 170_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn
+        );
+
+        // Default anchor = noHookRawWinner (200k). aggHook 170k < 200k →
+        // gas-gate passes → partition admits agg-hook → 1 slot each.
+        expect(stats.returnedCount).toBe(2);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(noHookRawWinner);
+        expect(routes).toContain(aggHook); // <-- the bug: agg-hook admitted
+        expect(routes).not.toContain(noHookCheapestGas);
+      });
+
+      it('flag on: rejects agg-hook in the bug shape (lowest-gas anchor catches the 70k delta)', () => {
+        // Same fixture as the prior test; with the flag on the anchor
+        // becomes noHookCheapestGas (100k). aggHook 170k > 100k by 70k,
+        // exceeds default 0n tolerance → gas-gate rejects → all K slots
+        // go to no-hook.
+        const lowestGasAnchorFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          true
+        );
+
+        const noHookRawWinner = noHookRouteAt(
+          '0x1c00000000000000000000000000000000000000',
+          50
+        );
+        const noHookCheapestGas = noHookRouteAt(
+          '0x1c10000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x1c20000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = lowestGasAnchorFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasUse(noHookRawWinner, 1000n, 200_000n),
+                createMockQuoteWithGasUse(noHookCheapestGas, 1000n, 100_000n),
+                createMockQuoteWithGasUse(aggHook, 1000n, 170_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn
+        );
+
+        expect(stats.returnedCount).toBe(2);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(noHookRawWinner);
+        expect(routes).toContain(noHookCheapestGas);
+        expect(routes).not.toContain(aggHook);
+      });
+
+      it('flag on: still admits when agg-hook gas <= lowest-gas no-hook', () => {
+        // Symmetric guard: the lowest-gas anchor must not over-correct
+        // and exclude legitimately-cheap agg-hook quotes.
+        const lowestGasAnchorFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          true
+        );
+
+        const noHookRawWinner = noHookRouteAt(
+          '0x1d00000000000000000000000000000000000000',
+          50
+        );
+        const noHookCheapestGas = noHookRouteAt(
+          '0x1d10000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x1d20000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = lowestGasAnchorFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasUse(noHookRawWinner, 1000n, 200_000n),
+                createMockQuoteWithGasUse(noHookCheapestGas, 1000n, 100_000n),
+                // aggHook ties cheapest gas → gas-gate vacuously passes.
+                createMockQuoteWithGasUse(aggHook, 1000n, 100_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn
+        );
+
+        expect(stats.returnedCount).toBe(2);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(aggHook);
+      });
+
+      it('flag on: respects the existing gas tolerance — admits within threshold', () => {
+        // Lowest-gas anchor + 100k unit tolerance. Bug-shape gap is
+        // 70k → within tolerance → gate admits.
+        const lowestGasAnchorFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          100_000n,
+          0n,
+          true
+        );
+
+        const noHookRawWinner = noHookRouteAt(
+          '0x1e00000000000000000000000000000000000000',
+          50
+        );
+        const noHookCheapestGas = noHookRouteAt(
+          '0x1e10000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x1e20000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = lowestGasAnchorFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasUse(noHookRawWinner, 1000n, 200_000n),
+                createMockQuoteWithGasUse(noHookCheapestGas, 1000n, 100_000n),
+                createMockQuoteWithGasUse(aggHook, 1000n, 170_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn
+        );
+
+        expect(stats.returnedCount).toBe(2);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(aggHook);
+      });
+
+      it('flag on: no-op when no-hook quotes lack gasUse (preserves test-mock compatibility)', () => {
+        // When no no-hook quote has gasDetails.gasUse populated, the
+        // lowest-gas anchor is undefined and the gas-gate skips —
+        // matching the existing BPS-only fallback that protects unit-test
+        // fixtures and stale-gas code paths.
+        const lowestGasAnchorFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          true
+        );
+
+        const noHookWinner = noHookRouteAt(
+          '0x1f00000000000000000000000000000000000000',
+          50
+        );
+        const noHookRunnerUp = noHookRouteAt(
+          '0x1f10000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x1f20000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = lowestGasAnchorFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // No gasDetails on the no-hook quotes; aggHook tied raw,
+                // so raw gate passes; gas gate has no anchor → admit.
+                createMockQuote(noHookWinner, 1000n),
+                createMockQuote(noHookRunnerUp, 1001n),
+                createMockQuoteWithGasUse(aggHook, 1000n, 500_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactOut
+        );
+
+        expect(stats.returnedCount).toBe(2);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(aggHook);
+      });
+    });
   });
 
   describe('chosen-split gas-comparison instrumentation', () => {

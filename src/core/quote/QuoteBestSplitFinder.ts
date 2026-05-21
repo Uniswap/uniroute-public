@@ -120,16 +120,53 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    */
   private readonly AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS: bigint;
 
+  /**
+   * Kill-switch for the lowest-gas anchor in `isAggHookCompetitive`'s
+   * gas-use gate. When false (default), the gate anchors on
+   * `noHookQuotes[0]` (best by raw amount). When true, the gate scans
+   * all of `noHookQuotes` for the entry with the minimum `gasUse` and
+   * anchors on that instead.
+   *
+   * Background: `maybeLogPartitionAnchorAnalysis` instrumentation in
+   * prod (`commit-fa30fa0`) showed 47.0% of partition firings (6.6M /
+   * 14.0M total in 60 min) hit the
+   * `anchorVerdict:lowest_gas_differs_anchor_admits` branch — the
+   * raw-anchor admits agg-hook but the lowest-gas anchor would
+   * reject. Trace `5715715370883124467` (a $100k LINK→USDT EXACT_IN
+   * losing 29.92 bps gas-adjusted) fired
+   * `firedAnchorSubOptimal=true` across 5 distinct percentage
+   * buckets, then `partition kept higher-gas agg-hook` 5×, then
+   * `chosen split has agg-hook with worse gas than no-hook
+   * alternative`, and ended as a within-uniroute Cat-A loss +
+   * trading-side Cat-B comparison loss.
+   *
+   * The lowest-gas anchor reflects the alternative DFS would pick
+   * if agg-hook were excluded from the candidate set, which is the
+   * correct comparison point for the partition's gas tradeoff —
+   * `noHookQuotes[0]` (raw winner) only happens to be the right
+   * anchor when it also has the lowest gas in the bucket, which the
+   * instrumentation showed is true ~50.6% of the time.
+   *
+   * Default off to ship behind a kill-switch and validate in a
+   * canary deploy before flipping. Constructor-settable for tests;
+   * production reads via env var `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR`
+   * in `DeepQuoteStrategy`.
+   */
+  private readonly AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR: boolean;
+
   constructor(
     aggHookPartitionToleranceBps: bigint = 0n,
     aggHookPartitionGasToleranceUnits: bigint = 0n,
-    aggHookSoleCandidateGasToleranceUnits: bigint = 0n
+    aggHookSoleCandidateGasToleranceUnits: bigint = 0n,
+    aggHookPartitionUseLowestGasAnchor: boolean = false
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
       aggHookPartitionGasToleranceUnits;
     this.AGG_HOOK_SOLE_CANDIDATE_GAS_TOLERANCE_UNITS =
       aggHookSoleCandidateGasToleranceUnits;
+    this.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR =
+      aggHookPartitionUseLowestGasAnchor;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -494,15 +531,21 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    *     exists at `noHookQuotes[noHookBudgetIfPartitioned]`). If no
    *     runner-up exists, nothing is being evicted, so the raw badness
    *     comparison has no meaningful anchor — skip the raw check.
-   *   gas-use gate runs ALWAYS against `noHookQuotes[0]` (best no-hook
-   *     in the bucket), regardless of whether displacement happens. The
-   *     reason: even when no no-hook is being displaced, the agg-hook
-   *     still gets a partition slot alongside the surviving no-hook(s),
-   *     and downstream `scoreAndSortCombinations` ranks splits by raw
-   *     amount only — so a gas-heavier agg-hook can still surface in
-   *     the final split. Anchoring against the best no-hook (rather
-   *     than the runner-up) reflects the alternative DFS would pick if
-   *     agg-hook were excluded from the candidate set.
+   *   gas-use gate runs ALWAYS. By default it anchors against
+   *     `noHookQuotes[0]` (best no-hook by raw amount). When the
+   *     kill-switch `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR` is
+   *     enabled, it anchors against the lowest-`gasUse` quote across
+   *     all of `noHookQuotes`. The lowest-gas anchor reflects the
+   *     alternative DFS would pick if agg-hook were excluded from the
+   *     candidate set — the raw winner only coincides with that
+   *     anchor when it also happens to be the cheapest on gas, which
+   *     prod telemetry (`PartitionAnchorAnalysis` metric, 60 min on
+   *     `commit-fa30fa0`) showed is true 50.6% of the time. In the
+   *     other 47.0% the raw-anchor would admit agg-hook while the
+   *     lowest-gas anchor would reject — the prod-observed proximate
+   *     cause of the Cat-B losses traced to specific requests (e.g.
+   *     `5715715370883124467` fires `firedAnchorSubOptimal=true` 5×
+   *     in a single LINK→USDT $100k EXACT_IN trace).
    *
    * Pre-fix (PR #8161) anchored gas against `noHookRunnerUp` and
    * short-circuited via `noHookQuotes.length <= noHookBudgetIfPartitioned`,
@@ -563,16 +606,24 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     }
 
     // --- Gas-use gate (PR #8161, extended to anchor on `noHookWinner`) ---
-    // Direction-agnostic: lower gas is always better. Anchor is the
-    // best no-hook in the bucket — the alternative DFS would pick if
-    // agg-hook were excluded. Skip if gas info is missing on either
-    // side (preserves backward compat with code paths that don't
-    // populate gasDetails, notably unit-test mocks).
+    // Direction-agnostic: lower gas is always better. The anchor is
+    // either the raw winner (`noHookQuotes[0]`) or the lowest-gas
+    // no-hook in the bucket, gated by
+    // `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR`. The lowest-gas
+    // anchor is what `maybeLogPartitionAnchorAnalysis` measures, and
+    // prod data showed the raw-anchor admits agg-hook in 47% of
+    // partition firings where the lowest-gas anchor would reject —
+    // the proximate cause of the Cat-B losses traced to specific
+    // requests (e.g. `5715715370883124467`). Skip if gas info is
+    // missing on either side (preserves backward compat with code
+    // paths that don't populate gasDetails, notably unit-test mocks).
     const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
-    const noHookGasUse = noHookWinner.gasDetails?.gasUse;
-    if (aggHookGasUse !== undefined && noHookGasUse !== undefined) {
-      if (aggHookGasUse > noHookGasUse) {
-        const gasUseDelta = aggHookGasUse - noHookGasUse;
+    const noHookAnchorGasUse = this.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR
+      ? this.lowestNoHookGasUse(noHookQuotes)
+      : noHookWinner.gasDetails?.gasUse;
+    if (aggHookGasUse !== undefined && noHookAnchorGasUse !== undefined) {
+      if (aggHookGasUse > noHookAnchorGasUse) {
+        const gasUseDelta = aggHookGasUse - noHookAnchorGasUse;
         if (gasUseDelta > this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS) {
           return false;
         }
@@ -580,6 +631,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     }
 
     return true;
+  }
+
+  /**
+   * Returns the minimum `gasDetails.gasUse` across `noHookQuotes`, or
+   * undefined when no quote in the input has gas info. Used by the
+   * gas-use gate when `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR` is on
+   * so the anchor reflects the cheapest alternative DFS would pick
+   * (rather than the raw winner, which may coincidentally have higher
+   * gas than another viable no-hook in the same bucket).
+   */
+  private lowestNoHookGasUse(noHookQuotes: QuoteBasic[]): bigint | undefined {
+    let lowest: bigint | undefined;
+    for (const quote of noHookQuotes) {
+      const gasUse = quote.gasDetails?.gasUse;
+      if (gasUse === undefined) continue;
+      if (lowest === undefined || gasUse < lowest) {
+        lowest = gasUse;
+      }
+    }
+    return lowest;
   }
 
   /**
