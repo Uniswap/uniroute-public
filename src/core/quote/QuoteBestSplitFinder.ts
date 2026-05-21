@@ -2307,12 +2307,30 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
+    // Shape-level Cat-A flag: chosen agg-hook winner has both higher
+    // raw AND higher gas than the best no-hook alternative in result.
+    // This is the structural fingerprint of a Cat-A loss within
+    // uniroute (treatment raw-better, gas-worse). Distinct from the 5
+    // mechanism flags above, which fire only on partition / sole-
+    // candidate gate decisions and miss the 100%-single-leg agg-hook
+    // winners (no partition fires at all on a 1-leg 100% combination).
+    // Empirical prod measurement: ~95% of single-leg-100% agg-hook
+    // winner catch-all residuals were attributable wins (equal gas
+    // vs no-hook alt); only the ~5% with this flag set are the true
+    // Cat-A loss-candidate population.
+    const firedRawBetterGasWorseVsNoHookAlt =
+      noHookAltRawTotal !== undefined &&
+      noHookAltGasTotal !== undefined &&
+      chosenRawTotal > noHookAltRawTotal &&
+      chosenGasTotal > noHookAltGasTotal;
+
     const anyFired =
       aggHookAttribution.firedPartitionKeptHigherGas ||
       aggHookAttribution.firedSoleCandidateAdmit ||
       aggHookAttribution.firedSoleCandidateGasWorse ||
       aggHookAttribution.firedChosenSplitGasWorse ||
-      aggHookAttribution.firedAnchorSubOptimal;
+      aggHookAttribution.firedAnchorSubOptimal ||
+      firedRawBetterGasWorseVsNoHookAlt;
     // Cardinality guard (cf. PR #8341): the metric tag list excludes
     // the 5 per-mechanism `firedXxx` flags. Including them would push
     // explicit-tag combinations to 2^5 × tradeType × chainId × ~auto-tag
@@ -2335,7 +2353,11 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     ctx.logger.info('QuoteBestSplitFinder agg-hook selected as winner', {
       chainId,
       tradeType,
-      attribution: {...aggHookAttribution, anyFired},
+      attribution: {
+        ...aggHookAttribution,
+        firedRawBetterGasWorseVsNoHookAlt,
+        anyFired,
+      },
       chosenSplit: {
         rawTotal: chosenRawTotal.toString(),
         gasTotal: chosenGasTotal.toString(),
@@ -2479,7 +2501,25 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
-    const anyFired = noHookCatBAttribution.firedFindBestSplitsTimedOut;
+    // Shape-level Cat-B flag: the result contains an agg-hook
+    // alternative with BOTH lower gas AND lower raw than the chosen
+    // no-hook winner. Gas-adj-wise that alt MIGHT have been a better
+    // pick (definitive answer depends on `gasCostInQuoteToken` which
+    // isn't in the catch-all payload), so this flags Cat-B losses
+    // where the BL had a cheaper-gas agg-hook option but chose
+    // no-hook on raw alone. Empirical prod measurement: ~15% of Cat-B
+    // catch-all residuals fit this shape — the rest are either
+    // "no agg-hook in result" or "agg-hook alt strictly worse",
+    // neither of which is a loss mechanism.
+    const firedAggHookAltLowerGasAndRaw =
+      bestAggHookAltRawTotal !== undefined &&
+      bestAggHookAltGasTotal !== undefined &&
+      chosenRawTotal > bestAggHookAltRawTotal &&
+      chosenGasTotal > bestAggHookAltGasTotal;
+
+    const anyFired =
+      noHookCatBAttribution.firedFindBestSplitsTimedOut ||
+      firedAggHookAltLowerGasAndRaw;
     // Cardinality guard (cf. PR #8341): the metric tag list excludes
     // the per-mechanism `firedXxx` flags. They live on the log payload
     // only — DD log analytics is the right surface for per-mechanism
@@ -2500,7 +2540,11 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       {
         chainId,
         tradeType,
-        attribution: {...noHookCatBAttribution, anyFired},
+        attribution: {
+          ...noHookCatBAttribution,
+          firedAggHookAltLowerGasAndRaw,
+          anyFired,
+        },
         chosenSplit: {
           rawTotal: chosenRawTotal.toString(),
           gasTotal: chosenGasTotal.toString(),

@@ -4695,8 +4695,12 @@ describe('QuoteBestSplitFinder', () => {
         '0xa500000000000000000000000000000000000000',
         50
       );
+      // EQUAL gas between chosen agg-hook and no-hook alt so the
+      // shape flag `firedRawBetterGasWorseVsNoHookAlt` does NOT fire
+      // — this is the genuinely-residual case (treatment higher raw,
+      // same gas → treatment win, not a Cat-A loss shape).
       const quoteMap = buildQuoteMap([
-        createMockQuoteWithGas(aggHook, 1000n, 500n),
+        createMockQuoteWithGas(aggHook, 1000n, 100n),
         createMockQuoteWithGas(noHook, 990n, 100n),
       ]);
       finder['emitAggHookWinnerAttribution'](
@@ -4715,9 +4719,91 @@ describe('QuoteBestSplitFinder', () => {
       ).toContain('attributed:false');
       expect(attributionLogCalls()).toHaveLength(1);
       const payload = attributionLogCalls()[0][1] as {
-        attribution: {anyFired: boolean};
+        attribution: {
+          anyFired: boolean;
+          firedRawBetterGasWorseVsNoHookAlt: boolean;
+        };
       };
       expect(payload.attribution.anyFired).toBe(false);
+      expect(payload.attribution.firedRawBetterGasWorseVsNoHookAlt).toBe(false);
+    });
+
+    it('fires firedRawBetterGasWorseVsNoHookAlt when chosen has higher raw AND higher gas than no-hook alt', () => {
+      const aggHook = aggHookRouteAt(
+        '0xa410000000000000000000000000000000000000',
+        50
+      );
+      const noHook = noHookRouteAt(
+        '0xa520000000000000000000000000000000000000',
+        50
+      );
+      // Cat-A loss shape: chosen agg-hook winner has higher raw
+      // (1000 > 990) AND higher gas (500 > 100) than the no-hook
+      // alternative — `firedRawBetterGasWorseVsNoHookAlt` should fire
+      // even when none of the 5 mechanism flags fire.
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook, 1000n, 500n),
+        createMockQuoteWithGas(noHook, 990n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook], [noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      expect(attributionMetricCalls()).toHaveLength(1);
+      expect(
+        (attributionMetricCalls()[0][2] as {tags: string[]}).tags
+      ).toContain('attributed:true');
+      const payload = attributionLogCalls()[0][1] as {
+        attribution: {
+          anyFired: boolean;
+          firedRawBetterGasWorseVsNoHookAlt: boolean;
+          firedPartitionKeptHigherGas: boolean;
+        };
+      };
+      expect(payload.attribution.firedRawBetterGasWorseVsNoHookAlt).toBe(true);
+      // Other mechanism flags remain false (test passes
+      // `buildAttribution()` with all flags false).
+      expect(payload.attribution.firedPartitionKeptHigherGas).toBe(false);
+      expect(payload.attribution.anyFired).toBe(true);
+    });
+
+    it('does not fire firedRawBetterGasWorseVsNoHookAlt when no no-hook alternative exists', () => {
+      const aggHook1 = aggHookRouteAt(
+        '0xa430000000000000000000000000000000000000',
+        50
+      );
+      const aggHook2 = aggHookRouteAt(
+        '0xa440000000000000000000000000000000000000',
+        50
+      );
+      // Both combinations are agg-hook → no noHookAlt → shape flag
+      // can't fire regardless of gas/raw values.
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(aggHook1, 1000n, 500n),
+        createMockQuoteWithGas(aggHook2, 990n, 100n),
+      ]);
+      finder['emitAggHookWinnerAttribution'](
+        [[aggHook1], [aggHook2]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        buildAttribution()
+      );
+      const payload = attributionLogCalls()[0][1] as {
+        attribution: {firedRawBetterGasWorseVsNoHookAlt: boolean};
+        noHookAlternative: unknown;
+      };
+      expect(payload.attribution.firedRawBetterGasWorseVsNoHookAlt).toBe(false);
+      expect(payload.noHookAlternative).toBeNull();
     });
 
     it('propagates attribution flags from sibling logs into the metric tags and payload', () => {
@@ -5068,6 +5154,8 @@ describe('QuoteBestSplitFinder', () => {
         '0xc200000000000000000000000000000000000000',
         100
       );
+      // Single no-hook quote in result → no agg-hook alternative →
+      // `firedAggHookAltLowerGasAndRaw` shape flag can't fire either.
       const quoteMap = buildQuoteMap([
         createMockQuoteWithGas(noHook, 1000n, 100n),
       ]);
@@ -5083,10 +5171,88 @@ describe('QuoteBestSplitFinder', () => {
       );
       expect(catBLogCalls()).toHaveLength(1);
       const payload = catBLogCalls()[0][1] as {
-        attribution: {anyFired: boolean; firedFindBestSplitsTimedOut: boolean};
+        attribution: {
+          anyFired: boolean;
+          firedFindBestSplitsTimedOut: boolean;
+          firedAggHookAltLowerGasAndRaw: boolean;
+        };
       };
       expect(payload.attribution.anyFired).toBe(false);
       expect(payload.attribution.firedFindBestSplitsTimedOut).toBe(false);
+      expect(payload.attribution.firedAggHookAltLowerGasAndRaw).toBe(false);
+    });
+
+    it('fires firedAggHookAltLowerGasAndRaw when result contains an agg-hook combo with lower gas AND lower raw', () => {
+      const noHook = noHookRouteAt(
+        '0xc210000000000000000000000000000000000000',
+        100
+      );
+      const aggHookAlt = aggHookRouteAt(
+        '0xc220000000000000000000000000000000000000',
+        100
+      );
+      // Chosen no-hook (raw=1000, gas=500). Agg-hook alt
+      // (raw=900, gas=200) has BOTH lower raw and lower gas — the
+      // gas-adj winner depends on per-unit cost, so the BL's pick of
+      // no-hook on raw alone is suspicious (Cat-B loss shape).
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook, 1000n, 500n),
+        createMockQuoteWithGas(aggHookAlt, 900n, 200n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[noHook], [aggHookAlt]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      expect(catBLogCalls()).toHaveLength(1);
+      expect((catBMetricCalls()[0][2] as {tags: string[]}).tags).toContain(
+        'attributed:true'
+      );
+      const payload = catBLogCalls()[0][1] as {
+        attribution: {
+          anyFired: boolean;
+          firedAggHookAltLowerGasAndRaw: boolean;
+        };
+      };
+      expect(payload.attribution.firedAggHookAltLowerGasAndRaw).toBe(true);
+      expect(payload.attribution.anyFired).toBe(true);
+    });
+
+    it('does not fire firedAggHookAltLowerGasAndRaw when agg-hook alt has higher gas', () => {
+      const noHook = noHookRouteAt(
+        '0xc230000000000000000000000000000000000000',
+        100
+      );
+      const aggHookAlt = aggHookRouteAt(
+        '0xc240000000000000000000000000000000000000',
+        100
+      );
+      // Agg-hook alt has lower raw (900<1000) but HIGHER gas
+      // (700>500) — strictly worse alt, BL correctly excluded.
+      // Shape flag should NOT fire.
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGas(noHook, 1000n, 500n),
+        createMockQuoteWithGas(aggHookAlt, 900n, 700n),
+      ]);
+      finder['emitNoHookWinnerCatBAttribution'](
+        [[noHook], [aggHookAlt]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {firedFindBestSplitsTimedOut: false}
+      );
+      const payload = catBLogCalls()[0][1] as {
+        attribution: {firedAggHookAltLowerGasAndRaw: boolean};
+      };
+      expect(payload.attribution.firedAggHookAltLowerGasAndRaw).toBe(false);
     });
 
     it('propagates firedFindBestSplitsTimedOut into the payload + attributed:true tag', () => {
