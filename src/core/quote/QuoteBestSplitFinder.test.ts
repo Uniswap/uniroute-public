@@ -65,6 +65,7 @@ describe('QuoteBestSplitFinder', () => {
         count: vi.fn().mockResolvedValue(undefined),
         gauge: vi.fn(),
         timing: vi.fn(),
+        dist: vi.fn().mockResolvedValue(undefined),
       },
       state: new Map(),
       set: vi.fn(),
@@ -5632,6 +5633,1123 @@ describe('QuoteBestSplitFinder', () => {
         bestAggHookAlternative: unknown;
       };
       expect(payload.bestAggHookAlternative).toBeNull();
+    });
+  });
+
+  // Residual attribution: post-PR-#8431 the K-budget anchor bug is
+  // closed. These two emitters size the remaining mechanism prevalence
+  // in prod without re-running DFS.
+  describe('K-budget admit / winner correlation', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.KBudgetAdmitWinnerCorrelation'
+          )
+      );
+    const quoteMapStub = new Map<RouteBasic<MockPool>, QuoteBasic>();
+
+    it('does not fire when testAggHooks is false', () => {
+      finder['emitKBudgetAdmitWinnerCorrelation'](
+        [[noHookRouteAt('0xa000000000000000000000000000000000000000', 100)]],
+        quoteMapStub,
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when result is empty', () => {
+      finder['emitKBudgetAdmitWinnerCorrelation'](
+        [],
+        quoteMapStub,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('tags partitionAdmitted:true winnerHasAggHook:true when admit propagated to winner', () => {
+      const aggHookRoute = aggHookRouteAt(
+        '0xa100000000000000000000000000000000000000',
+        50
+      );
+      const noHookRoute = noHookRouteAt(
+        '0xa200000000000000000000000000000000000000',
+        50
+      );
+      finder['emitKBudgetAdmitWinnerCorrelation'](
+        [[aggHookRoute, noHookRoute]],
+        quoteMapStub,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        3
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('partitionAdmitted:true');
+      expect(tags).toContain('winnerHasAggHook:true');
+    });
+
+    it('tags partitionAdmitted:true winnerHasAggHook:false when admit was harmless', () => {
+      const noHookRoute = noHookRouteAt(
+        '0xa300000000000000000000000000000000000000',
+        100
+      );
+      finder['emitKBudgetAdmitWinnerCorrelation'](
+        [[noHookRoute]],
+        quoteMapStub,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        2
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('partitionAdmitted:true');
+      expect(tags).toContain('winnerHasAggHook:false');
+    });
+
+    it('tags partitionAdmitted:false winnerHasAggHook:true when agg-hook came in via non-partition path', () => {
+      const aggHookRoute = aggHookRouteAt(
+        '0xa400000000000000000000000000000000000000',
+        100
+      );
+      finder['emitKBudgetAdmitWinnerCorrelation'](
+        [[aggHookRoute]],
+        quoteMapStub,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('partitionAdmitted:false');
+      expect(tags).toContain('winnerHasAggHook:true');
+    });
+
+    it('tags partitionAdmitted:false winnerHasAggHook:false', () => {
+      const noHookRoute = noHookRouteAt(
+        '0xa500000000000000000000000000000000000000',
+        100
+      );
+      finder['emitKBudgetAdmitWinnerCorrelation'](
+        [[noHookRoute]],
+        quoteMapStub,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('partitionAdmitted:false');
+      expect(tags).toContain('winnerHasAggHook:false');
+    });
+  });
+
+  describe('filterAndSortResults full-route bias', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    // Mock quotes with `gasDetails.gasCostInQuoteToken` populated so
+    // the scorer takes the gas-adjusted path rather than the raw-only
+    // fallback. Matches the live `scoreAndSortCombinations` shape.
+    const createMockQuoteWithGasCost = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasCostInQuoteToken: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse: 1n,
+          gasCostInQuoteToken,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.FilterAndSortFullRouteBias'
+          )
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      const fullRoute = noHookRouteAt(
+        '0xb000000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 10n),
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('verdict:no_split when only 100% routes present', () => {
+      const fullRoute = noHookRouteAt(
+        '0xb100000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 10n),
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:no_split');
+      expect(tags).toContain('topPct100HasAggHook:false');
+    });
+
+    it('verdict:no_pct100 when only split routes present', () => {
+      const splitA = noHookRouteAt(
+        '0xb200000000000000000000000000000000000000',
+        50
+      );
+      const splitB = noHookRouteAt(
+        '0xb210000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(splitA, 500n, 5n),
+        createMockQuoteWithGasCost(splitB, 500n, 5n),
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[splitA, splitB]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:no_pct100');
+    });
+
+    it('verdict:split_beats_pct100 — bug shape: split has higher gas-adj score but 100% route is ranked first', () => {
+      // ExactIn — higher score (amount - gas) is better.
+      // 100% route: amount=1000, gas=200 → score=800
+      // Split route: 500+500=1000 amount, 5+5=10 gas → score=990 (higher → split is better)
+      const fullRoute = aggHookRouteAt(
+        '0xb300000000000000000000000000000000000000',
+        100
+      );
+      const splitA = noHookRouteAt(
+        '0xb310000000000000000000000000000000000000',
+        50
+      );
+      const splitB = noHookRouteAt(
+        '0xb320000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 200n),
+        createMockQuoteWithGasCost(splitA, 500n, 5n),
+        createMockQuoteWithGasCost(splitB, 500n, 5n),
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute], [splitA, splitB]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:split_beats_pct100');
+      expect(tags).toContain('topPct100HasAggHook:true');
+    });
+
+    it('verdict:pct100_beats_split — 100%-first ordering is justified', () => {
+      // 100%: amount=1000, gas=5 → score=995
+      // Split: 1000 amount, 100 gas → score=900
+      const fullRoute = noHookRouteAt(
+        '0xb400000000000000000000000000000000000000',
+        100
+      );
+      const splitA = noHookRouteAt(
+        '0xb410000000000000000000000000000000000000',
+        50
+      );
+      const splitB = noHookRouteAt(
+        '0xb420000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 5n),
+        createMockQuoteWithGasCost(splitA, 500n, 50n),
+        createMockQuoteWithGasCost(splitB, 500n, 50n),
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute], [splitA, splitB]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:pct100_beats_split');
+    });
+
+    it('emits a score-based verdict + topPct100/topSplitGasComplete tags when any leg lacks gasCostInQuoteToken', () => {
+      // Live `scoreAndSortCombinations` falls back to raw-only
+      // scoring per-combination when any leg lacks
+      // `gasCostInQuoteToken`. Mixed-completeness combinations are
+      // still ranked together — the bias metric must mirror that
+      // semantic, NOT suppress the verdict via a `gas_info_missing`
+      // short-circuit. The completeness tags expose data quality so
+      // DD analysts can filter to a strict-gas subset.
+      //
+      // ExactIn scores (higher = better):
+      //   fullRoute: amount=1000, gas=10 → score=990, gasComplete=true
+      //   splitA (no gas): amount=500 → score=500 (raw fallback),
+      //                                gasComplete=false
+      // Best 100% (990) > best split (500) → verdict:pct100_beats_split
+      // (an honest reflection of how the live scorer would rank).
+      const fullRoute = noHookRouteAt(
+        '0xb500000000000000000000000000000000000000',
+        100
+      );
+      const splitA = noHookRouteAt(
+        '0xb510000000000000000000000000000000000000',
+        50
+      );
+      const quoteWithoutGas = {
+        route: splitA,
+        amount: 500n,
+        gasDetails: {gasPriceInWei: 1n, gasCostInWei: 1n, gasCostInEth: 0},
+      } as unknown as QuoteBasic;
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 10n),
+        quoteWithoutGas,
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute], [splitA]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:pct100_beats_split');
+      expect(tags).toContain('topPct100GasComplete:true');
+      expect(tags).toContain('topSplitGasComplete:false');
+      expect(tags.some(t => t === 'verdict:gas_info_missing')).toBe(false);
+    });
+
+    it('detects split_beats_pct100 hidden by mixed gas completeness (Codex stop-time finding)', () => {
+      // Bug shape Codex flagged: best 100% has complete gas (lower
+      // score), best split lacks gas (raw fallback inflates score),
+      // and the live scorer's mixed comparison would rank the
+      // raw-fallback split first. The previous `gas_info_missing`
+      // early-return SUPPRESSED this verdict, hiding the
+      // dropped-split bias.
+      //
+      // ExactIn scores (higher = better):
+      //   100%:  amount=1000, gas=200 → 800,  gasComplete=true
+      //   split: amount=900 (no gas)  → 900,  gasComplete=false (raw)
+      // split (900) > 100% (800) → verdict:split_beats_pct100
+      // The fix MUST surface this verdict, not suppress with
+      // gas_info_missing.
+      const fullRoute = aggHookRouteAt(
+        '0xb600000000000000000000000000000000000000',
+        100
+      );
+      const splitA = noHookRouteAt(
+        '0xb610000000000000000000000000000000000000',
+        50
+      );
+      const splitB = noHookRouteAt(
+        '0xb620000000000000000000000000000000000000',
+        50
+      );
+      const splitAWithoutGas = {
+        route: splitA,
+        amount: 450n,
+        gasDetails: {gasPriceInWei: 1n, gasCostInWei: 1n, gasCostInEth: 0},
+      } as unknown as QuoteBasic;
+      const splitBWithoutGas = {
+        route: splitB,
+        amount: 450n,
+        gasDetails: {gasPriceInWei: 1n, gasCostInWei: 1n, gasCostInEth: 0},
+      } as unknown as QuoteBasic;
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 200n),
+        splitAWithoutGas,
+        splitBWithoutGas,
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute], [splitA, splitB]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:split_beats_pct100');
+      expect(tags).toContain('topPct100HasAggHook:true');
+      expect(tags).toContain('topPct100GasComplete:true');
+      expect(tags).toContain('topSplitGasComplete:false');
+    });
+
+    it('ExactOut: split_beats_pct100 when split has lower (better) score', () => {
+      // ExactOut — score = amount + gas, lower is better.
+      // 100%: amount=1000, gas=200 → score=1200
+      // Split: 1000 amount, 10 gas → score=1010 (lower → split is better)
+      const fullRoute = noHookRouteAt(
+        '0xb600000000000000000000000000000000000000',
+        100
+      );
+      const splitA = noHookRouteAt(
+        '0xb610000000000000000000000000000000000000',
+        50
+      );
+      const splitB = noHookRouteAt(
+        '0xb620000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullRoute, 1000n, 200n),
+        createMockQuoteWithGasCost(splitA, 500n, 5n),
+        createMockQuoteWithGasCost(splitB, 500n, 5n),
+      ]);
+      finder['emitFilterAndSortFullRouteBias'](
+        [[fullRoute], [splitA, splitB]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactOut,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:split_beats_pct100');
+    });
+  });
+
+  describe('K-budget eviction permanent exclusion', () => {
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+
+    const createMockQuote = (
+      route: RouteBasic<MockPool>,
+      amount: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+      }) as unknown as QuoteBasic;
+
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.KBudgetEvictionPermanentExclusion'
+          )
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      finder['emitKBudgetEvictionPermanentExclusion'](
+        [[noHookRouteAt('0xc000000000000000000000000000000000000000', 50)]],
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        [createMockQuote(noHookRouteAt('0xc100', 50), 100n)]
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when no quotes were displaced', () => {
+      finder['emitKBudgetEvictionPermanentExclusion'](
+        [[noHookRouteAt('0xc200000000000000000000000000000000000000', 50)]],
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        []
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('tags excludedAny:true when a displaced route never appears in result', () => {
+      const displacedRoute = noHookRouteAt(
+        '0xc300000000000000000000000000000000000000',
+        50
+      );
+      // Result contains an unrelated route — displaced is excluded.
+      const otherRoute = noHookRouteAt(
+        '0xc400000000000000000000000000000000000000',
+        50
+      );
+      finder['emitKBudgetEvictionPermanentExclusion'](
+        [[otherRoute]],
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        [createMockQuote(displacedRoute, 100n)]
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('excludedAny:true');
+      expect(tags).toContain('excludedCountBucket:1');
+      expect(tags).toContain('displacedCountBucket:1');
+    });
+
+    it('tags excludedAny:false when displaced route appears elsewhere in result', () => {
+      const displacedRoute = noHookRouteAt(
+        '0xc500000000000000000000000000000000000000',
+        50
+      );
+      // Same displaced route appears in `result` at the same pool sequence.
+      finder['emitKBudgetEvictionPermanentExclusion'](
+        [[displacedRoute]],
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        [createMockQuote(displacedRoute, 100n)]
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('excludedAny:false');
+      expect(tags).toContain('excludedCountBucket:0');
+      expect(tags).toContain('displacedCountBucket:1');
+    });
+
+    it('quantizes displaced counts into 4_plus bucket for >=4 displacements', () => {
+      const otherRoute = noHookRouteAt(
+        '0xc600000000000000000000000000000000000000',
+        50
+      );
+      const displaced = [1, 2, 3, 4, 5].map(i =>
+        createMockQuote(
+          noHookRouteAt(`0xc6${i}0000000000000000000000000000000000000`, 50),
+          100n
+        )
+      );
+      finder['emitKBudgetEvictionPermanentExclusion'](
+        [[otherRoute]],
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        displaced
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('displacedCountBucket:4_plus');
+      expect(tags).toContain('excludedCountBucket:4_plus');
+    });
+  });
+
+  describe('K-budget bucket profile', () => {
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith('QuoteBestSplitFinder.KBudgetBucketProfile')
+      );
+
+    const emptyCounts = {
+      both_populated_partition_admitted: 0,
+      both_populated_partition_rejected: 0,
+      no_hook_only: 0,
+      agg_hook_only_admitted: 0,
+      agg_hook_only_rejected: 0,
+      empty: 0,
+    };
+
+    it('does not fire when testAggHooks is false', () => {
+      finder['emitKBudgetBucketProfile'](
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {...emptyCounts, no_hook_only: 5}
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('emits one metric with all six bucket-shape counts tagged', () => {
+      finder['emitKBudgetBucketProfile'](
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        {
+          both_populated_partition_admitted: 2,
+          both_populated_partition_rejected: 1,
+          no_hook_only: 4,
+          agg_hook_only_admitted: 0,
+          agg_hook_only_rejected: 3,
+          empty: 0,
+        }
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('bothPopulatedAdmittedBucket:2');
+      expect(tags).toContain('bothPopulatedRejectedBucket:1');
+      expect(tags).toContain('noHookOnlyBucket:4_plus');
+      expect(tags).toContain('aggHookOnlyAdmittedBucket:0');
+      expect(tags).toContain('aggHookOnlyRejectedBucket:3');
+      expect(tags).toContain('emptyBucket:0');
+    });
+  });
+
+  describe('agg-hook winner gas per protocol', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+
+    const createMockQuoteWithGasCost = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasCostInQuoteToken: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse: 1n,
+          gasCostInQuoteToken,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    const distCalls = () =>
+      (mockContext.metrics.dist as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.AggHookWinnerGasPerProtocol'
+          )
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      const aggHook = aggHookRouteAt(
+        '0xd000000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(aggHook, 1000n, 100n),
+      ]);
+      finder['emitAggHookWinnerGasPerProtocol'](
+        [[aggHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(distCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when result has no agg-hook legs', () => {
+      const noHook = noHookRouteAt(
+        '0xd100000000000000000000000000000000000000',
+        100
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(noHook, 1000n, 100n),
+      ]);
+      finder['emitAggHookWinnerGasPerProtocol'](
+        [[noHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(distCalls()).toHaveLength(0);
+    });
+
+    it('emits one distribution datapoint per agg-hook leg with the protocol tag', () => {
+      const aggHookA = aggHookRouteAt(
+        '0xd200000000000000000000000000000000000000',
+        50
+      );
+      const aggHookB = aggHookRouteAt(
+        '0xd210000000000000000000000000000000000000',
+        50
+      );
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(aggHookA, 500n, 100n),
+        createMockQuoteWithGasCost(aggHookB, 500n, 200n),
+      ]);
+      finder['emitAggHookWinnerGasPerProtocol'](
+        [[aggHookA, aggHookB]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(distCalls()).toHaveLength(2);
+      // Each call carries gasCostInQuoteToken as the metric value
+      // and a protocol tag derived from the agg-hook pool.
+      for (const c of distCalls()) {
+        const tags = (c[2] as {tags: string[]}).tags;
+        expect(tags.some(t => t.startsWith('protocol:'))).toBe(true);
+      }
+    });
+
+    it('skips agg-hook legs without populated gasCostInQuoteToken', () => {
+      const aggHook = aggHookRouteAt(
+        '0xd300000000000000000000000000000000000000',
+        100
+      );
+      const quoteWithoutGas = {
+        route: aggHook,
+        amount: 1000n,
+        gasDetails: {gasPriceInWei: 1n, gasCostInWei: 1n, gasCostInEth: 0},
+      } as unknown as QuoteBasic;
+      const quoteMap = buildQuoteMap([quoteWithoutGas]);
+      finder['emitAggHookWinnerGasPerProtocol'](
+        [[aggHook]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(distCalls()).toHaveLength(0);
+    });
+
+    // Codex finding (medium): "tags the first pool, not the agg-hook
+    // pool". `Pool` requires every pool to expose `protocol`, so mixed
+    // routes whose first hop is V2/V3/V4 and whose agg-hook leg is
+    // deeper would be mislabeled. The emitter must pick the agg-hook
+    // leg via the same `isAggHookPool` predicate used by
+    // `routeUsesAggHook`.
+    it('tags the agg-hook leg protocol on mixed routes (not the first leg)', () => {
+      // Build a mixed 2-leg route:
+      //   leg 0: no-hook MockPool with protocol = Protocol.V2
+      //   leg 1: agg-hook MockPool with protocol = Protocol.V3
+      // Bug shape: emitter previously took the first non-null
+      // `protocol` (leg 0 = V2). Correct shape: take the agg-hook
+      // leg's protocol (leg 1 = V3).
+      const noHookLeg = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xd400000000000000000000000000000000000000'
+      );
+      Object.defineProperty(noHookLeg, 'protocol', {
+        get: () => Protocol.V2,
+        configurable: true,
+      });
+      const aggHookLeg = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0xd410000000000000000000000000000000000000',
+        aggHookAddr
+      );
+      Object.defineProperty(aggHookLeg, 'protocol', {
+        get: () => Protocol.V3,
+        configurable: true,
+      });
+
+      const mixedRoute = createMockRoute([noHookLeg, aggHookLeg], 100);
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(mixedRoute, 1000n, 250n),
+      ]);
+      finder['emitAggHookWinnerGasPerProtocol'](
+        [[mixedRoute]],
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(distCalls()).toHaveLength(1);
+      const tags = (distCalls()[0][2] as {tags: string[]}).tags;
+      // The agg-hook leg's protocol (V3) must dominate the first
+      // leg's protocol (V2). Otherwise the mixed-route attribution
+      // is wrong (which is the bug Codex found).
+      expect(tags).toContain(`protocol:${Protocol.V3}`);
+      expect(tags).not.toContain(`protocol:${Protocol.V2}`);
+    });
+  });
+
+  // Codex finding (medium): the bias metric searches only the final
+  // `result`. When `fullRoutes.length >= maxSplitRoutes` the filter
+  // returns ONLY 100% routes, so the metric reads no split and emits
+  // `verdict:no_split` — undercounting the very mechanism it's meant
+  // to size. The fix: pass the pre-truncation candidate set to the
+  // emitter so it can compare the best dropped split against the
+  // 100% route.
+  describe('filterAndSortFullRouteBias on pre-truncation candidates', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const createMockQuoteWithGasCost = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasCostInQuoteToken: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse: 1n,
+          gasCostInQuoteToken,
+        },
+      }) as unknown as QuoteBasic;
+
+    const buildQuoteMap = (
+      quotes: QuoteBasic[]
+    ): Map<RouteBasic<MockPool>, QuoteBasic> => {
+      const m = new Map<RouteBasic<MockPool>, QuoteBasic>();
+      for (const q of quotes) {
+        m.set(q.route as RouteBasic<MockPool>, q);
+      }
+      return m;
+    };
+
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.FilterAndSortFullRouteBias'
+          )
+      );
+
+    // Codex stop-time finding: the pre-truncation array is in DFS
+    // insertion order, NOT sorted by gas-adj score. Using
+    // `.find(isFullRoute)` would pick the first inserted 100% route
+    // (not the best by score), and similarly for splits. This test
+    // pins down that the emitter must pick the BEST of each group.
+    it('picks the best 100% and best split by gas-adj score, not insertion order', () => {
+      // 3 100% routes inserted in DFS order; the LAST inserted has
+      // the best gas-adj score. 2 splits inserted; the LAST has the
+      // best gas-adj score. If the emitter used `.find(...)` it
+      // would pick the first inserted (worst-by-score) of each
+      // group, and the verdict would be wrong.
+      //
+      // ExactIn scores (higher = better):
+      //   full[0]: amount=1000, gas=200 → 800
+      //   full[1]: amount=1000, gas=100 → 900
+      //   full[2]: amount=1000, gas=10  → 990  (best 100%)
+      //   split[0]: 500+500=1000, 200+200=400 → 600 (worst split)
+      //   split[1]: 500+500=1000, 5+5=10      → 990 (best split)
+      // best100% (990) === bestSplit (990) → verdict:tie
+      // If the emitter mistakenly used find-first:
+      //   full[0]=800 vs split[0]=600 → pct100_beats_split (WRONG)
+      const fullWorst = noHookRouteAt(
+        '0xef00000000000000000000000000000000000000',
+        100
+      );
+      const fullMid = noHookRouteAt(
+        '0xef10000000000000000000000000000000000000',
+        100
+      );
+      const fullBest = aggHookRouteAt(
+        '0xef20000000000000000000000000000000000000',
+        100
+      );
+      const splitWorstA = noHookRouteAt(
+        '0xef30000000000000000000000000000000000000',
+        50
+      );
+      const splitWorstB = noHookRouteAt(
+        '0xef31000000000000000000000000000000000000',
+        50
+      );
+      const splitBestA = noHookRouteAt(
+        '0xef40000000000000000000000000000000000000',
+        50
+      );
+      const splitBestB = noHookRouteAt(
+        '0xef41000000000000000000000000000000000000',
+        50
+      );
+      const quoteMapBestOf = buildQuoteMap([
+        createMockQuoteWithGasCost(fullWorst, 1000n, 200n),
+        createMockQuoteWithGasCost(fullMid, 1000n, 100n),
+        createMockQuoteWithGasCost(fullBest, 1000n, 10n),
+        createMockQuoteWithGasCost(splitWorstA, 500n, 200n),
+        createMockQuoteWithGasCost(splitWorstB, 500n, 200n),
+        createMockQuoteWithGasCost(splitBestA, 500n, 5n),
+        createMockQuoteWithGasCost(splitBestB, 500n, 5n),
+      ]);
+      const preFilterResultBestOf: RouteBasic<MockPool>[][] = [
+        [fullWorst],
+        [fullMid],
+        [fullBest],
+        [splitWorstA, splitWorstB],
+        [splitBestA, splitBestB],
+      ];
+      finder['emitFilterAndSortFullRouteBias'](
+        preFilterResultBestOf,
+        quoteMapBestOf,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      // best 100% (fullBest, score 990) vs best split (splitBest*, score
+      // 990) → tie. If the find-first bug returned (no longer the
+      // current behavior) the tag would say `pct100_beats_split`.
+      expect(tags).toContain('verdict:tie');
+      // Top 100% by score is fullBest, which is an agg-hook route.
+      expect(tags).toContain('topPct100HasAggHook:true');
+    });
+
+    it('detects split_beats_pct100 when the post-filter result has only 100% routes but the pre-filter set has a better split', () => {
+      // Simulates the severe-bias case: `filterAndSortResults` dropped
+      // every split route because there were enough 100% routes. The
+      // emitter must be invoked on the PRE-FILTER candidate set so it
+      // can still see the dropped split.
+      const fullA = aggHookRouteAt(
+        '0xe000000000000000000000000000000000000000',
+        100
+      );
+      const fullB = aggHookRouteAt(
+        '0xe100000000000000000000000000000000000000',
+        100
+      );
+      const droppedSplitA = noHookRouteAt(
+        '0xe200000000000000000000000000000000000000',
+        50
+      );
+      const droppedSplitB = noHookRouteAt(
+        '0xe210000000000000000000000000000000000000',
+        50
+      );
+      // Scores (ExactIn, higher = better):
+      //   fullA:        1000 amount, 200 gas → 800
+      //   fullB:         900 amount, 200 gas → 700
+      //   droppedSplit: 500+500=1000 amount, 5+5=10 gas → 990 (best)
+      const quoteMap = buildQuoteMap([
+        createMockQuoteWithGasCost(fullA, 1000n, 200n),
+        createMockQuoteWithGasCost(fullB, 900n, 200n),
+        createMockQuoteWithGasCost(droppedSplitA, 500n, 5n),
+        createMockQuoteWithGasCost(droppedSplitB, 500n, 5n),
+      ]);
+      const preFilterResult: RouteBasic<MockPool>[][] = [
+        [fullA],
+        [fullB],
+        [droppedSplitA, droppedSplitB],
+      ];
+      finder['emitFilterAndSortFullRouteBias'](
+        preFilterResult,
+        quoteMap,
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:split_beats_pct100');
+      expect(tags).toContain('topPct100HasAggHook:true');
+    });
+  });
+
+  // Codex finding (medium): "K-budget eviction counts are inflated by
+  // recursive duplicate visits". The wrapper inside `findBestSplits`
+  // calls `getBestUnusedQuotesStats` from every recursive DFS branch,
+  // so the same `(percentage, route)` displacement is reported
+  // multiple times. The fix: dedupe by composite key inside the
+  // wrapper accumulation step. These tests exercise the inner
+  // `getBestUnusedQuotesStats` directly to verify per-request
+  // displacement and bucket-shape semantics are stable across
+  // repeated invocations with the same percentage.
+  describe('K-budget per-request dedupe', () => {
+    const aggHookAddr = STABLE_SWAP_NG[0]!;
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+    const aggHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, aggHookAddr)],
+        pct
+      );
+
+    const createMockQuoteWithGasUse = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasUse: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {
+          gasPriceInWei: 1n,
+          gasCostInWei: 1n,
+          gasCostInEth: 0,
+          gasUse,
+        },
+      }) as unknown as QuoteBasic;
+
+    it("reports the same displacement on every invocation (deduplication is the wrapper's responsibility)", () => {
+      // `getBestUnusedQuotesStats` is the pure function — it returns
+      // the same displacement state each time. The wrapper inside
+      // `findBestSplits` is what dedupes by (percentage, route key).
+      // This test pins down the contract so a future refactor can't
+      // silently start deduping inside the pure function (which would
+      // hide repeated visits from invocation-weighted callers).
+      const noHookA = noHookRouteAt(
+        '0xea00000000000000000000000000000000000000',
+        50
+      );
+      const noHookB = noHookRouteAt(
+        '0xeb00000000000000000000000000000000000000',
+        50
+      );
+      const aggHook = aggHookRouteAt(
+        '0xec00000000000000000000000000000000000000',
+        50
+      );
+      const buckets = new Map<number, QuoteBasic[]>([
+        [
+          50,
+          [
+            createMockQuoteWithGasUse(noHookA, 1000n, 100n),
+            createMockQuoteWithGasUse(noHookB, 1000n, 100n),
+            // raw-tied so raw gate vacuously passes; gas-equal so
+            // gas gate passes — partition admits → noHookB displaced.
+            createMockQuoteWithGasUse(aggHook, 1000n, 100n),
+          ],
+        ],
+      ]);
+
+      // First invocation.
+      const stats1 = finder['getBestUnusedQuotesStats'](
+        50,
+        buckets,
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+      // Second invocation with no change to inputs — same percentage,
+      // empty usedRoutes. Pure function reports the same state.
+      const stats2 = finder['getBestUnusedQuotesStats'](
+        50,
+        buckets,
+        [],
+        ChainId.MAINNET,
+        TradeType.ExactIn
+      );
+
+      expect(stats1.partitionAdmittedAggHook).toBe(true);
+      expect(stats1.displacedNoHookQuotes).toHaveLength(1);
+      expect(stats1.displacedNoHookQuotes[0].route).toBe(noHookB);
+
+      expect(stats2.partitionAdmittedAggHook).toBe(true);
+      expect(stats2.displacedNoHookQuotes).toHaveLength(1);
+      expect(stats2.displacedNoHookQuotes[0].route).toBe(noHookB);
     });
   });
 

@@ -8,7 +8,11 @@ import {ChainId} from '../../lib/config';
 import {buildMetricKey} from '../../lib/config';
 import {IQuoteBestSplitFinder} from './IQuoteBestSplitFinder';
 import {TradeType} from '../../models/quote/TradeType';
-import {routeUsesAggHook, hashForLogging} from '../../lib/observability';
+import {
+  isAggHookPool,
+  routeUsesAggHook,
+  hashForLogging,
+} from '../../lib/observability';
 
 export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
@@ -311,6 +315,32 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     totalCount: number;
     validCount: number;
     returnedCount: number;
+    // Whether the K-budget partition gate actually fired at this
+    // percentage (both classes populated AND `isAggHookCompetitive`
+    // returned true). Bubbled up so `findBestSplits` can correlate
+    // partition admits with the final winner's agg-hook content.
+    partitionAdmittedAggHook: boolean;
+    // No-hook quotes that the partition admit pushed past the
+    // truncation point (i.e., `noHookQuotes.slice(noHookBudget)` when
+    // partitioned). These quotes will not appear in the K-slot pool
+    // for this percentage; the eviction may still be harmless if DFS
+    // can build the optimal combination from other percentages, or
+    // harmful if the displaced route's pools are uniquely available
+    // here. `findBestSplits` uses this to size the "permanent
+    // exclusion" subset (displaced routes that never appear anywhere
+    // else in the final result).
+    displacedNoHookQuotes: QuoteBasic[];
+    // Bucket-shape category for this percentage. Sizes the
+    // distribution of bucket types per request — used by the
+    // `KBudgetBucketProfile` metric to detect pool-discovery /
+    // cross-percentage interaction asymmetries.
+    bucketShape:
+      | 'both_populated_partition_admitted'
+      | 'both_populated_partition_rejected'
+      | 'no_hook_only'
+      | 'agg_hook_only_admitted'
+      | 'agg_hook_only_rejected'
+      | 'empty';
   } {
     const quotes = percentageToSortedQuotes.get(percentage) || [];
     // First filter valid quotes
@@ -498,11 +528,44 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
+    // The K-slot truncation discards no-hook quotes whose index >= noHookBudget.
+    // Track them so `findBestSplits` can size "permanent exclusion" — routes
+    // that never appear anywhere else in the final result, so eviction was
+    // load-bearing for this percentage.
+    const displacedNoHookQuotes =
+      useBothPopulatedPartition && noHookQuotes.length > noHookBudget
+        ? noHookQuotes.slice(noHookBudget)
+        : [];
+
+    let bucketShape:
+      | 'both_populated_partition_admitted'
+      | 'both_populated_partition_rejected'
+      | 'no_hook_only'
+      | 'agg_hook_only_admitted'
+      | 'agg_hook_only_rejected'
+      | 'empty';
+    if (bothPresent) {
+      bucketShape = useBothPopulatedPartition
+        ? 'both_populated_partition_admitted'
+        : 'both_populated_partition_rejected';
+    } else if (noHookQuotes.length > 0) {
+      bucketShape = 'no_hook_only';
+    } else if (aggHookQuotes.length > 0) {
+      bucketShape = useAggHookSoleCandidate
+        ? 'agg_hook_only_admitted'
+        : 'agg_hook_only_rejected';
+    } else {
+      bucketShape = 'empty';
+    }
+
     return {
       quotes: returnedQuotes,
       totalCount: quotes.length,
       validCount: validQuotes.length,
       returnedCount: returnedQuotes.length,
+      partitionAdmittedAggHook: useBothPopulatedPartition,
+      displacedNoHookQuotes,
+      bucketShape,
     };
   }
 
@@ -1609,6 +1672,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
 
     const combinations = new Set<string>();
     let result: RouteBasic<TPool>[][] = [];
+    // Tracks `result` as it stood at the most-recent
+    // `filterAndSortResults` invocation, before truncation. Used by
+    // `emitFilterAndSortFullRouteBias` so the metric can see splits
+    // that the 100%-first bias dropped — otherwise the metric would
+    // emit `verdict:no_split` in exactly the case it's meant to size.
+    let lastUnfilteredResult: RouteBasic<TPool>[][] = [];
     let currentLevelBestAmount = 0n;
     let previousLevelBestAmount = 0n;
     // (A) cumulative best-combination tracking — which combination owns
@@ -1636,6 +1705,48 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       returnedQuotes: 0,
       droppedByConflict: 0,
       droppedByLimit: 0,
+      // PR-residual instrumentation: how many percentage buckets in
+      // this request had the K-budget partition gate actually admit
+      // agg-hook into the K-slot pool. Counted at most ONCE per
+      // (percentage, partition-admit) pair via the `seenAdmitKeys`
+      // dedupe Set, because `getBestUnusedQuotes` is called from
+      // every recursive DFS branch and would otherwise inflate this
+      // counter by the number of partial-route visits.
+      partitionAdmittedAggHookCount: 0,
+      // Dedupe set keyed by `percentage` for partition-admit
+      // counting. The K-budget gate's decision at a given percentage
+      // is a function of the percentage's quote distribution AND
+      // `usedRoutes` (conflict filtering). For per-request shape
+      // attribution we count the FIRST observed admit per percentage
+      // — invocation-weighted counts would over-state by DFS depth.
+      seenAdmitKeys: new Set<number>(),
+      // Accumulated displaced no-hook quotes across the request,
+      // deduplicated by `${percentage}:${route key}`. The wrapper
+      // appends a route only the first time `getBestUnusedQuotesStats`
+      // reports it as displaced; subsequent recursive visits of the
+      // same percentage that re-displace the same route are skipped.
+      // Per-route uniqueness matches the "permanent exclusion"
+      // semantics of `KBudgetEvictionPermanentExclusion`.
+      displacedNoHookQuotes: [] as QuoteBasic[],
+      // Dedupe set keyed by `${percentage}:${route key}` for
+      // displaced-quote accumulation.
+      seenDisplacedKeys: new Set<string>(),
+      // Histogram of bucket shapes for this request, counted at most
+      // ONCE per percentage. Bucket shape at a given percentage can
+      // vary with `usedRoutes` (because of conflict filtering), so
+      // the first observed shape is used as the canonical per-
+      // percentage shape — invocation-weighted counts would over-
+      // state by DFS depth.
+      bucketShapeCounts: {
+        both_populated_partition_admitted: 0,
+        both_populated_partition_rejected: 0,
+        no_hook_only: 0,
+        agg_hook_only_admitted: 0,
+        agg_hook_only_rejected: 0,
+        empty: 0,
+      },
+      // Dedupe set keyed by `percentage` for bucket-shape counting.
+      seenBucketKeys: new Set<number>(),
     };
     // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
     // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision,
@@ -1733,6 +1844,32 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         stats.totalCount - stats.validCount;
       bestUnusedQuoteStats.droppedByLimit +=
         stats.validCount - stats.returnedCount;
+      // Dedupe per-request attribution signals by percentage / route
+      // identity so we don't over-count for DFS revisits. The
+      // semantics we want are "for this REQUEST, was percentage X
+      // admitted at least once?", "for this REQUEST, was route Y
+      // ever displaced?", and "what shape was percentage X observed
+      // as?" — all at most-once-per-percentage / once-per-route.
+      if (
+        stats.partitionAdmittedAggHook &&
+        !bestUnusedQuoteStats.seenAdmitKeys.has(percentage)
+      ) {
+        bestUnusedQuoteStats.seenAdmitKeys.add(percentage);
+        bestUnusedQuoteStats.partitionAdmittedAggHookCount++;
+      }
+      for (const displaced of stats.displacedNoHookQuotes) {
+        const route = displaced.route as RouteBasic<TPool>;
+        const key = `${percentage}:${route.path
+          .map(p => p.address.toString().toLowerCase())
+          .join(',')}`;
+        if (bestUnusedQuoteStats.seenDisplacedKeys.has(key)) continue;
+        bestUnusedQuoteStats.seenDisplacedKeys.add(key);
+        bestUnusedQuoteStats.displacedNoHookQuotes.push(displaced);
+      }
+      if (!bestUnusedQuoteStats.seenBucketKeys.has(percentage)) {
+        bestUnusedQuoteStats.seenBucketKeys.add(percentage);
+        bestUnusedQuoteStats.bucketShapeCounts[stats.bucketShape]++;
+      }
       return stats.quotes;
     };
 
@@ -1897,6 +2034,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         timedOut,
       });
 
+      // Snapshot the pre-truncation candidate set so the
+      // `FilterAndSortFullRouteBias` emitter at end of `findBestSplits`
+      // can compare the best 100% route against the best split EVEN
+      // WHEN the bias drops every split (the `fullRoutes.length >=
+      // maxSplitRoutes` branch returns only 100% routes). Without this
+      // snapshot, the metric would emit `verdict:no_split` in exactly
+      // the case it's meant to size, undercounting the bug shape.
+      lastUnfilteredResult = result.slice();
       // Filter and sort results after each level to keep array size manageable
       result = this.filterAndSortResults(
         result,
@@ -2082,7 +2227,539 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       {firedFindBestSplitsTimedOut: timedOut}
     );
 
+    // Residual attribution: post-PR-#8431 the K-budget anchor bug is
+    // closed. Remaining Cat-B is small (~$600/hr on prod) and lives in
+    // mechanisms we haven't sized: K-budget *eviction* propagation (the
+    // partition admit displaces a no-hook quote needed for the best
+    // multi-leg) and `filterAndSortResults`'s 100%-routes-first bias.
+    // These two emissions size each mechanism's prod prevalence in one
+    // request without requiring a re-DFS.
+    this.emitKBudgetAdmitWinnerCorrelation(
+      result,
+      quoteMap,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      bestUnusedQuoteStats.partitionAdmittedAggHookCount
+    );
+    this.emitFilterAndSortFullRouteBias(
+      // Use the pre-truncation snapshot so the metric can see split
+      // routes that the 100%-first bias dropped. Falls back to the
+      // post-filter result when no level ran (empty trade) so the
+      // emitter still gets a sensible input.
+      lastUnfilteredResult.length > 0 ? lastUnfilteredResult : result,
+      quoteMap,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags
+    );
+    this.emitKBudgetEvictionPermanentExclusion(
+      result,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      bestUnusedQuoteStats.displacedNoHookQuotes
+    );
+    this.emitKBudgetBucketProfile(
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      bestUnusedQuoteStats.bucketShapeCounts
+    );
+    this.emitAggHookWinnerGasPerProtocol(
+      result,
+      quoteMap,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags
+    );
+
     return result;
+  }
+
+  /**
+   * Residual attribution: sizes the worst-case K-budget eviction harm.
+   * Tracks no-hook quotes the partition admit pushed past the K-slot
+   * truncation point, then checks each one against the final `result`.
+   * A displaced route counts as "permanently excluded" if its full
+   * pool-sequence doesn't appear in ANY combination of `result` —
+   * meaning the eviction removed it from the candidate set entirely,
+   * not just from one percentage bucket.
+   *
+   * Metric `QuoteBestSplitFinder.KBudgetEvictionPermanentExclusion`
+   * fires once per request (when `testAggHooks=true` AND at least one
+   * displacement happened) with tags:
+   *   `excludedAny:{true,false}` — was any displaced route never seen
+   *     again in `result`?
+   *   `excludedCountBucket:{0, 1, 2, 3, 4_plus}` — quantizes the
+   *     displaced-and-excluded count for histogram view.
+   *   `displacedCountBucket:{1, 2, 3, 4_plus}` — total displaced
+   *     count for context.
+   *
+   * Cost: scan over `result` is bounded by `maxSplitRoutes`; comparing
+   * routes via pool-address string is O(legs). For typical
+   * `maxSplitRoutes=5` and ≤10 displaced quotes, the work is small.
+   */
+  private emitKBudgetEvictionPermanentExclusion(
+    result: RouteBasic<TPool>[][],
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    displacedNoHookQuotes: QuoteBasic[]
+  ): void {
+    if (!testAggHooks) return;
+    if (displacedNoHookQuotes.length === 0) return;
+
+    const routeKey = (route: RouteBasic<TPool>): string =>
+      `${route.path.map(p => p.address.toString().toLowerCase()).join(',')}-${route.percentage}`;
+
+    // Build the set of every route key present in `result` for O(1)
+    // lookup. A displaced route counts as "available elsewhere" if
+    // its key matches any of these.
+    const resultRouteKeys = new Set<string>();
+    for (const combination of result) {
+      for (const route of combination) {
+        resultRouteKeys.add(routeKey(route));
+      }
+    }
+
+    let excludedCount = 0;
+    for (const displaced of displacedNoHookQuotes) {
+      const route = displaced.route as RouteBasic<TPool>;
+      if (!resultRouteKeys.has(routeKey(route))) {
+        excludedCount++;
+      }
+    }
+
+    const quantize = (n: number): string => {
+      if (n === 0) return '0';
+      if (n === 1) return '1';
+      if (n === 2) return '2';
+      if (n === 3) return '3';
+      return '4_plus';
+    };
+
+    void ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.KBudgetEvictionPermanentExclusion'),
+      1,
+      {
+        tags: [
+          ...metricTags,
+          `excludedAny:${excludedCount > 0}`,
+          `excludedCountBucket:${quantize(excludedCount)}`,
+          `displacedCountBucket:${quantize(displacedNoHookQuotes.length)}`,
+          `testAggHooks:${testAggHooks}`,
+          `tradeType:${tradeType}`,
+        ],
+      }
+    );
+  }
+
+  /**
+   * Residual attribution: sizes the per-request bucket-shape
+   * distribution. A trade's percentage buckets can be any mix of
+   * both-populated (partition admitted or rejected), no-hook-only,
+   * agg-hook-only (sole-candidate admitted or rejected), or empty.
+   * The mix characterizes the candidate-set asymmetry between the
+   * agg-hook-enabled and no-agg-hook RUNs of uniroute, which is the
+   * underlying cause of pool-discovery divergence and cross-percentage
+   * K-slot interactions.
+   *
+   * Emits one metric per request when `testAggHooks=true`, with one
+   * tag per bucket shape carrying the request-level count quantized
+   * into 0/1/2/3/4_plus buckets. DD aggregation by request lets us
+   * compute the request-level distribution of shapes.
+   *
+   * Why per-request rather than per-bucket: per-bucket counts already
+   * exist via `PartitionDecision` and `SoleCandidateDecision`. The
+   * per-request profile is what's missing — it tells us whether
+   * harmful interactions concentrate in requests with certain shape
+   * mixes (e.g., 3+ admit-buckets per request).
+   */
+  private emitKBudgetBucketProfile(
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    bucketShapeCounts: {
+      both_populated_partition_admitted: number;
+      both_populated_partition_rejected: number;
+      no_hook_only: number;
+      agg_hook_only_admitted: number;
+      agg_hook_only_rejected: number;
+      empty: number;
+    }
+  ): void {
+    if (!testAggHooks) return;
+
+    const quantize = (n: number): string => {
+      if (n === 0) return '0';
+      if (n === 1) return '1';
+      if (n === 2) return '2';
+      if (n === 3) return '3';
+      return '4_plus';
+    };
+
+    void ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.KBudgetBucketProfile'),
+      1,
+      {
+        tags: [
+          ...metricTags,
+          `bothPopulatedAdmittedBucket:${quantize(bucketShapeCounts.both_populated_partition_admitted)}`,
+          `bothPopulatedRejectedBucket:${quantize(bucketShapeCounts.both_populated_partition_rejected)}`,
+          `noHookOnlyBucket:${quantize(bucketShapeCounts.no_hook_only)}`,
+          `aggHookOnlyAdmittedBucket:${quantize(bucketShapeCounts.agg_hook_only_admitted)}`,
+          `aggHookOnlyRejectedBucket:${quantize(bucketShapeCounts.agg_hook_only_rejected)}`,
+          `emptyBucket:${quantize(bucketShapeCounts.empty)}`,
+          `testAggHooks:${testAggHooks}`,
+          `tradeType:${tradeType}`,
+        ],
+      }
+    );
+  }
+
+  /**
+   * Residual attribution: per-protocol gas-cost distribution on the
+   * agg-hook leg(s) of the chosen winner. Outliers in per-protocol
+   * gas reporting are evidence of stale or under-estimated gas cost
+   * for hook calls — a separate residual mechanism from the K-budget
+   * and 100%-bias paths.
+   *
+   * Emits one metric per agg-hook leg in the chosen winner, with the
+   * protocol identifier (e.g. `FluidDexT1`) and a quantized
+   * `gasCostInQuoteToken` bucket so DD's distribution view can show
+   * per-protocol percentiles. Fires only when `testAggHooks=true`
+   * AND the chosen winner has at least one agg-hook leg with
+   * `gasDetails.gasCostInQuoteToken` populated.
+   *
+   * Per-leg granularity means single-request multiple agg-hook legs
+   * emit multiple datapoints — acceptable because the metric is a
+   * `dist` (DD aggregates internally) rather than a per-request count.
+   */
+  private emitAggHookWinnerGasPerProtocol(
+    result: RouteBasic<TPool>[][],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[]
+  ): void {
+    if (!testAggHooks) return;
+    if (result.length === 0) return;
+
+    const top = result[0];
+    for (const route of top) {
+      if (!routeUsesAggHook(route, chainId)) continue;
+      const quote = quoteMap.get(route);
+      const gasCost = quote?.gasDetails?.gasCostInQuoteToken;
+      if (gasCost === undefined) continue;
+
+      // Identify the protocol via the first AGG-HOOK pool in the
+      // route — NOT the first pool overall. `Pool` requires every
+      // pool to expose `protocol`, so picking "first pool with a
+      // protocol" would mislabel mixed routes whose first hop is
+      // V2/V3/V4 and whose agg-hook leg is deeper as
+      // `protocol:V2|V3|V4` instead of e.g. `FluidDexT1`. Use the
+      // same `isAggHookPool` predicate that drives
+      // `routeUsesAggHook` to ensure the tag matches the leg we
+      // intend to measure.
+      const aggHookLeg = route.path.find(pool => isAggHookPool(pool, chainId));
+      const protocolTag =
+        aggHookLeg === undefined ? null : String(aggHookLeg.protocol);
+
+      void ctx.metrics.dist(
+        buildMetricKey('QuoteBestSplitFinder.AggHookWinnerGasPerProtocol'),
+        Number(gasCost),
+        {
+          tags: [
+            ...metricTags,
+            `protocol:${protocolTag ?? 'unknown'}`,
+            `testAggHooks:${testAggHooks}`,
+            `tradeType:${tradeType}`,
+          ],
+        }
+      );
+    }
+  }
+
+  /**
+   * Residual attribution: when the K-budget partition gate admits
+   * agg-hook into the K-slot pool at any percentage during a request
+   * (counted in `bestUnusedQuoteStats.partitionAdmittedAggHookCount`),
+   * we don't currently know whether that admit *propagates* to the
+   * final chosen winner. This emission ties admit-count to winner-
+   * agg-hook-presence so prod telemetry can answer "how often does a
+   * partition admit cause the trade to choose an agg-hook route?"
+   *
+   * Tags:
+   *   `partitionAdmitted:{true,false}` — true iff
+   *     `partitionAdmittedAggHookCount > 0` for this request
+   *   `winnerHasAggHook:{true,false}` — true iff the top-ranked
+   *     combination in `result` contains any agg-hook route
+   *
+   * The 2×2 contingency table in DD lets us size:
+   *   - `true × true`: admit propagated to winner (suspected harmful)
+   *   - `true × false`: admit was harmless (winner was no-hook anyway)
+   *   - `false × true`: agg-hook reached the winner via sole-candidate
+   *     or another path (separate mechanism)
+   *   - `false × false`: no agg-hook involvement
+   *
+   * Fires exactly once per request when `testAggHooks=true`. Gated on
+   * `testAggHooks` because the attribution is only meaningful when the
+   * agg-hooks-enabled run actually has agg-hook routes in the
+   * candidate set.
+   */
+  private emitKBudgetAdmitWinnerCorrelation(
+    result: RouteBasic<TPool>[][],
+    _quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    partitionAdmittedAggHookCount: number
+  ): void {
+    if (!testAggHooks) return;
+    if (result.length === 0) return;
+
+    const top = result[0];
+    const winnerHasAggHook = top.some(route =>
+      routeUsesAggHook(route, chainId)
+    );
+    const partitionAdmitted = partitionAdmittedAggHookCount > 0;
+
+    void ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.KBudgetAdmitWinnerCorrelation'),
+      1,
+      {
+        tags: [
+          ...metricTags,
+          `partitionAdmitted:${partitionAdmitted}`,
+          `winnerHasAggHook:${winnerHasAggHook}`,
+          `testAggHooks:${testAggHooks}`,
+          `tradeType:${tradeType}`,
+        ],
+      }
+    );
+  }
+
+  /**
+   * Residual attribution: `filterAndSortResults` returns 100% routes
+   * before split routes regardless of gas-adjusted score. When both
+   * are present in `result`, the downstream consumer picks `result[0]`
+   * — a 100% route — even if the best split has higher gas-adjusted
+   * score. This emission sizes how often that 100%-bias produces a
+   * gas-adj-worse winner.
+   *
+   * Tags:
+   *   `verdict:no_pct100`          — no 100% routes in result
+   *   `verdict:no_split`           — no split routes in result
+   *   `verdict:pct100_beats_split` — top 100% has higher (better)
+   *                                  score than top split (no bias
+   *                                  issue)
+   *   `verdict:split_beats_pct100` — top split has higher score than
+   *                                  top 100% but is ranked below
+   *                                  (the bug shape)
+   *   `verdict:tie`                — equal scores
+   *   `topPct100HasAggHook:{true,false}` — whether the top 100% route
+   *                                         uses an agg-hook (only
+   *                                         set when verdict involves
+   *                                         100% routes)
+   *   `topPct100GasComplete:{true,false}` — whether the top 100% had
+   *                                          `gasCostInQuoteToken`
+   *                                          populated on every leg.
+   *                                          When false, its score is
+   *                                          a raw-amount fallback —
+   *                                          same fallback the live
+   *                                          scorer uses.
+   *   `topSplitGasComplete:{true,false}`  — same for the top split.
+   *
+   * IMPORTANT: when gas info is incomplete on EITHER side the
+   * comparison still emits a score-based verdict — `gas_info_missing`
+   * is NOT a separate verdict. The live `scoreAndSortCombinations`
+   * ranks mixed-completeness combinations together (raw fallback for
+   * the incomplete one, gas-adjusted for the complete one), and the
+   * bias metric must mirror that semantic so it captures real
+   * dropped-split cases where the live scorer's raw fallback was the
+   * mechanism. The two completeness tags let DD analysts filter to
+   * the clean-gas subset if they want a stricter view.
+   *
+   * Fires exactly once per request when `testAggHooks=true`.
+   */
+  private emitFilterAndSortFullRouteBias(
+    result: RouteBasic<TPool>[][],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[]
+  ): void {
+    if (!testAggHooks) return;
+
+    const isFullRoute = (combo: RouteBasic<TPool>[]) =>
+      combo.length === 1 && combo[0].percentage === 100;
+
+    const pct100Combinations = result.filter(isFullRoute);
+    const splitCombinations = result.filter(combo => !isFullRoute(combo));
+
+    if (pct100Combinations.length === 0 && splitCombinations.length === 0) {
+      return;
+    }
+
+    const baseTags = [
+      ...metricTags,
+      `testAggHooks:${testAggHooks}`,
+      `tradeType:${tradeType}`,
+    ];
+
+    // Compute gas-adjusted scores for both top routes using the same
+    // formula as `scoreAndSortCombinations`. Fall back to raw amount
+    // when any leg's `gasCostInQuoteToken` is missing — same
+    // fallback rule the live scorer uses, so the metric's verdict
+    // matches the scorer's behavior.
+    const scoreCombination = (
+      combination: RouteBasic<TPool>[]
+    ): {score: bigint; gasComplete: boolean} => {
+      let totalAmount = 0n;
+      let totalGas = 0n;
+      let allGasPopulated = true;
+      for (const route of combination) {
+        const quote = quoteMap.get(route);
+        if (!quote) continue;
+        totalAmount += quote.amount;
+        const gas = quote.gasDetails?.gasCostInQuoteToken;
+        if (gas === undefined) {
+          allGasPopulated = false;
+        } else {
+          totalGas += gas;
+        }
+      }
+      const score = allGasPopulated
+        ? tradeType === TradeType.ExactIn
+          ? totalAmount - totalGas
+          : totalAmount + totalGas
+        : totalAmount;
+      return {score, gasComplete: allGasPopulated};
+    };
+
+    // The input is the PRE-truncation candidate set, so the entries
+    // are in DFS insertion order — not sorted by score. Pick the
+    // best of each group by computing scores for all members and
+    // selecting the max (ExactIn) / min (ExactOut). Using
+    // `.find(...)` would return the first inserted, which can be
+    // arbitrarily wrong on the unfiltered array; that's the bug
+    // shape the Codex review surfaced.
+    const bestOf = (
+      combos: RouteBasic<TPool>[][]
+    ): {
+      combo: RouteBasic<TPool>[];
+      score: bigint;
+      gasComplete: boolean;
+    } | null => {
+      if (combos.length === 0) return null;
+      let best: {
+        combo: RouteBasic<TPool>[];
+        score: bigint;
+        gasComplete: boolean;
+      } | null = null;
+      for (const combo of combos) {
+        const scored = scoreCombination(combo);
+        if (best === null) {
+          best = {combo, ...scored};
+          continue;
+        }
+        const isBetter =
+          tradeType === TradeType.ExactIn
+            ? scored.score > best.score
+            : scored.score < best.score;
+        if (isBetter) {
+          best = {combo, ...scored};
+        }
+      }
+      return best;
+    };
+
+    const topPct100 = bestOf(pct100Combinations);
+    const topSplit = bestOf(splitCombinations);
+
+    if (!topPct100) {
+      void ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.FilterAndSortFullRouteBias'),
+        1,
+        {tags: [...baseTags, 'verdict:no_pct100']}
+      );
+      return;
+    }
+
+    const topPct100HasAggHook = topPct100.combo.some(r =>
+      routeUsesAggHook(r, chainId)
+    );
+
+    if (!topSplit) {
+      void ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.FilterAndSortFullRouteBias'),
+        1,
+        {
+          tags: [
+            ...baseTags,
+            'verdict:no_split',
+            `topPct100HasAggHook:${topPct100HasAggHook}`,
+            `topPct100GasComplete:${topPct100.gasComplete}`,
+          ],
+        }
+      );
+      return;
+    }
+
+    // Always emit a score-based verdict. Live `scoreAndSortCombinations`
+    // ranks mixed-completeness combinations together (raw fallback for
+    // incomplete entries, gas-adjusted for complete ones); the bias
+    // metric mirrors that. The `topPct100GasComplete` and
+    // `topSplitGasComplete` tags expose the data-quality so DD
+    // analysts can filter to a strict-gas subset when needed without
+    // suppressing the verdict outright.
+    //
+    // For ExactIn, higher score is better. For ExactOut, lower score
+    // is better.
+    const pct100Better =
+      tradeType === TradeType.ExactIn
+        ? topPct100.score > topSplit.score
+        : topPct100.score < topSplit.score;
+    const splitBetter =
+      tradeType === TradeType.ExactIn
+        ? topSplit.score > topPct100.score
+        : topSplit.score < topPct100.score;
+    const verdict = pct100Better
+      ? 'pct100_beats_split'
+      : splitBetter
+        ? 'split_beats_pct100'
+        : 'tie';
+
+    void ctx.metrics.count(
+      buildMetricKey('QuoteBestSplitFinder.FilterAndSortFullRouteBias'),
+      1,
+      {
+        tags: [
+          ...baseTags,
+          `verdict:${verdict}`,
+          `topPct100HasAggHook:${topPct100HasAggHook}`,
+          `topPct100GasComplete:${topPct100.gasComplete}`,
+          `topSplitGasComplete:${topSplit.gasComplete}`,
+        ],
+      }
+    );
   }
 
   /**
