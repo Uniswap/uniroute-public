@@ -13,6 +13,8 @@ import {
   routeUsesAggHook,
   hashForLogging,
 } from '../../lib/observability';
+import {getProtocolForAggHookAddress} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {V4Pool} from '../../models/pool/V4Pool';
 
 export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
@@ -2465,18 +2467,24 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       const gasCost = quote?.gasDetails?.gasCostInQuoteToken;
       if (gasCost === undefined) continue;
 
-      // Identify the protocol via the first AGG-HOOK pool in the
-      // route — NOT the first pool overall. `Pool` requires every
-      // pool to expose `protocol`, so picking "first pool with a
-      // protocol" would mislabel mixed routes whose first hop is
-      // V2/V3/V4 and whose agg-hook leg is deeper as
-      // `protocol:V2|V3|V4` instead of e.g. `FluidDexT1`. Use the
-      // same `isAggHookPool` predicate that drives
-      // `routeUsesAggHook` to ensure the tag matches the leg we
-      // intend to measure.
+      // Identify the agg-hook protocol via the hook-address registry
+      // (`getProtocolForAggHookAddress`), NOT via `pool.protocol`.
+      // The pool's `protocol` getter returns the Uniswap protocol
+      // family (V4Pool → Protocol.V4) — staging post-deploy
+      // confirmed every emission tagged `protocol:v4` because every
+      // agg-hook pool is a V4Pool, which made the per-protocol
+      // distribution useless. The registry lookup returns the actual
+      // agg-hook protocol identifier (Protocol.FLUIDDEXT1,
+      // Protocol.CURVESTABLESWAP, etc.) which is the value we need
+      // to distinguish per-hook gas-cost outliers.
       const aggHookLeg = route.path.find(pool => isAggHookPool(pool, chainId));
       const protocolTag =
-        aggHookLeg === undefined ? null : String(aggHookLeg.protocol);
+        aggHookLeg === undefined || !(aggHookLeg instanceof V4Pool)
+          ? null
+          : String(
+              getProtocolForAggHookAddress(aggHookLeg.hooks, chainId) ??
+                aggHookLeg.protocol
+            );
 
       void ctx.metrics.dist(
         buildMetricKey('QuoteBestSplitFinder.AggHookWinnerGasPerProtocol'),

@@ -6360,7 +6360,14 @@ describe('QuoteBestSplitFinder', () => {
       expect(distCalls()).toHaveLength(0);
     });
 
-    it('emits one distribution datapoint per agg-hook leg with the protocol tag', () => {
+    it('emits one distribution datapoint per agg-hook leg tagged with the AGG-HOOK protocol (not the Uniswap version)', () => {
+      // Staging-deploy bug shape: prior code used `pool.protocol`
+      // which for V4Pool returns `Protocol.V4` — every emission
+      // tagged `protocol:v4`, making the per-protocol distribution
+      // useless. The fix uses `getProtocolForAggHookAddress` so the
+      // tag carries the agg-hook protocol family (FluidDexT1,
+      // CurveStableSwapNG, etc.). For STABLE_SWAP_NG[0] on mainnet
+      // the registry resolves to Protocol.CURVESTABLESWAPNG.
       const aggHookA = aggHookRouteAt(
         '0xd200000000000000000000000000000000000000',
         50
@@ -6383,11 +6390,13 @@ describe('QuoteBestSplitFinder', () => {
         ['chainId:1']
       );
       expect(distCalls()).toHaveLength(2);
-      // Each call carries gasCostInQuoteToken as the metric value
-      // and a protocol tag derived from the agg-hook pool.
       for (const c of distCalls()) {
         const tags = (c[2] as {tags: string[]}).tags;
-        expect(tags.some(t => t.startsWith('protocol:'))).toBe(true);
+        // The agg-hook protocol identifier resolved via the registry.
+        // STABLE_SWAP_NG[0] on MAINNET → Protocol.CURVESTABLESWAPNG.
+        expect(tags).toContain(`protocol:${Protocol.CURVESTABLESWAPNG}`);
+        // Must NOT be the bare Uniswap version that V4Pool reports.
+        expect(tags).not.toContain('protocol:v4');
       }
     });
 
@@ -6462,11 +6471,18 @@ describe('QuoteBestSplitFinder', () => {
       );
       expect(distCalls()).toHaveLength(1);
       const tags = (distCalls()[0][2] as {tags: string[]}).tags;
-      // The agg-hook leg's protocol (V3) must dominate the first
-      // leg's protocol (V2). Otherwise the mixed-route attribution
-      // is wrong (which is the bug Codex found).
-      expect(tags).toContain(`protocol:${Protocol.V3}`);
+      // The emitter resolves the protocol via the agg-hook address
+      // registry (`getProtocolForAggHookAddress`), not via
+      // `pool.protocol`. STABLE_SWAP_NG[0] on MAINNET → CurveStableSwapNG.
+      // The `pool.protocol` override on the agg-hook leg (V3) is
+      // intentionally IGNORED — the registry is the source of truth
+      // for the agg-hook protocol family. And the no-hook leg's
+      // `pool.protocol` (V2) is also ignored because the emitter
+      // first selects the agg-hook leg via `isAggHookPool`.
+      expect(tags).toContain(`protocol:${Protocol.CURVESTABLESWAPNG}`);
       expect(tags).not.toContain(`protocol:${Protocol.V2}`);
+      expect(tags).not.toContain(`protocol:${Protocol.V3}`);
+      expect(tags).not.toContain('protocol:v4');
     });
   });
 
