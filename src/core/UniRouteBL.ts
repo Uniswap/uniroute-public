@@ -3048,7 +3048,8 @@ export class UniRouteBL implements IUniRoutedBL {
           failedRoutes.push(
             quoteSplit.quotes.map(q => q.route.toString()).join(', ')
           );
-          ctx.logger.error('Simulation failed for quote:', {
+          // Per-quote sim failure during multi-route pass; other routes still try — diagnostic, not server error.
+          ctx.logger.warn('Simulation failed for quote:', {
             error: simulatedQuote.simulationResult?.description,
             quoteSplit: simulatedQuote.quotes.map(q => q.route.toString()),
             methodParameters: simulatedQuote.swapInfo?.methodParameters,
@@ -3151,9 +3152,9 @@ export class UniRouteBL implements IUniRoutedBL {
       }
     );
 
-    // Log failed routes if any
+    // Multi-route sim regularly produces partial failures (FOT, illiquid) — log at warn to keep signal without paging.
     if (failedRoutes.length > 0) {
-      ctx.logger.error('Routes that failed simulation:', {
+      ctx.logger.warn('Routes that failed simulation:', {
         failedRoutes,
         tags: metricTags,
       });

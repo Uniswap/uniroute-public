@@ -161,7 +161,8 @@ export abstract class Simulator {
         };
       }
     } else {
-      ctx.logger.error('User does not have sufficient balance to simulate.');
+      // User-input issue (insufficient balance) surfaced to caller — log at warn, not error.
+      ctx.logger.warn('User does not have sufficient balance to simulate.');
       return {
         ...quoteSplit,
         simulationResult: {
