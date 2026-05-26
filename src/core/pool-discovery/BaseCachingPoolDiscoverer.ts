@@ -16,6 +16,7 @@ import {ErrorNotFound, IRedisCache} from '@uniswap/lib-cache';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 import {getMaxFilteredPoolCount} from './TopPoolsSelector';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 
 // Upper bound on serialized size of a getPoolsForTokens cache entry, derived
 // from the selector's pool-count cap and a pessimistic per-pool byte estimate.
@@ -47,7 +48,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    protected unsupportedTokens: Set<string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository,
     protected discovererName: string,
     protected supportedProtocols: Protocol[] = [
       Protocol.V2,
@@ -69,11 +70,16 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // This name will be used as a prefix in cache keys to avoid conflicts between different implementations.
   protected abstract getDiscovererName(): string;
 
-  protected filterUnsupportedTokenPools(pools: TPool[]): TPool[] {
+  protected async filterUnsupportedTokenPools(
+    pools: TPool[],
+    ctx: Context
+  ): Promise<TPool[]> {
+    const {globalSet} =
+      await this.featureGatedTokensRepository.getSnapshot(ctx);
     const filteredPools = pools.filter(pool => {
       return (
-        !this.unsupportedTokens.has(pool.token0.id.toLowerCase()) &&
-        !this.unsupportedTokens.has(pool.token1.id.toLowerCase())
+        !globalSet.has(pool.token0.id.toLowerCase()) &&
+        !globalSet.has(pool.token1.id.toLowerCase())
       );
     });
     return filteredPools;
@@ -98,7 +104,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       const retrievedPoolsStr = await this.getPoolsCache.get(cacheKey);
       if (retrievedPoolsStr !== undefined) {
         retrievedPools = JSON.parse(retrievedPoolsStr);
-        retrievedPools = this.filterUnsupportedTokenPools(retrievedPools!);
+        retrievedPools = await this.filterUnsupportedTokenPools(
+          retrievedPools!,
+          ctx
+        );
         ctx.logger.debug(
           `[${this.discovererName}] Retrieved ${protocol} pools from cache`,
           {
@@ -114,7 +123,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     if (retrievedPools === undefined) {
       status = 'miss';
       retrievedPools = await this._getPools(chainId, protocol, ctx);
-      retrievedPools = this.filterUnsupportedTokenPools(retrievedPools);
+      retrievedPools = await this.filterUnsupportedTokenPools(
+        retrievedPools,
+        ctx
+      );
       const retrievedPoolsStr = JSON.stringify(retrievedPools);
       ctx.logger.debug(
         `[${this.discovererName}] Caching retrieved ${protocol} pools`,
@@ -199,7 +211,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
           await this.getPoolsForTokensCache.get(cacheKey);
         if (retrievedPoolsStr !== undefined) {
           retrievedPools = JSON.parse(retrievedPoolsStr);
-          retrievedPools = this.filterUnsupportedTokenPools(retrievedPools!);
+          retrievedPools = await this.filterUnsupportedTokenPools(
+            retrievedPools!,
+            ctx
+          );
           ctx.logger.debug(
             `[${this.discovererName}] Retrieved ${protocol} pools for tokens from cache`,
             {
@@ -225,7 +240,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       );
 
       // Filter out pools with unsupported tokens
-      retrievedPools = this.filterUnsupportedTokenPools(retrievedPools);
+      retrievedPools = await this.filterUnsupportedTokenPools(
+        retrievedPools,
+        ctx
+      );
 
       // use topPoolSelector to filter pools - we need to make sure a small number of pools is returned here.
       // The selector may flip cacheDirective.shouldUseCache to signal that the

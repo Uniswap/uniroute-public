@@ -19,6 +19,7 @@ import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {V2PoolInfo} from '../interface';
 import {sdkStreamMixin} from '@smithy/util-stream';
 import {Readable} from 'stream';
+import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 
 const mockConfig: IUniRouteServiceConfig = getUniRouteTestConfig();
 const mockContext: Context = buildTestContext();
@@ -68,7 +69,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        new Set<string>(),
+        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -145,7 +146,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        new Set<string>(),
+        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -194,7 +195,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        new Set<string>(),
+        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -245,7 +246,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        new Set<string>(),
+        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -300,7 +301,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        new Set<string>(),
+        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });

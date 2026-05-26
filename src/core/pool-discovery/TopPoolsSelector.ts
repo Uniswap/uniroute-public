@@ -16,6 +16,7 @@ import {
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
@@ -143,7 +144,8 @@ export function getMaxFilteredPoolCount(config: IPoolSelectionConfig): number {
 export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   constructor(
     private readonly chainRepository: IChainRepository,
-    private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>
+    private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
+    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {}
 
   public async filterPools(
@@ -164,8 +166,14 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 
     // Filter out pools that are unsupported:
     // Only consider pools where neither tokens are in the blocked token list.
+    const {globalSet: unsupportedTokens} =
+      await this.featureGatedTokensRepository.getSnapshot(ctx);
     const filteredUnsupportedPools =
-      BasicTopPoolsSelector.filterUnsupportedPools(pools, chainId);
+      BasicTopPoolsSelector.filterUnsupportedPools(
+        pools,
+        chainId,
+        unsupportedTokens
+      );
     ctx.logger.debug('Filtering unsupported tokens from pools', {
       chainId,
       totalChainPools: pools.length,
@@ -463,12 +471,13 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 
   public static filterUnsupportedPools(
     pools: UniPoolInfo[],
-    chainId: ChainId
+    _chainId: ChainId,
+    unsupportedTokens: Set<string>
   ): UniPoolInfo[] {
     return pools.filter(pool => {
       return (
-        !RoutingBlockList.isUnsupportedToken(pool.token0.id, chainId) &&
-        !RoutingBlockList.isUnsupportedToken(pool.token1.id, chainId)
+        !unsupportedTokens.has(pool.token0.id.toLowerCase()) &&
+        !unsupportedTokens.has(pool.token1.id.toLowerCase())
       );
     });
   }
@@ -885,7 +894,8 @@ export class AggHooksTopPoolsSelector
   implements ITopPoolsSelector<UniPoolInfo>
 {
   constructor(
-    private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>
+    private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
+    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {}
 
   public async filterPools(
@@ -934,8 +944,14 @@ export class AggHooksTopPoolsSelector
     });
 
     // 2. Drop pools whose tokens are on the routing block list.
+    const {globalSet: unsupportedTokens} =
+      await this.featureGatedTokensRepository.getSnapshot(ctx);
     const filteredUnsupportedPools =
-      BasicTopPoolsSelector.filterUnsupportedPools(aggHooksPools, chainId);
+      BasicTopPoolsSelector.filterUnsupportedPools(
+        aggHooksPools,
+        chainId,
+        unsupportedTokens
+      );
 
     // 3. Filter out pools that don't match the hooks options, only if the uniswap protocol is v4.
     const filteredPools = filteredUnsupportedPools.filter(pool => {

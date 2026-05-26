@@ -4,6 +4,7 @@ import {ChainId} from '../../../lib/config';
 import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
+import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
 import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
@@ -50,14 +51,14 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    protected unsupportedTokens: Set<string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository,
     protected readonly s3: S3Client
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
-      unsupportedTokens,
+      featureGatedTokensRepository,
       'BaseS3SubgraphPoolDiscoverer',
       [Protocol.V2, Protocol.V3, Protocol.V4]
     );

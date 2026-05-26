@@ -9,6 +9,7 @@ import {Address} from '../../../models/address/Address';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
+import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {IUniRouteServiceConfig} from '../../../lib/config';
 import {BASE_TOKENS_PER_CHAIN} from '../../../lib/tokenUtils';
@@ -43,13 +44,13 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     private readonly poolRepository: IPoolsRepository<V2Pool>,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    protected unsupportedTokens: Set<string> = new Set()
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
-      unsupportedTokens,
+      featureGatedTokensRepository,
       'StaticPoolDiscovererV2'
     );
   }
@@ -155,13 +156,13 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     private readonly poolRepository: IPoolsRepository<V3Pool>,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    protected unsupportedTokens: Set<string> = new Set()
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
-      unsupportedTokens,
+      featureGatedTokensRepository,
       'StaticPoolDiscovererV3'
     );
   }
@@ -258,13 +259,13 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     private readonly poolRepository: IPoolsRepository<V4Pool>,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    protected unsupportedTokens: Set<string> = new Set()
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
-      unsupportedTokens,
+      featureGatedTokensRepository,
       'StaticPoolDiscovererV4'
     );
   }

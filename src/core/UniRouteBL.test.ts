@@ -86,6 +86,7 @@ import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
 } from '../models/hooks/namespaces';
+import {FeatureGatedTokensRepository} from '../stores/compliance/FeatureGatedTokensRepository';
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
 // addresses are actually deployed in production.
@@ -424,7 +425,8 @@ describe('UniRouteBL', () => {
     cachedRoutesRepository = new CachedRoutesRepository(
       redisCache,
       serviceConfig,
-      new NoOpMessageQueue()
+      new NoOpMessageQueue(),
+      FeatureGatedTokensRepository.empty()
     );
     noRouteCacheRepository = new NoRouteCacheRepository(
       redisCache,
@@ -457,12 +459,42 @@ describe('UniRouteBL', () => {
   );
   const localPoolCache = new InMemoryRedisCache<string, string>();
   const poolDiscoverer = new PoolDiscoverer(
-    new EmptyPoolDiscovererV2(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV3(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV4(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV2(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV3(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV4(serviceConfig, localPoolCache, localPoolCache)
+    new EmptyPoolDiscovererV2(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV3(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV4(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV2(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV3(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV4(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    )
   );
   const freshPoolDetailsWrapper = new TestFreshPoolDetailsWrapper();
   const dummySimulator = new DummySimulator();

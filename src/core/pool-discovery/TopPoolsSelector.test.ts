@@ -1,4 +1,4 @@
-import {describe, beforeEach, it, expect, vi} from 'vitest';
+import {describe, beforeEach, it, expect} from 'vitest';
 import {
   AggHooksTopPoolsSelector,
   BasicTopPoolsSelector,
@@ -43,6 +43,9 @@ import {
   IPoolSelectionConfig,
 } from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {FeatureGatedTokensFetcher} from '../../stores/compliance/FeatureGatedTokensFetcher';
+import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
 
 describe('BasicTopPoolsSelector', () => {
   let chainRepository: IChainRepository;
@@ -55,16 +58,13 @@ describe('BasicTopPoolsSelector', () => {
 
   beforeEach(() => {
     chainRepository = new HardcodedChainRepository();
-    selector = new BasicTopPoolsSelector(chainRepository, poolSelectionConfig);
+    selector = new BasicTopPoolsSelector(
+      chainRepository,
+      poolSelectionConfig,
+      FeatureGatedTokensRepository.empty()
+    );
 
-    ctx = {
-      logger: {
-        debug: vi.fn(),
-      },
-      metrics: {
-        count: vi.fn(),
-      },
-    } as unknown as Context;
+    ctx = buildTestContext();
 
     mockV2Pool = {
       id: '0x123',
@@ -787,10 +787,6 @@ describe('BasicTopPoolsSelector', () => {
           experimentHookAddress,
           /* tvlUSD= */ 1
         );
-        const debugSpy = ctx.logger.debug as unknown as ReturnType<
-          typeof vi.fn
-        >;
-
         await selector.filterPools(
           [tinyExperimentPool, mockV4Pool],
           ChainId.MAINNET,
@@ -803,10 +799,10 @@ describe('BasicTopPoolsSelector', () => {
           {shouldUseCache: true}
         );
 
-        const appendedCalls = debugSpy.mock.calls.filter(
-          ([msg]) => msg === 'Manually appended experiment pools'
+        const appendedOutputs = (ctx as TestContext).logger.outputs.filter(
+          entry => entry.msg === 'Manually appended experiment pools'
         );
-        expect(appendedCalls).toHaveLength(0);
+        expect(appendedOutputs).toHaveLength(0);
       });
 
       it('does not append for non-V4 protocols even when experiment is set', async () => {
@@ -901,7 +897,8 @@ describe('BasicTopPoolsSelector', () => {
 
       const result = BasicTopPoolsSelector['filterUnsupportedPools'](
         pools,
-        ChainId.MAINNET
+        ChainId.MAINNET,
+        new Set<string>([unsupportedToken])
       );
 
       expect(result).toHaveLength(1);
@@ -1508,14 +1505,15 @@ describe('AggHooksTopPoolsSelector', () => {
   let ctx: Context;
 
   beforeEach(() => {
-    selector = new AggHooksTopPoolsSelector(fullHeuristicsConfig);
-    selectorDefault = new AggHooksTopPoolsSelector(
-      aggHooksPoolSelectionPerChainConfig
+    selector = new AggHooksTopPoolsSelector(
+      fullHeuristicsConfig,
+      FeatureGatedTokensRepository.empty()
     );
-    ctx = {
-      logger: {debug: vi.fn()},
-      metrics: {count: vi.fn()},
-    } as unknown as Context;
+    selectorDefault = new AggHooksTopPoolsSelector(
+      aggHooksPoolSelectionPerChainConfig,
+      FeatureGatedTokensRepository.empty()
+    );
+    ctx = buildTestContext();
   });
 
   it('sanity: AGG_HOOKS_ON_MAINNET contains the addresses used in these tests', () => {
@@ -2058,7 +2056,6 @@ describe('AggHooksTopPoolsSelector', () => {
 
   describe('unsupported token filtering', () => {
     it('should exclude pools whose tokens are on the routing block list', async () => {
-      // 0xd233d1f6fd11640081abb8db125f722b5dc729dc is a real unsupported token on MAINNET
       const unsupportedToken = '0xd233d1f6fd11640081abb8db125f722b5dc729dc';
       const badPool = makeAggV4Pool(
         '0xbad',
@@ -2068,7 +2065,38 @@ describe('AggHooksTopPoolsSelector', () => {
       );
       const goodPool = makeAggV4Pool('0xgood', TOKEN_IN, TOKEN_OUT);
 
-      const result = await selector.filterPools(
+      // Build a selector wired to a repo whose hardcoded fallback contains
+      // the unsupported token — exercises the deny-list filter end-to-end.
+      const denyListedRepo = new FeatureGatedTokensRepository(
+        {
+          // Force the repo to fall back to its hardcoded snapshot. Lets us
+          // assert the deny-list-driven filter in isolation without standing
+          // up a real fetcher.
+          fetchAll: async () => {
+            throw new Error('test: forcing hardcoded fallback');
+          },
+        } as unknown as FeatureGatedTokensFetcher,
+        {
+          name: 'test-deny-list',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          version: {major: 1, minor: 0, patch: 0},
+          tokens: [
+            {
+              chainId: ChainId.MAINNET,
+              address: unsupportedToken,
+              name: 'Unsupported',
+              symbol: 'UNS',
+              decimals: 18,
+            },
+          ],
+        }
+      );
+      const selectorWithDenyList = new AggHooksTopPoolsSelector(
+        fullHeuristicsConfig,
+        denyListedRepo
+      );
+
+      const result = await selectorWithDenyList.filterPools(
         [badPool, goodPool],
         ChainId.MAINNET,
         tokenIn,

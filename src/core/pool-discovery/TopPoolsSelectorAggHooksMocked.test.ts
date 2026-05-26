@@ -31,6 +31,8 @@ import {poolSelectionConfig} from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
 import {EMPTY_NAMESPACE_CONTEXT} from '../../models/hooks/namespaces';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {buildTestContext} from '@uniswap/lib-testhelpers';
 
 // ---------------------------------------------------------------------------
 // Synthetic test addresses — no dependency on production address lists.
@@ -113,9 +115,10 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
   beforeEach(() => {
     selector = new BasicTopPoolsSelector(
       new HardcodedChainRepository(),
-      poolSelectionConfig
+      poolSelectionConfig,
+      FeatureGatedTokensRepository.empty()
     );
-    ctx = {logger: {debug: vi.fn(), warn: vi.fn()}} as unknown as Context;
+    ctx = buildTestContext();
   });
 
   it('excludes a V4 pool whose hook address is in AGG_HOOKS_PER_CHAIN', async () => {
@@ -247,8 +250,11 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
   let ctx: Context;
 
   beforeEach(() => {
-    selector = new AggHooksTopPoolsSelector(poolSelectionConfig);
-    ctx = {logger: {debug: vi.fn(), warn: vi.fn()}} as unknown as Context;
+    selector = new AggHooksTopPoolsSelector(
+      poolSelectionConfig,
+      FeatureGatedTokensRepository.empty()
+    );
+    ctx = buildTestContext();
   });
 
   it('includes only the pool whose hook address is in AGG_HOOKS_PER_CHAIN', async () => {

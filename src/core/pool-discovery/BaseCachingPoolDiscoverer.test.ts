@@ -17,6 +17,7 @@ import {IRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
@@ -79,13 +80,13 @@ class TestPoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    protected unsupportedTokens: Set<string> = new Set()
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository = FeatureGatedTokensRepository.empty()
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
-      unsupportedTokens,
+      featureGatedTokensRepository,
       'TestPoolDiscoverer'
     );
   }
