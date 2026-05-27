@@ -45,7 +45,6 @@ import {
 import {Protocol} from 'src/models/pool/Protocol';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {FeatureGatedTokensFetcher} from '../../stores/compliance/FeatureGatedTokensFetcher';
-import {UnsupportedTokenListFetcher} from '../../stores/compliance/UnsupportedTokenListFetcher';
 import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
 
 describe('BasicTopPoolsSelector', () => {
@@ -2066,32 +2065,31 @@ describe('AggHooksTopPoolsSelector', () => {
       );
       const goodPool = makeAggV4Pool('0xgood', TOKEN_IN, TOKEN_OUT);
 
-      // Build a selector wired to a repo whose bootstrap fallback contains
-      // the unsupported token — exercises the deny-list filter end-to-end
-      // through the cold-start path (compliance fetch fails → bootstrap
-      // fetch succeeds with our denied token).
+      // Build a selector wired to a repo whose hardcoded fallback contains
+      // the unsupported token — exercises the deny-list filter end-to-end.
       const denyListedRepo = new FeatureGatedTokensRepository(
         {
+          // Force the repo to fall back to its hardcoded snapshot. Lets us
+          // assert the deny-list-driven filter in isolation without standing
+          // up a real fetcher.
           fetchAll: async () => {
-            throw new Error('test: forcing cold-start path');
+            throw new Error('test: forcing hardcoded fallback');
           },
         } as unknown as FeatureGatedTokensFetcher,
         {
-          fetch: async () => ({
-            name: 'test-deny-list',
-            timestamp: '2026-01-01T00:00:00.000Z',
-            version: {major: 1, minor: 0, patch: 0},
-            tokens: [
-              {
-                chainId: ChainId.MAINNET,
-                address: unsupportedToken,
-                name: 'Unsupported',
-                symbol: 'UNS',
-                decimals: 18,
-              },
-            ],
-          }),
-        } as unknown as UnsupportedTokenListFetcher
+          name: 'test-deny-list',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          version: {major: 1, minor: 0, patch: 0},
+          tokens: [
+            {
+              chainId: ChainId.MAINNET,
+              address: unsupportedToken,
+              name: 'Unsupported',
+              symbol: 'UNS',
+              decimals: 18,
+            },
+          ],
+        }
       );
       const selectorWithDenyList = new AggHooksTopPoolsSelector(
         fullHeuristicsConfig,
