@@ -404,6 +404,8 @@ export const ETIM_TAX_HOOK_ON_MAINNET =
 export const ASH_HOOK_ON_MAINNET = '0xebac1d1a384d3ae1a162fdf30788fcfa228380cc';
 export const LIVO_SWAP_HOOK_ON_MAINNET =
   '0x627fa6f76fa96b10bae1b6fba280a3c9264500cc';
+export const LIVO_SWAP_HOOK_V2_ON_MAINNET =
+  '0x068241d20c59980abeaeded990d2441f05f5c0cc';
 
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
@@ -445,6 +447,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ETIM_TAX_HOOK_ON_MAINNET,
     ASH_HOOK_ON_MAINNET,
     LIVO_SWAP_HOOK_ON_MAINNET,
+    LIVO_SWAP_HOOK_V2_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
