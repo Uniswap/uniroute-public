@@ -2693,6 +2693,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       tradeType,
       metricTags
     );
+    this.emitAggHookWinnerByAddress(
+      result,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags
+    );
     this.emitKBudgetAdmitProjectedLoss(
       ctx,
       testAggHooks,
@@ -2915,6 +2923,84 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           ],
         }
       );
+    }
+  }
+
+  /**
+   * Per-(hook-address, protocol) winner count. The existing
+   * `AggHookWinnerGasPerProtocol` aggregates by protocol only, which
+   * isn't granular enough to inform a per-(hook, pair) denylist —
+   * each agg-hook protocol registers many hook addresses (FluidDexT1
+   * has ~7+ on mainnet) and they can have wildly different win/loss
+   * profiles per token pair.
+   *
+   * This metric pairs with the existing Cat-A/Cat-B
+   * `catALossTreatmentHookAddresses` field on the trading-side
+   * comparison logs. Together they let us compute per-hook win/loss
+   * ratios in DD, scope per-(hook, pair) for hooks where the loss
+   * rate is concentrated, and surface candidates for targeted
+   * exclusion without sacrificing hooks that are net-positive
+   * overall.
+   *
+   * Cardinality: bounded — the `hookAddress` tag is restricted to
+   * registered agg-hook addresses (via `getProtocolForAggHookAddress`
+   * lookup). On mainnet today that's ~15 addresses across
+   * FluidDexT1 / FluidDexLite / CurveStableSwapNG; chain-wide totals
+   * stay well under 100. Skips unrecognized hooks defensively so an
+   * unregistered hook can't blow out the tag set.
+   *
+   * Fires once per (hookAddress, protocol) pair present in the
+   * chosen winner — deduped by a per-request `seenHookKeys` Set so
+   * a winner that uses the same hook twice (via different splits)
+   * doesn't double-count. Gated on `testAggHooks=true`.
+   */
+  private emitAggHookWinnerByAddress(
+    result: RouteBasic<TPool>[][],
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[]
+  ): void {
+    if (!testAggHooks) return;
+    if (result.length === 0) return;
+
+    const top = result[0];
+    const seenHookKeys = new Set<string>();
+
+    for (const route of top) {
+      if (!routeUsesAggHook(route, chainId)) continue;
+      for (const pool of route.path) {
+        if (!(pool instanceof V4Pool)) continue;
+        const hookAddress = pool.hooks;
+        if (typeof hookAddress !== 'string') continue;
+        const lowerHookAddress = hookAddress.toLowerCase();
+        const protocol = getProtocolForAggHookAddress(
+          lowerHookAddress,
+          chainId
+        );
+        // Defensive: drop unrecognized hooks so the metric's tag
+        // cardinality stays bounded by the registry.
+        if (protocol === undefined) continue;
+
+        const dedupeKey = `${lowerHookAddress}:${protocol}`;
+        if (seenHookKeys.has(dedupeKey)) continue;
+        seenHookKeys.add(dedupeKey);
+
+        void ctx.metrics.count(
+          buildMetricKey('QuoteBestSplitFinder.AggHookWinnerByAddress'),
+          1,
+          {
+            tags: [
+              ...metricTags,
+              `hookAddress:${lowerHookAddress}`,
+              `protocol:${protocol}`,
+              `tradeType:${tradeType}`,
+              `testAggHooks:${testAggHooks}`,
+            ],
+          }
+        );
+      }
     }
   }
 

@@ -7844,6 +7844,256 @@ describe('QuoteBestSplitFinder', () => {
     });
   });
 
+  describe('agg-hook winner by address', () => {
+    // FluidDexT1 hook addresses observed in prod attribution. These
+    // are real registered addresses from the allowlist registry;
+    // the test relies on the registry returning a non-undefined
+    // protocol for them.
+    const FLUID_DEX_T1_DOMINANT = '0xf154d602fff1239e9f8e4416fa3308e526402888';
+    const FLUID_DEX_T1_SECONDARY = '0xf17bf002c67a176af7bb0a87f4122aba86e66888';
+    const STABLE_SWAP_NG_ADDR = STABLE_SWAP_NG[0]!;
+
+    const aggHookRouteAt = (poolAddr: string, hookAddr: string, pct: number) =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, poolAddr, hookAddr)],
+        pct
+      );
+    const noHookRouteAt = (addr: string, pct: number) =>
+      createMockRoute([createMockPool(mockToken0, mockToken1, addr)], pct);
+
+    const countCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.AggHookWinnerByAddress'
+          )
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      const aggHook = aggHookRouteAt(
+        '0xe000000000000000000000000000000000000000',
+        FLUID_DEX_T1_DOMINANT,
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[aggHook]],
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(countCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when result is empty', () => {
+      finder['emitAggHookWinnerByAddress'](
+        [],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(countCalls()).toHaveLength(0);
+    });
+
+    it('does not fire when the winner has no agg-hook legs', () => {
+      const noHook = noHookRouteAt(
+        '0xe100000000000000000000000000000000000000',
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[noHook]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(countCalls()).toHaveLength(0);
+    });
+
+    it('emits one count per (hookAddress, protocol) with the address as a tag', () => {
+      const aggHook = aggHookRouteAt(
+        '0xe200000000000000000000000000000000000000',
+        FLUID_DEX_T1_DOMINANT,
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[aggHook]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      const calls = countCalls();
+      expect(calls).toHaveLength(1);
+      const tags = (calls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain(`hookAddress:${FLUID_DEX_T1_DOMINANT}`);
+      expect(tags).toContain('protocol:FluidDexT1');
+      expect(tags).toContain(`tradeType:${TradeType.ExactIn}`);
+      expect(tags).toContain('testAggHooks:true');
+      expect(calls[0][1]).toBe(1);
+    });
+
+    it('lowercases mixed-case hook addresses for tag stability', () => {
+      const mixedCase = '0xF154D602fff1239e9f8e4416fa3308e526402888';
+      const aggHook = aggHookRouteAt(
+        '0xe300000000000000000000000000000000000000',
+        mixedCase,
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[aggHook]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      const tags = (countCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain(`hookAddress:${mixedCase.toLowerCase()}`);
+    });
+
+    it('emits distinct counts for two different hook addresses on the same winner', () => {
+      // Two-leg winner: first leg uses FLUID_DEX_T1_DOMINANT, second
+      // leg uses FLUID_DEX_T1_SECONDARY. Both are FluidDexT1 protocol
+      // but distinct addresses — each should produce its own emit.
+      const route = createMockRoute(
+        [
+          createMockPool(
+            mockToken0,
+            mockToken1,
+            '0xe400000000000000000000000000000000000000',
+            FLUID_DEX_T1_DOMINANT
+          ),
+          createMockPool(
+            mockToken1,
+            mockToken0,
+            '0xe401000000000000000000000000000000000000',
+            FLUID_DEX_T1_SECONDARY
+          ),
+        ],
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[route]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      const calls = countCalls();
+      expect(calls).toHaveLength(2);
+      const allTags = calls.map(c => (c[2] as {tags: string[]}).tags);
+      const addresses = allTags.map(t =>
+        t.find(s => s.startsWith('hookAddress:'))
+      );
+      expect(addresses).toContain(`hookAddress:${FLUID_DEX_T1_DOMINANT}`);
+      expect(addresses).toContain(`hookAddress:${FLUID_DEX_T1_SECONDARY}`);
+    });
+
+    it('dedupes (hookAddress, protocol) within a single winner', () => {
+      // Two legs both using the SAME hook address — should fire once.
+      const route = createMockRoute(
+        [
+          createMockPool(
+            mockToken0,
+            mockToken1,
+            '0xe500000000000000000000000000000000000000',
+            FLUID_DEX_T1_DOMINANT
+          ),
+          createMockPool(
+            mockToken1,
+            mockToken0,
+            '0xe501000000000000000000000000000000000000',
+            FLUID_DEX_T1_DOMINANT
+          ),
+        ],
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[route]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      expect(countCalls()).toHaveLength(1);
+    });
+
+    it('skips pools whose hook address is not in the registry (cardinality guard)', () => {
+      const unregisteredHook = '0x0000000000000000000000000000000000000099';
+      const aggHook = aggHookRouteAt(
+        '0xe600000000000000000000000000000000000000',
+        unregisteredHook,
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[aggHook]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      // routeUsesAggHook depends on the registry too — when the
+      // address isn't registered, the route is not "agg-hook" and
+      // the emitter returns before counting.
+      expect(countCalls()).toHaveLength(0);
+    });
+
+    it('only emits for the winning combination (result[0]), not subsequent combinations', () => {
+      const winnerAggHook = aggHookRouteAt(
+        '0xe700000000000000000000000000000000000000',
+        FLUID_DEX_T1_DOMINANT,
+        100
+      );
+      const runnerUpAggHook = aggHookRouteAt(
+        '0xe701000000000000000000000000000000000000',
+        FLUID_DEX_T1_SECONDARY,
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[winnerAggHook], [runnerUpAggHook]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1']
+      );
+      const calls = countCalls();
+      expect(calls).toHaveLength(1);
+      const tags = (calls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain(`hookAddress:${FLUID_DEX_T1_DOMINANT}`);
+      expect(tags).not.toContain(`hookAddress:${FLUID_DEX_T1_SECONDARY}`);
+    });
+
+    it('includes baseline metric tags', () => {
+      const aggHook = aggHookRouteAt(
+        '0xe800000000000000000000000000000000000000',
+        STABLE_SWAP_NG_ADDR,
+        100
+      );
+      finder['emitAggHookWinnerByAddress'](
+        [[aggHook]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactOut,
+        ['chainId:1', 'env:test']
+      );
+      const tags = (countCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('chainId:1');
+      expect(tags).toContain('env:test');
+      expect(tags).toContain(`tradeType:${TradeType.ExactOut}`);
+    });
+  });
+
   // Codex finding (medium): the bias metric searches only the final
   // `result`. When `fullRoutes.length >= maxSplitRoutes` the filter
   // returns ONLY 100% routes, so the metric reads no split and emits
