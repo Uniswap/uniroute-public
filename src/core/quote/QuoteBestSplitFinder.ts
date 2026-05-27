@@ -160,11 +160,64 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    */
   private readonly AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR: boolean;
 
+  /**
+   * Reserved env-flag handle for the gas-cost-in-quote-token
+   * projection gate. CURRENTLY A NO-OP FOR ENFORCEMENT — the field
+   * is wired through `DeepQuoteStrategy` so the env-var name is
+   * already plumbed when a future PR enables enforcement, but the
+   * actual K-budget admission decision in `isAggHookCompetitive`
+   * ignores this flag today.
+   *
+   * Background: Cat-A loss attribution on `commit-fb14030`
+   * (PR #8528 bundle, 1h prod data) showed ~63% of Cat-A losses are
+   * FluidDexT1 leg_delta=0 on stable-stable second hops, where the
+   * agg-hook produces +0.04 bps raw but +58% gas overhead. The
+   * partition still admits the agg-hook because the existing
+   * gas-use gate compares gas UNITS (not quote-token cost), which
+   * is too coarse for that stable-stable shape.
+   *
+   * The projected gas-adjusted check (`projectedGateWouldAdmit` +
+   * `KBudgetAdmitProjectedLoss` metric) projects what the final
+   * scorer would do and ATTRIBUTES the loss population pre-flip.
+   * But Codex adversarial-review round-5 finding #1 showed that
+   * using the same projection for ENFORCEMENT (hard-pruning
+   * agg-hook) is unsafe because the DFS hasn't seen future-
+   * percentage pool conflicts — a locally projected-loss agg-hook
+   * can be globally best when admitting it avoids a downstream
+   * conflict the no-hook anchor would have caused.
+   *
+   * Future work: re-introduce enforcement once the conflict-
+   * propagation question is resolved (e.g. via bounded overflow
+   * slots or a conflict-aware variant). Until then, this flag is
+   * observation-only and the verdict telemetry lives entirely
+   * under `instrumentation.testAggHooks`.
+   *
+   * Default off; production reads via env var
+   * `AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE` in
+   * `DeepQuoteStrategy`. Constructor-settable for tests.
+   */
+  private readonly AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE: boolean;
+
+  /**
+   * Slack on the projected-loss gate, in quote-token wei. A non-zero
+   * value lets the gate admit borderline cases where the projected
+   * gas overhead exceeds projected raw improvement by less than this
+   * amount — useful to absorb gas-estimation noise without
+   * regressing the upside cases.
+   *
+   * Default `0n` matches the strict defaults on the existing
+   * `AGG_HOOK_PARTITION_TOLERANCE_BPS` and
+   * `AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS` gates.
+   */
+  private readonly AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT: bigint;
+
   constructor(
-    aggHookPartitionToleranceBps: bigint = 0n,
-    aggHookPartitionGasToleranceUnits: bigint = 0n,
-    aggHookSoleCandidateGasToleranceUnits: bigint = 0n,
-    aggHookPartitionUseLowestGasAnchor: boolean = false
+    aggHookPartitionToleranceBps = 0n,
+    aggHookPartitionGasToleranceUnits = 0n,
+    aggHookSoleCandidateGasToleranceUnits = 0n,
+    aggHookPartitionUseLowestGasAnchor = false,
+    aggHookPartitionUseProjectedGasAdjGate = false,
+    aggHookProjectedLossToleranceQT = 0n
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
@@ -173,6 +226,9 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       aggHookSoleCandidateGasToleranceUnits;
     this.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR =
       aggHookPartitionUseLowestGasAnchor;
+    this.AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE =
+      aggHookPartitionUseProjectedGasAdjGate;
+    this.AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT = aggHookProjectedLossToleranceQT;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -343,6 +399,40 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       | 'agg_hook_only_admitted'
       | 'agg_hook_only_rejected'
       | 'empty';
+    // What-if verdict for the projected gas-adjusted gate (see
+    // `AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE`). Computed
+    // regardless of the kill-switch state so `KBudgetAdmitProjectedLoss`
+    // can size the population the new gate would reject BEFORE we flip
+    // it on in prod. Only meaningful when `bothPresent` — undefined
+    // otherwise.
+    //
+    //   'admit_both'          — existing gate admitted AND projection-
+    //                           only gate would also admit (post-flip
+    //                           behavior unchanged).
+    //   'admit_raw_only'      — existing gate admitted BUT projection-
+    //                           only gate would reject (the population
+    //                           the flip removes).
+    //   'reject_raw_amount'   — existing raw-amount gate already
+    //                           rejected (projection irrelevant). Split
+    //                           from `reject_gas_use` per Codex
+    //                           adversarial-review finding #2 so the
+    //                           metric can distinguish which mechanism
+    //                           already covers a bucket.
+    //   'reject_gas_use'      — existing gas-use gate already rejected
+    //                           (projection irrelevant).
+    //   'no_data'             — gasCostInQuoteToken missing on a side;
+    //                           gate defensively admits.
+    projectedGateVerdict?:
+      | 'admit_both'
+      | 'admit_raw_only'
+      | 'reject_raw_amount'
+      | 'reject_gas_use'
+      | 'no_data';
+    // Agg-hook protocol tag (e.g. 'FluidDexT1') for the verdict above,
+    // derived from the agg-hook winner's hook address via the registry.
+    // Undefined when `projectedGateVerdict` is undefined or when the
+    // hook address isn't in the registry.
+    projectedGateProtocol?: string;
   } {
     const quotes = percentageToSortedQuotes.get(percentage) || [];
     // First filter valid quotes
@@ -560,6 +650,86 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       bucketShape = 'empty';
     }
 
+    // What-if verdict for the projected gas-adjusted gate. Computed
+    // here (not inside `isAggHookCompetitive`) so the existing gate's
+    // signature stays unchanged and unit-test mocks don't have to
+    // populate `gasCostInQuoteToken`. Only computed when both classes
+    // are populated, otherwise the gate doesn't run.
+    let projectedGateVerdict:
+      | 'admit_both'
+      | 'admit_raw_only'
+      | 'reject_raw_amount'
+      | 'reject_gas_use'
+      | 'no_data'
+      | undefined;
+    let projectedGateProtocol: string | undefined;
+    // Skip the verdict computation entirely on non-canary paths. The
+    // only production consumer of this telemetry is
+    // `emitKBudgetAdmitProjectedLoss`, which is gated on
+    // `testAggHooks`. Without this guard the recursive DFS pays for
+    // bigint arithmetic, hook-protocol lookup, and an extra
+    // gas-cost scan every both-populated bucket — which under
+    // wall-clock timeout pressure can convert successful searches
+    // into partial searches and worse user-visible quotes
+    // (Codex round-4 finding). The actual kill-switch enforcement
+    // lives in `isAggHookCompetitive`, which keeps running
+    // unconditionally.
+    if (bothPresent && instrumentation?.testAggHooks) {
+      // Disambiguate raw vs gas-use rejection FIRST and short-
+      // circuit before paying for `projectedGateWouldAdmit` —
+      // projection is irrelevant when the existing gates already
+      // rejected (Codex round-4 finding). Codex round-2 finding #2:
+      // a missing `gasCostInQuoteToken` (projection no_data) must
+      // NOT suppress a real raw/gas rejection. Round-1 finding #2:
+      // treating `!useBothPopulatedPartition` as "raw or gas
+      // rejected" mis-tags projection-only rejects.
+      const rejectReason = this.existingGateRejectReason(
+        aggHookQuotes,
+        noHookQuotes,
+        noHookBudgetIfPartitioned,
+        tradeType
+      );
+      if (rejectReason === 'raw_amount') {
+        projectedGateVerdict = 'reject_raw_amount';
+      } else if (rejectReason === 'gas_use') {
+        projectedGateVerdict = 'reject_gas_use';
+      } else {
+        const projectionAdmits = this.projectedGateWouldAdmit(
+          aggHookQuotes,
+          noHookQuotes,
+          noHookBudgetIfPartitioned,
+          tradeType
+        );
+        if (projectionAdmits === undefined) {
+          projectedGateVerdict = 'no_data';
+        } else if (projectionAdmits) {
+          projectedGateVerdict = 'admit_both';
+        } else {
+          // Existing raw/gas gates would have admitted, but the
+          // projection-only check would reject. This is the
+          // `admit_raw_only` population the metric must size —
+          // whether the kill-switch is on (projection actually
+          // rejected) or off (projection would reject if flipped).
+          projectedGateVerdict = 'admit_raw_only';
+        }
+      }
+      // Tag with the agg-hook winner's protocol when resolvable.
+      const aggHookWinnerRoute = aggHookQuotes[0].route as RouteBasic<TPool>;
+      for (const pool of aggHookWinnerRoute.path) {
+        if (!(pool instanceof V4Pool)) continue;
+        const hooks = pool.hooks;
+        if (typeof hooks !== 'string') continue;
+        const protocol = getProtocolForAggHookAddress(
+          hooks.toLowerCase(),
+          chainId
+        );
+        if (protocol !== undefined) {
+          projectedGateProtocol = protocol;
+          break;
+        }
+      }
+    }
+
     return {
       quotes: returnedQuotes,
       totalCount: quotes.length,
@@ -568,6 +738,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       partitionAdmittedAggHook: useBothPopulatedPartition,
       displacedNoHookQuotes,
       bucketShape,
+      projectedGateVerdict,
+      projectedGateProtocol,
     };
   }
 
@@ -682,10 +854,11 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // requests (e.g. `5715715370883124467`). Skip if gas info is
     // missing on either side (preserves backward compat with code
     // paths that don't populate gasDetails, notably unit-test mocks).
+    const noHookAnchorQuote = this.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR
+      ? this.lowestNoHookGasQuote(noHookQuotes)
+      : noHookWinner;
     const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
-    const noHookAnchorGasUse = this.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR
-      ? this.lowestNoHookGasUse(noHookQuotes)
-      : noHookWinner.gasDetails?.gasUse;
+    const noHookAnchorGasUse = noHookAnchorQuote?.gasDetails?.gasUse;
     if (aggHookGasUse !== undefined && noHookAnchorGasUse !== undefined) {
       if (aggHookGasUse > noHookAnchorGasUse) {
         const gasUseDelta = aggHookGasUse - noHookAnchorGasUse;
@@ -695,6 +868,24 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
+    // NOTE: the projected gas-adjusted comparison
+    // (`projectedGateWouldAdmit`) is intentionally NOT used here for
+    // enforcement. Codex adversarial-review round-5 finding #1:
+    // hard-pruning agg-hook on a local projected delta is unsafe
+    // because the DFS hasn't yet seen future-percentage pool
+    // conflicts. A locally gas-adj-worse agg-hook can be globally
+    // better when admitting it avoids a future conflict the no-hook
+    // anchor would have caused. The K-budget admit/reject decision
+    // therefore stays driven by the existing raw-amount and gas-USE
+    // gates, which use simpler, more conservative criteria that don't
+    // depend on quote-token projection.
+    //
+    // The projection itself remains as TELEMETRY ONLY (computed in
+    // `getBestUnusedQuotesStats` under the `testAggHooks` gate). The
+    // `AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE` env flag is
+    // currently a no-op for enforcement and is reserved for a future
+    // conflict-aware enforcement implementation. Documented in the
+    // field's JSDoc.
     return true;
   }
 
@@ -716,6 +907,183 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
     return lowest;
+  }
+
+  /**
+   * Returns the no-hook quote with the minimum `gasDetails.gasUse`, or
+   * undefined when no quote in the input has gas info. Companion to
+   * `lowestNoHookGasUse` used by the projected gas-adjusted gate
+   * (`AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE`) which needs the
+   * full anchor quote — not just its gasUse — to read `.amount` and
+   * `.gasDetails.gasCostInQuoteToken` for the projection.
+   */
+  private lowestNoHookGasQuote(
+    noHookQuotes: QuoteBasic[]
+  ): QuoteBasic | undefined {
+    return this.lowestNoHookGasQuoteInDisplacedSlice(
+      noHookQuotes,
+      0,
+      noHookQuotes.length
+    );
+  }
+
+  /**
+   * Returns the no-hook quote with the minimum `gasDetails.gasUse`
+   * within the half-open slice `[startIdx, endIdx)` of raw-sorted
+   * `noHookQuotes`, or undefined when no quote in that slice has gas
+   * info.
+   *
+   * Used by the projected gas-adjusted gate. The slice must be the
+   * DISPLACED set — quotes the partition would return if it
+   * REJECTED agg-hook but would NOT return if it ADMITTED. Anchoring
+   * on the kept set (e.g. `noHookQuotes[0]`) lets the projection
+   * reject agg-hook against a quote it doesn't actually displace
+   * (Codex adversarial-review round-3 finding). For the canonical
+   * K=2, noHookBudgetIfPartitioned=1 case, the displaced slice is
+   * `[1, 2)` i.e. just `noHookQuotes[1]` (the runner-up).
+   */
+  private lowestNoHookGasQuoteInDisplacedSlice(
+    noHookQuotes: QuoteBasic[],
+    startIdx: number,
+    endIdx: number
+  ): QuoteBasic | undefined {
+    let best: QuoteBasic | undefined;
+    let lowest: bigint | undefined;
+    const upper = Math.min(endIdx, noHookQuotes.length);
+    for (let i = Math.max(0, startIdx); i < upper; i++) {
+      const quote = noHookQuotes[i];
+      const gasUse = quote.gasDetails?.gasUse;
+      if (gasUse === undefined) continue;
+      if (lowest === undefined || gasUse < lowest) {
+        lowest = gasUse;
+        best = quote;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Returns true if the projected gas-adjusted gate WOULD admit the
+   * agg-hook winner, false if it would reject, undefined when the
+   * required `gasCostInQuoteToken` is missing on either side.
+   *
+   * Implements the same comparison as the in-gate logic in
+   * `isAggHookCompetitive` but as a side-effect-free predicate so the
+   * verdict can be reported regardless of the kill-switch state (the
+   * actual gate only runs when `AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE`
+   * is true, but we want what-if telemetry pre-flip too).
+   *
+   * Anchor: lowest-gas no-hook quote AMONG THE TOP-K returnable
+   * no-hooks (`MAX_VALID_QUOTES_PER_PERCENTAGE`), independent of
+   * `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR`. When the projection
+   * rejects, the partition fills all K slots with the top-K no-hook
+   * by raw — so the alternative DFS would actually pick is one of
+   * those, not a phantom lowest-gas quote outside the candidate
+   * pool. Codex adversarial-review finding #3 (round 1) split the
+   * anchor from the legacy flag; round 2 finding #1 bounded it to
+   * the K-returnable slice.
+   */
+  /**
+   * Returns the reason the existing `isAggHookCompetitive` gates
+   * (raw-amount + gas-use) would reject the agg-hook winner, or
+   * undefined if neither rejects. Side-effect-free predicate used by
+   * the projected-loss metric to distinguish `reject_raw_amount` from
+   * `reject_gas_use` — without this split the metric conflates both
+   * mechanisms and dashboards can't tell which Cat-A/Cat-B
+   * populations are already covered (Codex adversarial-review
+   * finding #2).
+   *
+   * Mirrors the in-gate logic at lines ~773-824. Note: this does NOT
+   * include the projected gas-adj gate — that's handled separately
+   * via `projectedGateWouldAdmit` because its verdict is the
+   * what-if signal we're measuring.
+   */
+  private existingGateRejectReason(
+    aggHookQuotes: QuoteBasic[],
+    noHookQuotes: QuoteBasic[],
+    noHookBudgetIfPartitioned: number,
+    tradeType: TradeType
+  ): 'raw_amount' | 'gas_use' | undefined {
+    if (aggHookQuotes.length === 0) return undefined;
+    if (noHookQuotes.length === 0) return undefined;
+    const aggHookWinner = aggHookQuotes[0];
+    const noHookWinner = noHookQuotes[0];
+    const noHookRunnerUp =
+      noHookQuotes.length > noHookBudgetIfPartitioned
+        ? noHookQuotes[noHookBudgetIfPartitioned]
+        : undefined;
+
+    // Raw-amount gate (mirrors lines 773-798).
+    if (noHookRunnerUp !== undefined) {
+      const badness =
+        tradeType === TradeType.ExactIn
+          ? noHookRunnerUp.amount - aggHookWinner.amount
+          : aggHookWinner.amount - noHookRunnerUp.amount;
+      if (badness > 0n) {
+        if (
+          badness * 10000n >
+          this.AGG_HOOK_PARTITION_TOLERANCE_BPS * noHookRunnerUp.amount
+        ) {
+          return 'raw_amount';
+        }
+      }
+    }
+
+    // Gas-use gate (mirrors lines 812-824).
+    const anchor = this.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR
+      ? this.lowestNoHookGasQuote(noHookQuotes)
+      : noHookWinner;
+    const aggHookGasUse = aggHookWinner.gasDetails?.gasUse;
+    const anchorGasUse = anchor?.gasDetails?.gasUse;
+    if (aggHookGasUse !== undefined && anchorGasUse !== undefined) {
+      if (aggHookGasUse > anchorGasUse) {
+        const gasUseDelta = aggHookGasUse - anchorGasUse;
+        if (gasUseDelta > this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS) {
+          return 'gas_use';
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private projectedGateWouldAdmit(
+    aggHookQuotes: QuoteBasic[],
+    noHookQuotes: QuoteBasic[],
+    noHookBudgetIfPartitioned: number,
+    tradeType: TradeType
+  ): boolean | undefined {
+    if (aggHookQuotes.length === 0 || noHookQuotes.length === 0) {
+      return undefined;
+    }
+    const aggHookWinner = aggHookQuotes[0];
+    // Anchor among the DISPLACED no-hooks (slice
+    // [noHookBudgetIfPartitioned, MAX_VALID_QUOTES_PER_PERCENTAGE)).
+    // The kept set is `noHookQuotes[0..noHookBudgetIfPartitioned)` —
+    // both admit and reject outcomes keep those, so they're not
+    // displaced by the agg-hook admission. Anchoring on the kept
+    // set could reject agg-hook against a quote it doesn't replace
+    // (Codex round-3 finding).
+    const anchor = this.lowestNoHookGasQuoteInDisplacedSlice(
+      noHookQuotes,
+      noHookBudgetIfPartitioned,
+      this.MAX_VALID_QUOTES_PER_PERCENTAGE
+    );
+    if (anchor === undefined) return undefined;
+    const aggGasQT = aggHookWinner.gasDetails?.gasCostInQuoteToken;
+    const anchorGasQT = anchor.gasDetails?.gasCostInQuoteToken;
+    if (aggGasQT === undefined || anchorGasQT === undefined) {
+      return undefined;
+    }
+    const gasOverheadQT = aggGasQT - anchorGasQT;
+    const rawImprovementQT =
+      tradeType === TradeType.ExactIn
+        ? aggHookWinner.amount - anchor.amount
+        : anchor.amount - aggHookWinner.amount;
+    return (
+      gasOverheadQT - rawImprovementQT <=
+      this.AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT
+    );
   }
 
   /**
@@ -1749,6 +2117,29 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       },
       // Dedupe set keyed by `percentage` for bucket-shape counting.
       seenBucketKeys: new Set<number>(),
+      // Per-(percentage, protocol) WORST-CASE verdict for the projected
+      // gas-adj gate's what-if check. DFS can revisit a percentage with
+      // different `usedRoutes` and produce a different verdict for the
+      // same bucket (e.g. `admit_both` early, then `admit_raw_only`
+      // after a conflict shifts the agg-hook winner). First-visit
+      // dedupe would let a benign early verdict suppress a later loss
+      // signal — exactly the population the metric must size. Per
+      // Codex adversarial-review finding #1, retain the worst-case
+      // verdict per key and emit it as the canonical bucket value.
+      //
+      // Severity (most-projection-impact first): `admit_raw_only` →
+      // `admit_both` → `reject_raw_amount` → `reject_gas_use` →
+      // `no_data`. `admit_raw_only` always wins because it represents
+      // the population the flip would change; among the others we
+      // prefer "more information about the projection" over "less".
+      projectedGateWorstVerdict: new Map<
+        string,
+        | 'admit_both'
+        | 'admit_raw_only'
+        | 'reject_raw_amount'
+        | 'reject_gas_use'
+        | 'no_data'
+      >(),
     };
     // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
     // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision,
@@ -1871,6 +2262,25 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       if (!bestUnusedQuoteStats.seenBucketKeys.has(percentage)) {
         bestUnusedQuoteStats.seenBucketKeys.add(percentage);
         bestUnusedQuoteStats.bucketShapeCounts[stats.bucketShape]++;
+      }
+      if (stats.projectedGateVerdict !== undefined) {
+        const protocol = stats.projectedGateProtocol ?? 'unknown';
+        const dedupeKey = `${percentage}:${protocol}`;
+        // Worst-case verdict aggregation per Codex adversarial-review
+        // finding #1. If the current visit's verdict is more severe
+        // than the stored verdict, replace it.
+        const existing =
+          bestUnusedQuoteStats.projectedGateWorstVerdict.get(dedupeKey);
+        if (
+          existing === undefined ||
+          this.projectedGateVerdictSeverity(stats.projectedGateVerdict) >
+            this.projectedGateVerdictSeverity(existing)
+        ) {
+          bestUnusedQuoteStats.projectedGateWorstVerdict.set(
+            dedupeKey,
+            stats.projectedGateVerdict
+          );
+        }
       }
       return stats.quotes;
     };
@@ -2283,6 +2693,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       tradeType,
       metricTags
     );
+    this.emitKBudgetAdmitProjectedLoss(
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      bestUnusedQuoteStats.projectedGateWorstVerdict
+    );
 
     return result;
   }
@@ -2528,6 +2945,127 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * agg-hooks-enabled run actually has agg-hook routes in the
    * candidate set.
    */
+  /**
+   * Severity ranking for projected-gate verdicts. Used by the wrapper
+   * accumulator to retain the worst-case verdict per (percentage,
+   * protocol) across DFS revisits — see the
+   * `projectedGateWorstVerdict` field in `bestUnusedQuoteStats` and
+   * Codex adversarial-review finding #1. Higher = more severe for the
+   * what-if signal we're measuring.
+   *
+   *   `admit_raw_only`     — 4 (highest: the population the projection
+   *                              flip would change; must never be
+   *                              overwritten by a benign earlier visit).
+   *   `admit_both`         — 3
+   *   `reject_raw_amount`  — 2
+   *   `reject_gas_use`     — 1
+   *   `no_data`            — 0 (lowest: defensive admit, no projection
+   *                              info)
+   */
+  private projectedGateVerdictSeverity(
+    verdict:
+      | 'admit_both'
+      | 'admit_raw_only'
+      | 'reject_raw_amount'
+      | 'reject_gas_use'
+      | 'no_data'
+  ): number {
+    switch (verdict) {
+      case 'admit_raw_only':
+        return 4;
+      case 'admit_both':
+        return 3;
+      case 'reject_raw_amount':
+        return 2;
+      case 'reject_gas_use':
+        return 1;
+      case 'no_data':
+        return 0;
+    }
+  }
+
+  /**
+   * Per-request what-if metric for the projected gas-adjusted gate.
+   * Emits one count per (verdict × protocol) combination present in
+   * the accumulator. Input is the WORST-CASE verdict per (percentage,
+   * protocol) — see the `projectedGateWorstVerdict` field in
+   * `bestUnusedQuoteStats` and Codex adversarial-review finding #1
+   * for why first-visit dedupe was wrong.
+   *
+   * Verdicts (see `projectedGateVerdict` in `getBestUnusedQuotesStats`):
+   *   `admit_both`        — existing gate admitted AND projection-only
+   *                         gate would also admit (post-flip behavior
+   *                         unchanged).
+   *   `admit_raw_only`    — existing gate admitted BUT projection-only
+   *                         gate would reject (the population the
+   *                         `AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE`
+   *                         flip removes — pre-flip sizing dashboard).
+   *   `reject_raw_amount` — existing raw-amount gate already rejected
+   *                         (projection irrelevant).
+   *   `reject_gas_use`    — existing gas-use gate already rejected
+   *                         (projection irrelevant).
+   *   `no_data`           — `gasCostInQuoteToken` missing on a side;
+   *                         defensive admit.
+   *
+   * Fires once per (verdict, protocol) combination that has at least
+   * one bucket assigned, with the bucket count as the metric value.
+   * `protocol` is the agg-hook winner's protocol (e.g. `FluidDexT1`);
+   * falls back to `unknown` when the hook isn't in the registry.
+   * Emits regardless of the kill-switch state so we size the pre-flip
+   * baseline.
+   */
+  private emitKBudgetAdmitProjectedLoss(
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    worstVerdictByKey: Map<
+      string,
+      | 'admit_both'
+      | 'admit_raw_only'
+      | 'reject_raw_amount'
+      | 'reject_gas_use'
+      | 'no_data'
+    >
+  ): void {
+    if (!testAggHooks) return;
+    // Aggregate the per-(percentage, protocol) worst-case verdicts
+    // into (verdict, protocol) → bucket counts.
+    const verdictCounts: Record<string, Map<string, number>> = {
+      admit_both: new Map(),
+      admit_raw_only: new Map(),
+      reject_raw_amount: new Map(),
+      reject_gas_use: new Map(),
+      no_data: new Map(),
+    };
+    for (const [key, verdict] of worstVerdictByKey) {
+      // Key shape is `${percentage}:${protocol}`. Split once on `:`,
+      // restoring colons in the protocol field for safety.
+      const splitAt = key.indexOf(':');
+      const protocol = splitAt === -1 ? 'unknown' : key.slice(splitAt + 1);
+      const m = verdictCounts[verdict];
+      m.set(protocol, (m.get(protocol) ?? 0) + 1);
+    }
+    for (const verdict of Object.keys(verdictCounts)) {
+      for (const [protocol, count] of verdictCounts[verdict]) {
+        if (count === 0) continue;
+        void ctx.metrics.count(
+          buildMetricKey('QuoteBestSplitFinder.KBudgetAdmitProjectedLoss'),
+          count,
+          {
+            tags: [
+              ...metricTags,
+              `verdict:${verdict}`,
+              `protocol:${protocol}`,
+              `tradeType:${tradeType}`,
+              `testAggHooks:${testAggHooks}`,
+            ],
+          }
+        );
+      }
+    }
+  }
+
   private emitKBudgetAdmitWinnerCorrelation(
     result: RouteBasic<TPool>[][],
     _quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,

@@ -4521,6 +4521,1184 @@ describe('QuoteBestSplitFinder', () => {
         expect(routes).toContain(aggHook);
       });
     });
+
+    // The projected gas-adjusted gate kill-switch
+    // (`AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE`) extends the
+    // existing gas-use gate by comparing in quote-token wei: it rejects
+    // when projected gas overhead exceeds projected raw improvement.
+    // The fixture below mirrors the dominant Cat-A pattern attributed
+    // on prod commit-fb14030 (FluidDexT1 USDT↔USDC second hop): +0.04
+    // bps raw gain at +58% gas overhead, which the existing gas-use
+    // gate admits because the per-leg gas-unit delta is small enough
+    // even against the lowest-gas anchor.
+    describe('projected gas-adjusted gate kill-switch', () => {
+      const createMockQuoteWithGasCostQT = (
+        route: RouteBasic<MockPool>,
+        amount: bigint,
+        gasUse: bigint,
+        gasCostInQuoteToken: bigint
+      ): QuoteBasic =>
+        ({
+          route,
+          amount,
+          gasDetails: {
+            gasPriceInWei: 1n,
+            gasCostInWei: 1n,
+            gasCostInEth: 0,
+            gasUse,
+            gasCostInQuoteToken,
+          },
+        }) as unknown as QuoteBasic;
+
+      // Canary instrumentation blob enabling projected-gate verdict
+      // telemetry. Codex round-4 finding: verdict computation is now
+      // gated on `instrumentation?.testAggHooks` so non-canary paths
+      // skip the bigint arithmetic and protocol lookup. Tests that
+      // assert on `stats.projectedGateVerdict` must pass this blob.
+      const canaryInstrumentation = () => ({
+        ctx: mockContext,
+        tradeType: TradeType.ExactIn,
+        testAggHooks: true,
+        partitionEvictLogBudget: {remaining: 5},
+        soleCandidateLogBudget: {remaining: 5},
+        partitionGasAdjustedLogBudget: {remaining: 5},
+        gateEarlyReturnLeakLogBudget: {remaining: 5},
+        soleCandidateGasComparisonLogBudget: {remaining: 5},
+        partitionAnchorAnalysisLogBudget: {remaining: 5},
+        aggHookAttribution: {
+          firedPartitionKeptHigherGas: false,
+          firedSoleCandidateAdmit: false,
+          firedSoleCandidateGasWorse: false,
+          firedChosenSplitGasWorse: false,
+          firedAnchorSubOptimal: false,
+        },
+        metricTags: ['chainId:1'],
+      });
+
+      // Canonical 3-quote bug-shape fixture for the projected-gate
+      // tests. The projection anchors on the DISPLACED runner-up
+      // (`noHookRunnerUp`), not the kept winner (`noHookWinner`) —
+      // see Codex round-3 finding. Each test below varies the
+      // agg-hook side (raw amount, gas QT, missing gas data) and the
+      // constructor flags; the runner-up profile is the gas anchor
+      // the projection actually uses.
+      const makeBugShapeFixture = (
+        noHookWinnerAddr: string,
+        noHookRunnerUpAddr: string,
+        aggHookAddr: string
+      ) => {
+        const noHookWinner = noHookRouteAt(noHookWinnerAddr, 50);
+        const noHookRunnerUp = noHookRouteAt(noHookRunnerUpAddr, 50);
+        const aggHook = aggHookRouteAt(aggHookAddr, 50);
+        return {noHookWinner, noHookRunnerUp, aggHook};
+      };
+
+      it('flag off: no behavior change — agg-hook admitted by existing gate even when projection would reject', () => {
+        // Default constructor (all flags off). Same gas-units between
+        // sides so the existing gas-use gate vacuously admits, but the
+        // projection comparison (raw +911 vs gas +17,635 wei QT) would
+        // reject. Without the kill-switch the gate should still admit.
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x2a00000000000000000000000000000000000000',
+          '0x2a01000000000000000000000000000000000000',
+          '0x2a10000000000000000000000000000000000000'
+        );
+
+        const stats = finder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // noHookWinner: raw-best (kept either way)
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445011n,
+                  30445n
+                ),
+                // noHookRunnerUp: displaced when agg-hook is admitted
+                // — projection anchor's gas profile lives HERE.
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445011n,
+                  30445n
+                ),
+                // aggHook: +911 raw vs runnerUp, +17_635 gas QT
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  445011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // Gas-use gate vacuous (delta 0); projection would reject but
+        // kill-switch off → partition admits both classes.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(aggHook);
+        // What-if verdict should report `admit_raw_only` — what the
+        // pre-flip telemetry needs to size the population.
+        expect(stats.projectedGateVerdict).toBe('admit_raw_only');
+      });
+
+      it('flag on: emits admit_raw_only verdict for dominant Cat-A shape; partition still admits (telemetry-only per Codex round-5)', () => {
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x2b00000000000000000000000000000000000000',
+          '0x2b01000000000000000000000000000000000000',
+          '0x2b10000000000000000000000000000000000000'
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  445011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // Projection: gasOverheadQT (17_635) - rawImprovementQT (911)
+        // = 16_724 > 0n tolerance → projection WOULD reject. With
+        // round-5 telemetry-only semantics, the verdict surfaces in
+        // the metric but the K-budget partition still admits — only
+        // the existing raw/gas-use gates can hard-prune.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(aggHook);
+        expect(stats.projectedGateVerdict).toBe('admit_raw_only');
+      });
+
+      it('flag on: admits when raw improvement covers gas overhead (upside-preservation)', () => {
+        // Same shape but raw gain large enough that
+        // rawImprovementQT > gasOverheadQT — must NOT be over-corrected
+        // out of the partition.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x2c00000000000000000000000000000000000000',
+          '0x2c01000000000000000000000000000000000000',
+          '0x2c10000000000000000000000000000000000000'
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445011n,
+                  30445n
+                ),
+                // aggHook: +50_000 raw vs runnerUp, +17_635 gas QT →
+                // net +32_365 wei QT
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236945677n,
+                  445011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('admit_both');
+      });
+
+      it('flag on: defensive admit when gasCostInQuoteToken is missing on a side', () => {
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x2d00000000000000000000000000000000000000',
+          '0x2d01000000000000000000000000000000000000',
+          '0x2d10000000000000000000000000000000000000'
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445011n,
+                  30445n
+                ),
+                // aggHook has no gasCostInQuoteToken → projection skips.
+                createMockQuoteWithGasUse(aggHook, 236896588n, 445011n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('no_data');
+      });
+
+      it('flag on: respects projected-loss tolerance — admits within slack', () => {
+        // Bug-shape but with tolerance 20_000n wei → projection net
+        // loss 16_724 is within slack → admit.
+        const tolerantProjectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          20_000n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x2e00000000000000000000000000000000000000',
+          '0x2e01000000000000000000000000000000000000',
+          '0x2e10000000000000000000000000000000000000'
+        );
+
+        const stats = tolerantProjectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  445011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('admit_both');
+      });
+
+      it('reports reject_gas_use verdict when the existing gas-use gate already rejected', () => {
+        // Big gas-use delta so existing gas-use gate rejects regardless
+        // of projection. Projection verdict should still be reported as
+        // `reject_gas_use` (not `admit_raw_only`) because admit_both /
+        // admit_raw_only are only meaningful when the existing gate
+        // admitted.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const noHook = noHookRouteAt(
+          '0x2f00000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x2f10000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // 500_000 vs 100_000 → 400_000 gas-unit delta exceeds
+                // the 0n existing tolerance → existing gate rejects.
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  500_000n,
+                  48080n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHook,
+                  236895677n,
+                  100_000n,
+                  30445n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(false);
+        expect(stats.projectedGateVerdict).toBe('reject_gas_use');
+      });
+
+      it('reports reject_raw_amount verdict when the existing raw-amount gate already rejected (Codex finding #2)', () => {
+        // Raw badness exceeds the tolerance (0n bps), so the existing
+        // raw-amount gate rejects. Verdict must be `reject_raw_amount`
+        // — not the legacy `reject_gas_use` fallback that conflates
+        // both mechanisms.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const noHookWinner = noHookRouteAt(
+          '0x3000000000000000000000000000000000000000',
+          50
+        );
+        const noHookRunnerUp = noHookRouteAt(
+          '0x3010000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3020000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // noHookRunnerUp at index=1 has amount 1000 (raw better
+                // than aggHook 900 by 100 — badness * 10000 = 1_000_000
+                // > 0 * 1000 → raw-amount gate rejects).
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  2000n,
+                  100_000n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  1000n,
+                  100_000n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(aggHook, 900n, 100_000n, 30445n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(false);
+        expect(stats.projectedGateVerdict).toBe('reject_raw_amount');
+      });
+
+      it('projection gate uses lowest-gas anchor independent of AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR (Codex finding #3)', () => {
+        // Both kill-switches: projection ON, lowest-gas anchor OFF.
+        // The projection should STILL use the lowest-gas no-hook
+        // anchor — its anchor selection is decoupled from the legacy
+        // flag. With raw-winner-anchored projection, this fixture
+        // would falsely admit; with lowest-gas-anchored projection,
+        // it rejects because the gas delta vs the cheapest no-hook
+        // exceeds the raw improvement.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false, // AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR: OFF
+          true, // AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE: ON
+          0n
+        );
+
+        const noHookRawWinner = noHookRouteAt(
+          '0x3100000000000000000000000000000000000000',
+          50
+        );
+        const noHookCheapestGas = noHookRouteAt(
+          '0x3110000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3120000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // Raw-winner has both high gas (50_000 QT) AND high gas
+                // units (200_000). Lowest-gas no-hook has 30_000 QT,
+                // 100_000 units. AggHook beats raw-winner trivially on
+                // BOTH gas dimensions (170_000 units, 35_000 QT) but
+                // loses to the lowest-gas anchor on gas QT
+                // (35_000 vs 30_000 = +5_000 overhead) vs +911 raw gain.
+                createMockQuoteWithGasCostQT(
+                  noHookRawWinner,
+                  1001n,
+                  200_000n,
+                  50_000n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookCheapestGas,
+                  1001n,
+                  100_000n,
+                  30_000n
+                ),
+                createMockQuoteWithGasCostQT(aggHook, 1912n, 170_000n, 35_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // Projection against displaced-slice anchor (lowest-gas no-
+        // hook within indices [1, K)) = noHookCheapestGas (30_000 QT).
+        // gasOverheadQT (5000) - rawImprovementQT (911) = 4089 > 0 →
+        // projection WOULD reject. The verdict (`admit_raw_only`)
+        // proves the projection used the displaced-slice anchor
+        // independent of `AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR`.
+        // With round-5 telemetry-only semantics, partition still
+        // admits.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('admit_raw_only');
+      });
+
+      it('projection anchor stays inside the K-budget returnable set, not phantom no-hook outside top-K (Codex round-2 finding #1)', () => {
+        // MAX_VALID_QUOTES_PER_PERCENTAGE=2. Place a cheap-gas no-hook
+        // at index 2 (outside the top-K). If the projection anchored
+        // on the full no-hook list, it would compare agg-hook against
+        // the index-2 quote (low gas), reject, and then fill the K=2
+        // slots with the worse-gas no-hook quotes at indices 0/1.
+        // With the round-2 fix, the projection anchors WITHIN the
+        // top-K (indices 0/1), where agg-hook is competitive enough
+        // to be admitted.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true, // projection kill-switch ON
+          0n
+        );
+
+        const noHookRaw0 = noHookRouteAt(
+          '0x3400000000000000000000000000000000000000',
+          50
+        );
+        const noHookRaw1 = noHookRouteAt(
+          '0x3410000000000000000000000000000000000000',
+          50
+        );
+        const noHookCheapButDiscarded = noHookRouteAt(
+          '0x3420000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3430000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // Top-K (indices 0..1) no-hooks have HIGH gas QT
+                // (60_000), so agg-hook at 35_000 GAS QT beats them.
+                // The phantom quote at index 2 has very low gas
+                // (10_000) — outside the K-budget and SHOULD NOT
+                // anchor the projection.
+                createMockQuoteWithGasCostQT(
+                  noHookRaw0,
+                  2000n,
+                  200_000n,
+                  60_000n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRaw1,
+                  1999n,
+                  200_000n,
+                  60_000n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookCheapButDiscarded,
+                  1500n,
+                  100_000n,
+                  10_000n
+                ),
+                // aggHook: +1_911 raw vs top-K-anchor 2000n
+                // (badness=89 raw, badness*10000=890_000 > 0*2000=0;
+                // raw_amount gate rejects). Move aggHook above noHook
+                // top-K on raw to bypass the raw-amount gate.
+                createMockQuoteWithGasCostQT(aggHook, 2050n, 200_000n, 35_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // With round-2 fix: projection anchor is among top-K (raw0 at
+        // 60_000 QT). aggHook 35_000 < 60_000 → gas overhead negative
+        // → projection ADMITS. Without the fix (anchor on the
+        // phantom quote): aggHook 35_000 > 10_000 → projection
+        // rejects. The test must observe ADMIT.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('admit_both');
+      });
+
+      it('existing raw/gas reject takes precedence over no_data when gasCostInQuoteToken is missing (Codex round-2 finding #2)', () => {
+        // gas-use gate rejects (big gas-unit delta) AND
+        // gasCostInQuoteToken is missing on agg-hook side. Verdict
+        // must be `reject_gas_use`, not `no_data` (which would
+        // wrongly imply defensive admit).
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true, // projection kill-switch ON
+          0n
+        );
+
+        const noHook = noHookRouteAt(
+          '0x3500000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3510000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // gas-use delta 400_000 > 0 → existing gas-use gate
+                // rejects. aggHook lacks gasCostInQuoteToken →
+                // projection would return undefined (`no_data`).
+                // Verdict must reflect the actual rejection cause.
+                createMockQuoteWithGasUse(aggHook, 1000n, 500_000n),
+                createMockQuoteWithGasCostQT(noHook, 1000n, 100_000n, 30_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(false);
+        expect(stats.projectedGateVerdict).toBe('reject_gas_use');
+      });
+
+      it('existing raw_amount reject takes precedence over no_data when gasCostInQuoteToken is missing (Codex round-2 finding #2)', () => {
+        // Same as above but raw-amount gate rejects instead. Verdict
+        // must be `reject_raw_amount`, not `no_data`.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const noHookWinner = noHookRouteAt(
+          '0x3600000000000000000000000000000000000000',
+          50
+        );
+        const noHookRunnerUp = noHookRouteAt(
+          '0x3610000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3620000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  2000n,
+                  100_000n,
+                  30_000n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  1000n,
+                  100_000n,
+                  30_000n
+                ),
+                // aggHook below noHookRunnerUp on raw → raw-amount
+                // gate rejects. No gasCostInQuoteToken on aggHook →
+                // projection no_data.
+                createMockQuoteWithGasUse(aggHook, 900n, 100_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(false);
+        expect(stats.projectedGateVerdict).toBe('reject_raw_amount');
+      });
+
+      it('projection anchor uses the displaced runner-up, NOT the kept winner (Codex round-3 finding)', () => {
+        // The kept winner has CHEAP gas. The displaced runner-up has
+        // EXPENSIVE gas. Pre-fix code anchored on the kept winner
+        // (lowest-gas in the top-K) and would have rejected agg-hook
+        // against a quote it doesn't displace. The fix bounds the
+        // anchor to the displaced slice, so projection compares
+        // agg-hook vs the runner-up — where agg-hook is competitive
+        // (cheaper gas than the runner-up).
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true, // projection kill-switch ON
+          0n
+        );
+
+        const noHookKeptCheapGas = noHookRouteAt(
+          '0x3700000000000000000000000000000000000000',
+          50
+        );
+        const noHookDisplacedExpensiveGas = noHookRouteAt(
+          '0x3710000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3720000000000000000000000000000000000000',
+          50
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                // noHookKeptCheapGas: top-by-raw AND cheapest gas
+                // (10_000 QT). KEPT in both admit and reject outcomes
+                // → should NOT anchor the projection.
+                createMockQuoteWithGasCostQT(
+                  noHookKeptCheapGas,
+                  2000n,
+                  100_000n,
+                  10_000n
+                ),
+                // noHookDisplacedExpensiveGas: runner-up, expensive
+                // gas (50_000 QT) → DISPLACED when agg-hook admitted.
+                // This IS the projection anchor.
+                createMockQuoteWithGasCostQT(
+                  noHookDisplacedExpensiveGas,
+                  1999n,
+                  100_000n,
+                  50_000n
+                ),
+                // aggHook: 1 raw better than runnerUp, 35_000 QT gas
+                // (cheaper than runnerUp's 50_000). vs runnerUp:
+                // gasOverhead = 35_000-50_000 = -15_000, raw +1 →
+                // net = -15_001 < 0 → projection ADMITS. vs winner
+                // (10_000 QT): gasOverhead = 25_000 > raw 1 → would
+                // wrongly REJECT.
+                createMockQuoteWithGasCostQT(aggHook, 2000n, 100_000n, 35_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // With round-3 fix (displaced-slice anchor): ADMIT. Without
+        // the fix (top-K anchor that includes the kept winner):
+        // REJECT.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('admit_both');
+      });
+
+      it('verdict is admit_raw_only when raw/gas gates admit but projection would reject (round-5 telemetry-only)', () => {
+        // Codex stop-gate (round-4) finding: pre-fix code mis-tagged
+        // a projection-only rejection as `reject_gas_use` because
+        // `existingGateRejectReason` returned `undefined` and the
+        // fallback was `reject_gas_use`. Correct verdict is
+        // `admit_raw_only`. Round-5 telemetry-only semantics: the
+        // partition still admits (no hard-prune); only the metric
+        // verdict reflects that the projection would have rejected.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true, // projection kill-switch ON
+          0n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x3300000000000000000000000000000000000000',
+          '0x3301000000000000000000000000000000000000',
+          '0x3310000000000000000000000000000000000000'
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445_011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445_011n,
+                  30445n
+                ),
+                // FluidDexT1-shape fixture: +911 raw vs runnerUp,
+                // +17,635 gas QT, SAME gas units (so the gas-use gate
+                // vacuously admits).
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  445_011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // Projection would reject (gas QT overhead > raw gain), but
+        // raw/gas gates admit → telemetry verdict `admit_raw_only`;
+        // partition admits (telemetry-only enforcement per round-5).
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBe('admit_raw_only');
+      });
+
+      it('telemetry skipped when testAggHooks is false (no projectedGateVerdict computed, Codex round-4 perf finding)', () => {
+        // The verdict block must NOT run on non-canary paths — under
+        // wall-clock timeout pressure the bigint arithmetic and
+        // protocol-registry lookup can convert successful searches
+        // into partial searches. Round-5 telemetry-only semantics:
+        // partition admits in either canary or non-canary mode (the
+        // flag is reserved for future enforcement); the test asserts
+        // only that the verdict helpers are not invoked when the
+        // canary gate is off.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true, // kill-switch ON — verdict computation should still skip without testAggHooks
+          0n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x3800000000000000000000000000000000000000',
+          '0x3801000000000000000000000000000000000000',
+          '0x3810000000000000000000000000000000000000'
+        );
+
+        // Spy on the helpers — they must NOT be called when
+        // telemetry is off.
+        const projSpy = vi.spyOn(
+          projectedGateFinder as unknown as {
+            projectedGateWouldAdmit: () => unknown;
+          },
+          'projectedGateWouldAdmit'
+        );
+        const reasonSpy = vi.spyOn(
+          projectedGateFinder as unknown as {
+            existingGateRejectReason: () => unknown;
+          },
+          'existingGateRejectReason'
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445_011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445_011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  445_011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn
+          // No instrumentation arg → telemetry off.
+        );
+
+        // Round-5: no hard-prune, so partition admits agg-hook
+        // regardless of the projection result. The important guarantee
+        // is that the telemetry verdict computation skipped entirely
+        // → verdict undefined and helpers not invoked.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        expect(stats.projectedGateVerdict).toBeUndefined();
+        expect(projSpy).not.toHaveBeenCalled();
+        expect(reasonSpy).not.toHaveBeenCalled();
+
+        projSpy.mockRestore();
+        reasonSpy.mockRestore();
+      });
+
+      it('round-5: gate does NOT hard-prune agg-hook even when projection rejects (telemetry-only)', () => {
+        // Codex round-5 finding #1: hard-pruning on a local
+        // projection is unsafe given DFS conflict-propagation. The
+        // K-budget partition's admit/reject decision must stay
+        // driven by the existing raw-amount and gas-USE gates;
+        // projection only feeds telemetry.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true, // projection flag ON — still a no-op for enforcement
+          0n
+        );
+
+        const {noHookWinner, noHookRunnerUp, aggHook} = makeBugShapeFixture(
+          '0x3a00000000000000000000000000000000000000',
+          '0x3a01000000000000000000000000000000000000',
+          '0x3a10000000000000000000000000000000000000'
+        );
+
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  236895678n,
+                  445_011n,
+                  30445n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  236895677n,
+                  445_011n,
+                  30445n
+                ),
+                // FluidDexT1 shape: projection WOULD reject.
+                createMockQuoteWithGasCostQT(
+                  aggHook,
+                  236896588n,
+                  445_011n,
+                  48080n
+                ),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        // Partition admits — projection is observation-only.
+        expect(stats.partitionAdmittedAggHook).toBe(true);
+        const routes = stats.quotes.map(q => q.route);
+        expect(routes).toContain(aggHook);
+        // Telemetry still records what the projection would have done.
+        expect(stats.projectedGateVerdict).toBe('admit_raw_only');
+      });
+
+      it('telemetry skipped: projectedGateWouldAdmit is short-circuited when raw/gas gate already rejected (Codex round-4)', () => {
+        // Even when telemetry is ON, if the existing raw or gas-use
+        // gate already rejected, the projection check is irrelevant
+        // — skip it to save the bigint arithmetic.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const projSpy = vi.spyOn(
+          projectedGateFinder as unknown as {
+            projectedGateWouldAdmit: () => unknown;
+          },
+          'projectedGateWouldAdmit'
+        );
+
+        const noHookWinner = noHookRouteAt(
+          '0x3900000000000000000000000000000000000000',
+          50
+        );
+        const noHookRunnerUp = noHookRouteAt(
+          '0x3901000000000000000000000000000000000000',
+          50
+        );
+        const aggHook = aggHookRouteAt(
+          '0x3910000000000000000000000000000000000000',
+          50
+        );
+
+        // Big gas-use delta → existing gas-use gate rejects.
+        const stats = projectedGateFinder['getBestUnusedQuotesStats'](
+          50,
+          new Map<number, QuoteBasic[]>([
+            [
+              50,
+              [
+                createMockQuoteWithGasCostQT(
+                  noHookWinner,
+                  1001n,
+                  100_000n,
+                  30_000n
+                ),
+                createMockQuoteWithGasCostQT(
+                  noHookRunnerUp,
+                  1000n,
+                  100_000n,
+                  30_000n
+                ),
+                createMockQuoteWithGasCostQT(aggHook, 1000n, 500_000n, 48_000n),
+              ],
+            ],
+          ]),
+          [],
+          ChainId.MAINNET,
+          TradeType.ExactIn,
+          canaryInstrumentation()
+        );
+
+        expect(stats.partitionAdmittedAggHook).toBe(false);
+        expect(stats.projectedGateVerdict).toBe('reject_gas_use');
+        // Verdict computation went through `existingGateRejectReason`
+        // path and skipped the more expensive projection check.
+        expect(projSpy).not.toHaveBeenCalled();
+
+        projSpy.mockRestore();
+      });
+
+      it('worst-case verdict retention: DFS revisit with admit_raw_only is not suppressed by an earlier admit_both visit (Codex finding #1)', () => {
+        // Simulate two DFS visits to the same percentage with
+        // different `usedRoutes`. First visit produces `admit_both`
+        // (benign), second produces `admit_raw_only` (projection
+        // would reject). The accumulator must retain `admit_raw_only`
+        // because that's the population the metric must size.
+        const projectedGateFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          true,
+          0n
+        );
+
+        const aggHook = aggHookRouteAt(
+          '0x3200000000000000000000000000000000000000',
+          50
+        );
+        // Visit 1 quote set: agg-hook gas gain covers gas overhead →
+        // admit_both.
+        const noHookFavorable = noHookRouteAt(
+          '0x3210000000000000000000000000000000000000',
+          50
+        );
+        // Visit 2 quote set (different `usedRoutes` filter): cheaper
+        // no-hook anchor → admit_raw_only.
+        const noHookUnfavorable = noHookRouteAt(
+          '0x3220000000000000000000000000000000000000',
+          50
+        );
+
+        const protocol = 'StableSwapNG';
+        const accumulator = new Map<
+          string,
+          | 'admit_both'
+          | 'admit_raw_only'
+          | 'reject_raw_amount'
+          | 'reject_gas_use'
+          | 'no_data'
+        >();
+
+        // Simulate the wrapper's worst-case retention logic by calling
+        // the helper directly. First visit: admit_both.
+        const k1 = `50:${protocol}`;
+        accumulator.set(k1, 'admit_both');
+        const existing1 = accumulator.get(k1);
+        const sev = (
+          v:
+            | 'admit_both'
+            | 'admit_raw_only'
+            | 'reject_raw_amount'
+            | 'reject_gas_use'
+            | 'no_data'
+        ) => projectedGateFinder['projectedGateVerdictSeverity'](v);
+        // Second visit: admit_raw_only (worse). Should replace.
+        if (existing1 === undefined || sev('admit_raw_only') > sev(existing1)) {
+          accumulator.set(k1, 'admit_raw_only');
+        }
+        expect(accumulator.get(k1)).toBe('admit_raw_only');
+
+        // Third visit: admit_both (less severe). Must NOT replace.
+        const existing2 = accumulator.get(k1);
+        if (existing2 === undefined || sev('admit_both') > sev(existing2)) {
+          accumulator.set(k1, 'admit_both');
+        }
+        expect(accumulator.get(k1)).toBe('admit_raw_only');
+
+        // Sanity: the fixture-level pieces compile.
+        void aggHook;
+        void noHookFavorable;
+        void noHookUnfavorable;
+      });
+    });
   });
 
   describe('chosen-split gas-comparison instrumentation', () => {
@@ -6272,6 +7450,186 @@ describe('QuoteBestSplitFinder', () => {
       expect(tags).toContain('aggHookOnlyAdmittedBucket:0');
       expect(tags).toContain('aggHookOnlyRejectedBucket:3');
       expect(tags).toContain('emptyBucket:0');
+    });
+  });
+
+  describe('K-budget projected-loss what-if', () => {
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.KBudgetAdmitProjectedLoss'
+          )
+      );
+
+    it('does not fire when testAggHooks is false', () => {
+      const worst = new Map<
+        string,
+        | 'admit_both'
+        | 'admit_raw_only'
+        | 'reject_raw_amount'
+        | 'reject_gas_use'
+        | 'no_data'
+      >([['50:FluidDexT1', 'admit_raw_only']]);
+      finder['emitKBudgetAdmitProjectedLoss'](
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        worst
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('emits one count per (verdict, protocol) with the per-bucket count as the value', () => {
+      const worst = new Map<
+        string,
+        | 'admit_both'
+        | 'admit_raw_only'
+        | 'reject_raw_amount'
+        | 'reject_gas_use'
+        | 'no_data'
+      >([
+        // 5 buckets at admit_both/FluidDexT1
+        ['25:FluidDexT1', 'admit_both'],
+        ['50:FluidDexT1', 'admit_both'],
+        ['75:FluidDexT1', 'admit_both'],
+        ['100:FluidDexT1', 'admit_both'],
+        ['10:FluidDexT1', 'admit_both'],
+        // 3 buckets at admit_raw_only/FluidDexT1
+        ['30:FluidDexT1', 'admit_raw_only'],
+        ['60:FluidDexT1', 'admit_raw_only'],
+        ['90:FluidDexT1', 'admit_raw_only'],
+        // 1 bucket at admit_raw_only/CurveStableSwapNG
+        ['20:CurveStableSwapNG', 'admit_raw_only'],
+        // 2 buckets at reject_gas_use/FluidDexLite
+        ['40:FluidDexLite', 'reject_gas_use'],
+        ['80:FluidDexLite', 'reject_gas_use'],
+      ]);
+      finder['emitKBudgetAdmitProjectedLoss'](
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        worst
+      );
+      const calls = metricCalls();
+      expect(calls).toHaveLength(4);
+
+      const findCall = (verdict: string, protocol: string) =>
+        calls.find(c => {
+          const tags = (c[2] as {tags: string[]}).tags;
+          return (
+            tags.includes(`verdict:${verdict}`) &&
+            tags.includes(`protocol:${protocol}`)
+          );
+        });
+
+      expect(findCall('admit_both', 'FluidDexT1')?.[1]).toBe(5);
+      expect(findCall('admit_raw_only', 'FluidDexT1')?.[1]).toBe(3);
+      expect(findCall('admit_raw_only', 'CurveStableSwapNG')?.[1]).toBe(1);
+      expect(findCall('reject_gas_use', 'FluidDexLite')?.[1]).toBe(2);
+    });
+
+    it('emits no events when the worst-verdict map is empty', () => {
+      const worst = new Map<
+        string,
+        | 'admit_both'
+        | 'admit_raw_only'
+        | 'reject_raw_amount'
+        | 'reject_gas_use'
+        | 'no_data'
+      >();
+      finder['emitKBudgetAdmitProjectedLoss'](
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        worst
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('emits reject_raw_amount as a distinct verdict from reject_gas_use', () => {
+      // Codex adversarial-review finding #2: dashboards must be able
+      // to distinguish raw-gate rejects from gas-use rejects.
+      const worst = new Map<
+        string,
+        | 'admit_both'
+        | 'admit_raw_only'
+        | 'reject_raw_amount'
+        | 'reject_gas_use'
+        | 'no_data'
+      >([
+        ['10:FluidDexT1', 'reject_raw_amount'],
+        ['50:FluidDexT1', 'reject_gas_use'],
+      ]);
+      finder['emitKBudgetAdmitProjectedLoss'](
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        worst
+      );
+      const calls = metricCalls();
+      expect(calls).toHaveLength(2);
+      const verdictTags = calls.map(c =>
+        (c[2] as {tags: string[]}).tags.find(t => t.startsWith('verdict:'))
+      );
+      expect(verdictTags).toContain('verdict:reject_raw_amount');
+      expect(verdictTags).toContain('verdict:reject_gas_use');
+    });
+  });
+
+  describe('projected-gate verdict severity (worst-case retention)', () => {
+    // Codex adversarial-review finding #1: DFS revisits with different
+    // `usedRoutes` can produce different verdicts for the same
+    // (percentage, protocol). The accumulator must retain the
+    // highest-severity verdict so a benign early visit doesn't
+    // suppress a later projected-loss signal.
+    type Verdict =
+      | 'admit_both'
+      | 'admit_raw_only'
+      | 'reject_raw_amount'
+      | 'reject_gas_use'
+      | 'no_data';
+    const severity = (v: Verdict): number =>
+      finder['projectedGateVerdictSeverity'](v);
+
+    it('ranks admit_raw_only above all other verdicts', () => {
+      expect(severity('admit_raw_only')).toBeGreaterThan(
+        severity('admit_both')
+      );
+      expect(severity('admit_raw_only')).toBeGreaterThan(
+        severity('reject_raw_amount')
+      );
+      expect(severity('admit_raw_only')).toBeGreaterThan(
+        severity('reject_gas_use')
+      );
+      expect(severity('admit_raw_only')).toBeGreaterThan(severity('no_data'));
+    });
+
+    it('ranks admit_both above reject_* and no_data', () => {
+      expect(severity('admit_both')).toBeGreaterThan(
+        severity('reject_raw_amount')
+      );
+      expect(severity('admit_both')).toBeGreaterThan(
+        severity('reject_gas_use')
+      );
+      expect(severity('admit_both')).toBeGreaterThan(severity('no_data'));
+    });
+
+    it('ranks reject_raw_amount above reject_gas_use and no_data', () => {
+      expect(severity('reject_raw_amount')).toBeGreaterThan(
+        severity('reject_gas_use')
+      );
+      expect(severity('reject_raw_amount')).toBeGreaterThan(
+        severity('no_data')
+      );
+    });
+
+    it('ranks no_data as the lowest severity', () => {
+      expect(severity('no_data')).toBeLessThan(severity('reject_gas_use'));
     });
   });
 

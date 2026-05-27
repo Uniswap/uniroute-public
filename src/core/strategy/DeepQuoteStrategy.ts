@@ -96,11 +96,24 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     // the change against prod `PartitionAnchorAnalysis` telemetry.
     const useLowestGasAnchor =
       process.env.AGG_HOOK_PARTITION_USE_LOWEST_GAS_ANCHOR === 'true';
+    // Reserved env-flag handle for the projected gas-adjusted gate
+    // in the K-budget partition. CURRENTLY A NO-OP FOR ENFORCEMENT
+    // — Codex adversarial-review round-5 finding #1 showed that
+    // hard-pruning agg-hook on a local projection is unsafe given
+    // the DFS conflict-propagation semantics. The wiring stays so a
+    // future PR can flip this on once a conflict-aware enforcement
+    // implementation lands. Telemetry
+    // (`KBudgetAdmitProjectedLoss{verdict:admit_raw_only}`) is
+    // computed independently under the `testAggHooks` canary gate.
+    const useProjectedGasAdjGate =
+      process.env.AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE === 'true';
     this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>(
       0n,
       0n,
       0n,
-      useLowestGasAnchor
+      useLowestGasAnchor,
+      useProjectedGasAdjGate,
+      0n
     );
     this.rpcProviderMap = rpcProviderMap ?? new Map();
   }

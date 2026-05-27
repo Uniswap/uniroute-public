@@ -2776,7 +2776,7 @@ export class UniRouteBL implements IUniRoutedBL {
     metricTags: string[],
     gasPrice?: bigint,
     blockNumber?: number,
-    permit2Disabled: boolean = false,
+    permit2Disabled = false,
     universalRouterVersion?: UniversalRouterVersion,
     resolvedStateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit | undefined> {
