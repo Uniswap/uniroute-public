@@ -306,10 +306,10 @@ describe('SwapOptionsFactory', () => {
       expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
     });
 
-    it('should fall back to Permit2 on chains where SwapProxy is not deployed (e.g. MegaETH)', () => {
+    it('should fall back to Permit2 on chains where SwapProxy is not deployed', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,
-        chainId: ChainId.MEGAETH,
+        chainId: 999999 as ChainId,
         permit2Disabled: true,
       };
 
@@ -441,10 +441,10 @@ describe('SwapOptionsFactory', () => {
       expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
     });
 
-    it('should fall back to Permit2 on chains where SwapProxy is not deployed (e.g. MegaETH)', () => {
+    it('should fall back to Permit2 on chains where SwapProxy is not deployed', () => {
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_1_1({
         ...baseInput,
-        chainId: ChainId.MEGAETH,
+        chainId: 999999 as ChainId,
         permit2Disabled: true,
       });
 
