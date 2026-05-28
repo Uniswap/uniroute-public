@@ -36,13 +36,37 @@ export class MixedGasEstimator extends BaseGasEstimator {
    */
   private readonly AGG_HOOK_GAS_CALIBRATION_ENABLED: boolean;
 
+  /**
+   * Kill-switch for using the MixedQuoter view-call return value as
+   * the base gas use instead of summing the V3-style heuristic across
+   * sections. Mirrors `V4GasEstimator.V4_USE_QUOTER_GAS_AS_BASE` —
+   * the agg-hook calibration constants were measured against the
+   * quoter's view-call gas, so applying them on top of the heuristic
+   * sum leaves a material under-correction.
+   *
+   * When this flag and `AGG_HOOK_GAS_CALIBRATION_ENABLED` are both
+   * true on a mixed route that includes an agg-hook V4 leg, gas use
+   * is `mixedQuoterGas + calibration`, matching simulator-vs-quoter
+   * deltas to within the universal-router coordination overhead.
+   *
+   * Default false; prod reads via env var `V4_USE_QUOTER_GAS_AS_BASE`
+   * wired in `dependencies.ts`. The shared env var name reflects
+   * that this and `V4GasEstimator` should flip in lockstep — agg-hook
+   * routes can land as pure-V4 or mixed depending on routing
+   * decisions, and the gas baseline must be consistent across both
+   * estimators or the comparison shifts in either direction.
+   */
+  private readonly V4_USE_QUOTER_GAS_AS_BASE: boolean;
+
   constructor(
     protected readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
     protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
-    aggHookGasCalibrationEnabled = false
+    aggHookGasCalibrationEnabled = false,
+    v4UseQuoterGasAsBase = false
   ) {
     super(rpcProviderMap, freshPoolDetailsWrapper);
     this.AGG_HOOK_GAS_CALIBRATION_ENABLED = aggHookGasCalibrationEnabled;
+    this.V4_USE_QUOTER_GAS_AS_BASE = v4UseQuoterGasAsBase;
   }
 
   public async estimateRouteGas(
@@ -50,6 +74,53 @@ export class MixedGasEstimator extends BaseGasEstimator {
     chainId: ChainId,
     gasPriceWei: number
   ): Promise<GasDetails> {
+    // When V4_USE_QUOTER_GAS_AS_BASE is on AND the mixed quote
+    // carries a positive `gasEstimate` (from MixedQuoter V1 or V2),
+    // use that as the base gas use for the whole route. It already
+    // accounts for tick crossings and hook callbacks at the quoter
+    // level, so we skip the per-section heuristic and tick math.
+    // Falls back to the heuristic path below when the flag is off
+    // or the quoter return is missing — preserves today's behavior
+    // for SDK-quoted / cached mixed routes that lost the quoter
+    // detail. Agg-hook calibration still composes on top regardless
+    // of which base was used.
+    //
+    // We do still add `TOKEN_OVERHEAD` per V3/V4 section on this
+    // path: the heuristic adds 150k for mainnet AAVE/LDO transfers,
+    // and a mixed route quoted via the V4Quoter base should land at
+    // the same total or it would unfairly outscore an otherwise
+    // identical V2/V3 route in the gas-adjusted comparison. The
+    // MixedQuoter view call exercises the swap, but
+    // `TOKEN_OVERHEAD` was tuned as a heuristic correction on top of
+    // the heuristic — we carry it forward so the relative ranking
+    // with V2/V3 routes stays stable when the flag flips.
+    const quoterGas = quote.v3QuoterResponseDetails?.gasEstimate;
+    if (
+      this.V4_USE_QUOTER_GAS_AS_BASE &&
+      quoterGas !== undefined &&
+      quoterGas > 0n
+    ) {
+      const sectionsForOverhead = this.partitionRouteByProtocol(
+        quote.route.path
+      );
+      let tokenOverheadSum = BigNumber.from(0);
+      for (const section of sectionsForOverhead) {
+        if (section.length === 0) continue;
+        const protocol = section[0].protocol;
+        if (protocol !== Protocol.V3 && protocol !== Protocol.V4) continue;
+        const sectionRoute = new RouteBasic(protocol, section);
+        tokenOverheadSum = tokenOverheadSum.add(
+          TOKEN_OVERHEAD(chainId, sectionRoute)
+        );
+      }
+      return this.buildGasDetailsWithCalibration(
+        quote,
+        chainId,
+        gasPriceWei,
+        BigNumber.from(quoterGas.toString()).add(tokenOverheadSum)
+      );
+    }
+
     // Partition the route by protocol sections
     const sections = this.partitionRouteByProtocol(quote.route.path);
 
@@ -119,34 +190,50 @@ export class MixedGasEstimator extends BaseGasEstimator {
 
     baseGasUse = baseGasUse.add(tickGasUse).add(uninitializedTickGasUse);
 
-    // Agg-hook gas calibration: correct V4Quoter's view-call
-    // under-estimate of production tx gas for routes that hop
-    // through registered agg-hook pools. See
-    // `aggHookGasCalibration.ts` for the per-protocol overhead
-    // table and the prod data the constants were calibrated from.
+    return this.buildGasDetailsWithCalibration(
+      quote,
+      chainId,
+      gasPriceWei,
+      baseGasUse
+    );
+  }
+
+  /**
+   * Composes the final `GasDetails` from a base gas use plus the
+   * agg-hook calibration when enabled. Shared by both the
+   * quoter-return base path and the per-section heuristic path so
+   * the calibration semantics stay identical regardless of which
+   * baseline was chosen.
+   */
+  private buildGasDetailsWithCalibration(
+    quote: QuoteBasic,
+    chainId: ChainId,
+    gasPriceWei: number,
+    baseGasUseBn: BigNumber
+  ): GasDetails {
+    let gasUseBn = baseGasUseBn;
     if (this.AGG_HOOK_GAS_CALIBRATION_ENABLED) {
       const adjustment = aggHookGasCalibrationAdjustment(
         quote.route.path,
         chainId
       );
       if (adjustment > 0n) {
-        baseGasUse = baseGasUse.add(BigNumber.from(adjustment.toString()));
+        gasUseBn = gasUseBn.add(BigNumber.from(adjustment.toString()));
       }
     }
 
-    // Calculate final gas costs
-    const baseGasCostWei = BigNumber.from(gasPriceWei).mul(baseGasUse);
+    const gasCostWei = BigNumber.from(gasPriceWei).mul(gasUseBn);
     const wrappedCurrency = getGasToken(chainId);
-    const totalGasCostNativeCurrency = CurrencyAmount.fromRawAmount(
+    const gasCostNativeCurrency = CurrencyAmount.fromRawAmount(
       wrappedCurrency,
-      baseGasCostWei.toString()
+      gasCostWei.toString()
     );
 
     return new GasDetails(
       BigInt(gasPriceWei),
-      BigInt(baseGasCostWei.toString()),
-      Number(totalGasCostNativeCurrency.toExact()),
-      BigInt(baseGasUse.toString())
+      BigInt(gasCostWei.toString()),
+      Number(gasCostNativeCurrency.toExact()),
+      BigInt(gasUseBn.toString())
     );
   }
 

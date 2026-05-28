@@ -56,6 +56,36 @@ export const AGG_HOOK_GAS_CALIBRATION_OVERHEAD: Readonly<
 };
 
 /**
+ * Per-agg-hook-protocol V4Quoter-equivalent gas fallback. Used as
+ * the base gas value for agg-hook routes that were quoted directly
+ * via the hook ABI (`fetchAggHookQuotes`) and therefore lack a
+ * `V3QuoterResponseDetails.gasEstimate`. Without this fallback the
+ * `V4_USE_QUOTER_GAS_AS_BASE` code path silently degrades to the
+ * heuristic baseline for the actual production agg-hook routes —
+ * exactly the routes the calibration was designed to fix.
+ *
+ * The values are the average single-hop V4Quoter view-call gas
+ * observed on the same SUCCESS traces used to derive the
+ * calibration overhead (see `AGG_HOOK_GAS_CALIBRATION_OVERHEAD`).
+ * Treating these as the per-leg quoter-equivalent base keeps the
+ * accounting consistent: total per-leg gas =
+ *   `AGG_HOOK_QUOTER_GAS_FALLBACK[protocol]` +
+ *   `AGG_HOOK_GAS_CALIBRATION_OVERHEAD[protocol]`
+ * which matches `simulator_gas − universal_router_overhead` for
+ * routes with one agg-hook leg.
+ *
+ * If a future protocol is added to
+ * `AGG_HOOK_GAS_CALIBRATION_OVERHEAD`, add it here too — otherwise
+ * routes through that protocol will keep falling back to the
+ * heuristic even with the kill-switch on.
+ */
+export const AGG_HOOK_QUOTER_GAS_FALLBACK: Readonly<Record<string, bigint>> = {
+  FluidDexT1: 250_000n,
+  FluidDexLite: 233_000n,
+  CurveStableSwapNG: 249_000n,
+};
+
+/**
  * Returns the total gas-unit calibration adjustment for a route,
  * summing per-protocol overhead across every leg that hops through
  * a registered agg-hook pool. Multi-leg routes that use the same
@@ -79,6 +109,33 @@ export function aggHookGasCalibrationAdjustment(
     const overhead = AGG_HOOK_GAS_CALIBRATION_OVERHEAD[protocol];
     if (overhead === undefined) continue;
     total += overhead;
+  }
+  return total;
+}
+
+/**
+ * Returns the per-leg V4Quoter-equivalent gas fallback for any
+ * agg-hook legs in the route, or `0n` if the route has none.
+ *
+ * Used by `V4GasEstimator` when the kill-switch is on but the quote
+ * was produced by `fetchAggHookQuotes` (no `gasEstimate` field).
+ * Pairs with `aggHookGasCalibrationAdjustment` — callers add both
+ * to compose the full router-side gas for an agg-hook route.
+ */
+export function aggHookQuoterGasFallback(
+  path: Pool[],
+  chainId: ChainId
+): bigint {
+  let total = 0n;
+  for (const pool of path) {
+    if (!(pool instanceof V4Pool)) continue;
+    const hooks = pool.hooks;
+    if (typeof hooks !== 'string') continue;
+    const protocol = getProtocolForAggHookAddress(hooks.toLowerCase(), chainId);
+    if (protocol === undefined) continue;
+    const fallback = AGG_HOOK_QUOTER_GAS_FALLBACK[protocol];
+    if (fallback === undefined) continue;
+    total += fallback;
   }
   return total;
 }
