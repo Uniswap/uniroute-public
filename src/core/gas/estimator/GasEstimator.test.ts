@@ -148,6 +148,81 @@ describe('GasEstimators', () => {
       // Should be similar to V3 without tick crossing
       expect(gasDetails.gasUse).toBe(BigInt(97000)); // 2000 + 80000 + 15000
     });
+
+    describe('agg-hook gas calibration', () => {
+      // FluidDexT1 mainnet hook (from FLUID_DEX_1 list)
+      const FLUID_DEX_T1_HOOK = '0xf1abe2961CCf73B55be164054E7ADC985a52A888';
+
+      const v4PoolWithFluidHook = new V4Pool(
+        token0,
+        token1,
+        500,
+        60,
+        FLUID_DEX_T1_HOOK,
+        BigInt(1000),
+        '0x9234567890123456789012345678901234567890',
+        BigInt(1000),
+        BigInt(0)
+      );
+
+      it('should NOT apply calibration when kill-switch is off (default)', async () => {
+        const estimator = new V4GasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper
+        );
+        const route = new RouteBasic(Protocol.V4, [v4PoolWithFluidHook]);
+        const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
+
+        const gasDetails = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        expect(gasDetails.gasUse).toBe(BigInt(97000));
+      });
+
+      it('should apply FluidDexT1 calibration when kill-switch is on', async () => {
+        const estimator = new V4GasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          true
+        );
+        const route = new RouteBasic(Protocol.V4, [v4PoolWithFluidHook]);
+        const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
+
+        const gasDetails = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        // Base V4 single-hop gasUse 97_000 + FluidDexT1 overhead 172_000
+        expect(gasDetails.gasUse).toBe(BigInt(97000 + 172000));
+        // gasCostInWei must be recomputed against the adjusted gasUse
+        expect(gasDetails.gasCostInWei).toBe(
+          BigInt(1000) * BigInt(97000 + 172000)
+        );
+      });
+
+      it('should NOT apply calibration when kill-switch is on but no agg hook present', async () => {
+        const estimator = new V4GasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          true
+        );
+        const route = new RouteBasic(Protocol.V4, [v4Pool1]);
+        const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
+
+        const gasDetails = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        expect(gasDetails.gasUse).toBe(BigInt(97000));
+      });
+    });
   });
 
   describe('MixedGasEstimator', () => {
@@ -258,6 +333,153 @@ describe('GasEstimators', () => {
       expect(mixedGasDetails.gasUse).toBe(
         v2GasDetails.gasUse + v3GasDetails.gasUse
       );
+    });
+
+    describe('agg-hook gas calibration', () => {
+      // Mainnet hook addresses from aggHooksAddressesAllowlist
+      const FLUID_DEX_T1_HOOK = '0xf1abe2961CCf73B55be164054E7ADC985a52A888';
+      const STABLE_SWAP_NG_HOOK = '0xc24cf69d2f636db53b57342709bdcb01fbd3a088';
+
+      const v4PoolWithFluidHook = new V4Pool(
+        token1,
+        token2,
+        500,
+        60,
+        FLUID_DEX_T1_HOOK,
+        BigInt(1000),
+        '0x9234567890123456789012345678901234567890',
+        BigInt(1000),
+        BigInt(0)
+      );
+
+      const v4PoolWithCurveNGHook = new V4Pool(
+        token0,
+        token1,
+        500,
+        60,
+        STABLE_SWAP_NG_HOOK,
+        BigInt(1000),
+        '0xa234567890123456789012345678901234567890',
+        BigInt(1000),
+        BigInt(0)
+      );
+
+      it('should NOT apply calibration when kill-switch is off (default)', async () => {
+        const estimator = new MixedGasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper
+        );
+        const route = new RouteBasic(Protocol.MIXED, [
+          v3Pool1,
+          v4PoolWithFluidHook,
+        ]);
+        const quote = new QuoteBasic(
+          route,
+          BigInt(1000),
+          {initializedTicksCrossedList: [2]},
+          undefined
+        );
+
+        const baseline = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+        // V3 hop (2000+80000+15000+31000=128000) + V4 hop (2000+80000+15000=97000) = 225000
+        expect(baseline.gasUse).toBe(BigInt(225000));
+      });
+
+      it('should apply per-protocol overhead to V4 agg-hook leg when kill-switch is on', async () => {
+        const estimator = new MixedGasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          true
+        );
+        const route = new RouteBasic(Protocol.MIXED, [
+          v3Pool1,
+          v4PoolWithFluidHook,
+        ]);
+        const quote = new QuoteBasic(
+          route,
+          BigInt(1000),
+          {initializedTicksCrossedList: [2]},
+          undefined
+        );
+
+        const calibrated = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        // 225000 base + 172000 FluidDexT1 overhead
+        expect(calibrated.gasUse).toBe(BigInt(225000 + 172000));
+      });
+
+      it('sums per-leg overhead across multi-protocol V4 legs in a mixed route', async () => {
+        const estimator = new MixedGasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          true
+        );
+        const route = new RouteBasic(Protocol.MIXED, [
+          v4PoolWithCurveNGHook,
+          v4PoolWithFluidHook,
+        ]);
+        const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
+
+        const calibrated = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        // Two V4 hops in a single V4 section: BASE_SWAP_COST (2000)
+        //   + COST_PER_HOP * 2 (80000 * 2 = 160000) = 162000
+        // (no SINGLE_HOP_OVERHEAD since hops > 1, no tick costs since not V3)
+        // + FluidDexT1 (172000) + CurveStableSwapNG (188000) = 522000
+        expect(calibrated.gasUse).toBe(BigInt(162000 + 172000 + 188000));
+      });
+
+      it('should NOT apply calibration on a non-mainnet chainId', async () => {
+        const calibratedEstimator = new MixedGasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          true
+        );
+        const baselineEstimator = new MixedGasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          false
+        );
+        const route = new RouteBasic(Protocol.MIXED, [
+          v3Pool1,
+          v4PoolWithFluidHook,
+        ]);
+        const quote = new QuoteBasic(
+          route,
+          BigInt(1000),
+          {initializedTicksCrossedList: [2]},
+          undefined
+        );
+
+        const calibrated = await calibratedEstimator.estimateRouteGas(
+          quote,
+          ChainId.ARBITRUM,
+          1000
+        );
+        const baseline = await baselineEstimator.estimateRouteGas(
+          quote,
+          ChainId.ARBITRUM,
+          1000
+        );
+
+        // No calibration on non-mainnet (FluidDexT1 hook addrs only registered
+        // on MAINNET). Chain-specific gas constants may differ from mainnet,
+        // so we compare against the baseline estimator on the same chainId
+        // rather than a hard-coded mainnet baseline.
+        expect(calibrated.gasUse).toBe(baseline.gasUse);
+      });
     });
   });
 });

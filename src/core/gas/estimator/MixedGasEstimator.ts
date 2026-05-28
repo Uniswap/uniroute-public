@@ -18,17 +18,31 @@ import {BaseGasEstimator} from './BaseGasEstimator';
 import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
 import {Protocol} from '../../../models/pool/Protocol';
 import {Pool} from '../../../models/pool/Pool';
+import {aggHookGasCalibrationAdjustment} from '../aggHookGasCalibration';
 
 // V2-specific constants
 const COST_PER_EXTRA_HOP_V2 = BigNumber.from(50000);
 const BASE_SWAP_COST_V2 = BigNumber.from(135000);
 
 export class MixedGasEstimator extends BaseGasEstimator {
+  /**
+   * Kill-switch for the per-agg-hook-protocol gas calibration. When
+   * true, the estimator adds `aggHookGasCalibrationAdjustment(...)`
+   * to the route's base gas use, correcting V4Quoter's view-call
+   * under-estimate of production tx gas for routes that hop through
+   * registered agg-hook pools. Default false; prod reads via env
+   * var `AGG_HOOK_GAS_CALIBRATION_ENABLED` wired in
+   * `dependencies.ts`.
+   */
+  private readonly AGG_HOOK_GAS_CALIBRATION_ENABLED: boolean;
+
   constructor(
     protected readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
-    protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
+    protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    aggHookGasCalibrationEnabled = false
   ) {
     super(rpcProviderMap, freshPoolDetailsWrapper);
+    this.AGG_HOOK_GAS_CALIBRATION_ENABLED = aggHookGasCalibrationEnabled;
   }
 
   public async estimateRouteGas(
@@ -104,6 +118,21 @@ export class MixedGasEstimator extends BaseGasEstimator {
     const uninitializedTickGasUse = COST_PER_UNINIT_TICK.mul(0);
 
     baseGasUse = baseGasUse.add(tickGasUse).add(uninitializedTickGasUse);
+
+    // Agg-hook gas calibration: correct V4Quoter's view-call
+    // under-estimate of production tx gas for routes that hop
+    // through registered agg-hook pools. See
+    // `aggHookGasCalibration.ts` for the per-protocol overhead
+    // table and the prod data the constants were calibrated from.
+    if (this.AGG_HOOK_GAS_CALIBRATION_ENABLED) {
+      const adjustment = aggHookGasCalibrationAdjustment(
+        quote.route.path,
+        chainId
+      );
+      if (adjustment > 0n) {
+        baseGasUse = baseGasUse.add(BigNumber.from(adjustment.toString()));
+      }
+    }
 
     // Calculate final gas costs
     const baseGasCostWei = BigNumber.from(gasPriceWei).mul(baseGasUse);
