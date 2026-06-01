@@ -388,6 +388,34 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // exclusion" subset (displaced routes that never appear anywhere
     // else in the final result).
     displacedNoHookQuotes: QuoteBasic[];
+    // The strict counterfactual replacement set for the admitted
+    // agg-hook: only the no-hook ranks in `[noHookBudget, k)` that
+    // WOULD have entered the K-slot pool if the partition gate had
+    // rejected. With K=2 and noHookBudget=1 this is exactly
+    // `noHookQuotes[1]` (the rank-2 no-hook). Ranks ≥ k are outside
+    // the K-slot pool regardless of the gate decision, so the
+    // partition did NOT evict them — including them in the
+    // counterfactual would mis-attribute background routing harm to
+    // K-budget admission. The `KBudgetEvictionImpact` what-if metric
+    // scores only this subset against the (admitted-agg-hook, slot-0
+    // no-hook) anchor pair to size the eviction-bug population
+    // accurately (Codex review finding #3).
+    partitionEvictedNoHookQuotes: QuoteBasic[];
+    // The agg-hook quote that the K-budget gate admitted at this
+    // percentage (slot 1 of the partitioned K-pool). Bubbled up so
+    // `findBestSplits` can build a per-bucket counterfactual: would
+    // the best displaced no-hook have scored strictly better on
+    // gas-adjusted terms than this admitted agg-hook AND the no-hook
+    // that got slot 0? This is the eviction-impact what-if metric's
+    // primary input. Undefined when the partition gate did not admit.
+    admittedAggHookQuote?: QuoteBasic;
+    // The no-hook quote that occupied slot 0 of the partitioned
+    // K-pool (the raw-amount winner among the no-hook class).
+    // Pairs with `admittedAggHookQuote` to define the anchor against
+    // which displaced no-hooks are scored — admission is harmful only
+    // if the displaced beats BOTH slot-0 no-hook AND the slot-1
+    // agg-hook. Undefined when the partition gate did not admit.
+    slotZeroNoHookQuote?: QuoteBasic;
     // Bucket-shape category for this percentage. Sizes the
     // distribution of bucket types per request — used by the
     // `KBudgetBucketProfile` metric to detect pool-discovery /
@@ -628,6 +656,18 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       useBothPopulatedPartition && noHookQuotes.length > noHookBudget
         ? noHookQuotes.slice(noHookBudget)
         : [];
+    // Strict counterfactual subset: only the no-hook ranks in
+    // `[noHookBudget, k)` that would have entered the K-slot pool if
+    // the partition gate had rejected (and thus assigned all k slots
+    // to no-hook). Ranks ≥ k are outside the K-slot pool regardless
+    // of the gate decision, so the partition did NOT evict them.
+    // Used exclusively by `emitKBudgetEvictionImpact` (Codex review
+    // finding #3) — the broader `displacedNoHookQuotes` above
+    // remains the input for `KBudgetEvictionPermanentExclusion`.
+    const partitionEvictedNoHookQuotes =
+      useBothPopulatedPartition && noHookQuotes.length > noHookBudget
+        ? noHookQuotes.slice(noHookBudget, k)
+        : [];
 
     let bucketShape:
       | 'both_populated_partition_admitted'
@@ -737,6 +777,17 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       returnedCount: returnedQuotes.length,
       partitionAdmittedAggHook: useBothPopulatedPartition,
       displacedNoHookQuotes,
+      partitionEvictedNoHookQuotes,
+      // Only populated when the partition gate fired. `aggHookQuotes[0]`
+      // and `noHookQuotes[0]` are non-empty whenever
+      // `useBothPopulatedPartition` is true (the gate requires
+      // `bothPresent`), so the indexing is safe under the same gate.
+      admittedAggHookQuote: useBothPopulatedPartition
+        ? aggHookQuotes[0]
+        : undefined,
+      slotZeroNoHookQuote: useBothPopulatedPartition
+        ? noHookQuotes[0]
+        : undefined,
       bucketShape,
       projectedGateVerdict,
       projectedGateProtocol,
@@ -2140,6 +2191,27 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         | 'reject_gas_use'
         | 'no_data'
       >(),
+      // Per-(percentage, admittedAggHookRouteKey) event tuple capturing
+      // the partition-admit + displacement context, used by
+      // `emitKBudgetEvictionImpact` to compute a per-bucket
+      // counterfactual: would the best displaced no-hook have beat
+      // both the admitted agg-hook AND the slot-0 no-hook on gas-
+      // adjusted terms? Multi-visit DFS at the same percentage with
+      // different `usedRoutes` may admit a different agg-hook winner
+      // each time — keying on both percentage and the admitted
+      // agg-hook's route key captures each distinct admission.
+      // First-write-wins per composite key because subsequent visits
+      // with the same admitted-agg-hook at the same percentage
+      // produce the same truncation slate by construction.
+      displacementEvents: new Map<
+        string,
+        {
+          percentage: number;
+          admittedAggHookQuote: QuoteBasic;
+          slotZeroNoHookQuote: QuoteBasic;
+          displacedNoHookQuotes: QuoteBasic[];
+        }
+      >(),
     };
     // Per-request caps on instrumentation logs (cf. maybeLogPartitionDecision,
     // maybeLogAggHookSoleCandidate, maybeLogPartitionGasAdjustedDecision,
@@ -2258,6 +2330,54 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         if (bestUnusedQuoteStats.seenDisplacedKeys.has(key)) continue;
         bestUnusedQuoteStats.seenDisplacedKeys.add(key);
         bestUnusedQuoteStats.displacedNoHookQuotes.push(displaced);
+      }
+      // Capture the per-bucket displacement-event tuple for the
+      // gas-adjusted counterfactual emitter (`emitKBudgetEvictionImpact`).
+      // Only fires when the partition gate admitted AND at least one
+      // no-hook was in the strict counterfactual replacement slice
+      // (`partitionEvictedNoHookQuotes` — Codex review finding #3).
+      //
+      // Codex review finding #1: a coarse key of
+      // `${percentage}:${admittedAggHookRouteKey}` lets the
+      // first-write of an early benign DFS visit suppress a later
+      // harmful visit at the same percentage that admitted the same
+      // agg-hook but had a different slot-zero or different
+      // displaced slate (conflict-filter shifts under
+      // `usedRoutes`). Include the slot-zero route key AND the
+      // partition-evicted route keys in the event identity so each
+      // unique slate gets its own event and the emitter's
+      // worst-case aggregation across events surfaces the harmful
+      // slate when it exists.
+      if (
+        stats.partitionEvictedNoHookQuotes.length > 0 &&
+        stats.admittedAggHookQuote !== undefined &&
+        stats.slotZeroNoHookQuote !== undefined
+      ) {
+        const routeKey = (route: RouteBasic<TPool>): string =>
+          `${route.path
+            .map(p => p.address.toString().toLowerCase())
+            .join(',')}-${route.percentage}`;
+        const admittedRouteKey = routeKey(
+          stats.admittedAggHookQuote.route as RouteBasic<TPool>
+        );
+        const slotZeroRouteKey = routeKey(
+          stats.slotZeroNoHookQuote.route as RouteBasic<TPool>
+        );
+        // Sort displaced route keys so different DFS visits that
+        // observe the same set in a different order collapse to one
+        // event (and only DIFFERENT sets get distinct events).
+        const displacedKeys = stats.partitionEvictedNoHookQuotes
+          .map(q => routeKey(q.route as RouteBasic<TPool>))
+          .sort();
+        const eventKey = `${percentage}:${admittedRouteKey}:${slotZeroRouteKey}:${displacedKeys.join('|')}`;
+        if (!bestUnusedQuoteStats.displacementEvents.has(eventKey)) {
+          bestUnusedQuoteStats.displacementEvents.set(eventKey, {
+            percentage,
+            admittedAggHookQuote: stats.admittedAggHookQuote,
+            slotZeroNoHookQuote: stats.slotZeroNoHookQuote,
+            displacedNoHookQuotes: stats.partitionEvictedNoHookQuotes,
+          });
+        }
       }
       if (!bestUnusedQuoteStats.seenBucketKeys.has(percentage)) {
         bestUnusedQuoteStats.seenBucketKeys.add(percentage);
@@ -2708,6 +2828,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       metricTags,
       bestUnusedQuoteStats.projectedGateWorstVerdict
     );
+    this.emitKBudgetEvictionImpact(
+      result,
+      chainId,
+      ctx,
+      testAggHooks,
+      tradeType,
+      metricTags,
+      bestUnusedQuoteStats.partitionAdmittedAggHookCount,
+      bestUnusedQuoteStats.displacementEvents
+    );
 
     return result;
   }
@@ -3150,6 +3280,331 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         );
       }
     }
+  }
+
+  /**
+   * What-if metric: when the K-budget partition admits an agg-hook
+   * quote and truncates at least one no-hook quote, would the best
+   * displaced no-hook have scored strictly better on gas-adjusted
+   * terms than the actually-admitted slate at that bucket? This is
+   * the "K-budget eviction" bug fingerprint: a partition admit that's
+   * locally correct (calibrated gas-adj passes the gate's tolerance)
+   * but globally harmful (the displaced no-hook would have been the
+   * route DFS needed to build the winning combination).
+   *
+   * Emits exactly once per request with one of these verdicts:
+   *   no_displacement              — control bucket: no partition admit OR
+   *                                  every admit landed in a single-no-hook
+   *                                  bucket (no truncation possible).
+   *   admit_no_truncation          — gate admitted in at least one bucket
+   *                                  but no no-hook was truncated (e.g. the
+   *                                  bucket had only one no-hook quote, so
+   *                                  slot 0 keeps it and slot 1 takes the
+   *                                  agg-hook). Admit is "free" from a
+   *                                  displacement standpoint.
+   *   admit_harmful_gas_adj        — eviction-bug fingerprint: the best
+   *                                  displaced no-hook scores STRICTLY
+   *                                  better gas-adjusted than BOTH the
+   *                                  admitted agg-hook AND the slot-0
+   *                                  no-hook by more than
+   *                                  AGG_HOOK_PARTITION_TOLERANCE_BPS.
+   *                                  Sign-normalized for tradeType.
+   *   admit_neutral_gas_adj        — displacement happened but the gas-adj
+   *                                  gap is within tolerance (near-tie).
+   *   admit_correct_gas_adj        — displaced no-hook scores strictly
+   *                                  WORSE than the admitted slate — gate
+   *                                  correctly dropped the inferior
+   *                                  candidate.
+   *   displaced_absorbed_in_result — displacement happened AND the best
+   *                                  displaced route key appears in some
+   *                                  combination in `result` (DFS
+   *                                  substituted it back from an adjacent
+   *                                  bucket). Emitted only as a fallback
+   *                                  for the gas_data_missing branch — the
+   *                                  primary "absorbed" signal is the
+   *                                  `displacedAbsorbed` tag on the
+   *                                  harmful/neutral/correct verdicts.
+   *   gas_data_missing             — displacement happened but
+   *                                  `gasCostInQuoteToken` is missing on
+   *                                  the displaced quote or both anchors,
+   *                                  so the gas-adj counterfactual is
+   *                                  undefined. No raw-amount fallback —
+   *                                  Codex review #2 finding 6.
+   *
+   * Cross-reference: pair `verdict:admit_harmful_gas_adj` with
+   * `displacedAbsorbed:false` in DD to size the genuine smoking-gun
+   * subpopulation (the DFS couldn't recover the displaced quote from
+   * another bucket).
+   */
+  private emitKBudgetEvictionImpact(
+    result: RouteBasic<TPool>[][],
+    chainId: ChainId,
+    ctx: UniContext,
+    testAggHooks: boolean | undefined,
+    tradeType: TradeType,
+    metricTags: string[],
+    partitionAdmittedAggHookCount: number,
+    displacementEvents: Map<
+      string,
+      {
+        percentage: number;
+        admittedAggHookQuote: QuoteBasic;
+        slotZeroNoHookQuote: QuoteBasic;
+        displacedNoHookQuotes: QuoteBasic[];
+      }
+    >
+  ): void {
+    if (!testAggHooks) return;
+
+    // Whether the chosen winner (result[0]) contains any agg-hook
+    // leg. Mirrors the helper used by emitKBudgetAdmitWinnerCorrelation
+    // so cross-metric joins by tag value are consistent.
+    const winnerHasAggHook =
+      result.length > 0 &&
+      result[0].some(route => routeUsesAggHook(route, chainId));
+
+    const emit = (
+      verdict:
+        | 'no_displacement'
+        | 'admit_no_truncation'
+        | 'admit_harmful_gas_adj'
+        | 'admit_neutral_gas_adj'
+        | 'admit_correct_gas_adj'
+        | 'displaced_absorbed_in_result'
+        | 'gas_data_missing',
+      displacedAbsorbed: 'true' | 'false' | 'na',
+      displacedScoreDeltaBucket: string
+    ): void => {
+      void ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.KBudgetEvictionImpact'),
+        1,
+        {
+          tags: [
+            ...metricTags,
+            `verdict:${verdict}`,
+            `tradeType:${tradeType}`,
+            `winnerHasAggHook:${winnerHasAggHook}`,
+            `displacedAbsorbed:${displacedAbsorbed}`,
+            `displacedScoreDeltaBucket:${displacedScoreDeltaBucket}`,
+            `testAggHooks:${testAggHooks}`,
+          ],
+        }
+      );
+    };
+
+    // Control bucket: no displacement at all this request.
+    if (displacementEvents.size === 0) {
+      if (partitionAdmittedAggHookCount > 0) {
+        // The gate admitted in at least one bucket but never
+        // truncated — single-no-hook bucket admit shape.
+        emit('admit_no_truncation', 'na', 'na');
+      } else {
+        emit('no_displacement', 'na', 'na');
+      }
+      return;
+    }
+
+    // Build the result route-key set for the displacedAbsorbed
+    // check. Use the same identity as
+    // `emitKBudgetEvictionPermanentExclusion` (pool path PLUS
+    // percentage) so a displaced 50% route is NOT marked absorbed
+    // by a 25% route that just happens to share the same pool path
+    // — different percentages produce different gas-adj math and
+    // are not equivalent routes (Codex review finding #2).
+    const routeKey = (route: RouteBasic<TPool>): string =>
+      `${route.path
+        .map(p => p.address.toString().toLowerCase())
+        .join(',')}-${route.percentage}`;
+    const resultRouteKeySet = new Set<string>();
+    for (const combination of result) {
+      for (const route of combination) {
+        resultRouteKeySet.add(routeKey(route));
+      }
+    }
+
+    // For EXACT_IN: gas-adj score = amount - gasCostInQuoteToken,
+    //   higher is better. delta := displacedScore - anchorScore;
+    //   positive ⇒ displaced better.
+    // For EXACT_OUT: gas-adj score = amount + gasCostInQuoteToken,
+    //   LOWER is better. delta := anchorScore - displacedScore;
+    //   positive ⇒ displaced better (sign-normalized).
+    // anchor := the gas-adj-best of (admittedAggHook, slotZeroNoHook)
+    //   — admit is harmful only if displaced beats BOTH.
+    const scoreOf = (q: QuoteBasic): {score: bigint; gasComplete: boolean} => {
+      const gasCost = q.gasDetails?.gasCostInQuoteToken;
+      if (gasCost === undefined) {
+        return {score: q.amount, gasComplete: false};
+      }
+      return {
+        score:
+          tradeType === TradeType.ExactIn
+            ? q.amount - gasCost
+            : q.amount + gasCost,
+        gasComplete: true,
+      };
+    };
+
+    const betterOfAnchorScores = (
+      a: {score: bigint; gasComplete: boolean},
+      b: {score: bigint; gasComplete: boolean}
+    ): {score: bigint; gasComplete: boolean} => {
+      // Pick the anchor that's better gas-adjusted (the harder bar
+      // for the displaced to beat). Higher score wins for EXACT_IN,
+      // lower for EXACT_OUT.
+      if (tradeType === TradeType.ExactIn) {
+        return a.score >= b.score ? a : b;
+      }
+      return a.score <= b.score ? a : b;
+    };
+
+    const betterDisplacedScore = (
+      best: {score: bigint; gasComplete: boolean; quote: QuoteBasic} | null,
+      candidate: {score: bigint; gasComplete: boolean; quote: QuoteBasic}
+    ): {score: bigint; gasComplete: boolean; quote: QuoteBasic} => {
+      if (best === null) return candidate;
+      if (tradeType === TradeType.ExactIn) {
+        return candidate.score > best.score ? candidate : best;
+      }
+      return candidate.score < best.score ? candidate : best;
+    };
+
+    const tolerance = Number(this.AGG_HOOK_PARTITION_TOLERANCE_BPS);
+
+    const quantizeBpsBucket = (b: number): string => {
+      if (b <= -50) return 'le_neg_50';
+      if (b <= -10) return 'neg_50_to_neg_10';
+      if (b <= -1) return 'neg_10_to_neg_1';
+      if (b < 0) return 'neg_1_to_0';
+      if (b < 1) return '0_to_1';
+      if (b < 10) return '1_to_10';
+      if (b < 50) return '10_to_50';
+      return 'gt_50';
+    };
+
+    // Classify each displacement event independently into
+    // (verdict, displacedAbsorbed, deltaBps). Codex adversarial-review
+    // finding: aggregating raw-unit score deltas across events
+    // before computing bps is wrong — a large-notional event with a
+    // 0-bps gas-adj impact can have a bigger raw-wei delta than a
+    // small-notional event with materially harmful bps. Picking the
+    // larger-raw event suppresses the harmful one. Fix: compute the
+    // verdict and absorption per event up front, then select by
+    // operational severity (with bps magnitude as a tiebreaker
+    // within a severity tier).
+    type EventClassification = {
+      verdict:
+        | 'admit_harmful_gas_adj'
+        | 'admit_neutral_gas_adj'
+        | 'admit_correct_gas_adj'
+        | 'displaced_absorbed_in_result'
+        | 'gas_data_missing';
+      displacedAbsorbed: 'true' | 'false';
+      deltaBps: number;
+      bucket: string;
+    };
+
+    const classifications: EventClassification[] = [];
+    for (const event of displacementEvents.values()) {
+      const admittedScore = scoreOf(event.admittedAggHookQuote);
+      const slotZeroScore = scoreOf(event.slotZeroNoHookQuote);
+      const anchor = betterOfAnchorScores(admittedScore, slotZeroScore);
+      const anchorAmount =
+        anchor === admittedScore
+          ? event.admittedAggHookQuote.amount
+          : event.slotZeroNoHookQuote.amount;
+
+      let bestDisplaced: {
+        score: bigint;
+        gasComplete: boolean;
+        quote: QuoteBasic;
+      } | null = null;
+      for (const dq of event.displacedNoHookQuotes) {
+        const s = scoreOf(dq);
+        bestDisplaced = betterDisplacedScore(bestDisplaced, {
+          ...s,
+          quote: dq,
+        });
+      }
+      if (bestDisplaced === null) continue;
+
+      const bestDisplacedKey = routeKey(
+        bestDisplaced.quote.route as RouteBasic<TPool>
+      );
+      const displacedAbsorbed: 'true' | 'false' = resultRouteKeySet.has(
+        bestDisplacedKey
+      )
+        ? 'true'
+        : 'false';
+
+      if (!bestDisplaced.gasComplete || !anchor.gasComplete) {
+        // gas_data_missing has the absorbed-override semantic — if
+        // the displaced route showed up elsewhere in result, surface
+        // displaced_absorbed_in_result instead of the data gap.
+        classifications.push({
+          verdict:
+            displacedAbsorbed === 'true'
+              ? 'displaced_absorbed_in_result'
+              : 'gas_data_missing',
+          displacedAbsorbed,
+          deltaBps: 0,
+          bucket: 'na',
+        });
+        continue;
+      }
+
+      const rawDelta =
+        tradeType === TradeType.ExactIn
+          ? bestDisplaced.score - anchor.score
+          : anchor.score - bestDisplaced.score;
+      const safeAnchorAmt = anchorAmount === 0n ? 1n : anchorAmount;
+      const deltaBps = Number((rawDelta * 10_000n) / safeAnchorAmt);
+      const bucket = quantizeBpsBucket(deltaBps);
+
+      let verdict: EventClassification['verdict'];
+      if (deltaBps > tolerance) {
+        verdict = 'admit_harmful_gas_adj';
+      } else if (deltaBps >= -tolerance) {
+        verdict = 'admit_neutral_gas_adj';
+      } else {
+        verdict = 'admit_correct_gas_adj';
+      }
+      classifications.push({verdict, displacedAbsorbed, deltaBps, bucket});
+    }
+
+    if (classifications.length === 0) {
+      // Every event had displacedNoHookQuotes.length=0 — shouldn't
+      // happen given the upstream capture gate, but be defensive.
+      emit('admit_no_truncation', 'na', 'na');
+      return;
+    }
+
+    // Operational-severity ranking. Lower rank = more important
+    // signal to surface; the dashboard's most-actionable query is
+    // `verdict:admit_harmful_gas_adj AND displacedAbsorbed:false`,
+    // so prefer that over absorbed harmful, over gas-missing, over
+    // neutral, over correct, over benign absorbed. Within a tier,
+    // tiebreak on bps magnitude (descending — larger harm is more
+    // interesting both for harmful and for spotting near-misses).
+    const severityRank = (c: EventClassification): number => {
+      if (
+        c.verdict === 'admit_harmful_gas_adj' &&
+        c.displacedAbsorbed === 'false'
+      )
+        return 0;
+      if (c.verdict === 'admit_harmful_gas_adj') return 1;
+      if (c.verdict === 'gas_data_missing') return 2;
+      if (c.verdict === 'admit_neutral_gas_adj') return 3;
+      if (c.verdict === 'admit_correct_gas_adj') return 4;
+      return 5; // displaced_absorbed_in_result — fully benign
+    };
+    classifications.sort((a, b) => {
+      const r = severityRank(a) - severityRank(b);
+      if (r !== 0) return r;
+      return Math.abs(b.deltaBps) - Math.abs(a.deltaBps);
+    });
+
+    const winner = classifications[0];
+    emit(winner.verdict, winner.displacedAbsorbed, winner.bucket);
   }
 
   private emitKBudgetAdmitWinnerCorrelation(

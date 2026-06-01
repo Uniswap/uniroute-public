@@ -7400,6 +7400,666 @@ describe('QuoteBestSplitFinder', () => {
     });
   });
 
+  describe('K-budget eviction impact (counterfactual)', () => {
+    // FluidDexT1 mainnet hook — registered agg-hook for cross-checks.
+    const FLUID_HOOK = '0xf1abe2961CCf73B55be164054E7ADC985a52A888';
+
+    const routeAt = (
+      addr: string,
+      pct: number,
+      hooks?: string
+    ): RouteBasic<MockPool> =>
+      createMockRoute(
+        [createMockPool(mockToken0, mockToken1, addr, hooks)],
+        pct
+      );
+
+    // Builds a QuoteBasic with optional gasCostInQuoteToken populated.
+    const quoteWithGas = (
+      route: RouteBasic<MockPool>,
+      amount: bigint,
+      gasCostInQuoteToken?: bigint
+    ): QuoteBasic =>
+      ({
+        route,
+        amount,
+        gasDetails: {gasCostInQuoteToken},
+      }) as unknown as QuoteBasic;
+
+    const metricCalls = () =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        c =>
+          (c[0] as string).endsWith(
+            'QuoteBestSplitFinder.KBudgetEvictionImpact'
+          )
+      );
+
+    const buildEvents = (
+      events: {
+        percentage: number;
+        admittedAggHookQuote: QuoteBasic;
+        slotZeroNoHookQuote: QuoteBasic;
+        displacedNoHookQuotes: QuoteBasic[];
+      }[]
+    ) => {
+      const m = new Map<
+        string,
+        {
+          percentage: number;
+          admittedAggHookQuote: QuoteBasic;
+          slotZeroNoHookQuote: QuoteBasic;
+          displacedNoHookQuotes: QuoteBasic[];
+        }
+      >();
+      for (const ev of events) {
+        const aggRoute = ev.admittedAggHookQuote.route;
+        const key = `${ev.percentage}:${aggRoute.path
+          .map(p => p.address.toString().toLowerCase())
+          .join(',')}`;
+        m.set(key, ev);
+      }
+      return m;
+    };
+
+    it('does not fire when testAggHooks is false', () => {
+      finder['emitKBudgetEvictionImpact'](
+        [],
+        ChainId.MAINNET,
+        mockContext,
+        false,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0,
+        new Map()
+      );
+      expect(metricCalls()).toHaveLength(0);
+    });
+
+    it('emits no_displacement when no admits and no events', () => {
+      finder['emitKBudgetEvictionImpact'](
+        [[routeAt('0xd100', 50)]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0,
+        new Map()
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:no_displacement');
+      expect(tags).toContain('displacedAbsorbed:na');
+      expect(tags).toContain('displacedScoreDeltaBucket:na');
+      expect(tags).toContain('tradeType:EXACT_IN');
+    });
+
+    it('emits admit_no_truncation when admits fired but no truncation occurred', () => {
+      finder['emitKBudgetEvictionImpact'](
+        [[routeAt('0xd200', 50)]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        2,
+        new Map()
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_no_truncation');
+    });
+
+    it('emits admit_harmful_gas_adj when displaced beats both anchors materially (EXACT_IN)', () => {
+      const aggHookRoute = routeAt('0xd301', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd302', 50);
+      const displacedRoute = routeAt('0xd303', 50);
+      // EXACT_IN scores: amount - gasCostInQuoteToken (higher = better)
+      //   slotZero = 1000 - 5 = 995
+      //   admitted = 998 - 40 = 958  (loses to slotZero)
+      //   anchor   = max(995, 958) = 995
+      //   displaced = 1050 - 5 = 1045  → 5,025 bps above anchor (well > tol)
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+      expect(tags).toContain('displacedAbsorbed:false');
+      expect(tags).toContain('displacedScoreDeltaBucket:gt_50');
+    });
+
+    it('emits admit_neutral_gas_adj when displaced ties the anchor within tolerance', () => {
+      const aggHookRoute = routeAt('0xd401', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd402', 50);
+      const displacedRoute = routeAt('0xd403', 50);
+      // Default AGG_HOOK_PARTITION_TOLERANCE_BPS=0 ⇒ admit_neutral only
+      // when deltaBps is exactly 0. Build a tie: anchor=slotZero=995;
+      // displaced=995 → delta=0bps → admit_neutral_gas_adj.
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 1000n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_neutral_gas_adj');
+      expect(tags).toContain('displacedScoreDeltaBucket:0_to_1');
+    });
+
+    it('emits admit_correct_gas_adj when displaced is strictly worse beyond tolerance', () => {
+      const aggHookRoute = routeAt('0xd501', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd502', 50);
+      const displacedRoute = routeAt('0xd503', 50);
+      // anchor = max(1000-5, 998-40) = 995; displaced = 100-5 = 95
+      // delta = (95-995)/1000 * 10000 = -9000 bps → admit_correct_gas_adj
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 100n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_correct_gas_adj');
+      expect(tags).toContain('displacedScoreDeltaBucket:le_neg_50');
+    });
+
+    it('emits gas_data_missing when displaced quote lacks gasCostInQuoteToken', () => {
+      const aggHookRoute = routeAt('0xd601', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd602', 50);
+      const displacedRoute = routeAt('0xd603', 50);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [
+            quoteWithGas(displacedRoute, 1050n /* no gasCost */),
+          ],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:gas_data_missing');
+      expect(tags).toContain('displacedAbsorbed:false');
+      expect(tags).toContain('displacedScoreDeltaBucket:na');
+    });
+
+    it('overrides gas_data_missing → displaced_absorbed_in_result when displaced route appears in result', () => {
+      const aggHookRoute = routeAt('0xd701', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd702', 50);
+      const displacedRoute = routeAt('0xd703', 50);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [
+            quoteWithGas(displacedRoute, 1050n /* no gasCost */),
+          ],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        // The displaced route appears as a leg in a different combination.
+        [[aggHookRoute], [displacedRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:displaced_absorbed_in_result');
+      expect(tags).toContain('displacedAbsorbed:true');
+    });
+
+    it('sets displacedAbsorbed:true tag when displaced route appears in result on the harmful path', () => {
+      const aggHookRoute = routeAt('0xd801', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd802', 50);
+      const displacedRoute = routeAt('0xd803', 50);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        // displacedRoute appears as a leg in a different combination — absorbed.
+        [[aggHookRoute], [displacedRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      expect(metricCalls()).toHaveLength(1);
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+      expect(tags).toContain('displacedAbsorbed:true');
+    });
+
+    it('sets winnerHasAggHook:true when result[0] contains an agg-hook route', () => {
+      const aggHookRoute = routeAt('0xd901', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xd902', 50);
+      const displacedRoute = routeAt('0xd903', 50);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('winnerHasAggHook:true');
+    });
+
+    it('sets winnerHasAggHook:false when result[0] is no-hook only', () => {
+      const aggHookRoute = routeAt('0xda01', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xda02', 50);
+      const displacedRoute = routeAt('0xda03', 50);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        // No agg-hook in result.
+        [[slotZeroRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('winnerHasAggHook:false');
+    });
+
+    it('sign-inverts for EXACT_OUT — displaced needing less input is harmful (gas-adj)', () => {
+      const aggHookRoute = routeAt('0xdb01', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xdb02', 50);
+      const displacedRoute = routeAt('0xdb03', 50);
+      // EXACT_OUT scores: amount + gasCostInQuoteToken (LOWER = better)
+      //   slotZero = 1000+5 = 1005; admitted = 998+40 = 1038
+      //   anchor   = min(1005, 1038) = 1005 (best)
+      //   displaced = 800+5 = 805  → 200 bps "better" than anchor when
+      //   sign-normalized for EXACT_OUT → admit_harmful_gas_adj
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 800n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactOut,
+        ['chainId:1'],
+        1,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+      expect(tags).toContain('tradeType:EXACT_OUT');
+    });
+
+    it('aggregates worst-case across multiple events (one harmful, one correct → emits harmful)', () => {
+      const aggHook1 = routeAt('0xdc01', 50, FLUID_HOOK);
+      const aggHook2 = routeAt('0xdc02', 75, FLUID_HOOK);
+      const slotZero1 = routeAt('0xdc03', 50);
+      const slotZero2 = routeAt('0xdc04', 75);
+      const displacedHarmful = routeAt('0xdc05', 50);
+      const displacedCorrect = routeAt('0xdc06', 75);
+      const events = buildEvents([
+        // Event A: displaced strictly worse — admit_correct.
+        {
+          percentage: 75,
+          admittedAggHookQuote: quoteWithGas(aggHook2, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZero2, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedCorrect, 100n, 5n)],
+        },
+        // Event B: displaced beats both anchors — admit_harmful.
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHook1, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZero1, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedHarmful, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHook1]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        2,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+    });
+
+    it('always emits exactly once per request (no-displacement path)', () => {
+      finder['emitKBudgetEvictionImpact'](
+        [],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        0,
+        new Map()
+      );
+      expect(metricCalls()).toHaveLength(1);
+    });
+
+    // Codex review finding #2: route identity must include percentage.
+    // Without the fix, a displaced 50% route would be incorrectly
+    // marked absorbed by a 25% route with the same pool path —
+    // different percentages produce different gas-adj math and are
+    // not equivalent routes.
+    it('does NOT mark displacedAbsorbed:true when result has the same pool path at a different percentage', () => {
+      const aggHookRoute = routeAt('0xdd01', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xdd02', 50);
+      const displacedRoute = routeAt('0xdd03', 50);
+      // result contains the same pool path but at percentage 25 — NOT
+      // the same route by identity. Should be flagged as not absorbed.
+      const sameShapeDifferentPct = routeAt('0xdd03', 25);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedRoute, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute], [sameShapeDifferentPct]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+      // Pool path matches a result route but percentage differs ⇒
+      // not absorbed.
+      expect(tags).toContain('displacedAbsorbed:false');
+    });
+
+    // Codex review finding #1: worst-case across multiple events at
+    // the SAME percentage. Different DFS branches at the same
+    // percentage admit the same agg-hook with different slot-zero
+    // and displaced slates. The wrapper now keys events on the full
+    // slate (percentage + admittedAggHook + slotZero + displaced),
+    // so each unique slate lands as its own event. The emitter
+    // aggregates worst-case across them; if any slate is harmful,
+    // the verdict must be admit_harmful_gas_adj.
+    it('selects the worst-case slate when the same percentage has multiple harmful + benign events', () => {
+      const aggHookRoute = routeAt('0xde01', 50, FLUID_HOOK);
+      const slotZeroA = routeAt('0xde02', 50);
+      const slotZeroB = routeAt('0xde03', 50);
+      const displacedHarmful = routeAt('0xde04', 50);
+      const displacedBenign = routeAt('0xde05', 50);
+      const events = buildEvents([
+        // Slate A: benign — displaced strictly worse than anchor.
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroA, 1000n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedBenign, 100n, 5n)],
+        },
+        // Slate B: harmful — different slot-zero, harmful displaced.
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroB, 999n, 5n),
+          displacedNoHookQuotes: [quoteWithGas(displacedHarmful, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+    });
+
+    // Codex adversarial-review (second pass) finding: aggregating
+    // raw-unit score deltas across events before computing bps is
+    // wrong. A large-notional event with a bigger absolute wei
+    // delta but 0 bps after integer division can overwrite a
+    // small-notional event with materially harmful bps. Pre-fix
+    // behavior would emit admit_neutral; post-fix the per-event
+    // classification + severity-ranked selection surfaces the
+    // harmful event.
+    it('does NOT let a large-notional 0-bps event overwrite a small-notional harmful-bps event', () => {
+      // Event A — small notional, deltaBps=30 (harmful):
+      //   anchor amount=1000, displaced amount=1003, no gas cost.
+      //   rawDelta=3, deltaBps=(3*10000)/1000=30
+      const aggHookSmall = routeAt('0xea01', 50, FLUID_HOOK);
+      const slotZeroSmall = routeAt('0xea02', 50);
+      const displacedSmall = routeAt('0xea03', 50);
+      // Event B — large notional, raw delta is bigger but bps=0:
+      //   anchor amount=1_000_000, displaced=1_000_010 → raw=10,
+      //   deltaBps = (10*10000)/1_000_000 = 0 (integer truncation).
+      const aggHookLarge = routeAt('0xea04', 75, FLUID_HOOK);
+      const slotZeroLarge = routeAt('0xea05', 75);
+      const displacedLarge = routeAt('0xea06', 75);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookSmall, 999n, 0n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroSmall, 1000n, 0n),
+          displacedNoHookQuotes: [quoteWithGas(displacedSmall, 1003n, 0n)],
+        },
+        {
+          percentage: 75,
+          admittedAggHookQuote: quoteWithGas(aggHookLarge, 999_999n, 0n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroLarge, 1_000_000n, 0n),
+          displacedNoHookQuotes: [quoteWithGas(displacedLarge, 1_000_010n, 0n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookSmall]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        2,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      // Pre-fix this would have emitted admit_neutral_gas_adj because
+      // the large-notional event's rawDelta (10) > small-notional's
+      // (3), and the chosen event's deltaBps rounds to 0.
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+      expect(tags).toContain('displacedScoreDeltaBucket:10_to_50');
+    });
+
+    // Companion to the above: when one event is harmful+absorbed and
+    // another is harmful+unabsorbed, severity ranking picks the
+    // unabsorbed one (the smoking-gun query `verdict:harmful AND
+    // displacedAbsorbed:false`). Pre-fix behavior would pick by raw
+    // delta and could let the absorbed event hide the unabsorbed one.
+    it('prefers harmful+unabsorbed over harmful+absorbed regardless of bps magnitude', () => {
+      const aggHookA = routeAt('0xeb01', 50, FLUID_HOOK);
+      const slotZeroA = routeAt('0xeb02', 50);
+      // Smoking-gun: harmful + NOT absorbed in result. Moderate bps.
+      const unabsorbedDisplaced = routeAt('0xeb03', 50);
+      const aggHookB = routeAt('0xeb04', 75, FLUID_HOOK);
+      const slotZeroB = routeAt('0xeb05', 75);
+      // Absorbed harmful event with much bigger bps but absorbed in
+      // result — should NOT win selection over the unabsorbed
+      // smoking-gun.
+      const absorbedDisplaced = routeAt('0xeb06', 75);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookA, 999n, 0n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroA, 1000n, 0n),
+          displacedNoHookQuotes: [quoteWithGas(unabsorbedDisplaced, 1010n, 0n)],
+        },
+        {
+          percentage: 75,
+          admittedAggHookQuote: quoteWithGas(aggHookB, 999n, 0n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroB, 1000n, 0n),
+          // Much larger bps — would dominate any "tiebreak by
+          // magnitude" if absorbed was disregarded.
+          displacedNoHookQuotes: [quoteWithGas(absorbedDisplaced, 2000n, 0n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        // Result contains absorbedDisplaced (75%) but NOT
+        // unabsorbedDisplaced (50%).
+        [[aggHookA], [absorbedDisplaced]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        2,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+      // Severity ranking should pick the unabsorbed event over the
+      // absorbed one even though the absorbed event has bigger bps.
+      expect(tags).toContain('displacedAbsorbed:false');
+    });
+
+    // Codex review finding #3: only the partition-evicted slice is
+    // the counterfactual replacement. Wrapper feeds
+    // `partitionEvictedNoHookQuotes` (the slice
+    // noHooks[noHookBudget, k)) into the event — NOT
+    // `displacedNoHookQuotes` (which is the broader
+    // noHooks[noHookBudget:] used by KBudgetEvictionPermanentExclusion).
+    // This test asserts that the emitter's input semantics produce
+    // admit_harmful only when the singular partition-evicted rank
+    // would have won — i.e. its gas-adj score beats both anchors.
+    it('only considers the partition-evicted slice (the rank that would have been admitted if partition rejected)', () => {
+      const aggHookRoute = routeAt('0xdf01', 50, FLUID_HOOK);
+      const slotZeroRoute = routeAt('0xdf02', 50);
+      // The partition-evicted quote — rank 1 (the one displaced by
+      // K=2/budget=1). Pass it as the SOLE displaced quote in the
+      // event tuple, mirroring what the wrapper produces from
+      // partitionEvictedNoHookQuotes.
+      const partitionEvicted = routeAt('0xdf03', 50);
+      const events = buildEvents([
+        {
+          percentage: 50,
+          admittedAggHookQuote: quoteWithGas(aggHookRoute, 998n, 40n),
+          slotZeroNoHookQuote: quoteWithGas(slotZeroRoute, 1000n, 5n),
+          // Only the partition-evicted candidate — no rank-3+ entries
+          // here (those are excluded at the wrapper level so they
+          // never reach the emitter as displaced candidates).
+          displacedNoHookQuotes: [quoteWithGas(partitionEvicted, 1050n, 5n)],
+        },
+      ]);
+      finder['emitKBudgetEvictionImpact'](
+        [[aggHookRoute]],
+        ChainId.MAINNET,
+        mockContext,
+        true,
+        TradeType.ExactIn,
+        ['chainId:1'],
+        1,
+        events
+      );
+      const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('verdict:admit_harmful_gas_adj');
+    });
+  });
+
   describe('K-budget bucket profile', () => {
     const metricCalls = () =>
       (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
