@@ -39,7 +39,7 @@ describe('cacheConfig', () => {
       const protocols = createChainProtocols(mockLogger, mockMetric);
       // Verify a reasonable number of entries are returned
       expect(protocols.length).toBeGreaterThanOrEqual(45);
-      expect(protocols.length).toBeLessThanOrEqual(55);
+      expect(protocols.length).toBeLessThanOrEqual(60);
     });
 
     it('each entry has required fields', () => {

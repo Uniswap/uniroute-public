@@ -76,7 +76,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     routeQuoteAllocator: IRouteQuoteAllocator<Pool>,
     quoteSelector: IQuoteSelector,
     tokenHandler: ITokenHandler,
-    arbitrumGasDataProvider: ArbitrumGasDataProvider,
+    arbitrumGasDataProviders: Map<ChainId, ArbitrumGasDataProvider>,
     freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
     rpcProviderMap?: Map<ChainId, JsonRpcProvider>
   ) {
@@ -87,7 +87,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       routeQuoteAllocator,
       quoteSelector,
       tokenHandler,
-      arbitrumGasDataProvider,
+      arbitrumGasDataProviders,
       freshPoolDetailsWrapper
     );
     // Kill-switch for the lowest-gas anchor in the K-budget partition
@@ -199,18 +199,22 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
         )
       : 0;
 
-    // Below information is only needed when dealing with Arbitrum or Optimism Stack chains
-    // in order to calculate L2 gas costs accurately. We need to update the quotes with fresh pool details
-    // so that we can generate the correct calldata for L2 gas estimation.
+    // Below information is only needed when dealing with Arbitrum Orbit or
+    // Optimism Stack chains in order to calculate L2 gas costs accurately. We
+    // need to update the quotes with fresh pool details so that we can
+    // generate the correct calldata for L2 gas estimation.
+    const orbitGasDataProvider = this.arbitrumGasDataProviders.get(
+      chain.chainId
+    );
     let arbitrumGasData: ArbitrumGasData | undefined = undefined;
     if (
-      chain.chainId === ChainId.ARBITRUM &&
+      orbitGasDataProvider &&
       serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled
     ) {
-      arbitrumGasData = await this.arbitrumGasDataProvider.getGasData();
+      arbitrumGasData = await orbitGasDataProvider.getGasData();
     }
     if (
-      (chain.chainId === ChainId.ARBITRUM &&
+      (orbitGasDataProvider &&
         serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled &&
         !serviceConfig.L1L2GasCostFetcher
           .SkipArbitrumCallDataGenerationAndApproximate) ||

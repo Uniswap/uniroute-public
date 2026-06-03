@@ -56,6 +56,7 @@ export enum ChainId {
   TEMPO = __PLACEHOLDER__,
   LINEA = __PLACEHOLDER__,
   MEGAETH = __PLACEHOLDER__,
+  ROBINHOOD = __PLACEHOLDER__,
 }
 
 export interface IUniRouteServiceConfig {
@@ -444,6 +445,7 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.TEMPO,
   ChainId.LINEA,
   ChainId.MEGAETH,
+  ChainId.ROBINHOOD,
 ];
 
 export const V2_SUPPORTED = [
@@ -466,6 +468,7 @@ export const V2_SUPPORTED = [
   ChainId.TEMPO,
   ChainId.LINEA,
   ChainId.MEGAETH,
+  ChainId.ROBINHOOD,
 ];
 
 export const V4_SUPPORTED = [
@@ -490,6 +493,7 @@ export const V4_SUPPORTED = [
   ChainId.TEMPO,
   ChainId.LINEA,
   ChainId.MEGAETH,
+  ChainId.ROBINHOOD,
 ];
 
 export const MIXED_SUPPORTED = [
@@ -509,7 +513,13 @@ export const MIXED_SUPPORTED = [
   ChainId.TEMPO,
   ChainId.LINEA,
   ChainId.MEGAETH,
+  ChainId.ROBINHOOD,
 ];
+
+// Arbitrum One + Arbitrum Orbit chains that share the same L1-cost gas model
+// (gas info precompile at 0x6c, calldata-byte L1 fee). Each entry needs a
+// matching ArbitrumGasDataProvider wired in dependencies.ts.
+export const ARBITRUM_ORBIT_CHAINS = [ChainId.ARBITRUM, ChainId.ROBINHOOD];
 
 export const OPTIMISM_STACK_CHAINS = [
   ChainId.OPTIMISM,
@@ -583,6 +593,7 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.TEMPO]: {...defaultPoolSelectionConfig},
   [ChainId.LINEA]: {...defaultPoolSelectionConfig},
   [ChainId.MEGAETH]: {...defaultPoolSelectionConfig},
+  [ChainId.ROBINHOOD]: {...defaultPoolSelectionConfig},
 };
 
 export const aggHooksPoolSelectionPerChainConfig: Record<
@@ -612,6 +623,7 @@ export const aggHooksPoolSelectionPerChainConfig: Record<
   [ChainId.TEMPO]: {...aggHooksPoolSelectionConfig},
   [ChainId.LINEA]: {...aggHooksPoolSelectionConfig},
   [ChainId.MEGAETH]: {...aggHooksPoolSelectionConfig},
+  [ChainId.ROBINHOOD]: {...aggHooksPoolSelectionConfig},
 };
 
 // Mapping of chainId to Set of token addresses that require gasPrice to be passed to simulation
@@ -642,6 +654,7 @@ export const needsGasPriceFetchingMapping: Record<ChainId, Set<string>> = {
   [ChainId.TEMPO]: new Set<string>(),
   [ChainId.LINEA]: new Set<string>(),
   [ChainId.MEGAETH]: new Set<string>(),
+  [ChainId.ROBINHOOD]: new Set<string>(),
 };
 
 export const needsGasPriceFetching = (

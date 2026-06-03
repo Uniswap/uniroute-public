@@ -24,6 +24,7 @@ import {
   USDC_CELO,
   USDC_LINEA,
   USDM_MEGAETH,
+  USDG_ROBINHOOD,
   USDC_MAINNET,
   USDC_MONAD,
   USDC_NATIVE_ARBITRUM,
@@ -98,6 +99,7 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.TEMPO]: [PATHUSD_TEMPO],
   [ChainId.LINEA]: [USDC_LINEA],
   [ChainId.MEGAETH]: [USDM_MEGAETH],
+  [ChainId.ROBINHOOD]: [USDG_ROBINHOOD],
 };
 
 export type GasPools = {

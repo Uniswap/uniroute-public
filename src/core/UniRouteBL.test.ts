@@ -57,8 +57,6 @@ import {DummySimulator} from './simulator/DummySimulator';
 import {ISimulator, SimulationStatus} from './simulator/ISimulator';
 import {StateOverrideResolver} from './simulator/StateOverrideResolver';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
-import {ArbitrumGasDataProvider} from './gas/gas-data-provider';
-import {BaseProvider} from '@ethersproject/providers';
 import {
   CachedRoutesReadResult,
   ICachedRoutesRepository,
@@ -348,7 +346,7 @@ class MockedQuoteStrategy extends BaseQuoteStrategy {
       {} as RouteQuoteAllocator<Pool>,
       {} as SimpleQuoteSelector,
       {} as ITokenHandler,
-      new ArbitrumGasDataProvider({} as BaseProvider),
+      new Map(),
       {} as IFreshPoolDetailsWrapper
     );
     this.bestQuote = bestQuote;

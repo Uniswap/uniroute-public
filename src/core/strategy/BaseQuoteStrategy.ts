@@ -16,6 +16,7 @@ import {Erc20Token} from '../../models/token/Erc20Token';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {ITokenHandler} from '../../stores/token/ITokenHandler';
 import {ArbitrumGasDataProvider} from '../gas/gas-data-provider';
+import {ChainId} from '../../lib/config';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
 
 export abstract class BaseQuoteStrategy implements IQuoteStrategy {
@@ -26,7 +27,12 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     protected readonly routeQuoteAllocator: IRouteQuoteAllocator<Pool>,
     protected readonly quoteSelector: IQuoteSelector,
     protected readonly tokenHandler: ITokenHandler,
-    protected readonly arbitrumGasDataProvider: ArbitrumGasDataProvider,
+    // Keyed by chainId so each Arbitrum Orbit chain uses its own RPC for the
+    // L1 fee precompile read. Arbitrum One + Robinhood today; extend as needed.
+    protected readonly arbitrumGasDataProviders: Map<
+      ChainId,
+      ArbitrumGasDataProvider
+    >,
     protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
   ) {}
 

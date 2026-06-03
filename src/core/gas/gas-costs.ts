@@ -3,6 +3,7 @@ import {estimateL1Gas, estimateL1GasCost} from '@eth-optimism/sdk';
 import {BigNumber} from '@ethersproject/bignumber';
 import {Currency, Percent, TradeType} from '@uniswap/sdk-core';
 import {
+  ARBITRUM_ORBIT_CHAINS,
   ChainId,
   IUniRouteServiceConfig,
   OPTIMISM_STACK_CHAINS,
@@ -54,6 +55,7 @@ export const BASE_SWAP_COST = (id: ChainId): BigNumber => {
     case ChainId.TEMPO:
     case ChainId.LINEA:
     case ChainId.MEGAETH:
+    case ChainId.ROBINHOOD:
       return BigNumber.from(2000);
     case ChainId.ARBITRUM:
       return BigNumber.from(5000);
@@ -86,6 +88,7 @@ export const COST_PER_INIT_TICK = (id: ChainId): BigNumber => {
     case ChainId.TEMPO:
     case ChainId.LINEA:
     case ChainId.MEGAETH:
+    case ChainId.ROBINHOOD:
       return BigNumber.from(31000);
     case ChainId.ARBITRUM:
       return BigNumber.from(31000);
@@ -118,6 +121,7 @@ export const COST_PER_HOP = (id: ChainId): BigNumber => {
     case ChainId.TEMPO:
     case ChainId.LINEA:
     case ChainId.MEGAETH:
+    case ChainId.ROBINHOOD:
       return BigNumber.from(80000);
     case ChainId.ARBITRUM:
       return BigNumber.from(80000);
@@ -268,7 +272,7 @@ export const calculateL1GasFeesHelper = async (
           ctx
         );
     } else if (
-      chainId === ChainId.ARBITRUM &&
+      ARBITRUM_ORBIT_CHAINS.includes(chainId) &&
       serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled
     ) {
       [mainnetGasUsed, mainnetFeeInWei, gasUsedL1OnL2] =
@@ -435,15 +439,12 @@ export function calculateArbitrumToL1FeeFromCalldata(
 
 // Ported from SOR
 export function getL2ToL1GasUsed(data: string, chainId: ChainId): BigNumber {
-  switch (chainId) {
-    case ChainId.ARBITRUM: {
-      // calculates bytes of compressed calldata
-      const l1ByteUsed = getArbitrumBytes(data);
-      return l1ByteUsed.mul(16);
-    }
-    default:
-      return BigNumber.from(0);
+  if (ARBITRUM_ORBIT_CHAINS.includes(chainId)) {
+    // calculates bytes of compressed calldata
+    const l1ByteUsed = getArbitrumBytes(data);
+    return l1ByteUsed.mul(16);
   }
+  return BigNumber.from(0);
 }
 
 // Ported from SOR

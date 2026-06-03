@@ -170,7 +170,7 @@ function createStrategy(
     routeQuoteAllocator: RouteQuoteAllocator<Pool>,
     quoteSelector: SimpleQuoteSelector,
     tokenHandler: ITokenHandler,
-    arbitrumGasDataProvider: ArbitrumGasDataProvider,
+    arbitrumGasDataProviders: Map<ChainId, ArbitrumGasDataProvider>,
     freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
   ) => BaseQuoteStrategy,
   quotes: QuoteBasic[] = []
@@ -181,9 +181,12 @@ function createStrategy(
   const routeQuoteAllocator = new RouteQuoteAllocator();
   const quoteSelector = new SimpleQuoteSelector();
   const tokenHandler = new TokenHandlerMock();
-  const arbitrumGasDataProvider = new ArbitrumGasDataProvider(
-    new JsonRpcProvider() as BaseProvider
-  );
+  const arbitrumGasDataProviders = new Map<ChainId, ArbitrumGasDataProvider>([
+    [
+      ChainId.ARBITRUM,
+      new ArbitrumGasDataProvider(new JsonRpcProvider() as BaseProvider),
+    ],
+  ]);
   const freshPoolDetailsWrapper = {} as IFreshPoolDetailsWrapper;
 
   return new strategyClass(
@@ -193,7 +196,7 @@ function createStrategy(
     routeQuoteAllocator,
     quoteSelector,
     tokenHandler,
-    arbitrumGasDataProvider,
+    arbitrumGasDataProviders,
     freshPoolDetailsWrapper
   );
 }
@@ -207,7 +210,7 @@ function runStrategyTests(
     routeQuoteAllocator: RouteQuoteAllocator<Pool>,
     quoteSelector: SimpleQuoteSelector,
     tokenHandler: ITokenHandler,
-    arbitrumGasDataProvider: ArbitrumGasDataProvider,
+    arbitrumGasDataProviders: Map<ChainId, ArbitrumGasDataProvider>,
     freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
   ) => BaseQuoteStrategy
 ) {

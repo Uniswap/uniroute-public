@@ -19,6 +19,8 @@ import {Protocol} from '../../../models/pool/Protocol';
 const CHAIN_ID_TEMPO = 4217 as ChainId;
 // MEGAETH is not in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_MEGAETH = 4326 as ChainId;
+// ROBINHOOD is not in sdk-core — define locally until sdk-core is upgraded
+const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
 // Protocols listed here are excluded from cached-routes retrieval inside
 // CachedRoutesRepository.  All external (agg hook) protocols are included
 // because production metrics show cached routes still containing agg hook
@@ -661,5 +663,6 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.XLAYER]: [ADDRESS_ZERO, AEGIS_V3],
   [ChainId.LINEA]: [ADDRESS_ZERO],
   [CHAIN_ID_MEGAETH]: [ADDRESS_ZERO, TEST_HOOK_ON_MEGAETH],
+  [CHAIN_ID_ROBINHOOD]: [ADDRESS_ZERO],
   [CHAIN_ID_TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
 };
