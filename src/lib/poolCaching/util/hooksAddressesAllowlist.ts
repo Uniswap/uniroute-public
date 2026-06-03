@@ -175,6 +175,12 @@ export const AEGIS_V3 = '0x88c9ff9fc0b22cca42265d3f1d1c2c39e41cdacc';
 export const AEGIS_V1_1_ON_POLYGON =
   '0x15cD9520D0fAF71c938Db4426F8C58B5cBAa9ACc';
 
+// Aegis Engine — Mainnet (ROUTE-1287). Base entry dropped post-verification:
+// the subgraph gateway has no data for the Base reference pool, so it is
+// un-verifiable. Re-add AEGIS_ENGINE_ON_BASE once the gateway indexes it.
+export const AEGIS_ENGINE_ON_MAINNET =
+  '0x8f29bd5c8429730fa4c46e6295c4e679ededd0cc';
+
 export const ZORA_CREATOR_HOOK_ON_BASE_v1 =
   '0xfbce3d80c659c765bc6c55e29e87d839c7609040';
 export const ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1 =
@@ -410,11 +416,20 @@ export const LIVO_SWAP_HOOK_V2_ON_MAINNET =
 export const ESTATE_BONDING_CURVE_HOOK_ON_BASE =
   '0x66799c2eb2590006820f6cb826133176ecdda888';
 
+// Janpu hooks — Base (ROUTE-1280, ROUTE-1281)
+export const JANPU_STATIC_FEE_V2_ON_BASE =
+  '0xb67f057bfbcb27ff9908dbf2d3d9dbd89d29e8cc';
+export const JANPU_HOOK_DYNAMIC_FEE_V2_ON_BASE =
+  '0x49659b737c672324a221623f8d3f29e5687f28cc';
+
 export const UNIAGENT_V4_HOOK_ON_MAINNET =
   '0xa5db9bd1eac09894c680fe56bc5db26078c800cc';
 
 export const BASELINE_HOOK_ON_MAINNET =
   '0xc81fd894c0ace037d133af4886550ac8133568e8';
+
+// TTTHook — Mainnet (ROUTE-1289)
+export const TTTHOOK_ON_MAINNET = '0xdee7a2ffa963f82facbb12a4e3e8909e4a51a444';
 
 // MEV-X Homelander — same address across all supported chains
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
@@ -470,6 +485,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     UNIAGENT_V4_HOOK_ON_MAINNET,
     BASELINE_HOOK_ON_MAINNET,
     MEV_X_HOMELANDER_ON_MAINNET,
+    AEGIS_ENGINE_ON_MAINNET,
+    TTTHOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -604,6 +621,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     APEX_YIELD_HOOK_ON_BASE,
     ESTATE_BONDING_CURVE_HOOK_ON_BASE,
     MEV_X_HOMELANDER_ON_BASE,
+    JANPU_STATIC_FEE_V2_ON_BASE,
+    JANPU_HOOK_DYNAMIC_FEE_V2_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO],
