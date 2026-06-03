@@ -3405,6 +3405,62 @@ describe('UniRouteBL', () => {
       buildSwapMethodParametersSpy.mockRestore();
     });
 
+    it('should run simulation when universalRouterVersion is V2_2_0 and simulateFromAddress is set', async () => {
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_2_0')
+
+        .mockReturnValue({
+          simulate: {fromAddress: simulationRequest.simulateFromAddress},
+        } as unknown as SwapOptionsUniversalRouter);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, simulationRequest, {
+        universalRouterVersion: UniversalRouterVersion.V2_2_0,
+      });
+
+      expect(response.error).toBeUndefined();
+      // swapOptions is created for V2_2_0 → simulation block is entered → FailingSimulator fires
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+
+      swapOptionsSpy.mockRestore();
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
     it('should skip simulation when universalRouterVersion is V2_1_1 but simulateFromAddress is not set', async () => {
       let simulateCalled = false;
       const trackingSimulator: ISimulator = {

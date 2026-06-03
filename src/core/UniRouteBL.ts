@@ -2822,6 +2822,12 @@ export class UniRouteBL implements IUniRoutedBL {
     } else if (universalRouterVersion === UniversalRouterVersion.V2_1_1) {
       swapOptions =
         SwapOptionsFactory.createUniversalRouterOptions_2_1_1(swapOptionsInput);
+    } else if (universalRouterVersion === UniversalRouterVersion.V2_2_0) {
+      // UR 2.2 (permissioned-pool support) — build swap options so the
+      // route is simulated and calldata is produced, rather than skipped.
+      // Opted into via the `x-universal-router-version: 2.2.0` request header.
+      swapOptions =
+        SwapOptionsFactory.createUniversalRouterOptions_2_2_0(swapOptionsInput);
     } else if (request.simulateFromAddress) {
       ctx.logger.warn(
         'Simulation skipped: universalRouterVersion does not support simulation',

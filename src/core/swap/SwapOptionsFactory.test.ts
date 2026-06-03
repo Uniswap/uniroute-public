@@ -10,6 +10,7 @@ import {
   UniversalRouterVersion,
 } from '@uniswap/universal-router-sdk';
 import {SwapType} from '../simulator/sor-port/simulation-provider';
+import {getUniversalRouterAddress} from '../../lib/universalRouterAddress';
 
 describe('SwapOptionsFactory', () => {
   describe('createUniversalRouterOptions_2_0', () => {
@@ -494,6 +495,70 @@ describe('SwapOptionsFactory', () => {
       expect(result!.deadlineOrPreviousBlockhash).toBeDefined();
       expect(result!.inputTokenPermit).toBeDefined();
       expect(result!.simulate).toBeDefined();
+    });
+  });
+
+  describe('createUniversalRouterOptions_2_2_0', () => {
+    const baseInput: SwapOptionsUniversalRouterInput = {
+      chainId: ChainId.MAINNET,
+      tradeType: TradeType.ExactIn,
+      amountIn: '1000000000000000000',
+      tokenInWrappedAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      slippageTolerance: '0.5',
+    };
+
+    it('should return undefined when slippageTolerance is not provided', () => {
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_2_0({
+        ...baseInput,
+        slippageTolerance: undefined,
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should create basic swap options with version V2_2_0', () => {
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_2_0(baseInput);
+
+      expect(result).toBeDefined();
+      expect(result!.type).toBe(SwapType.UNIVERSAL_ROUTER);
+      expect(result!.urVersion).toBe(UniversalRouterVersion.V2_2_0);
+      expect(result!.slippageTolerance.toFixed(2)).toBe('0.50');
+    });
+
+    it('should use the V2_2_0 UR address as the permit spender', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        permitSignature: '0x1234567890abcdef',
+        permitNonce: '1',
+        permitExpiration: '1700000000',
+        permitAmount: '1000000000000000000',
+        permitSigDeadline: '1700001000',
+      };
+
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_2_0(input);
+
+      expect(result!.inputTokenPermit).toBeDefined();
+      // Permit spender must be the V2_2_0 UR address for this chain.
+      expect(result!.inputTokenPermit!.spender).toBe(
+        getUniversalRouterAddress(
+          UniversalRouterVersion.V2_2_0,
+          ChainId.MAINNET
+        )
+      );
+    });
+
+    it('should add simulate option when simulateFromAddress is provided', () => {
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_2_0({
+        ...baseInput,
+        simulateFromAddress: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+      });
+
+      expect(result!.simulate).toBeDefined();
+      expect(result!.simulate!.fromAddress).toBe(
+        '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
+      );
     });
   });
 });
