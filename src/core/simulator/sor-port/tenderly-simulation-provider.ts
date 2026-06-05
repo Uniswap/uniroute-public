@@ -377,6 +377,10 @@ export class TenderlySimulator extends Simulator {
     stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     const chainId = this.chainId;
+    // Tag swapsteps-mode simulations so their success rate is sliceable.
+    const swapStepsTags: string[] = swapOptions.universalRouterSwapsteps
+      ? ['swapSteps:true']
+      : [];
 
     if (TENDERLY_NOT_SUPPORTED_CHAINS.includes(chainId)) {
       const msg = `${TENDERLY_NOT_SUPPORTED_CHAINS.toString()} not supported by Tenderly!`;
@@ -539,6 +543,7 @@ export class TenderlySimulator extends Simulator {
             `http_status:${httpStatus}`,
             `status:${httpStatus === 200 ? 'success' : 'failure'}`,
             'simType:SimApi',
+            ...swapStepsTags,
           ],
         });
 
@@ -628,6 +633,7 @@ export class TenderlySimulator extends Simulator {
             `http_status:${httpStatus}`,
             `status:${httpStatus === 200 ? 'success' : 'failure'}`,
             'simType:Node',
+            ...swapStepsTags,
           ],
         });
 

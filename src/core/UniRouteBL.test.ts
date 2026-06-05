@@ -32,6 +32,7 @@ import {TradeType} from '../models/quote/TradeType';
 import {SimpleQuoteSelector} from './quote/selector/SimpleQuoteSelector';
 import {IRoutesRepository} from '../stores/route/IRoutesRepository';
 import {V2Pool} from '../models/pool/V2Pool';
+import {V3Pool} from '../models/pool/V3Pool';
 import {V4Pool} from '../models/pool/V4Pool';
 import {GasEstimateProvider} from './gas/estimator/GasEstimateProvider';
 import {NoGasEstimator} from './gas/estimator/IGasEstimator';
@@ -73,7 +74,13 @@ import {UsdBucket} from '../stores/route/uniroutes/usdBucketUtils';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {HandlerContext} from '@connectrpc/connect';
 import {Trade} from '@uniswap/router-sdk';
-import {Currency, TradeType as SdkTradeType} from '@uniswap/sdk-core';
+import {
+  Currency,
+  CurrencyAmount,
+  Ether,
+  Token,
+  TradeType as SdkTradeType,
+} from '@uniswap/sdk-core';
 import {BigNumber} from '@ethersproject/bignumber';
 import {Protocol} from '../models/pool/Protocol';
 import {Pool} from '../models/pool/Pool';
@@ -311,6 +318,28 @@ class FailingSimulator implements ISimulator {
         estimatedGasUsedInUSD: 0,
         status: SimulationStatus.FAILED,
         description: 'Simulation failed for testing',
+      },
+    };
+  }
+}
+
+// Records the quoteSplit (incl. swapInfo.methodParameters) it was asked to
+// simulate, then returns a successful result.
+class CapturingSimulator implements ISimulator {
+  public captured: QuoteSplit | undefined;
+  async simulate(
+    _chainId: ChainId,
+    _swapOptions: SwapOptionsUniversalRouter,
+    quoteSplit: QuoteSplit
+  ): Promise<QuoteSplit> {
+    this.captured = quoteSplit;
+    return {
+      ...quoteSplit,
+      simulationResult: {
+        estimatedGasUsed: 100000n,
+        estimatedGasUsedInQuoteToken: 0n,
+        estimatedGasUsedInUSD: 0,
+        status: SimulationStatus.SUCCESS,
       },
     };
   }
@@ -1931,6 +1960,279 @@ describe('UniRouteBL', () => {
         '0.00000000123556789'
       );
     });
+
+    it('should suppress portion fields and return raw quote on EXACT_IN when universalRouterSwapsteps is true', async () => {
+      // Same fixture as the EXACT_IN portion test above, but with the
+      // swapsteps flag on. UniRoute should leave amounts raw and not emit
+      // any portion fields — Trading owns the fee math in this mode.
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        portionBips: 50, // 0.5% — would normally be applied
+        portionRecipient: '0x1234567890123456789012345678901234567890',
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterSwapsteps: true,
+      });
+
+      // No portion fields should appear in the response.
+      expect(response.portionBips).toBeUndefined();
+      expect(response.portionRecipient).toBeUndefined();
+      expect(response.portionAmount).toBeUndefined();
+      expect(response.portionAmountDecimals).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjusted).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjustedDecimals).toBeUndefined();
+
+      // Last pool's amountOut is the raw quote (no portion subtraction).
+      expect(response.route[0].pools[0].amountIn).equals('1000000000000000000');
+      expect(response.route[0].pools[0].amountOut).equals('1234567890');
+
+      // quoteAmount is the raw quote; quoteGasAdjusted = 1234567890 - 1000000.
+      expect(response.quoteAmount).equals('1234567890');
+      expect(response.quoteGasAdjusted).equals('1233567890');
+    });
+
+    it('should attach swapSteps to QuoteResponse when universalRouterSwapsteps is true (V2 EXACT_IN)', async () => {
+      // Use a non-native ERC20 input (USDT) so the factory does not need to
+      // resolve native-vs-wrapped sentinels — that orthogonal concern is
+      // covered by the SwapStepsFactory unit tests.
+      const USDT = '0xdAC17F958D2ee523a2206206994597C13D831ec7';
+      const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        tokenInAddress: USDT,
+        tokenOutAddress: USDC,
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              new Address(USDT),
+              new Address(USDC),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890')
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterSwapsteps: true,
+      });
+
+      // swapSteps populated; one V2_SWAP_EXACT_IN step covering the whole input.
+      // Carried as Struct -> toJson() yields the flat {type,...} SDK shape.
+      expect(response.swapSteps).toHaveLength(1);
+      const step = response.swapSteps[0].toJson() as Record<string, unknown>;
+      expect(step.type).toBe('V2_SWAP_EXACT_IN');
+      expect(step.recipient).toBe('0x0000000000000000000000000000000000000002');
+      expect(step.amountIn).toBe('1000000000000000000');
+      expect(step.amountOutMin).toBe('0');
+      expect(step.path).toEqual([USDT, USDC]);
+    });
+
+    it('should leave swapSteps empty when universalRouterSwapsteps is false (or absent)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890')
+        ),
+      ]);
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.swapSteps).toEqual([]);
+    });
+
+    it('should not increase routed amount on EXACT_OUT when universalRouterSwapsteps is true', async () => {
+      // EXACT_OUT normally adds the portion to amountIn before routing. In
+      // swapsteps mode that adjustment must be skipped — the route should
+      // serve the raw user-requested output amount.
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+        portionBips: 50, // 0.5% — would add 5e15 to amountIn under legacy path
+        portionRecipient: '0x1234567890123456789012345678901234567890',
+      });
+
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          BigInt('1234567890'),
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken: BigInt('1000000'),
+          }
+        ),
+      ]);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, request, {
+        universalRouterSwapsteps: true,
+      });
+
+      // No portion fields should appear in the response.
+      expect(response.portionBips).toBeUndefined();
+      expect(response.portionRecipient).toBeUndefined();
+      expect(response.portionAmount).toBeUndefined();
+      expect(response.portionAmountDecimals).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjusted).toBeUndefined();
+      expect(response.quoteGasAndPortionAdjustedDecimals).toBeUndefined();
+
+      // Last pool's amountOut is the raw user-requested amount — not
+      // increased by the portion.
+      expect(response.route[0].pools[0].amountOut).equals(
+        '1000000000000000000'
+      );
+      // quoteAmount is the raw quote.
+      expect(response.quoteAmount).equals('1234567890');
+    });
   });
 
   describe('pool details updates', () => {
@@ -2431,6 +2733,212 @@ describe('UniRouteBL', () => {
       expect(callArgs[7]).toBe(false); // skipPoolsForTokensCache should be false
 
       getRoutesSpy.mockRestore();
+    });
+  });
+
+  describe('swapsteps simulation calldata (Fork A)', () => {
+    const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+    const DAI = '0x6B175474E89094C44Da98b954EedeAC495271d0F';
+    const POOL_A = '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640';
+    const POOL_B = '0x0000000000000000000000000000000000002222';
+    const gasDetails = {
+      gasUse: BigInt('150000'),
+      gasPriceInWei: BigInt('30000000000'),
+      gasCostInWei: BigInt('4500000000000000'),
+      gasCostInEth: 0.0045,
+      gasCostInQuoteToken: BigInt('1000000'),
+    };
+    const simConfig = {
+      ...serviceConfigAsync,
+      Simulation: {...serviceConfigAsync.Simulation, Enabled: true},
+    };
+
+    it('simulates encodeSwaps calldata (not legacy) and tags sim metrics with swapSteps:true', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest, // ETH in, USDC out
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        slippageTolerance: 5,
+      });
+
+      // Native ETH in -> USDC out via a WETH/USDC V3 pool.
+      const singleQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V3, [
+            new V3Pool(
+              new Address(WETH),
+              new Address(baseRequest.tokenOutAddress),
+              500,
+              new Address(POOL_A),
+              1_000_000_000_000n,
+              79228162514264337593543950336n,
+              0n
+            ),
+          ]),
+          BigInt('1000000'),
+          undefined,
+          gasDetails
+        ),
+      ]);
+
+      const tradeMock = {
+        tradeType: SdkTradeType.EXACT_INPUT,
+        inputAmount: CurrencyAmount.fromRawAmount(
+          Ether.onChain(1),
+          baseRequest.amount
+        ),
+        outputAmount: CurrencyAmount.fromRawAmount(
+          new Token(1, baseRequest.tokenOutAddress, 6),
+          '1000000'
+        ),
+        priceImpact: {toFixed: () => '0.01'},
+      } as unknown as Trade<Currency, Currency, SdkTradeType>;
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(() => tradeMock);
+      const legacySpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+      const metricsSpy = vi.spyOn(ctx.metrics, 'count');
+      const capturing = new CapturingSimulator();
+
+      const uniRouteBL = new UniRouteBL(
+        simConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(singleQuote),
+        capturing,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      await uniRouteBL.quote(ctx, request, {
+        universalRouterSwapsteps: true,
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
+
+      // Fork A used encodeSwaps, not the legacy builder.
+      expect(legacySpy).not.toHaveBeenCalled();
+      const calldata = capturing.captured?.swapInfo?.methodParameters?.calldata;
+      expect(calldata?.startsWith('0x')).toBe(true);
+      expect(calldata).not.toBe('0x1234567890abcdef'); // legacy mock value
+      expect(calldata!.length).toBeGreaterThan(20);
+
+      // Comment #3: simulation metrics carry the swapSteps tag.
+      expect(metricsSpy).toHaveBeenCalledWith(
+        expect.stringContaining('SimulationAttempts'),
+        expect.anything(),
+        expect.objectContaining({
+          tags: expect.arrayContaining(['swapSteps:true']),
+        })
+      );
+
+      buildTradeSpy.mockRestore();
+      legacySpy.mockRestore();
+      metricsSpy.mockRestore();
+    });
+
+    it('falls back to legacy calldata when the factory throws (MIXED EXACT_OUT)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        slippageTolerance: 5,
+      });
+
+      // MIXED routes reject EXACT_OUT in the factory -> Fork A must fall back.
+      const mixedQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.MIXED, [
+            new V3Pool(
+              new Address(WETH),
+              new Address(DAI),
+              500,
+              new Address(POOL_A),
+              1_000_000_000_000n,
+              79228162514264337593543950336n,
+              0n
+            ),
+            new V2Pool(
+              new Address(DAI),
+              new Address(baseRequest.tokenOutAddress),
+              new Address(POOL_B),
+              1_000_000_000_000n,
+              1_000_000_000_000n
+            ),
+          ]),
+          BigInt('1000000000000000000'),
+          undefined,
+          gasDetails
+        ),
+      ]);
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const legacySpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const capturing = new CapturingSimulator();
+      const uniRouteBL = new UniRouteBL(
+        simConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(mixedQuote),
+        capturing,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      await uniRouteBL.quote(ctx, request, {
+        universalRouterSwapsteps: true,
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
+
+      // Factory threw -> legacy builder used for the simulated calldata.
+      expect(legacySpy).toHaveBeenCalled();
+      expect(capturing.captured?.swapInfo?.methodParameters?.calldata).toBe(
+        '0x1234567890abcdef'
+      );
+
+      buildTradeSpy.mockRestore();
+      legacySpy.mockRestore();
     });
   });
 

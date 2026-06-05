@@ -114,6 +114,10 @@ export class EthSimulateV1Simulator extends Simulator {
       DEFAULT_ESTIMATE_MULTIPLIER;
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
+      // Tag swapsteps-mode simulations so their success rate is sliceable.
+      const swapStepsTags: string[] = swapOptions.universalRouterSwapsteps
+        ? ['swapSteps:true']
+        : [];
       if (
         quoteSplit.swapInfo!.tokenInIsNative &&
         this.chainId === ChainId.MAINNET
@@ -249,6 +253,7 @@ export class EthSimulateV1Simulator extends Simulator {
               `chain:${this.chainId}`,
               'status:failure',
               'simType:eth_simulateV1',
+              ...swapStepsTags,
             ],
           });
 
@@ -284,6 +289,7 @@ export class EthSimulateV1Simulator extends Simulator {
             `chain:${this.chainId}`,
             'status:success',
             'simType:eth_simulateV1',
+            ...swapStepsTags,
           ],
         });
 
@@ -317,6 +323,7 @@ export class EthSimulateV1Simulator extends Simulator {
             `chain:${this.chainId}`,
             'status:failure',
             'simType:eth_simulateV1',
+            ...swapStepsTags,
           ],
         });
         return {

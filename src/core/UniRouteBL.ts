@@ -70,7 +70,7 @@ import {INoRouteCacheRepository} from '../stores/route/uniroutes/NoRouteCacheRep
 import {QuoteType} from '../models/quote/QuoteType';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {EnumUtils} from '../lib/EnumUtils';
-import {QuoteSplit} from '../models/quote/QuoteSplit';
+import {QuoteSplit, allocateAmounts} from '../models/quote/QuoteSplit';
 import {SwapInfo} from '../models/quote/SwapInfo';
 import {IRouteQuoteAllocator} from './route/RouteQuoteAllocator';
 import {IGasConverter} from './gas/converter/IGasConverter';
@@ -85,6 +85,12 @@ import {
   detectDuplicateResolvedWrites,
 } from './simulator/StateOverrideResolver';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
+import {buildSwapSteps} from './swap/SwapStepsFactory';
+import {
+  buildSwapSpecification,
+  buildSwapStepsMethodParameters,
+} from './swap/SwapStepsBuilder';
+import {Struct} from '@bufbuild/protobuf';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {IQuoteRequestValidator} from './QuoteRequestValidator';
 import {
@@ -119,7 +125,7 @@ import {getProtocolForAggHookAddress} from '../lib/poolCaching/util/hooksAddress
 import {RedisCache} from '@uniswap/lib-cache/redis';
 import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
-import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {SwapStep, UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {
   namespaceFieldsForLogging,
   routeSetCountsForLogging,
@@ -337,6 +343,7 @@ export class UniRouteBL implements IUniRoutedBL {
       portionRecipient,
       requestBlockNumber,
       requestSource,
+      universalRouterSwapsteps,
     } = parsed;
     let amountIn = originalAmountIn;
     const metricTags = [
@@ -471,7 +478,10 @@ export class UniRouteBL implements IUniRoutedBL {
       }
 
       // Do portion adjustments if needed for ExactOut.
-      if (tradeType === TradeType.ExactOut) {
+      // In swapsteps mode Trading owns the fee math and will pass a flat fee
+      // to `encodeSwaps`, so UniRoute leaves `amountIn` raw and routes the
+      // unmodified user-requested amount.
+      if (tradeType === TradeType.ExactOut && !universalRouterSwapsteps) {
         const portionAmount = getPortionAmount(
           fotInDirectSwap,
           externalTransferFailedInDirectSwap,
@@ -752,7 +762,8 @@ export class UniRouteBL implements IUniRoutedBL {
         fineGrainedUsdBucket,
         portionBips,
         portionRecipient,
-        debugInfo
+        debugInfo,
+        universalRouterSwapsteps
       );
     } catch (error) {
       // If request fails, log metric + request details for debugging purposes
@@ -835,6 +846,7 @@ export class UniRouteBL implements IUniRoutedBL {
       portionRecipient: request.portionRecipient,
       requestBlockNumber: request.blockNumber,
       requestSource: options?.requestSource?.toLowerCase() || 'unknown',
+      universalRouterSwapsteps: options?.universalRouterSwapsteps === true,
     };
   }
 
@@ -1557,6 +1569,7 @@ export class UniRouteBL implements IUniRoutedBL {
       requestBlockNumber,
       options?.permit2Disabled ?? false,
       options?.universalRouterVersion,
+      options?.universalRouterSwapsteps === true,
       resolvedStateOverrides
     );
 
@@ -2213,7 +2226,12 @@ export class UniRouteBL implements IUniRoutedBL {
     fineGrainedUsdBucket: UsdBucketFineGrained,
     portionBips?: number,
     portionRecipient?: string,
-    debugInfo?: DebugInfo
+    debugInfo?: DebugInfo,
+    // In swapsteps mode Trading owns fee math, so UniRoute returns raw
+    // amounts and does not populate any portion-related fields. Caller is
+    // responsible for *not* having called `getPortionAmount` against
+    // `amountIn` upstream.
+    universalRouterSwapsteps: boolean = false
   ): Promise<QuoteResponse> {
     const tokenIn = erc20TokenToSdkToken(
       chain.chainId,
@@ -2233,16 +2251,7 @@ export class UniRouteBL implements IUniRoutedBL {
     );
 
     // Calculate amountIn distribution for each quote using original route percentages
-    let remainingAmountIn = amountIn;
-    const quoteAmountsIn = quoteSplit.quotes.map((quote, i) => {
-      if (i === quoteSplit.quotes.length - 1) {
-        // Last quote gets remaining amount to ensure total equals amountIn
-        return remainingAmountIn;
-      }
-      const quoteAmountIn = (amountIn * BigInt(quote.route.percentage)) / 100n;
-      remainingAmountIn -= quoteAmountIn;
-      return quoteAmountIn;
-    });
+    const quoteAmountsIn = allocateAmounts(quoteSplit, amountIn);
 
     const gasCostInQuoteToken = quoteSplit.quotes.reduce(
       (sum, quote) => sum + (quote.gasDetails?.gasCostInQuoteToken ?? 0n),
@@ -2332,6 +2341,18 @@ export class UniRouteBL implements IUniRoutedBL {
       });
     }
 
+    // In swapsteps mode Trading owns fee math; UniRoute returns raw amounts
+    // and no portion fields. Treating the portion inputs as undefined here
+    // makes every downstream helper (`getPortionAmount`,
+    // `getPortionQuoteAmount`, the route-portion-adjusted poolAmountOut)
+    // collapse to a fee-neutral path without per-call branches.
+    const effectivePortionBips = universalRouterSwapsteps
+      ? undefined
+      : portionBips;
+    const effectivePortionRecipient = universalRouterSwapsteps
+      ? undefined
+      : portionRecipient;
+
     // Do portion amount calculations
     const tokenOutAmountIn =
       tradeType === TradeType.ExactOut ? originalAmountIn : totalQuoteAmount;
@@ -2339,8 +2360,8 @@ export class UniRouteBL implements IUniRoutedBL {
       fotInDirectSwap,
       externalTransferFailedInDirectSwap,
       tokenOutAmountIn,
-      portionBips,
-      portionRecipient
+      effectivePortionBips,
+      effectivePortionRecipient
     );
     const portionAmountDecimals = CurrencyAmount.fromRawAmount(
       tokenOut,
@@ -2547,8 +2568,8 @@ export class UniRouteBL implements IUniRoutedBL {
             fotInDirectSwap,
             externalTransferFailedInDirectSwap,
             quote.amount,
-            portionBips,
-            portionRecipient
+            effectivePortionBips,
+            effectivePortionRecipient
           );
           assert(
             tradeType === TradeType.ExactIn
@@ -2615,8 +2636,8 @@ export class UniRouteBL implements IUniRoutedBL {
           fotInDirectSwap,
           externalTransferFailedInDirectSwap,
           quote.amount,
-          portionBips,
-          portionRecipient
+          effectivePortionBips,
+          effectivePortionRecipient
         );
         assert(
           tradeType === TradeType.ExactIn
@@ -2632,6 +2653,50 @@ export class UniRouteBL implements IUniRoutedBL {
 
       return filtered;
     });
+
+    // Build swapSteps when in swapsteps mode. Trading owns fee math here, so
+    // the factory output is fee-neutral by construction. Errors (unsupported
+    // protocol/tradeType combos like MIXED EXACT_OUT) are logged and we fall
+    // back to an empty swapSteps array — the legacy `methodParameters` and
+    // route remain authoritative for those cases.
+    let internalSwapSteps: SwapStep[] = [];
+    if (universalRouterSwapsteps) {
+      try {
+        internalSwapSteps = buildSwapSteps(
+          quoteSplit,
+          tradeType,
+          amountIn,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo
+        );
+      } catch (err) {
+        await ctx.metrics.count(
+          buildMetricKey('buildSwapStepsResponseFailed'),
+          1,
+          {tags: [`chain:${chain.chainId}`]}
+        );
+        ctx.logger.warn('Failed to build swapSteps; returning empty list', {
+          error: err instanceof Error ? err.message : String(err),
+          tradeType,
+        });
+      }
+    }
+    // Emit the SDK SwapStep[] shape verbatim ({type,...}/{action,...}) as
+    // Struct, rather than the proto oneof wrapper.
+    const swapStepStructs = internalSwapSteps.map(step =>
+      Struct.fromJsonString(JSON.stringify(step))
+    );
+
+    // In swapsteps mode Trading owns fee math and exposes portion fields itself,
+    // so UniRoute omits them; otherwise populate the legacy fields.
+    const portionFields = universalRouterSwapsteps
+      ? {}
+      : {
+          portionBips,
+          portionRecipient,
+          portionAmount: portionAmount.toString(),
+          portionAmountDecimals: portionAmountDecimals.toExact(),
+        };
 
     // Finally construct and return the QuoteResponse
     const quoteResponse = new QuoteResponse({
@@ -2661,10 +2726,8 @@ export class UniRouteBL implements IUniRoutedBL {
         calldata: quoteSplit.swapInfo?.methodParameters?.calldata,
         value: quoteSplit.swapInfo?.methodParameters?.value,
       }),
-      portionBips,
-      portionRecipient,
-      portionAmount: portionAmount.toString(),
-      portionAmountDecimals: portionAmountDecimals.toExact(),
+      ...portionFields,
+      swapSteps: swapStepStructs,
       priceImpact: this.formatPriceImpact(quoteSplit.swapInfo?.priceImpact),
       quoteId: ctx.requestId,
       usdBucket: fineGrainedUsdBucket.toString(),
@@ -2778,11 +2841,19 @@ export class UniRouteBL implements IUniRoutedBL {
     blockNumber?: number,
     permit2Disabled = false,
     universalRouterVersion?: UniversalRouterVersion,
+    universalRouterSwapsteps: boolean = false,
     resolvedStateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit | undefined> {
     if (topNQuotes.length === 0) {
       return undefined;
     }
+
+    // Simulation metrics carry a bounded swapSteps tag so swapsteps-mode
+    // simulation success rate is trackable separately.
+    const simulationMetricTags = [
+      ...metricTags,
+      `swapSteps:${universalRouterSwapsteps}`,
+    ];
 
     let bestQuote: QuoteSplit | undefined;
     let simulationAttempts = 0;
@@ -2811,6 +2882,7 @@ export class UniRouteBL implements IUniRoutedBL {
       simulateFromAddress: request.simulateFromAddress,
       permit2Disabled: permit2Disabled,
       tokenInIsNative: tokenInCurrencyInfo.isNative,
+      universalRouterSwapsteps,
     };
 
     if (
@@ -2920,12 +2992,64 @@ export class UniRouteBL implements IUniRoutedBL {
         // Get our method parameters
         let methodParameters: SDKMethodParameters;
         try {
-          methodParameters = buildSwapMethodParameters(
-            ctx,
-            swapOptions!,
-            chain.chainId,
-            trade
-          );
+          if (universalRouterSwapsteps) {
+            try {
+              // Simulate the encodeSwaps calldata Trading will actually submit.
+              const swapSteps = buildSwapSteps(
+                quoteSplit,
+                tradeType,
+                amountIn,
+                tokenInCurrencyInfo,
+                tokenOutCurrencyInfo
+              );
+              const spec = buildSwapSpecification({
+                swapOptions: swapOptions!,
+                inputAmount: trade.inputAmount,
+                outputAmount: trade.outputAmount,
+                tradeType:
+                  tradeType === TradeType.ExactIn
+                    ? SdkTradeType.EXACT_INPUT
+                    : SdkTradeType.EXACT_OUTPUT,
+                chainId: chain.chainId,
+              });
+              methodParameters = buildSwapStepsMethodParameters(
+                swapSteps,
+                spec,
+                chain.chainId
+              );
+            } catch (swapStepsError) {
+              // Factory/encoder error (e.g. MIXED EXACT_OUT): simulate the legacy
+              // calldata so the request still yields a quote. Response swapSteps
+              // are handled independently in populateQuoteResponse.
+              await ctx.metrics.count(
+                buildMetricKey('buildSwapStepsCalldataFailed'),
+                1,
+                {tags: metricTags}
+              );
+              ctx.logger.warn(
+                'swapSteps calldata build failed; simulating legacy calldata instead',
+                {
+                  error:
+                    swapStepsError instanceof Error
+                      ? swapStepsError.message
+                      : String(swapStepsError),
+                }
+              );
+              methodParameters = buildSwapMethodParameters(
+                ctx,
+                swapOptions!,
+                chain.chainId,
+                trade
+              );
+            }
+          } else {
+            methodParameters = buildSwapMethodParameters(
+              ctx,
+              swapOptions!,
+              chain.chainId,
+              trade
+            );
+          }
         } catch (error) {
           // Call to UR might fail if not enough reserves in v2 - continue to next quote
           await ctx.metrics.count(
@@ -3040,7 +3164,7 @@ export class UniRouteBL implements IUniRoutedBL {
           simulationLatency,
           {
             tags: [
-              ...metricTags,
+              ...simulationMetricTags,
               `simulationStatus:${SimulationStatus[simulationStatus]}`,
             ],
           }
@@ -3131,7 +3255,7 @@ export class UniRouteBL implements IUniRoutedBL {
       };
 
       await ctx.metrics.count(buildMetricKey('SimulationSkipped'), 1, {
-        tags: metricTags,
+        tags: simulationMetricTags,
       });
     }
 
@@ -3140,21 +3264,21 @@ export class UniRouteBL implements IUniRoutedBL {
       buildMetricKey('SimulationAttempts'),
       simulationAttempts,
       {
-        tags: metricTags,
+        tags: simulationMetricTags,
       }
     );
     await ctx.metrics.count(
       buildMetricKey('SimulationSuccesses'),
       simulationSuccesses,
       {
-        tags: metricTags,
+        tags: simulationMetricTags,
       }
     );
     await ctx.metrics.count(
       buildMetricKey('SimulationFailures'),
       simulationFailures,
       {
-        tags: metricTags,
+        tags: simulationMetricTags,
       }
     );
 

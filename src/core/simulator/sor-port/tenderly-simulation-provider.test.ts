@@ -1398,6 +1398,39 @@ describe('tenderly-simulation-provider', () => {
         );
       });
 
+      it('tags UniRpcV2.Simulation.Request with swapSteps:true in swapsteps mode', async () => {
+        const mockResult = [
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '150000', status: '0x1'},
+            ],
+          },
+        ];
+        vi.mocked(provider.send).mockResolvedValue(mockResult);
+
+        await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          {...swapOptions, universalRouterSwapsteps: true},
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          'UniRpcV2.Simulation.Request',
+          1,
+          {
+            tags: [
+              'chain:1',
+              'status:success',
+              'simType:eth_simulateV1',
+              'swapSteps:true',
+            ],
+          }
+        );
+      });
+
       it('should use custom gas multiplier when provided', async () => {
         const customSimulator = new EthSimulateV1Simulator(
           ChainId.MAINNET,

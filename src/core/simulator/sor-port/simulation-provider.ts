@@ -41,6 +41,8 @@ export enum BalanceOverrideOutcome {
 export type SwapOptionsUniversalRouter = UniversalRouterSwapOptions & {
   type: SwapType.UNIVERSAL_ROUTER;
   simulate?: {fromAddress: string};
+  // Carried so the simulator providers can tag metrics for swapsteps mode.
+  universalRouterSwapsteps?: boolean;
 };
 
 export type SimulationResult = {

@@ -32,6 +32,11 @@ export type SwapOptionsUniversalRouterInput = {
   permitSigDeadline?: string;
   simulateFromAddress?: string;
   permit2Disabled?: boolean;
+  // When true, suppress `fee`/`flatFee` on the legacy router options so the
+  // fallback `swapCallParameters` calldata is fee-neutral. Trading owns fee
+  // math in the swapsteps flow and will pass a `Fee`/`FlatFee` to
+  // `SwapRouter.encodeSwaps` separately.
+  universalRouterSwapsteps?: boolean;
 };
 
 function isSwapProxyDeployed(chainId: ChainId): boolean {
@@ -91,18 +96,24 @@ export class SwapOptionsFactory {
       simulateFromAddress,
       permit2Disabled,
       tokenInIsNative,
+      universalRouterSwapsteps,
     }: SwapOptionsUniversalRouterInput
   ): SwapOptionsUniversalRouter | undefined {
     if (!slippageTolerance) {
       return undefined;
     }
 
-    const allFeeOptions = populateFeeOptions(
-      tradeType,
-      portionBips,
-      portionRecipient,
-      computePortionAmount(amountIn, portionBips)
-    );
+    // Trading owns fee math in swapsteps mode; producing a fee-neutral
+    // `swapCallParameters` here keeps legacy and swapsteps consumers aligned
+    // until the SDK `encodeSwaps` path lands.
+    const allFeeOptions = universalRouterSwapsteps
+      ? undefined
+      : populateFeeOptions(
+          tradeType,
+          portionBips,
+          portionRecipient,
+          computePortionAmount(amountIn, portionBips)
+        );
 
     // Permit2 fallback: native input (ETH can't be approved) and chains without SwapProxy.
     const useApproveProxy =
@@ -120,6 +131,7 @@ export class SwapOptionsFactory {
       tokenTransferMode: useApproveProxy
         ? TokenTransferMode.ApproveProxy
         : TokenTransferMode.Permit2,
+      universalRouterSwapsteps,
       ...allFeeOptions,
     };
 

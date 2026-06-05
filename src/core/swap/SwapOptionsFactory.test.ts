@@ -232,7 +232,9 @@ describe('SwapOptionsFactory', () => {
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
 
       expect(result).toBeDefined();
-      // The fee options should be populated based on portionUtils
+      // EXACT_INPUT populates `fee` (percent-based) when portion is provided.
+      expect(result!.fee).toBeDefined();
+      expect(result!.flatFee).toBeUndefined();
     });
 
     it('should handle portion fees for EXACT_OUTPUT', () => {
@@ -246,6 +248,41 @@ describe('SwapOptionsFactory', () => {
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
 
       expect(result).toBeDefined();
+      // EXACT_OUTPUT populates `flatFee` (absolute-amount-based) when portion is provided.
+      expect(result!.flatFee).toBeDefined();
+      expect(result!.fee).toBeUndefined();
+    });
+
+    it('should suppress fee for EXACT_INPUT when universalRouterSwapsteps is true', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        tradeType: TradeType.ExactIn,
+        portionBips: 100,
+        portionRecipient: '0xFeeRecipient123456789012345678901234567890',
+        universalRouterSwapsteps: true,
+      };
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
+
+      expect(result).toBeDefined();
+      expect(result!.fee).toBeUndefined();
+      expect(result!.flatFee).toBeUndefined();
+    });
+
+    it('should suppress flatFee for EXACT_OUTPUT when universalRouterSwapsteps is true', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        tradeType: TradeType.ExactOut,
+        portionBips: 50,
+        portionRecipient: '0xFeeRecipient123456789012345678901234567890',
+        universalRouterSwapsteps: true,
+      };
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_0(input);
+
+      expect(result).toBeDefined();
+      expect(result!.fee).toBeUndefined();
+      expect(result!.flatFee).toBeUndefined();
     });
 
     it('should work for different chain IDs', () => {
