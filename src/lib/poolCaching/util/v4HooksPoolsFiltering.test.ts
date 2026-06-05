@@ -1389,3 +1389,178 @@ describe('v4HooksPoolsFiltering', () => {
     });
   });
 });
+
+// Permissioned-hook (Superstate) pools are admitted by their hook, not by TVL.
+// An adapter↔adapter pool (e.g. PA1/PA2) holds no whitelisted base token, so its
+// tvlETH is ~0 and would otherwise be dropped — this guards that it survives.
+describe('permissioned-hook pools (Superstate PA↔PA)', () => {
+  // Sepolia FINAL permissioned hook + its adapters (PA1/PA2), from the shared
+  // registry @uniswap/lib-sharedconfig/permissionedTokens.
+  const SEPOLIA_PERMISSIONED_HOOK =
+    '0xeade493b075cee00e6a832af758b7c76793fe880';
+  const PA1 = '0xef1dc9abd8a7e073cfdda453c775e7ce24e4a4c8';
+  const PA2 = '0x721c18b87340c11cd148624c6c5aad2a95aa6168';
+
+  const createPaPool = (overrides: Partial<V4SubgraphPool> = {}) =>
+    createPool({
+      id: '0xcbdf68ff01bf24f535523e274165a1f11ffea6306f383200b49eb222d8bf2521',
+      hooks: SEPOLIA_PERMISSIONED_HOOK,
+      tvlETH: 0,
+      tvlUSD: 0,
+      token0: {id: PA1, symbol: 'PA1', name: 'Perm Token 1', decimals: '18'},
+      token1: {id: PA2, symbol: 'PA2', name: 'Perm Token 2', decimals: '18'},
+      ...overrides,
+    });
+
+  it('keeps a PA↔PA pool with tvlETH = 0 (regression: direct permissioned pool)', () => {
+    const paPool = createPaPool();
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [paPool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(
+      paPool.id.toLowerCase()
+    );
+  });
+
+  it('retains an owned permissioned pool though its hook is absent from HOOKS_ADDRESSES_ALLOWLIST', () => {
+    expect(
+      (HOOKS_ADDRESSES_ALLOWLIST[ChainId.SEPOLIA] ?? []).map(h =>
+        h.toLowerCase()
+      )
+    ).not.toContain(SEPOLIA_PERMISSIONED_HOOK);
+
+    // Even alongside a higher-TVL vanilla pool in the same fee group, the
+    // zero-TVL owned permissioned pool is still retained.
+    const vanilla = createPool({
+      id: '0x' + 'a'.repeat(63) + '1',
+      hooks: ADDRESS_ZERO,
+      token0: {id: PA1, symbol: 'PA1', name: 'Perm Token 1', decimals: '18'},
+      token1: {id: PA2, symbol: 'PA2', name: 'Perm Token 2', decimals: '18'},
+      tvlETH: 100,
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [createPaPool(), vanilla],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(
+      '0xcbdf68ff01bf24f535523e274165a1f11ffea6306f383200b49eb222d8bf2521'
+    );
+  });
+
+  // Trust-boundary regression: a pool initialized under a permissioned hook but
+  // whose tokens are NOT adapters owned by that hook must NOT be persisted —
+  // the no-TVL-floor query could otherwise ingest arbitrary pools. Mirrors the
+  // route-level hasAdmissibleAdapters check.
+  it('drops a permissioned-hook pool whose tokens are not registered adapters', () => {
+    const unownedPool = createPool({
+      id: '0x' + 'b'.repeat(63) + '2',
+      hooks: SEPOLIA_PERMISSIONED_HOOK,
+      tvlETH: 0,
+      tvlUSD: 0,
+      // Neither token is a registered adapter for this hook.
+      token0: {
+        id: '0x000000000000000000000000000000000000dea1',
+        symbol: 'X',
+        name: 'NotAdapterX',
+        decimals: '18',
+      },
+      token1: {
+        id: '0x000000000000000000000000000000000000dea2',
+        symbol: 'Y',
+        name: 'NotAdapterY',
+        decimals: '18',
+      },
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [unownedPool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).not.toContain(
+      unownedPool.id.toLowerCase()
+    );
+  });
+
+  // Bounded-admission regression (Codex): an owned adapter paired with an
+  // ARBITRARY non-adapter, non-major token must NOT be persisted — otherwise an
+  // actor could pair a registered adapter with unlimited junk tokens under the
+  // public hook and bloat the snapshot.
+  it('drops an owned-adapter pool paired with an arbitrary non-major token', () => {
+    const adapterJunkPool = createPool({
+      id: '0x' + 'd'.repeat(63) + '4',
+      hooks: SEPOLIA_PERMISSIONED_HOOK,
+      tvlETH: 0,
+      tvlUSD: 0,
+      // PA1 is an owned adapter, but the counter-token is arbitrary junk.
+      token0: {id: PA1, symbol: 'PA1', name: 'Perm Token 1', decimals: '18'},
+      token1: {
+        id: '0x000000000000000000000000000000000000beef',
+        symbol: 'JUNK',
+        name: 'Junk',
+        decimals: '18',
+      },
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [adapterJunkPool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).not.toContain(
+      adapterJunkPool.id.toLowerCase()
+    );
+  });
+
+  // PoolKey-bound regression (Codex): an owned adapter + major token at a
+  // NONSTANDARD fee/tickSpacing must not be admitted — bounds the PoolKey space
+  // to the canonical V4 set quickRoute can route, so it can't be inflated.
+  it('drops an owned permissioned pool with a nonstandard fee/tickSpacing', () => {
+    const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14';
+    const nonstandardKeyPool = createPool({
+      id: '0x' + 'e'.repeat(63) + '5',
+      hooks: SEPOLIA_PERMISSIONED_HOOK,
+      feeTier: '1234', // not in {100, 500, 3000, 10000}
+      tickSpacing: '7', // not canonical
+      tvlETH: 0,
+      tvlUSD: 0,
+      token0: {id: PA1, symbol: 'PA1', name: 'Perm Token 1', decimals: '18'},
+      token1: {id: WETH_SEPOLIA, symbol: 'WETH', name: 'WETH', decimals: '18'},
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [nonstandardKeyPool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).not.toContain(
+      nonstandardKeyPool.id.toLowerCase()
+    );
+  });
+
+  it('keeps an owned PA↔WETH permissioned pool (single adapter endpoint)', () => {
+    const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14';
+    const paWethPool = createPool({
+      id: '0x' + 'c'.repeat(63) + '3',
+      hooks: SEPOLIA_PERMISSIONED_HOOK,
+      tvlETH: 0,
+      tvlUSD: 0,
+      token0: {id: PA1, symbol: 'PA1', name: 'Perm Token 1', decimals: '18'},
+      token1: {id: WETH_SEPOLIA, symbol: 'WETH', name: 'WETH', decimals: '18'},
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [paWethPool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(
+      paWethPool.id.toLowerCase()
+    );
+  });
+});

@@ -5,6 +5,11 @@
 
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId, Currency, Token} from '@uniswap/sdk-core';
+import {
+  getPermissionedAdapterTokens,
+  getPermissionedHookAddresses,
+} from '@uniswap/lib-sharedconfig/permissionedTokens';
+import {getMajorTokens} from '../util/majorTokens';
 import retry from 'async-retry';
 import Timeout from 'await-timeout';
 import {gql, GraphQLClient} from 'graphql-request';
@@ -137,6 +142,66 @@ export abstract class SubgraphProvider<
       }.`
     );
 
+    // Permissioned-hook (e.g. Superstate) V4 pools are admitted by their hook,
+    // not by tracked liquidity. An adapter↔adapter pool (e.g. PA1/PA2) holds no
+    // whitelisted base token, so its totalValueLockedETH is structurally ~0 and
+    // it can never clear V4_MIN_TVL_ETH — the floor would drop it from the
+    // snapshot, making it unroutable. So fetch these by hook with no TVL floor.
+    // But permissioned hook addresses are PUBLIC: an unconstrained fetch is
+    // externally bloateable (anyone can initialize pools under the hook). Bound
+    // the fetch to the SAME finite pair set the cache admits: BOTH sides must be
+    // a "known" token (a registered adapter OR a major/base token) and one side
+    // must be a registered adapter. Two split queries (one per adapter side;
+    // GraphQL `where` is AND-only) — a PA1/arbitrary-token pool matches neither,
+    // so junk is never paged. feeTier/tickSpacing are also constrained to the
+    // canonical V4 set so the PoolKey space is fully finite (and matches what
+    // quickRoute probes). Per-hook adapter OWNERSHIP is enforced downstream in
+    // v4HooksPoolsFiltering. Sourced from the shared registry + major tokens.
+    const permissionedHooks =
+      this.protocol === Protocol.V4
+        ? getPermissionedHookAddresses(this.chainId)
+        : [];
+    const permissionedAdapters =
+      this.protocol === Protocol.V4
+        ? Array.from(getPermissionedAdapterTokens(this.chainId))
+        : [];
+    // Known counter-tokens = adapters ∪ chain major/base tokens (all lowercased).
+    const knownTokens =
+      this.protocol === Protocol.V4
+        ? Array.from(
+            new Set([...permissionedAdapters, ...getMajorTokens(this.chainId)])
+          )
+        : [];
+    const includePermissionedQuery =
+      permissionedHooks.length > 0 && permissionedAdapters.length > 0;
+    const permissionedHookQuery = (adapterField: 'token0_in' | 'token1_in') => {
+      const knownField =
+        adapterField === 'token0_in' ? 'token1_in' : 'token0_in';
+      return {
+        name: `V4 permissioned hook pools ${adapterField}`,
+        query: gql`
+          query getV4PermissionedHookPools($pageSize: Int!, $id: String, $permissionedHooks: [String!]!, $permissionedAdapters: [String!]!, $knownTokens: [String!]!) {
+            pools(
+              first: $pageSize
+              ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
+              where: {
+                id_gt: $id,
+                liquidity_gt: "0",
+                hooks_in: $permissionedHooks,
+                ${adapterField}: $permissionedAdapters,
+                ${knownField}: $knownTokens,
+                feeTier_in: ["100", "500", "3000", "10000"],
+                tickSpacing_in: [1, 10, 60, 200]
+              }
+            ) {
+              ${this.getPoolFields()}
+            }
+          }
+        `,
+        variables: {permissionedHooks, permissionedAdapters, knownTokens},
+      };
+    };
+
     // Define separate queries for each filtering condition
     const queries = [
       // 1. Pools with high tracked ETH (for both V3 and V4)
@@ -208,6 +273,17 @@ export abstract class SubgraphProvider<
         `,
               variables: {},
             },
+          ]
+        : []),
+      // 4. V4: Permissioned-hook pools regardless of TVL, bounded to registered
+      // adapter endpoints (token0 OR token1) so a public hooks_in-only fetch
+      // can't be bloated by arbitrary pools initialized under the hook. Two
+      // split queries because GraphQL `where` is AND-only. Skipped on chains
+      // with no permissioned hooks/adapters configured.
+      ...(includePermissionedQuery
+        ? [
+            permissionedHookQuery('token0_in'),
+            permissionedHookQuery('token1_in'),
           ]
         : []),
     ];

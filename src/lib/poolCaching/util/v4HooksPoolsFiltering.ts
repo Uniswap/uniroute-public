@@ -3,6 +3,10 @@
  */
 
 import {Hook, HookOptions} from '@uniswap/v4-sdk';
+import {
+  getAdapterHookConfig,
+  getPermissionedHookAddresses,
+} from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {HOOKS_ADDRESSES_ALLOWLIST} from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {ChainId, Currency, Token} from '@uniswap/sdk-core';
@@ -18,6 +22,16 @@ import {getMajorTokens, isMajorPair} from './majorTokens';
 
 type V4PoolGroupingKey = string;
 const TOP_GROUPED_V4_POOLS = 10;
+
+// Canonical V4 feeTier → tickSpacing pairs (mirrors models V4FeeAmounts/
+// V4TickSpacing and what quickRoute probes). Used to bound permissioned-pool
+// PoolKeys to a finite, routable set.
+const CANONICAL_V4_FEE_TICK_SPACINGS: Record<string, string> = {
+  '100': '1',
+  '500': '10',
+  '3000': '60',
+  '10000': '200',
+};
 
 function convertV4PoolToGroupingKey(pool: V4SubgraphPool): V4PoolGroupingKey {
   return pool.token0.id.concat(pool.token1.id).concat(pool.feeTier);
@@ -148,6 +162,46 @@ export function v4HooksPoolsFiltering(
   );
   const majorTokens = getMajorTokens(chainId);
 
+  // Permissioned-hook (e.g. Superstate) pools are admitted by their hook, not by
+  // TVL — an adapter↔adapter pool's tvlETH is ~0 and would lose the top-N race,
+  // so admissible ones are appended deterministically below rather than via the
+  // TVL queues. The cache MUST apply the same trust boundary as the route path
+  // (hasAdmissibleAdapters): persist a permissioned-hook pool only when at least
+  // one endpoint is an adapter OWNED by that hook. Without this, the no-TVL-floor
+  // permissioned subgraph query could ingest an unbounded set of arbitrary pools
+  // initialized under a permissioned hook and bloat the snapshot.
+  const permissionedHookAddresses = new Set(
+    getPermissionedHookAddresses(chainId).map(hook => hook.toLowerCase())
+  );
+  const isOwnedAdapter = (token: string, hookAddress: string): boolean =>
+    getAdapterHookConfig(chainId, token)?.deployment.hookAddress ===
+    hookAddress;
+  // A permissioned-hook pool is admissible only if its PoolKey is fully bounded:
+  //   - hook ∈ permissioned registry,
+  //   - feeTier/tickSpacing ∈ the canonical V4 set (what quickRoute probes),
+  //   - BOTH endpoints are "known" (an adapter owned by THIS hook, or a
+  //     base/major token), with at least one an owned adapter.
+  // This bounds the admitted set to ownedAdapters × (ownedAdapters ∪ majors) ×
+  // canonical(fee,tickSpacing) — finite and attacker-uninflatable — so the
+  // no-TVL-floor subgraph query cannot bloat the snapshot. Partner base tokens
+  // not in the default majors are added via V4_HOOKS_EXTRA_MAJOR_TOKENS (config).
+  const isAdmissiblePermissionedPool = (pool: V4SubgraphPool): boolean => {
+    const hookAddress = pool.hooks.toLowerCase();
+    if (!permissionedHookAddresses.has(hookAddress)) return false;
+    // Canonical V4 (feeTier → tickSpacing) pairs only; reject nonstandard keys.
+    if (CANONICAL_V4_FEE_TICK_SPACINGS[pool.feeTier] !== pool.tickSpacing) {
+      return false;
+    }
+    const token0 = pool.token0.id.toLowerCase();
+    const token1 = pool.token1.id.toLowerCase();
+    const token0Owned = isOwnedAdapter(token0, hookAddress);
+    const token1Owned = isOwnedAdapter(token1, hookAddress);
+    if (!token0Owned && !token1Owned) return false;
+    const token0Known = token0Owned || majorTokens.has(token0);
+    const token1Known = token1Owned || majorTokens.has(token1);
+    return token0Known && token1Known;
+  };
+
   // Auto-allowlisted: non-denylisted, non-zero-address hooks on non-major pairs
   // without custom accounting. These get their own separate top-N TVL queue
   // (parallel to routable hooks) to bound pool cache file size.
@@ -263,6 +317,12 @@ export function v4HooksPoolsFiltering(
       return;
     }
 
+    // Permissioned-hook pools bypass the TVL-bounded queues; they are admitted
+    // (ownership-gated) via the deterministic append below.
+    if (permissionedHookAddresses.has(pool.hooks.toLowerCase())) {
+      return;
+    }
+
     if (isHooksPoolRoutable(pool, chainId, logger, metric)) {
       addPoolToQueue(pool, v4PoolsByTokenPairsAndFees);
     } else if (isAutoAllowlistedHook(pool)) {
@@ -297,13 +357,41 @@ export function v4HooksPoolsFiltering(
       const hookAddress = pool.hooks.toLowerCase();
       return (
         allowlistedHooksAddresses.has(hookAddress) &&
+        // Permissioned hooks take the dedicated ownership-gated append below;
+        // exclude them here so a hook accidentally in both lists isn't doubled.
+        !permissionedHookAddresses.has(hookAddress) &&
         !denylistedHooksAddresses.has(hookAddress) &&
         !selectedPoolIds.has(pool.id.toLowerCase())
       );
     }
   );
 
+  // Append permissioned-hook pools that pass the adapter-ownership check, and
+  // count the ones rejected for ownership so unowned pools under a permissioned
+  // hook never reach the snapshot (the route path still enforces the endpoint
+  // check at quote time).
+  let rejectedUnownedPermissionedPools = 0;
+  const ownedPermissionedHooksPools = pools.filter((pool: V4SubgraphPool) => {
+    const hookAddress = pool.hooks.toLowerCase();
+    if (!permissionedHookAddresses.has(hookAddress)) return false;
+    if (denylistedHooksAddresses.has(hookAddress)) return false;
+    if (selectedPoolIds.has(pool.id.toLowerCase())) return false;
+    if (!isAdmissiblePermissionedPool(pool)) {
+      rejectedUnownedPermissionedPools += 1;
+      return false;
+    }
+    return true;
+  });
+  if (rejectedUnownedPermissionedPools > 0) {
+    metric?.putMetric(
+      'v4HooksPoolsFiltering.permissionedHookPoolRejected.unowned',
+      rejectedUnownedPermissionedPools,
+      MetricLoggerUnit.Count
+    );
+  }
+
   return topPoolsByTvl
     .concat(topAutoAllowlistedPoolsByTvl)
-    .concat(explicitlyAllowlistedHooksPools);
+    .concat(explicitlyAllowlistedHooksPools)
+    .concat(ownedPermissionedHooksPools);
 }
