@@ -17,6 +17,8 @@ import {Protocol} from '../../../models/pool/Protocol';
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
+// ARC is not yet in sdk-core — define locally until sdk-core is upgraded
+const CHAIN_ID_ARC = 5042 as ChainId;
 // MEGAETH is not in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_MEGAETH = 4326 as ChainId;
 // ROBINHOOD is not in sdk-core — define locally until sdk-core is upgraded
@@ -665,4 +667,5 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [CHAIN_ID_MEGAETH]: [ADDRESS_ZERO, TEST_HOOK_ON_MEGAETH],
   [CHAIN_ID_ROBINHOOD]: [ADDRESS_ZERO],
   [CHAIN_ID_TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
+  [CHAIN_ID_ARC]: [ADDRESS_ZERO],
 };

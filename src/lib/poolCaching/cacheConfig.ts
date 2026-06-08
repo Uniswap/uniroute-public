@@ -13,6 +13,8 @@ const CHAIN_ID_TEMPO = 4217 as ChainId;
 const CHAIN_ID_MEGAETH = 4326 as ChainId;
 // ROBINHOOD is not in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
+// ARC is not in sdk-core — define locally until sdk-core is upgraded
+const CHAIN_ID_ARC = 5042 as ChainId;
 
 import {
   V2SubgraphProvider,
@@ -73,6 +75,8 @@ export const v4SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-megaeth-mainnet/prod/gn`;
     case CHAIN_ID_ROBINHOOD:
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-robinhood-mainnet/prod/gn`;
+    case CHAIN_ID_ARC:
+      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-arc-mainnet/prod/gn`;
     default:
       return undefined;
   }
@@ -122,6 +126,8 @@ export const v3SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-megaeth-mainnet/prod/gn`;
     case CHAIN_ID_ROBINHOOD:
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-robinhood-mainnet/prod/gn`;
+    case CHAIN_ID_ARC:
+      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-arc-mainnet/prod/gn`;
     default:
       return undefined;
   }
@@ -167,6 +173,8 @@ export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-megaeth-mainnet/prod/gn`;
     case CHAIN_ID_ROBINHOOD:
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-robinhood-mainnet/prod/gn`;
+    case CHAIN_ID_ARC:
+      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-arc-mainnet/prod/gn`;
     default:
       return undefined;
   }
@@ -548,6 +556,23 @@ export function createChainProtocols(
         metric
       ),
     },
+    {
+      protocol: Protocol.V3,
+      chainId: CHAIN_ID_ARC,
+      timeout: 90000,
+      provider: new V3SubgraphProvider(
+        CHAIN_ID_ARC,
+        3,
+        90000,
+        true,
+        v3TrackedEthThreshold,
+        v3UntrackedUsdThreshold,
+        v3SubgraphUrlOverride(CHAIN_ID_ARC),
+        undefined,
+        logger,
+        metric
+      ),
+    },
     // V2
     {
       protocol: Protocol.V2,
@@ -869,6 +894,24 @@ export function createChainProtocols(
         v2UntrackedUsdThreshold,
         v2SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
         process.env.GOLD_SKY_BEARER_TOKEN,
+        logger,
+        metric
+      ),
+    },
+    {
+      protocol: Protocol.V2,
+      chainId: CHAIN_ID_ARC,
+      timeout: 90000,
+      provider: new V2SubgraphProvider(
+        CHAIN_ID_ARC,
+        3,
+        90000,
+        true,
+        1000,
+        v2TrackedEthThreshold,
+        v2UntrackedUsdThreshold,
+        v2SubgraphUrlOverride(CHAIN_ID_ARC),
+        undefined,
         logger,
         metric
       ),
@@ -1254,6 +1297,23 @@ export function createChainProtocols(
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
         process.env.GOLD_SKY_BEARER_TOKEN,
+        logger,
+        metric
+      ),
+    },
+    {
+      protocol: Protocol.V4,
+      chainId: CHAIN_ID_ARC,
+      timeout: 90000,
+      provider: new V4SubgraphProvider(
+        CHAIN_ID_ARC,
+        3,
+        90000,
+        true,
+        v4TrackedEthThreshold,
+        v4UntrackedUsdThreshold,
+        v4SubgraphUrlOverride(CHAIN_ID_ARC),
+        undefined,
         logger,
         metric
       ),

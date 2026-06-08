@@ -187,6 +187,7 @@ export const TENDERLY_NOT_SUPPORTED_CHAINS = [
   ChainId.BNB,
   ChainId.ZORA,
   ChainId.MONAD_TESTNET,
+  ChainId.ARC,
   ChainId.ROBINHOOD,
 ];
 

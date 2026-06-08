@@ -51,6 +51,7 @@ import {
   USDT_MONAD_TESTNET,
   USDT_OPTIMISM,
   PATHUSD_TEMPO,
+  USDC_ARC,
   getGasToken,
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
@@ -98,6 +99,7 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.XLAYER]: [USDC_XLAYER],
   [ChainId.TEMPO]: [PATHUSD_TEMPO],
   [ChainId.LINEA]: [USDC_LINEA],
+  [ChainId.ARC]: [USDC_ARC],
   [ChainId.MEGAETH]: [USDM_MEGAETH],
   [ChainId.ROBINHOOD]: [USDG_ROBINHOOD],
 };

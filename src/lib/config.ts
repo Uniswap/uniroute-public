@@ -55,6 +55,7 @@ export enum ChainId {
   XLAYER = __PLACEHOLDER__,
   TEMPO = __PLACEHOLDER__,
   LINEA = __PLACEHOLDER__,
+  ARC = __PLACEHOLDER__,
   MEGAETH = __PLACEHOLDER__,
   ROBINHOOD = __PLACEHOLDER__,
 }
@@ -444,6 +445,7 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.ARC,
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
 ];
@@ -467,6 +469,7 @@ export const V2_SUPPORTED = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.ARC,
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
 ];
@@ -492,6 +495,7 @@ export const V4_SUPPORTED = [
   ChainId.XLAYER,
   ChainId.TEMPO,
   ChainId.LINEA,
+  ChainId.ARC,
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
 ];
@@ -592,6 +596,7 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.XLAYER]: {...defaultPoolSelectionConfig},
   [ChainId.TEMPO]: {...defaultPoolSelectionConfig},
   [ChainId.LINEA]: {...defaultPoolSelectionConfig},
+  [ChainId.ARC]: {...defaultPoolSelectionConfig},
   [ChainId.MEGAETH]: {...defaultPoolSelectionConfig},
   [ChainId.ROBINHOOD]: {...defaultPoolSelectionConfig},
 };
@@ -622,6 +627,7 @@ export const aggHooksPoolSelectionPerChainConfig: Record<
   [ChainId.XLAYER]: {...aggHooksPoolSelectionConfig},
   [ChainId.TEMPO]: {...aggHooksPoolSelectionConfig},
   [ChainId.LINEA]: {...aggHooksPoolSelectionConfig},
+  [ChainId.ARC]: {...aggHooksPoolSelectionConfig},
   [ChainId.MEGAETH]: {...aggHooksPoolSelectionConfig},
   [ChainId.ROBINHOOD]: {...aggHooksPoolSelectionConfig},
 };
@@ -653,6 +659,7 @@ export const needsGasPriceFetchingMapping: Record<ChainId, Set<string>> = {
   [ChainId.XLAYER]: new Set<string>(),
   [ChainId.TEMPO]: new Set<string>(),
   [ChainId.LINEA]: new Set<string>(),
+  [ChainId.ARC]: new Set<string>(),
   [ChainId.MEGAETH]: new Set<string>(),
   [ChainId.ROBINHOOD]: new Set<string>(),
 };
