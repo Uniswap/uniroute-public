@@ -253,6 +253,40 @@ describe('SwapOptionsFactory', () => {
       expect(result!.fee).toBeUndefined();
     });
 
+    it('should handle fractional portion bps for EXACT_INPUT (UR 2.1.1)', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        tradeType: TradeType.ExactIn,
+        portionBips: 12.5, // partial fee bps (ROUTE-1329)
+        portionRecipient: '0xFeeRecipient123456789012345678901234567890',
+      };
+
+      // Must not throw `RangeError: ... cannot be converted to a BigInt`.
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(input);
+
+      expect(result).toBeDefined();
+      expect(result!.fee).toBeDefined();
+      expect(result!.flatFee).toBeUndefined();
+    });
+
+    it('should handle fractional portion bps for EXACT_OUTPUT (UR 2.1.1)', () => {
+      const input: SwapOptionsUniversalRouterInput = {
+        ...baseInput,
+        tradeType: TradeType.ExactOut,
+        portionBips: 12.5, // partial fee bps (ROUTE-1329)
+        portionRecipient: '0xFeeRecipient123456789012345678901234567890',
+      };
+
+      // computePortionAmount must not throw on the fractional bips.
+      const result =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(input);
+
+      expect(result).toBeDefined();
+      expect(result!.flatFee).toBeDefined();
+      expect(result!.fee).toBeUndefined();
+    });
+
     it('should suppress fee for EXACT_INPUT when universalRouterSwapsteps is true', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,
