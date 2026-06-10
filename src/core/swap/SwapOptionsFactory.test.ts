@@ -631,5 +631,42 @@ describe('SwapOptionsFactory', () => {
         '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'
       );
     });
+
+    it('maps a permissioned adapter input to its underlying sec-token in the permit', () => {
+      // Sepolia PA1 adapter → Superstate TestToken underlying, per the
+      // shared permissioned-token registry.
+      const PA1_ADAPTER = '0xef1dc9abd8a7e073cfdda453c775e7ce24e4a4c8';
+      const PA1_UNDERLYING = '0xbf56488c857a881ae7e3bed27cf99c10a7ab7e50';
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_2_0({
+        ...baseInput,
+        chainId: ChainId.SEPOLIA,
+        tokenInWrappedAddress: PA1_ADAPTER,
+        permitSignature: '0x1234567890abcdef',
+        permitNonce: '1',
+        permitExpiration: '1700000000',
+        permitAmount: '1000000000000000000',
+        permitSigDeadline: '1700001000',
+      });
+
+      expect(result!.inputTokenPermit!.details.token).toBe(PA1_UNDERLYING);
+    });
+
+    it('leaves a non-permissioned input token unchanged in the permit', () => {
+      const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+
+      const result = SwapOptionsFactory.createUniversalRouterOptions_2_2_0({
+        ...baseInput,
+        chainId: ChainId.SEPOLIA,
+        tokenInWrappedAddress: WETH,
+        permitSignature: '0x1234567890abcdef',
+        permitNonce: '1',
+        permitExpiration: '1700000000',
+        permitAmount: '1000000000000000000',
+        permitSigDeadline: '1700001000',
+      });
+
+      expect(result!.inputTokenPermit!.details.token).toBe(WETH);
+    });
   });
 });

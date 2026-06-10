@@ -17,6 +17,7 @@ import {ChainId} from '../../../lib/config';
 import {CurrencyInfo} from '../../../models/currency/CurrencyInfo';
 import {SimulationStatus} from '../ISimulator';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
+import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
 
 export enum SwapType {
   UNIVERSAL_ROUTER,
@@ -294,7 +295,12 @@ export abstract class Simulator {
     provider: JsonRpcProvider,
     ctx: Context
   ): Promise<boolean> {
-    const tokenContract = ERC20__factory.connect(tokenInAddress, provider);
+    // Any permit2 approval calls must be on the underlying permissioned token not the adapter token
+    const approvalToken = getUnderlyingPermissionedTokenOrSelf(
+      tokenInAddress,
+      this.chainId
+    );
+    const tokenContract = ERC20__factory.connect(approvalToken, provider);
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
       if (swapOptions.tokenTransferMode === TokenTransferMode.ApproveProxy) {
@@ -341,7 +347,7 @@ export abstract class Simulator {
       const {amount: universalRouterAllowance, expiration: tokenExpiration} =
         await permit2Contract.allowance(
           fromAddress,
-          tokenInAddress,
+          approvalToken,
           getUniversalRouterAddress(swapOptions.urVersion, this.chainId)
         );
 

@@ -13,6 +13,7 @@ import {
 } from '../simulator/sor-port/simulation-provider';
 import {computePortionAmount, populateFeeOptions} from '../../lib/portionUtils';
 import {TradeType} from '../../models/quote/TradeType';
+import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
 
 export type SwapOptionsUniversalRouterInput = {
   chainId: ChainId;
@@ -149,7 +150,11 @@ export class SwapOptionsFactory {
       // as part of routing-api response.
       const permit: PermitSingle = {
         details: {
-          token: tokenInWrappedAddress,
+          // Any permit2 approval calls must be on the underlying permissioned token not the adapter token
+          token: getUnderlyingPermissionedTokenOrSelf(
+            tokenInWrappedAddress,
+            chainId
+          ),
           amount: permitAmount,
           expiration: permitExpiration,
           nonce: permitNonce,

@@ -39,6 +39,7 @@ import {
   SWAP_PROXY_ADDRESS,
   TokenTransferMode,
 } from '@uniswap/universal-router-sdk';
+import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
 
 export type GasBody = {
   gas: string;
@@ -434,6 +435,12 @@ export class TenderlySimulator extends Simulator {
       const useUniversalRouterProxy =
         swapOptions.tokenTransferMode === TokenTransferMode.ApproveProxy;
 
+      // Any permit2 approval calls must be on the underlying permissioned token not the adapter token
+      const tokenInApprovalAddress = getUnderlyingPermissionedTokenOrSelf(
+        quoteSplit.swapInfo!.tokenInWrappedAddress,
+        this.chainId
+      );
+
       let approvalCalls: TenderlySimulationRequest[];
       if (!useUniversalRouterProxy) {
         const approvePermit2Calldata = erc20Interface.encodeFunctionData(
@@ -444,7 +451,7 @@ export class TenderlySimulator extends Simulator {
         const permit2Interface = Permit2__factory.createInterface();
         const approveUniversalRouterCallData =
           permit2Interface.encodeFunctionData('approve', [
-            quoteSplit.swapInfo!.tokenInWrappedAddress,
+            tokenInApprovalAddress,
             getUniversalRouterAddress(swapOptions.urVersion, this.chainId),
             MAX_UINT160,
             Math.floor(new Date().getTime() / 1000) + 10000000,
@@ -455,7 +462,7 @@ export class TenderlySimulator extends Simulator {
             network_id: chainId,
             estimate_gas: true,
             input: approvePermit2Calldata,
-            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            to: tokenInApprovalAddress,
             value: '0',
             from: fromAddress,
             block_number: blockNumber,
@@ -486,7 +493,7 @@ export class TenderlySimulator extends Simulator {
             network_id: chainId,
             estimate_gas: true,
             input: approveProxyUniversalRouterContractCalldata,
-            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            to: tokenInApprovalAddress,
             value: '0',
             from: fromAddress,
             block_number: blockNumber,

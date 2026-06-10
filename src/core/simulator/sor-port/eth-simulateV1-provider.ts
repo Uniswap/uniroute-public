@@ -29,6 +29,7 @@ import {
   SWAP_PROXY_ADDRESS,
   TokenTransferMode,
 } from '@uniswap/universal-router-sdk';
+import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
 
 // Types for eth_simulateV1 RPC request
 interface BlockStateCalls {
@@ -135,6 +136,12 @@ export class EthSimulateV1Simulator extends Simulator {
       const useUniversalRouterProxy =
         swapOptions.tokenTransferMode === TokenTransferMode.ApproveProxy;
 
+      // Any permit2 approval calls must be on the underlying permissioned token not the adapter token
+      const tokenInApprovalAddress = getUnderlyingPermissionedTokenOrSelf(
+        quoteSplit.swapInfo!.tokenInWrappedAddress,
+        this.chainId
+      );
+
       let approvalCalls: SimulateV1Call[];
       if (!useUniversalRouterProxy) {
         const approvePermit2Calldata = erc20Interface.encodeFunctionData(
@@ -145,7 +152,7 @@ export class EthSimulateV1Simulator extends Simulator {
         const permit2Interface = Permit2__factory.createInterface();
         const approveUniversalRouterCallData =
           permit2Interface.encodeFunctionData('approve', [
-            quoteSplit.swapInfo!.tokenInWrappedAddress,
+            tokenInApprovalAddress,
             getUniversalRouterAddress(swapOptions.urVersion, this.chainId),
             MAX_UINT160,
             Math.floor(new Date().getTime() / 1000) + 10000000,
@@ -154,7 +161,7 @@ export class EthSimulateV1Simulator extends Simulator {
         approvalCalls = [
           {
             from: fromAddress,
-            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            to: tokenInApprovalAddress,
             data: approvePermit2Calldata,
             value: '0x0',
           }, // Approve Permit2 Contract
@@ -175,7 +182,7 @@ export class EthSimulateV1Simulator extends Simulator {
         approvalCalls = [
           {
             from: fromAddress,
-            to: quoteSplit.swapInfo!.tokenInWrappedAddress,
+            to: tokenInApprovalAddress,
             data: approveProxyUniversalRouterContractCalldata,
             value: '0x0',
           },
