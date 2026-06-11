@@ -179,10 +179,6 @@ export const AEGIS_V3 = '0x88c9ff9fc0b22cca42265d3f1d1c2c39e41cdacc';
 export const AEGIS_V1_1_ON_POLYGON =
   '0x15cD9520D0fAF71c938Db4426F8C58B5cBAa9ACc';
 
-// Aegis Engine — Mainnet (ROUTE-1287, PR #8766). Base entry was dropped
-// pre-merge in PR #8766 (gateway had no data for the Base reference pool);
-// the Mainnet entry shipped and has been live since 2026-06-03. Re-add
-// AEGIS_ENGINE_ON_BASE once the gateway indexes it.
 export const AEGIS_ENGINE_ON_MAINNET =
   '0x8f29bd5c8429730fa4c46e6295c4e679ededd0cc';
 
@@ -423,7 +419,6 @@ export const LIVO_SWAP_HOOK_V2_ON_MAINNET =
 export const ESTATE_BONDING_CURVE_HOOK_ON_BASE =
   '0x66799c2eb2590006820f6cb826133176ecdda888';
 
-// Janpu hooks — Base (ROUTE-1280, ROUTE-1281)
 export const JANPU_STATIC_FEE_V2_ON_BASE =
   '0xb67f057bfbcb27ff9908dbf2d3d9dbd89d29e8cc';
 export const JANPU_HOOK_DYNAMIC_FEE_V2_ON_BASE =
@@ -435,17 +430,14 @@ export const UNIAGENT_V4_HOOK_ON_MAINNET =
 export const BASELINE_HOOK_ON_MAINNET =
   '0xc81fd894c0ace037d133af4886550ac8133568e8';
 
-// TTTHook — Mainnet (ROUTE-1289)
 export const TTTHOOK_ON_MAINNET = '0xdee7a2ffa963f82facbb12a4e3e8909e4a51a444';
 
-// JRNY hook — Mainnet (ROUTE-1322)
 export const JRNY_HOOK_ON_MAINNET =
   '0x8cec12bc7ea6b92cd330b77e163fe5dbde88c0cc';
 
-// Aliens (A51) — A51peg hook on Base (ROUTE-1323)
 export const A51PEG_HOOK_ON_BASE = '0x1c0c00db76140b4e7deb997ccf1246d8d6b80440';
 
-// Aegis DFM — same address across all supported chains (ROUTE-1300)
+// Aegis DFM — same address across all supported chains
 const AEGIS_DFM_ADDRESS = '0xb4f4949e8d0a177bb6d2fea33e9516bb219610cc';
 export const AEGIS_DFM_ON_MAINNET = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_UNICHAIN = AEGIS_DFM_ADDRESS;
@@ -462,32 +454,18 @@ export const AEGIS_DFM_ON_AVALANCHE = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_BNB = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_CELO = AEGIS_DFM_ADDRESS;
 
-// Onchain Raid — Mainnet (ROUTE-1339)
 export const ONCHAIN_RAID_ON_MAINNET =
   '0x319c49f68df3da28edceb691dac45e0a16d1d0cc';
 
-// SnapBack Protocol — Base (ROUTE-1340)
 export const SNAPBACK_PROTOCOL_ON_BASE =
   '0x2063a2b535a59911532cdf4d1cf28501099f0aec';
 
-// DeployerTaxHook — Mainnet (ROUTE-1341)
 export const DEPLOYERTAXHOOK_ON_MAINNET =
   '0x990a91c744d50fe05a123a80f5a5a6a966f28088';
 
-// Stable Protection — Unichain (ROUTE-1343)
 export const STABLE_PROTECTION_ON_UNICHAIN =
   '0x1510926ba6986cb3c93bfff25839c0ef740820c0';
 
-// Cork AMM — dropped post-verification (ROUTE-1348): reference pool
-// 0x4a1a…bcbf (USDe5CT-1/SUSDS on Mainnet) gateway returned 0/0 — pool is
-// empty on both sides. Re-add once tradeable liquidity lands.
-
-// TaxStrategyHook — dropped post-verification (ROUTE-1358): reference pool
-// 0xcd59…44c1 (ETH/TEST on Mainnet) gateway returned 1 wei / 2 wei — pool
-// holds only 1 wei on each side. Re-add once tradeable liquidity lands.
-
-// Super Strategy — Base (ROUTE-1370, ROUTE-1371, ROUTE-1372). Distinct from
-// the pre-existing SUPERSTRATEGY_HOOK_ON_BASE — three new deployments here.
 export const SUPER_STRATEGY_ON_BASE =
   '0xca51c787e7136db1cbfd92a24287ea8e9363b0c8';
 export const SUPER_STRATEGY_V2_ON_BASE =
@@ -495,10 +473,8 @@ export const SUPER_STRATEGY_V2_ON_BASE =
 export const SUPER_STRATEGY_V3_ON_BASE =
   '0x6646b048fba0a70a692f7690ae6dad83bcacb0c8';
 
-// BackGeoOracle — per-chain deployments (ROUTE-1347, ROUTE-1362, ROUTE-1374,
-// ROUTE-1380, ROUTE-1384, ROUTE-1385, ROUTE-1386). Different address on each
-// chain (CREATE2 with permission-flag vanity ending in ...ac4), so no shared
-// constant — declared individually.
+// BackGeoOracle — per-chain CREATE2 deployments with different address per
+// chain (permission-flag vanity ending in ...ac4), so no shared constant.
 export const BACKGEOORACLE_ON_MAINNET =
   '0xb13250f0dc8ec6de297e81cda8142db51860bac4';
 export const BACKGEOORACLE_ON_BASE =
@@ -509,72 +485,30 @@ export const BACKGEOORACLE_ON_ARBITRUM =
   '0x3043e182047f8696dfe483535785ed1c3681bac4';
 export const BACKGEOORACLE_ON_OPTIMISM =
   '0x79234983ded8eaa571873fffe94e437e11c7fac4';
-// BACKGEOORACLE_ON_POLYGON dropped post-verification (ROUTE-1385):
-// reference pool 0x18d4…4619 (POL/USDC.e on Polygon) gateway returned 0/0 —
-// pool is empty on both sides. Re-add once tradeable liquidity lands.
 export const BACKGEOORACLE_ON_UNICHAIN =
   '0x54bd666ea7fd8d5404c0593eab3dcf9b6e2a3ac4';
 
-// Ring FewV2 Direct Routing — dropped post-verification (ROUTE-1298,
-// ROUTE-1355 share hook + pool): reference pool 0x56c5…8aa3 (ETH/USDC on
-// Mainnet) gateway returned 0/0 — empty on both sides. Re-add once
-// tradeable liquidity lands.
-
-// JRNY hook v2 — Mainnet (ROUTE-1332). Distinct from JRNY_HOOK_ON_MAINNET
-// (0x8cec…c0cc, ROUTE-1322) — different deployment, different address.
 export const JRNY_HOOK_V2_ON_MAINNET =
   '0x49c4ab474dc5519bfe120acb4098d3e6f61b40cc';
 
-// ETIMTaxHook v2 — Mainnet (ROUTE-1349). Distinct from existing
-// ETIM_TAX_HOOK_ON_MAINNET (0x41a9…80cc) — different address.
 export const ETIMTAXHOOK_V2_ON_MAINNET =
   '0x05388fb8b99b66867f08b2841d6baaea58b040cc';
 
-// MAINNET_HOOK_0XE48B1CE2 dropped post-verification (ROUTE-1350): reference
-// pool 0x913d…5493 (ETH/SPIN) gateway returned 0/0 — empty on both sides.
-// Re-add once tradeable liquidity lands.
-
-// PAMHook — Mainnet (ROUTE-1354)
 export const PAMHOOK_ON_MAINNET = '0x34052720fd88197718251765fe03611d740c00cc';
 
-// TaxHook — Mainnet (ROUTE-1357)
 export const TAXHOOK_ON_MAINNET = '0x6fb14025194d3921942b269ba49c988fbd3fc0cc';
 
-// MoonpotHook dropped post-verification (ROUTE-1366): reference pool
-// 0x9271…4bc8 (TMP/USDC on Base) gateway returned ~10k TMP / 8 wei USDC —
-// effectively empty on the USDC side. Re-add once tradeable liquidity
-// lands.
-
-// SETHHook — Base (ROUTE-1368). Wraps ETH ↔ ETHx; reference pool has no
-// AMM liquidity by design (ticket: "Intentionally has no liquidity — wraps
-// ETH to ETHx and vice versa"). Allowlisting is requested anyway because
-// the hook routes via custom accounting, not pool liquidity. Operator
-// override of the dead-pool drop rule documented here.
 export const SETHHOOK_ON_BASE = '0xe0e522e5888e398d9e5d4d90a48c489425cb2888';
 
-// Clanker Hook v2 — BNB (ROUTE-1378 static fee).
-// CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BSC_v2 dropped post-verification
-// (ROUTE-1376): reference pool 0x962c…0dae (FAST/WBNB) gateway returned
-// FAST: 7e10 / WBNB: 0 — empty on the WBNB side. Re-add once tradeable
-// liquidity lands.
-// Naming matches existing CLANKER_*_FEE_HOOKS_ADDRESS_ON_BSC pattern with
-// the lower-case _v2 suffix used elsewhere in this file.
 export const CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BSC_v2 =
   '0x0fcb2c049786054fd35330db361a75a88903a8cc';
 
-// The Pool — Arbitrum (ROUTE-1382). MAJOR POOL.
 export const THE_POOL_ON_ARBITRUM =
   '0x486579de6391053df88a073cebd673dd545200cc';
 
-// VortexHook — Mainnet (ROUTE-1387)
 export const VORTEXHOOK_ON_MAINNET =
   '0x068f3dd75f3537bc5b396bc0ead71b832c0c2acc';
 
-// VenaHook dropped post-verification (ROUTE-1388): reference pool
-// 0x61d5…35f5 (ETH/VENA on Base) gateway returned 1 wei ETH / 5000 VENA —
-// only 1 wei on the input side. Re-add once tradeable liquidity lands.
-
-// DiamondHandsHook ($DMND) — Mainnet (ROUTE-1390)
 export const DIAMONDHANDSHOOK_ON_MAINNET =
   '0x1df8e3ce04a62922506e4ba303e1338583155044';
 
