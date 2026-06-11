@@ -515,6 +515,69 @@ export const BACKGEOORACLE_ON_OPTIMISM =
 export const BACKGEOORACLE_ON_UNICHAIN =
   '0x54bd666ea7fd8d5404c0593eab3dcf9b6e2a3ac4';
 
+// Ring FewV2 Direct Routing — dropped post-verification (ROUTE-1298,
+// ROUTE-1355 share hook + pool): reference pool 0x56c5…8aa3 (ETH/USDC on
+// Mainnet) gateway returned 0/0 — empty on both sides. Re-add once
+// tradeable liquidity lands.
+
+// JRNY hook v2 — Mainnet (ROUTE-1332). Distinct from JRNY_HOOK_ON_MAINNET
+// (0x8cec…c0cc, ROUTE-1322) — different deployment, different address.
+export const JRNY_HOOK_V2_ON_MAINNET =
+  '0x49c4ab474dc5519bfe120acb4098d3e6f61b40cc';
+
+// ETIMTaxHook v2 — Mainnet (ROUTE-1349). Distinct from existing
+// ETIM_TAX_HOOK_ON_MAINNET (0x41a9…80cc) — different address.
+export const ETIMTAXHOOK_V2_ON_MAINNET =
+  '0x05388fb8b99b66867f08b2841d6baaea58b040cc';
+
+// MAINNET_HOOK_0XE48B1CE2 dropped post-verification (ROUTE-1350): reference
+// pool 0x913d…5493 (ETH/SPIN) gateway returned 0/0 — empty on both sides.
+// Re-add once tradeable liquidity lands.
+
+// PAMHook — Mainnet (ROUTE-1354)
+export const PAMHOOK_ON_MAINNET = '0x34052720fd88197718251765fe03611d740c00cc';
+
+// TaxHook — Mainnet (ROUTE-1357)
+export const TAXHOOK_ON_MAINNET = '0x6fb14025194d3921942b269ba49c988fbd3fc0cc';
+
+// MoonpotHook dropped post-verification (ROUTE-1366): reference pool
+// 0x9271…4bc8 (TMP/USDC on Base) gateway returned ~10k TMP / 8 wei USDC —
+// effectively empty on the USDC side. Re-add once tradeable liquidity
+// lands.
+
+// SETHHook — Base (ROUTE-1368). Wraps ETH ↔ ETHx; reference pool has no
+// AMM liquidity by design (ticket: "Intentionally has no liquidity — wraps
+// ETH to ETHx and vice versa"). Allowlisting is requested anyway because
+// the hook routes via custom accounting, not pool liquidity. Operator
+// override of the dead-pool drop rule documented here.
+export const SETHHOOK_ON_BASE = '0xe0e522e5888e398d9e5d4d90a48c489425cb2888';
+
+// Clanker Hook v2 — BNB (ROUTE-1378 static fee).
+// CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BSC_v2 dropped post-verification
+// (ROUTE-1376): reference pool 0x962c…0dae (FAST/WBNB) gateway returned
+// FAST: 7e10 / WBNB: 0 — empty on the WBNB side. Re-add once tradeable
+// liquidity lands.
+// Naming matches existing CLANKER_*_FEE_HOOKS_ADDRESS_ON_BSC pattern with
+// the lower-case _v2 suffix used elsewhere in this file.
+export const CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BSC_v2 =
+  '0x0fcb2c049786054fd35330db361a75a88903a8cc';
+
+// The Pool — Arbitrum (ROUTE-1382). MAJOR POOL.
+export const THE_POOL_ON_ARBITRUM =
+  '0x486579de6391053df88a073cebd673dd545200cc';
+
+// VortexHook — Mainnet (ROUTE-1387)
+export const VORTEXHOOK_ON_MAINNET =
+  '0x068f3dd75f3537bc5b396bc0ead71b832c0c2acc';
+
+// VenaHook dropped post-verification (ROUTE-1388): reference pool
+// 0x61d5…35f5 (ETH/VENA on Base) gateway returned 1 wei ETH / 5000 VENA —
+// only 1 wei on the input side. Re-add once tradeable liquidity lands.
+
+// DiamondHandsHook ($DMND) — Mainnet (ROUTE-1390)
+export const DIAMONDHANDSHOOK_ON_MAINNET =
+  '0x1df8e3ce04a62922506e4ba303e1338583155044';
+
 // MEV-X Homelander — same address across all supported chains
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
 export const MEV_X_HOMELANDER_ON_MAINNET = MEV_X_HOMELANDER_ADDRESS;
@@ -578,6 +641,12 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     TOKENWORKS_HOOK_ON_MAINNET_2,
     TOKENWORKS_HOOK_ON_MAINNET_3,
     BACKGEOORACLE_ON_MAINNET,
+    JRNY_HOOK_V2_ON_MAINNET,
+    ETIMTAXHOOK_V2_ON_MAINNET,
+    PAMHOOK_ON_MAINNET,
+    TAXHOOK_ON_MAINNET,
+    VORTEXHOOK_ON_MAINNET,
+    DIAMONDHANDSHOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -610,6 +679,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     MEV_X_HOMELANDER_ON_ARBITRUM,
     AEGIS_DFM_ON_ARBITRUM,
     BACKGEOORACLE_ON_ARBITRUM,
+    THE_POOL_ON_ARBITRUM,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.ARBITRUM_SEPOLIA]: [ADDRESS_ZERO],
@@ -636,6 +706,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     MEV_X_HOMELANDER_ON_BNB,
     AEGIS_DFM_ON_BNB,
     BACKGEOORACLE_ON_BNB,
+    CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BSC_v2,
   ],
   [ChainId.AVALANCHE]: [
     ADDRESS_ZERO,
@@ -730,6 +801,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SUPER_STRATEGY_ON_BASE,
     SUPER_STRATEGY_V2_ON_BASE,
     SUPER_STRATEGY_V3_ON_BASE,
+    SETHHOOK_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
