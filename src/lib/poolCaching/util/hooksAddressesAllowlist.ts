@@ -478,6 +478,43 @@ export const DEPLOYERTAXHOOK_ON_MAINNET =
 export const STABLE_PROTECTION_ON_UNICHAIN =
   '0x1510926ba6986cb3c93bfff25839c0ef740820c0';
 
+// Cork AMM — dropped post-verification (ROUTE-1348): reference pool
+// 0x4a1a…bcbf (USDe5CT-1/SUSDS on Mainnet) gateway returned 0/0 — pool is
+// empty on both sides. Re-add once tradeable liquidity lands.
+
+// TaxStrategyHook — dropped post-verification (ROUTE-1358): reference pool
+// 0xcd59…44c1 (ETH/TEST on Mainnet) gateway returned 1 wei / 2 wei — pool
+// holds only 1 wei on each side. Re-add once tradeable liquidity lands.
+
+// Super Strategy — Base (ROUTE-1370, ROUTE-1371, ROUTE-1372). Distinct from
+// the pre-existing SUPERSTRATEGY_HOOK_ON_BASE — three new deployments here.
+export const SUPER_STRATEGY_ON_BASE =
+  '0xca51c787e7136db1cbfd92a24287ea8e9363b0c8';
+export const SUPER_STRATEGY_V2_ON_BASE =
+  '0x5c062f56e7f1a5cf25b95e626af15176f52fb0c8';
+export const SUPER_STRATEGY_V3_ON_BASE =
+  '0x6646b048fba0a70a692f7690ae6dad83bcacb0c8';
+
+// BackGeoOracle — per-chain deployments (ROUTE-1347, ROUTE-1362, ROUTE-1374,
+// ROUTE-1380, ROUTE-1384, ROUTE-1385, ROUTE-1386). Different address on each
+// chain (CREATE2 with permission-flag vanity ending in ...ac4), so no shared
+// constant — declared individually.
+export const BACKGEOORACLE_ON_MAINNET =
+  '0xb13250f0dc8ec6de297e81cda8142db51860bac4';
+export const BACKGEOORACLE_ON_BASE =
+  '0x59f39091fd6f47e9d0bcb466f74e305f1709bac4';
+export const BACKGEOORACLE_ON_BNB =
+  '0x77b2051204306786934be8bec29a48584e133ac4';
+export const BACKGEOORACLE_ON_ARBITRUM =
+  '0x3043e182047f8696dfe483535785ed1c3681bac4';
+export const BACKGEOORACLE_ON_OPTIMISM =
+  '0x79234983ded8eaa571873fffe94e437e11c7fac4';
+// BACKGEOORACLE_ON_POLYGON dropped post-verification (ROUTE-1385):
+// reference pool 0x18d4…4619 (POL/USDC.e on Polygon) gateway returned 0/0 —
+// pool is empty on both sides. Re-add once tradeable liquidity lands.
+export const BACKGEOORACLE_ON_UNICHAIN =
+  '0x54bd666ea7fd8d5404c0593eab3dcf9b6e2a3ac4';
+
 // MEV-X Homelander — same address across all supported chains
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
 export const MEV_X_HOMELANDER_ON_MAINNET = MEV_X_HOMELANDER_ADDRESS;
@@ -538,6 +575,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AEGIS_DFM_ON_MAINNET,
     ONCHAIN_RAID_ON_MAINNET,
     DEPLOYERTAXHOOK_ON_MAINNET,
+    TOKENWORKS_HOOK_ON_MAINNET_2,
+    TOKENWORKS_HOOK_ON_MAINNET_3,
+    BACKGEOORACLE_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -552,6 +592,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FINDEX_HOOK_ON_OPTIMISM,
     DYNAMIC_VOLUME_HOOK_ON_OPTIMISM,
     AEGIS_DFM_ON_OPTIMISM,
+    BACKGEOORACLE_ON_OPTIMISM,
   ],
   [ChainId.OPTIMISM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.OPTIMISM_SEPOLIA]: [ADDRESS_ZERO],
@@ -568,6 +609,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ALPHIX_LVR_FEE_HOOK_ON_ARBITRUM,
     MEV_X_HOMELANDER_ON_ARBITRUM,
     AEGIS_DFM_ON_ARBITRUM,
+    BACKGEOORACLE_ON_ARBITRUM,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.ARBITRUM_SEPOLIA]: [ADDRESS_ZERO],
@@ -593,6 +635,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BUY_HOOK_V3_ON_BNB,
     MEV_X_HOMELANDER_ON_BNB,
     AEGIS_DFM_ON_BNB,
+    BACKGEOORACLE_ON_BNB,
   ],
   [ChainId.AVALANCHE]: [
     ADDRESS_ZERO,
@@ -683,6 +726,10 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     A51PEG_HOOK_ON_BASE,
     AEGIS_DFM_ON_BASE,
     SNAPBACK_PROTOCOL_ON_BASE,
+    BACKGEOORACLE_ON_BASE,
+    SUPER_STRATEGY_ON_BASE,
+    SUPER_STRATEGY_V2_ON_BASE,
+    SUPER_STRATEGY_V3_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
@@ -708,6 +755,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     MEV_X_HOMELANDER_ON_UNICHAIN,
     AEGIS_DFM_ON_UNICHAIN,
     STABLE_PROTECTION_ON_UNICHAIN,
+    BACKGEOORACLE_ON_UNICHAIN,
   ],
   [ChainId.MONAD_TESTNET]: [ADDRESS_ZERO],
   [ChainId.MONAD]: [
