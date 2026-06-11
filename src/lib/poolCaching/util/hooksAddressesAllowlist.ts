@@ -179,9 +179,10 @@ export const AEGIS_V3 = '0x88c9ff9fc0b22cca42265d3f1d1c2c39e41cdacc';
 export const AEGIS_V1_1_ON_POLYGON =
   '0x15cD9520D0fAF71c938Db4426F8C58B5cBAa9ACc';
 
-// Aegis Engine — Mainnet (ROUTE-1287). Base entry dropped post-verification:
-// the subgraph gateway has no data for the Base reference pool, so it is
-// un-verifiable. Re-add AEGIS_ENGINE_ON_BASE once the gateway indexes it.
+// Aegis Engine — Mainnet (ROUTE-1287, PR #8766). Base entry was dropped
+// pre-merge in PR #8766 (gateway had no data for the Base reference pool);
+// the Mainnet entry shipped and has been live since 2026-06-03. Re-add
+// AEGIS_ENGINE_ON_BASE once the gateway indexes it.
 export const AEGIS_ENGINE_ON_MAINNET =
   '0x8f29bd5c8429730fa4c46e6295c4e679ededd0cc';
 
@@ -460,10 +461,22 @@ export const AEGIS_DFM_ON_SONEIUM = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_AVALANCHE = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_BNB = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_CELO = AEGIS_DFM_ADDRESS;
-// AEGIS_DFM_ON_MONAD dropped post-verification (ROUTE-1300):
-// reference pool 0xa8ed3…348d (AUSD/XAUt0) has only 166 wei XAUt0 on the
-// token1 side, so AUSD→XAUt0 returns 404 no_valid_quotes on dev. Re-add
-// once tradeable liquidity lands on Monad.
+
+// Onchain Raid — Mainnet (ROUTE-1339)
+export const ONCHAIN_RAID_ON_MAINNET =
+  '0x319c49f68df3da28edceb691dac45e0a16d1d0cc';
+
+// SnapBack Protocol — Base (ROUTE-1340)
+export const SNAPBACK_PROTOCOL_ON_BASE =
+  '0x2063a2b535a59911532cdf4d1cf28501099f0aec';
+
+// DeployerTaxHook — Mainnet (ROUTE-1341)
+export const DEPLOYERTAXHOOK_ON_MAINNET =
+  '0x990a91c744d50fe05a123a80f5a5a6a966f28088';
+
+// Stable Protection — Unichain (ROUTE-1343)
+export const STABLE_PROTECTION_ON_UNICHAIN =
+  '0x1510926ba6986cb3c93bfff25839c0ef740820c0';
 
 // MEV-X Homelander — same address across all supported chains
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
@@ -523,6 +536,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     TTTHOOK_ON_MAINNET,
     JRNY_HOOK_ON_MAINNET,
     AEGIS_DFM_ON_MAINNET,
+    ONCHAIN_RAID_ON_MAINNET,
+    DEPLOYERTAXHOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -667,6 +682,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     JANPU_HOOK_DYNAMIC_FEE_V2_ON_BASE,
     A51PEG_HOOK_ON_BASE,
     AEGIS_DFM_ON_BASE,
+    SNAPBACK_PROTOCOL_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
@@ -691,6 +707,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     UNIVERSAL_HOOK_ON_UNICHAIN,
     MEV_X_HOMELANDER_ON_UNICHAIN,
     AEGIS_DFM_ON_UNICHAIN,
+    STABLE_PROTECTION_ON_UNICHAIN,
   ],
   [ChainId.MONAD_TESTNET]: [ADDRESS_ZERO],
   [ChainId.MONAD]: [
