@@ -45,7 +45,7 @@ import {
 import {Protocol} from 'src/models/pool/Protocol';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {FeatureGatedTokensFetcher} from '../../stores/compliance/FeatureGatedTokensFetcher';
-import {UnsupportedTokenListFetcher} from '../../stores/compliance/UnsupportedTokenListFetcher';
+import {S3FeatureGatedTokensFetcher} from '../../stores/compliance/S3FeatureGatedTokensFetcher';
 import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
 
 describe('BasicTopPoolsSelector', () => {
@@ -2069,7 +2069,7 @@ describe('AggHooksTopPoolsSelector', () => {
       // Build a selector wired to a repo whose bootstrap fallback contains
       // the unsupported token — exercises the deny-list filter end-to-end
       // through the cold-start path (compliance fetch fails → bootstrap
-      // fetch succeeds with our denied token).
+      // S3 fetch succeeds with our denied token).
       const denyListedRepo = new FeatureGatedTokensRepository(
         {
           fetchAll: async () => {
@@ -2077,21 +2077,13 @@ describe('AggHooksTopPoolsSelector', () => {
           },
         } as unknown as FeatureGatedTokensFetcher,
         {
-          fetch: async () => ({
-            name: 'test-deny-list',
-            timestamp: '2026-01-01T00:00:00.000Z',
-            version: {major: 1, minor: 0, patch: 0},
-            tokens: [
-              {
-                chainId: ChainId.MAINNET,
-                address: unsupportedToken,
-                name: 'Unsupported',
-                symbol: 'UNS',
-                decimals: 18,
-              },
-            ],
-          }),
-        } as unknown as UnsupportedTokenListFetcher
+          fetch: async () => [
+            {
+              chainId: ChainId.MAINNET,
+              address: unsupportedToken.toLowerCase(),
+            },
+          ],
+        } as unknown as S3FeatureGatedTokensFetcher
       );
       const selectorWithDenyList = new AggHooksTopPoolsSelector(
         fullHeuristicsConfig,
