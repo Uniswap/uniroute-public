@@ -3380,13 +3380,15 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         1,
         {
           tags: [
+            // tradeType comes in via ...metricTags (UniRouteBL adds
+            // `tradeType:${tradeType}`); testAggHooks is always true here
+            // (the method early-returns when !testAggHooks), so neither is
+            // emitted explicitly — both would be redundant dimensions.
             ...metricTags,
             `verdict:${verdict}`,
-            `tradeType:${tradeType}`,
             `winnerHasAggHook:${winnerHasAggHook}`,
             `displacedAbsorbed:${displacedAbsorbed}`,
             `displacedScoreDeltaBucket:${displacedScoreDeltaBucket}`,
-            `testAggHooks:${testAggHooks}`,
           ],
         }
       );

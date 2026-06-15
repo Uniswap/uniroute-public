@@ -7491,7 +7491,6 @@ describe('QuoteBestSplitFinder', () => {
       expect(tags).toContain('verdict:no_displacement');
       expect(tags).toContain('displacedAbsorbed:na');
       expect(tags).toContain('displacedScoreDeltaBucket:na');
-      expect(tags).toContain('tradeType:EXACT_IN');
     });
 
     it('emits admit_no_truncation when admits fired but no truncation occurred', () => {
@@ -7778,7 +7777,6 @@ describe('QuoteBestSplitFinder', () => {
       );
       const tags = (metricCalls()[0][2] as {tags: string[]}).tags;
       expect(tags).toContain('verdict:admit_harmful_gas_adj');
-      expect(tags).toContain('tradeType:EXACT_OUT');
     });
 
     it('aggregates worst-case across multiple events (one harmful, one correct → emits harmful)', () => {
