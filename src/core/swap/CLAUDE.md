@@ -68,9 +68,15 @@ Notable details:
   response/Trading consume. The SDK encoder rejects `''` (ethers `arrayify`),
   so `SwapStepsBuilder` normalizes `'' → '0x'` only for the `encodeSwaps` call;
   the emitted `swapSteps` keep `''`.
-- `poolKey.currency0 < currency1` is enforced by UniRoute's `Address.sorted`
-  in pool construction; `zeroForOne` is derived from whether `tokenIn`
-  matches `pool.token0`.
+- `poolKey` currencies are canonicalized (`currency0 < currency1`) by
+  `Address.sorted` inside `poolKeyFromV4` — **not** by pool construction.
+  `V4Pool` stores `token0`/`token1` verbatim, and the on-chain pool
+  discoverer builds them in `tokenIn`/`tokenOut` request order, so
+  `pool.token0` is **not** guaranteed to be the lower address. `zeroForOne`
+  is therefore derived from the canonical `currency0` (not `pool.token0`),
+  so the key and the direction share one ordering. An unsorted key hashes to
+  a nonexistent pool and reverts `PoolNotInitialized()` on-chain — locked by
+  the unsorted-pool regression tests in `SwapStepsFactory.test.ts`.
 - V4 native pools use `0x0000…0` as a currency directly. No `WRAP_ETH` is
   needed for V4 native segments; the V4 PoolManager handles native ETH
   natively.

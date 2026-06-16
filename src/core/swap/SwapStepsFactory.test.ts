@@ -523,6 +523,163 @@ describe('SwapStepsFactory - V4', () => {
       ],
     });
   });
+
+  // Pool objects from the on-chain discoverer carry token0/token1 in
+  // tokenIn/tokenOut request order rather than canonical sorted order. The
+  // emitted poolKey must be canonicalized regardless — an unsorted key
+  // hashes to a nonexistent pool and reverts with PoolNotInitialized().
+  it('canonicalizes the poolKey when the pool carries unsorted token0/token1 (WETH -> USDC)', () => {
+    // Same WETH/USDC pool, but constructed with token0=WETH, token1=USDC
+    // (unsorted: USDC < WETH). Route WETH -> USDC: tokenIn is currency1 of
+    // the canonical key, so zeroForOne = false.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(WETH, USDC, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+      ]),
+      999n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactIn,
+      1_000_000_000_000_000_000n,
+      tokenCI(WETH),
+      tokenCI(USDC)
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {action: 'SETTLE', currency: WETH, amount: '1000000000000000000'},
+          {
+            action: 'SWAP_EXACT_IN_SINGLE',
+            poolKey: {
+              currency0: USDC,
+              currency1: WETH,
+              fee: 500,
+              tickSpacing: 10,
+              hooks: ZERO_HOOKS,
+            },
+            zeroForOne: false,
+            amountIn: '1000000000000000000',
+            amountOutMinimum: '0',
+            hookData: '',
+          },
+          {
+            action: 'TAKE',
+            currency: USDC,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('sorts the poolKey numerically, not by raw ASCII (checksum case must not matter)', () => {
+    // Checksummed forms: 0xa0…02 starts lowercase 'a', 0xB0…04 starts
+    // uppercase 'B'. Numerically a0…02 < B0…04, but raw ASCII puts 'B'
+    // (0x42) before 'a' (0x61) — a case-sensitive sort would emit the
+    // flipped key (and zeroForOne=false) and revert PoolNotInitialized().
+    const TOKEN_LOWER_A = '0xa000000000000000000000000000000000000002';
+    const TOKEN_UPPER_B = '0xB000000000000000000000000000000000000004';
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(TOKEN_UPPER_B, TOKEN_LOWER_A, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+      ]),
+      999n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactIn,
+      1_000_000n,
+      tokenCI(TOKEN_LOWER_A),
+      tokenCI(TOKEN_UPPER_B)
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {action: 'SETTLE', currency: TOKEN_LOWER_A, amount: '1000000'},
+          {
+            action: 'SWAP_EXACT_IN_SINGLE',
+            poolKey: {
+              currency0: TOKEN_LOWER_A,
+              currency1: TOKEN_UPPER_B,
+              fee: 500,
+              tickSpacing: 10,
+              hooks: ZERO_HOOKS,
+            },
+            zeroForOne: true,
+            amountIn: '1000000',
+            amountOutMinimum: '0',
+            hookData: '',
+          },
+          {
+            action: 'TAKE',
+            currency: TOKEN_UPPER_B,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('canonicalizes the poolKey when the pool carries unsorted token0/token1 (USDC -> WETH)', () => {
+    // Unsorted pool again, opposite direction. tokenIn (USDC) is currency0
+    // of the canonical key, so zeroForOne = true — the raw pool fields
+    // would have said false.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(WETH, USDC, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+      ]),
+      999n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactIn,
+      1_000_000n,
+      tokenCI(USDC),
+      tokenCI(WETH)
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {action: 'SETTLE', currency: USDC, amount: '1000000'},
+          {
+            action: 'SWAP_EXACT_IN_SINGLE',
+            poolKey: {
+              currency0: USDC,
+              currency1: WETH,
+              fee: 500,
+              tickSpacing: 10,
+              hooks: ZERO_HOOKS,
+            },
+            zeroForOne: true,
+            amountIn: '1000000',
+            amountOutMinimum: '0',
+            hookData: '',
+          },
+          {
+            action: 'TAKE',
+            currency: WETH,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
+        ],
+      },
+    ]);
+  });
 });
 
 // === Native input / output (WRAP_ETH / UNWRAP_WETH) ==========================
@@ -951,6 +1108,60 @@ describe('SwapStepsFactory - V4 exact-out', () => {
           },
           {action: 'SETTLE_ALL', currency: USDC, maxAmount: '2000000'},
           {action: 'TAKE_ALL', currency: DAI, minAmount: '1000000'},
+        ],
+      },
+    ]);
+  });
+
+  it('canonicalizes the poolKey for exact-out when the pool carries unsorted token0/token1', () => {
+    // Pool constructed token0=WETH, token1=USDC (unsorted). Route
+    // WETH -> USDC exact-out: canonical key sorts to (USDC, WETH) and
+    // tokenIn (WETH) is currency1, so zeroForOne = false.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(WETH, USDC, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+      ]),
+      // Route input (WETH) for 1000 USDC out:
+      500_000_000_000_000_000n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactOut,
+      1_000_000_000n,
+      tokenCI(WETH),
+      tokenCI(USDC)
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {
+            action: 'SWAP_EXACT_OUT_SINGLE',
+            poolKey: {
+              currency0: USDC,
+              currency1: WETH,
+              fee: 500,
+              tickSpacing: 10,
+              hooks: ZERO_HOOKS,
+            },
+            zeroForOne: false,
+            amountOut: '1000000000',
+            amountInMaximum: '500000000000000000',
+            hookData: '',
+          },
+          {
+            action: 'SETTLE_ALL',
+            currency: WETH,
+            maxAmount: '500000000000000000',
+          },
+          {
+            action: 'TAKE_ALL',
+            currency: USDC,
+            minAmount: '1000000000',
+          },
         ],
       },
     ]);

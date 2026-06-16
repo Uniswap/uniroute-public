@@ -5,6 +5,7 @@ import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {V3Pool} from '../../models/pool/V3Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
+import {Address} from '../../models/address/Address';
 import {TradeType} from '../../models/quote/TradeType';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {
@@ -361,26 +362,27 @@ function buildV4ExactInStep(
 ): SwapStep {
   const hops = walkRoutePath(pools, tokenIn);
   const outputCurrency = hops[hops.length - 1].tokenOut;
+  const singlePoolKey =
+    pools.length === 1 ? poolKeyFromV4(pools[0]) : undefined;
 
-  const swapAction: V4Action =
-    pools.length === 1
-      ? {
-          action: 'SWAP_EXACT_IN_SINGLE',
-          poolKey: poolKeyFromV4(pools[0]),
-          // V4 pools store token0 < token1 (UniRoute's `Address.sorted`
-          // convention). zeroForOne is true when swapping currency0 -> currency1.
-          zeroForOne: addressEq(pools[0].token0.address, tokenIn),
-          amountIn: amountIn.toString(),
-          amountOutMinimum: '0',
-          hookData: '',
-        }
-      : {
-          action: 'SWAP_EXACT_IN',
-          currencyIn: tokenIn,
-          path: hops.map(pathKeyFromHop),
-          amountIn: amountIn.toString(),
-          amountOutMinimum: '0',
-        };
+  const swapAction: V4Action = singlePoolKey
+    ? {
+        action: 'SWAP_EXACT_IN_SINGLE',
+        poolKey: singlePoolKey,
+        // zeroForOne is true when swapping currency0 -> currency1; derive
+        // it from the canonical key, not the pool object (see poolKeyFromV4).
+        zeroForOne: addressEq(singlePoolKey.currency0, tokenIn),
+        amountIn: amountIn.toString(),
+        amountOutMinimum: '0',
+        hookData: '',
+      }
+    : {
+        action: 'SWAP_EXACT_IN',
+        currencyIn: tokenIn,
+        path: hops.map(pathKeyFromHop),
+        amountIn: amountIn.toString(),
+        amountOutMinimum: '0',
+      };
 
   const v4Actions: V4Action[] = [
     {action: 'SETTLE', currency: tokenIn, amount: amountIn.toString()},
@@ -411,33 +413,35 @@ function buildV4ExactOutStep(
 ): SwapStep {
   const hops = walkRoutePath(pools, tokenIn);
   const outputCurrency = hops[hops.length - 1].tokenOut;
+  const singlePoolKey =
+    pools.length === 1 ? poolKeyFromV4(pools[0]) : undefined;
 
-  const swapAction: V4Action =
-    pools.length === 1
-      ? {
-          action: 'SWAP_EXACT_OUT_SINGLE',
-          poolKey: poolKeyFromV4(pools[0]),
-          zeroForOne: addressEq(pools[0].token0.address, tokenIn),
-          amountOut: amountOut.toString(),
-          amountInMaximum: amountInMax.toString(),
+  const swapAction: V4Action = singlePoolKey
+    ? {
+        action: 'SWAP_EXACT_OUT_SINGLE',
+        poolKey: singlePoolKey,
+        // zeroForOne derived from the canonical key (see poolKeyFromV4).
+        zeroForOne: addressEq(singlePoolKey.currency0, tokenIn),
+        amountOut: amountOut.toString(),
+        amountInMaximum: amountInMax.toString(),
+        hookData: '',
+      }
+    : {
+        action: 'SWAP_EXACT_OUT',
+        currencyOut: outputCurrency,
+        // V4 exact-out PathKey[] is reversed: starts at the output side
+        // and walks back toward input. Each entry's `intermediateCurrency`
+        // is the upstream token from the reversed perspective.
+        path: [...hops].reverse().map(h => ({
+          intermediateCurrency: h.tokenIn,
+          fee: h.pool.fee,
+          tickSpacing: h.pool.tickSpacing,
+          hooks: h.pool.hooks,
           hookData: '',
-        }
-      : {
-          action: 'SWAP_EXACT_OUT',
-          currencyOut: outputCurrency,
-          // V4 exact-out PathKey[] is reversed: starts at the output side
-          // and walks back toward input. Each entry's `intermediateCurrency`
-          // is the upstream token from the reversed perspective.
-          path: [...hops].reverse().map(h => ({
-            intermediateCurrency: h.tokenIn,
-            fee: h.pool.fee,
-            tickSpacing: h.pool.tickSpacing,
-            hooks: h.pool.hooks,
-            hookData: '',
-          })),
-          amountOut: amountOut.toString(),
-          amountInMaximum: amountInMax.toString(),
-        };
+        })),
+        amountOut: amountOut.toString(),
+        amountInMaximum: amountInMax.toString(),
+      };
 
   return {
     type: 'V4_SWAP',
@@ -457,10 +461,20 @@ function buildV4ExactOutStep(
   };
 }
 
+/**
+ * On-chain PoolKeys require canonical ordering (currency0 < currency1) — a
+ * key with flipped currencies hashes to a nonexistent pool and the swap
+ * reverts with `PoolNotInitialized()`. `V4Pool.token0/token1` don't
+ * reliably honor that invariant (the on-chain discoverer constructs pools
+ * in tokenIn/tokenOut request order; subgraph discovery is sorted), so
+ * sort here rather than trusting the source. Mirrors
+ * `V4Pool.computePoolId`, which already sorts for the same reason.
+ */
 function poolKeyFromV4(pool: V4Pool): PoolKey {
+  const [currency0, currency1] = Address.sorted([pool.token0, pool.token1]);
   return {
-    currency0: pool.token0.address,
-    currency1: pool.token1.address,
+    currency0: currency0.address,
+    currency1: currency1.address,
     fee: pool.fee,
     tickSpacing: pool.tickSpacing,
     hooks: pool.hooks,
