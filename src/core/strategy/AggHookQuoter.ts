@@ -49,6 +49,14 @@ const AGG_HOOK_QUOTE_ABI = [
 /** Timeout for each individual hook.quote() RPC call. */
 const HOOK_QUOTE_TIMEOUT_MS = 5_000;
 
+/**
+ * v4 represents native currency (e.g. ETH) as the zero address in pool keys,
+ * whereas CurrencyInfo.wrappedAddress resolves native to its wrapped form
+ * (e.g. WETH). Use this sentinel when comparing a native input against a pool's
+ * currency0/currency1 so the swap direction is detected correctly.
+ */
+const NATIVE_CURRENCY_ADDRESS = '0x0000000000000000000000000000000000000000';
+
 /** All known aggregator hook addresses (lowercased). */
 const AGG_HOOK_ADDRESSES = new Set<string>([
   ...AGG_HOOKS_ON_MAINNET,
@@ -149,8 +157,15 @@ export async function fetchAggHookQuotes(
       const hookContract = getHookContract(pool.hooks);
       const poolId = pool.id;
 
-      // Determine swap direction: zeroForOne = tokenIn is token0
-      const tokenInLower = tokenIn.wrappedAddress.address.toLowerCase();
+      // Determine swap direction: zeroForOne = tokenIn is token0.
+      // v4 keys native currency as the zero address, but
+      // CurrencyInfo.wrappedAddress resolves native to its wrapped token
+      // (e.g. WETH). Compare in the pool's address space so native-ETH inputs
+      // match a native currency0 instead of falling through to the wrong
+      // direction.
+      const tokenInLower = tokenIn.isNative
+        ? NATIVE_CURRENCY_ADDRESS
+        : tokenIn.wrappedAddress.address.toLowerCase();
       const token0Lower = pool.token0.address.toLowerCase();
       const zeroForOne = tokenInLower === token0Lower;
 

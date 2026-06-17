@@ -48,6 +48,22 @@ function makeTempoAggPool(): V4Pool {
   );
 }
 
+// Agg hook pool whose currency0 is native ETH (v4 keys native as the zero
+// address). USDC_E is currency1.
+function makeNativeEthAggPool(): V4Pool {
+  return new V4Pool(
+    new Address('0x0000000000000000000000000000000000000000'),
+    USDC_E,
+    500,
+    10,
+    TEMPO_HOOK,
+    0n,
+    TEMPO_POOL_ID,
+    79228162514264337593543950336n,
+    0n
+  );
+}
+
 function makeVanillaV4Pool(): V4Pool {
   return new V4Pool(
     WETH,
@@ -399,6 +415,65 @@ describe('fetchAggHookQuotes', () => {
       -1000000n,
       TEMPO_POOL_ID
     );
+
+    restoreMocks();
+  });
+
+  it('treats native ETH tokenIn as token0 (zeroForOne true) for a native pool', async () => {
+    const quoteFn = vi
+      .fn()
+      .mockResolvedValue(ethers.BigNumber.from('1000000'));
+    vi.spyOn(ethers, 'Contract').mockImplementation(
+      () => ({callStatic: {quote: quoteFn}} as unknown as ethers.Contract)
+    );
+    const provider = {} as ethers.providers.BaseProvider;
+    const route = new RouteBasic(Protocol.V4, [makeNativeEthAggPool()], 100);
+
+    // tokenIn is native ETH. Its wrappedAddress resolves to WETH, but the
+    // pool's currency0 is the native zero address — zeroForOne must still be
+    // true. (Regression: comparing WETH against 0x0 flipped the direction.)
+    await fetchAggHookQuotes(
+      chain,
+      [route],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(true, WETH), // native ETH (wraps to WETH)
+      new CurrencyInfo(false, USDC_E),
+      provider,
+      ctx,
+      ['chain:TEMPO']
+    );
+
+    expect(quoteFn).toHaveBeenCalledWith(true, -1000000n, TEMPO_POOL_ID);
+
+    restoreMocks();
+  });
+
+  it('sets zeroForOne false when native ETH is the output token of a native pool', async () => {
+    const quoteFn = vi
+      .fn()
+      .mockResolvedValue(ethers.BigNumber.from('999900'));
+    vi.spyOn(ethers, 'Contract').mockImplementation(
+      () => ({callStatic: {quote: quoteFn}} as unknown as ethers.Contract)
+    );
+    const provider = {} as ethers.providers.BaseProvider;
+    const route = new RouteBasic(Protocol.V4, [makeNativeEthAggPool()], 100);
+
+    // tokenIn = USDC_E (currency1), tokenOut = native ETH (currency0) →
+    // zeroForOne must be false.
+    await fetchAggHookQuotes(
+      chain,
+      [route],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(false, USDC_E),
+      new CurrencyInfo(true, WETH),
+      provider,
+      ctx,
+      ['chain:TEMPO']
+    );
+
+    expect(quoteFn).toHaveBeenCalledWith(false, -1000000n, TEMPO_POOL_ID);
 
     restoreMocks();
   });
