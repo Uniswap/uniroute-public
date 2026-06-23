@@ -15,6 +15,7 @@ import {
   SwapStep,
   V4Action,
 } from '@uniswap/universal-router-sdk';
+import {Percent} from '@uniswap/sdk-core';
 
 const NATIVE_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -26,23 +27,34 @@ const SENTINEL_AMOUNT = (1n << 255n).toString();
 // amount field can't hold 2**255, so chained V4 swaps use this instead.
 const V4_OPEN_DELTA = '0';
 
+// Pads an exact-out route input by slippage for the per-leg cap and WRAP_ETH
+// amount: floor(input * (denom + num) / denom).
+function maxInputWithSlippage(input: bigint, slippage: Percent): bigint {
+  const numerator = BigInt(slippage.numerator.toString());
+  const denominator = BigInt(slippage.denominator.toString());
+  return (input * (denominator + numerator)) / denominator;
+}
+
 /**
  * Builds the route-local `SwapStep[]` representation of a `QuoteSplit` for
- * `SwapRouter.encodeSwaps`. Pure function — no fee math, no slippage; all
- * recipients are `ROUTER_AS_RECIPIENT` and Trading owns the
- * `SwapSpecification` half of the contract.
+ * `SwapRouter.encodeSwaps`. Pure function, no fee math; recipients are
+ * `ROUTER_AS_RECIPIENT` and Trading owns the `SwapSpecification` half of the
+ * contract.
  *
- * For EXACT_IN, `amount` is the user-funded input amount, divided proportionally
- * across `quoteSplit.quotes` by `route.percentage`. For EXACT_OUT, `amount` is
- * the user's desired output, and each quote's `quote.amount` carries the
- * routed input required to produce that output.
+ * EXACT_IN: `amount` is the input, split across quotes by `route.percentage`;
+ * slippage is the SDK's final SWEEP min, so the steps carry none.
+ *
+ * EXACT_OUT: `amount` is the desired output, `quote.amount` the routed input.
+ * The SDK pads only the ingress, not the per-leg input caps, so the caps and
+ * WRAP_ETH are slippage-padded here (raw caps revert V3/V4TooMuchRequested).
  */
 export function buildSwapSteps(
   quoteSplit: QuoteSplit,
   tradeType: TradeType,
   amount: bigint,
   tokenInCurrencyInfo: CurrencyInfo,
-  tokenOutCurrencyInfo: CurrencyInfo
+  tokenOutCurrencyInfo: CurrencyInfo,
+  slippageTolerance: Percent
 ): SwapStep[] {
   const allocatedAmounts = allocateAmounts(quoteSplit, amount);
   const innerSteps: SwapStep[] = [];
@@ -67,11 +79,12 @@ export function buildSwapSteps(
       tokenOutCurrencyInfo
     );
 
-    // Wrap accounting works on the *input* amount: for ExactIn the
-    // allocated amount is already input; for ExactOut the route's input is
-    // `quote.amount`.
+    // Input units: ExactIn uses the allocated input; ExactOut pads the routed
+    // input (`quote.amount`) by slippage for the per-leg cap + WRAP_ETH.
     const routeInputAmount =
-      tradeType === TradeType.ExactIn ? allocatedAmount : quote.amount;
+      tradeType === TradeType.ExactIn
+        ? allocatedAmount
+        : maxInputWithSlippage(quote.amount, slippageTolerance);
 
     if (
       tokenInCurrencyInfo.isNative &&
@@ -87,7 +100,13 @@ export function buildSwapSteps(
     }
 
     innerSteps.push(
-      ...buildStepsForQuote(quote, tradeType, allocatedAmount, inferredTokenIn)
+      ...buildStepsForQuote(
+        quote,
+        tradeType,
+        allocatedAmount,
+        inferredTokenIn,
+        routeInputAmount
+      )
     );
   }
 
@@ -116,12 +135,14 @@ function buildStepsForQuote(
   quote: QuoteBasic,
   tradeType: TradeType,
   allocatedAmount: bigint,
-  routeTokenIn: string
+  routeTokenIn: string,
+  // Slippage-padded per-leg cap; unused for ExactIn.
+  amountInMax: bigint
 ): SwapStep[] {
   if (tradeType === TradeType.ExactIn) {
     return buildExactInSteps(quote, allocatedAmount, routeTokenIn);
   }
-  return buildExactOutSteps(quote, allocatedAmount, routeTokenIn);
+  return buildExactOutSteps(quote, allocatedAmount, routeTokenIn, amountInMax);
 }
 
 function buildExactInSteps(
@@ -166,24 +187,22 @@ function buildExactInSteps(
 function buildExactOutSteps(
   quote: QuoteBasic,
   allocatedAmountOut: bigint,
-  routeTokenIn: string
+  routeTokenIn: string,
+  amountInMax: bigint
 ): SwapStep[] {
   if (quote.route.protocol === Protocol.MIXED) {
     throw new Error(
       'SwapStepsFactory: MIXED routes do not support EXACT_OUT (rejected upstream by buildTrade)'
     );
   }
-  // For ExactOut, `quote.amount` is the route-required input amount (from
-  // the reverse routing math); `allocatedAmountOut` is the user's desired
-  // output share for this quote.
-  const routeInputAmount = quote.amount;
+  // `allocatedAmountOut` is the user's desired output share for this quote.
   switch (quote.route.protocol) {
     case Protocol.V2:
       return [
         buildV2ExactOutStep(
           quote.route.path as V2Pool[],
           allocatedAmountOut,
-          routeInputAmount,
+          amountInMax,
           routeTokenIn
         ),
       ];
@@ -192,7 +211,7 @@ function buildExactOutSteps(
         buildV3ExactOutStep(
           quote.route.path as V3Pool[],
           allocatedAmountOut,
-          routeInputAmount,
+          amountInMax,
           routeTokenIn
         ),
       ];
@@ -201,7 +220,7 @@ function buildExactOutSteps(
         buildV4ExactOutStep(
           quote.route.path as V4Pool[],
           allocatedAmountOut,
-          routeInputAmount,
+          amountInMax,
           routeTokenIn
         ),
       ];
@@ -307,8 +326,6 @@ function buildV2ExactOutStep(
     type: 'V2_SWAP_EXACT_OUT',
     recipient: ROUTER_AS_RECIPIENT,
     amountOut: amountOut.toString(),
-    // Raw route-required input — Trading's `SwapSpecification` owns slippage,
-    // so we don't pad at the step level.
     amountInMax: amountInMax.toString(),
     path,
   };

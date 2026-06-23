@@ -90,6 +90,7 @@ import {
   buildSwapSpecification,
   buildSwapStepsMethodParameters,
 } from './swap/SwapStepsBuilder';
+import {parseSlippageTolerance} from './swap/shared';
 import {Struct} from '@bufbuild/protobuf';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {IQuoteRequestValidator} from './QuoteRequestValidator';
@@ -2667,7 +2668,10 @@ export class UniRouteBL implements IUniRoutedBL {
           tradeType,
           amountIn,
           tokenInCurrencyInfo,
-          tokenOutCurrencyInfo
+          tokenOutCurrencyInfo,
+          // Resolved tolerance for the exact-out caps (see buildSwapSteps);
+          // `?? 0` handles the degenerate no-slippage case.
+          parseSlippageTolerance((slippageTolerance ?? 0).toString())
         );
       } catch (err) {
         await ctx.metrics.count(
@@ -3000,7 +3004,8 @@ export class UniRouteBL implements IUniRoutedBL {
                 tradeType,
                 amountIn,
                 tokenInCurrencyInfo,
-                tokenOutCurrencyInfo
+                tokenOutCurrencyInfo,
+                swapOptions!.slippageTolerance
               );
               const spec = buildSwapSpecification({
                 swapOptions: swapOptions!,

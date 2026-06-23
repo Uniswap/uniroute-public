@@ -2,6 +2,7 @@ import {describe, it, expect} from 'vitest';
 import {
   CurrencyAmount,
   Ether,
+  Percent,
   Token,
   TradeType as SdkTradeType,
 } from '@uniswap/sdk-core';
@@ -26,6 +27,10 @@ import {V4Pool} from '../../models/pool/V4Pool';
 import {Address} from '../../models/address/Address';
 import {TradeType} from '../../models/quote/TradeType';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
+
+// buildSwapSteps requires a slippage tolerance; these round-trip tests pass
+// zero (caps unpadded) so the encodeSwaps calldata they assert is unchanged.
+const ZERO_SLIPPAGE = new Percent(0, 1);
 
 // === Fixtures ================================================================
 
@@ -179,7 +184,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactIn,
       1_000_000n,
       tokenCI(USDC),
-      tokenCI(WETH)
+      tokenCI(WETH),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions(),
@@ -206,7 +212,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactIn,
       1_000_000n,
       tokenCI(USDC),
-      tokenCI(WETH)
+      tokenCI(WETH),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions(),
@@ -230,7 +237,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactIn,
       1_000_000n,
       tokenCI(USDC),
-      tokenCI(WETH)
+      tokenCI(WETH),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions(),
@@ -257,7 +265,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactIn,
       1_000_000n,
       tokenCI(USDC),
-      tokenCI(DAI)
+      tokenCI(DAI),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions(),
@@ -284,7 +293,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactIn,
       1_000_000n,
       tokenCI(USDC),
-      tokenCI(DAI)
+      tokenCI(DAI),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions(),
@@ -308,7 +318,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactOut,
       500_000_000_000_000_000n,
       tokenCI(USDC),
-      tokenCI(WETH)
+      tokenCI(WETH),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions({tradeType: TradeType.ExactOut}),
@@ -336,7 +347,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactIn,
       amountIn,
       tokenCI(WETH, true),
-      tokenCI(USDC)
+      tokenCI(USDC),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions({tokenInWrappedAddress: WETH}),
@@ -364,7 +376,8 @@ describe('buildSwapStepsMethodParameters - encodeSwaps round-trip', () => {
       TradeType.ExactOut,
       amountOut,
       tokenCI(WETH, true),
-      tokenCI(USDC)
+      tokenCI(USDC),
+      ZERO_SLIPPAGE
     );
     const spec = buildSwapSpecification({
       swapOptions: swapOptions({
