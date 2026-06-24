@@ -9,7 +9,6 @@ import {
   SwapSpecification,
   SwapStep,
   TokenTransferMode,
-  V4Action,
 } from '@uniswap/universal-router-sdk';
 import {ChainId} from '../../lib/config';
 import {MethodParameters} from '../../lib/methodParameters';
@@ -53,34 +52,6 @@ export function buildSwapSpecification(params: {
   };
 }
 
-// The factory emits `hookData: ''` (Guidestar convention, what the response
-// carries), but ethers' encoder arrayifies hookData and rejects ''. Normalize
-// to '0x' only for the encode call; the response swapSteps keep ''.
-function withEncodableHookData(steps: SwapStep[]): SwapStep[] {
-  const hd = (h: string): string => (h === '' ? '0x' : h);
-  return steps.map(step => {
-    if (step.type !== 'V4_SWAP') return step;
-    return {
-      ...step,
-      v4Actions: step.v4Actions.map((a): V4Action => {
-        switch (a.action) {
-          case 'SWAP_EXACT_IN_SINGLE':
-          case 'SWAP_EXACT_OUT_SINGLE':
-            return {...a, hookData: hd(a.hookData)};
-          case 'SWAP_EXACT_IN':
-          case 'SWAP_EXACT_OUT':
-            return {
-              ...a,
-              path: a.path.map(p => ({...p, hookData: hd(p.hookData)})),
-            };
-          default:
-            return a;
-        }
-      }),
-    };
-  });
-}
-
 // Encodes swapSteps into Universal Router calldata, resolving `to` the same way
 // the legacy builder does: UR for Permit2, SwapProxy for ApproveProxy.
 export function buildSwapStepsMethodParameters(
@@ -88,10 +59,7 @@ export function buildSwapStepsMethodParameters(
   spec: SwapSpecification,
   chainId: ChainId
 ): MethodParameters {
-  const {calldata, value} = SwapRouter.encodeSwaps(
-    spec,
-    withEncodableHookData(swapSteps)
-  );
+  const {calldata, value} = SwapRouter.encodeSwaps(spec, swapSteps);
   const to =
     spec.tokenTransferMode === TokenTransferMode.ApproveProxy
       ? SWAP_PROXY_ADDRESS(chainId)

@@ -119,7 +119,21 @@ export function buildSwapSteps(
     });
   }
   steps.push(...innerSteps);
-  if (needsUnwrapWeth) {
+
+  const outputIsWrappedNative =
+    !tokenOutCurrencyInfo.isNative &&
+    addressEq(
+      tokenOutCurrencyInfo.wrappedAddress.address,
+      tokenInCurrencyInfo.wrappedAddress.address
+    );
+  // Exact-out over-wraps native input to the padded max; unwrap the leftover so
+  // the input-refund SWEEP (native) recovers it. Skip when the output is WETH —
+  // it shares the leftover's currency and its own SWEEP already returns it.
+  const recoversWrappedInputLeftover =
+    tradeType === TradeType.ExactOut &&
+    wrapEthAmount > 0n &&
+    !outputIsWrappedNative;
+  if (needsUnwrapWeth || recoversWrappedInputLeftover) {
     steps.push({
       type: 'UNWRAP_WETH',
       recipient: ROUTER_AS_RECIPIENT,
@@ -369,8 +383,7 @@ function buildV3ExactOutStep(
  * `[SETTLE(input, amountIn), SWAP_EXACT_IN[_SINGLE](...), TAKE(output, recipient: ROUTER, amount: 0)]`.
  *
  * Single-pool emits `SWAP_EXACT_IN_SINGLE`; multi-hop emits `SWAP_EXACT_IN`
- * with a `PathKey[]`. `hookData` is the empty string (`''`), matching
- * Guidestar's payload — narrow SDK boundary normalizes to `0x` if required.
+ * with a `PathKey[]`. `hookData` is `'0x'` (canonical empty bytes).
  */
 function buildV4ExactInStep(
   pools: V4Pool[],
@@ -391,12 +404,12 @@ function buildV4ExactInStep(
         zeroForOne: addressEq(singlePoolKey.currency0, tokenIn),
         amountIn: amountIn.toString(),
         amountOutMinimum: '0',
-        hookData: '',
+        hookData: '0x',
       }
     : {
         action: 'SWAP_EXACT_IN',
         currencyIn: tokenIn,
-        path: hops.map(pathKeyFromHop),
+        path: v4PathKeys(hops, false),
         amountIn: amountIn.toString(),
         amountOutMinimum: '0',
       };
@@ -416,11 +429,9 @@ function buildV4ExactInStep(
 }
 
 /**
- * V4 exact-out action layout differs from exact-in: SWAP first, then
- * SETTLE_ALL (input, maxAmount), then TAKE_ALL (output, minAmount). The
- * input amount isn't known until the swap runs, so SETTLE_ALL absorbs
- * whatever the swap consumed (up to `maxAmount`). The SDK accepts either
- * ordering as long as deltas net to zero.
+ * V4 exact-out reverses the exact-in layout: SWAP first (the input amount isn't
+ * known until it runs), then SETTLE (input) and TAKE (output) from router
+ * custody via the OPEN_DELTA sentinel.
  */
 function buildV4ExactOutStep(
   pools: V4Pool[],
@@ -441,21 +452,12 @@ function buildV4ExactOutStep(
         zeroForOne: addressEq(singlePoolKey.currency0, tokenIn),
         amountOut: amountOut.toString(),
         amountInMaximum: amountInMax.toString(),
-        hookData: '',
+        hookData: '0x',
       }
     : {
         action: 'SWAP_EXACT_OUT',
         currencyOut: outputCurrency,
-        // V4 exact-out PathKey[] is reversed: starts at the output side
-        // and walks back toward input. Each entry's `intermediateCurrency`
-        // is the upstream token from the reversed perspective.
-        path: [...hops].reverse().map(h => ({
-          intermediateCurrency: h.tokenIn,
-          fee: h.pool.fee,
-          tickSpacing: h.pool.tickSpacing,
-          hooks: h.pool.hooks,
-          hookData: '',
-        })),
+        path: v4PathKeys(hops, true),
         amountOut: amountOut.toString(),
         amountInMaximum: amountInMax.toString(),
       };
@@ -464,15 +466,12 @@ function buildV4ExactOutStep(
     type: 'V4_SWAP',
     v4Actions: [
       swapAction,
+      {action: 'SETTLE', currency: tokenIn, amount: V4_OPEN_DELTA},
       {
-        action: 'SETTLE_ALL',
-        currency: tokenIn,
-        maxAmount: amountInMax.toString(),
-      },
-      {
-        action: 'TAKE_ALL',
+        action: 'TAKE',
         currency: outputCurrency,
-        minAmount: amountOut.toString(),
+        recipient: ROUTER_AS_RECIPIENT,
+        amount: V4_OPEN_DELTA,
       },
     ],
   };
@@ -498,14 +497,20 @@ function poolKeyFromV4(pool: V4Pool): PoolKey {
   };
 }
 
-function pathKeyFromHop(hop: Hop<V4Pool>): PathKey {
-  return {
-    intermediateCurrency: hop.tokenOut,
-    fee: hop.pool.fee,
-    tickSpacing: hop.pool.tickSpacing,
-    hooks: hop.pool.hooks,
-    hookData: '',
-  };
+/**
+ * V4 multi-hop PathKey[], matching v4-sdk encodeRouteToPath: exact-in keys each
+ * hop on its tokenOut (forward); exact-out keys on tokenIn (the SDK's
+ * reverse-pools-then-reverse-pathKeys nets to this — the router walks an
+ * exact-out path in reverse internally). Pinned to the SDK by an oracle test.
+ */
+function v4PathKeys(hops: Hop<V4Pool>[], exactOutput: boolean): PathKey[] {
+  return hops.map(h => ({
+    intermediateCurrency: exactOutput ? h.tokenIn : h.tokenOut,
+    fee: h.pool.fee,
+    tickSpacing: h.pool.tickSpacing,
+    hooks: h.pool.hooks,
+    hookData: '0x',
+  }));
 }
 
 // === Address helpers =========================================================

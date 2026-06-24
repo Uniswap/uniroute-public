@@ -11,7 +11,12 @@ import {Address} from '../../models/address/Address';
 import {TradeType} from '../../models/quote/TradeType';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {ROUTER_AS_RECIPIENT} from '@uniswap/universal-router-sdk';
-import {Percent} from '@uniswap/sdk-core';
+import {
+  Pool as V4SdkPool,
+  Route as V4SdkRoute,
+  encodeRouteToPath,
+} from '@uniswap/v4-sdk';
+import {Percent, Token} from '@uniswap/sdk-core';
 
 // === Test fixtures ============================================================
 
@@ -317,7 +322,7 @@ describe('SwapStepsFactory - V4', () => {
             zeroForOne: true,
             amountIn: '1000000',
             amountOutMinimum: '0',
-            hookData: '',
+            hookData: '0x',
           },
           {
             action: 'TAKE',
@@ -366,7 +371,7 @@ describe('SwapStepsFactory - V4', () => {
             zeroForOne: false,
             amountIn: '1000000000000000000',
             amountOutMinimum: '0',
-            hookData: '',
+            hookData: '0x',
           },
           {
             action: 'TAKE',
@@ -414,14 +419,14 @@ describe('SwapStepsFactory - V4', () => {
                 fee: 500,
                 tickSpacing: 10,
                 hooks: ZERO_HOOKS,
-                hookData: '',
+                hookData: '0x',
               },
               {
                 intermediateCurrency: DAI,
                 fee: 3000,
                 tickSpacing: 60,
                 hooks: ZERO_HOOKS,
-                hookData: '',
+                hookData: '0x',
               },
             ],
             amountIn: '1000000',
@@ -528,7 +533,7 @@ describe('SwapStepsFactory - V4', () => {
           zeroForOne: true,
           amountIn: '1000000000000000000',
           amountOutMinimum: '0',
-          hookData: '',
+          hookData: '0x',
         },
         {
           action: 'TAKE',
@@ -582,7 +587,7 @@ describe('SwapStepsFactory - V4', () => {
             zeroForOne: false,
             amountIn: '1000000000000000000',
             amountOutMinimum: '0',
-            hookData: '',
+            hookData: '0x',
           },
           {
             action: 'TAKE',
@@ -636,7 +641,7 @@ describe('SwapStepsFactory - V4', () => {
             zeroForOne: true,
             amountIn: '1000000',
             amountOutMinimum: '0',
-            hookData: '',
+            hookData: '0x',
           },
           {
             action: 'TAKE',
@@ -687,7 +692,7 @@ describe('SwapStepsFactory - V4', () => {
             zeroForOne: true,
             amountIn: '1000000',
             amountOutMinimum: '0',
-            hookData: '',
+            hookData: '0x',
           },
           {
             action: 'TAKE',
@@ -849,6 +854,74 @@ describe('SwapStepsFactory - native input/output', () => {
       ],
     });
   });
+
+  it('appends UNWRAP_WETH for native-input exact-out via a WETH route (recover over-wrap)', () => {
+    // Over-wrapped leftover (padded max - consumed) is unwrapped to native.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V3, [v3Pool(USDC, WETH, 500, POOL_ADDR_1)]),
+      1_000_000_000_000_000n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactOut,
+      2_000_000n,
+      new CurrencyInfo(true, new Address(WETH)),
+      tokenCI(USDC),
+      ZERO_SLIPPAGE
+    );
+
+    expect(steps.map(s => s.type)).toEqual([
+      'WRAP_ETH',
+      'V3_SWAP_EXACT_OUT',
+      'UNWRAP_WETH',
+    ]);
+  });
+
+  it('does not unwrap for WETH-input exact-out (input SWEEP returns WETH directly)', () => {
+    // ERC20 input is never wrapped, so nothing to unwrap.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V3, [v3Pool(USDC, WETH, 500, POOL_ADDR_1)]),
+      1_000_000_000_000_000n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactOut,
+      2_000_000n,
+      tokenCI(WETH),
+      tokenCI(USDC),
+      ZERO_SLIPPAGE
+    );
+
+    expect(steps.map(s => s.type)).toEqual(['V3_SWAP_EXACT_OUT']);
+  });
+
+  it('does not unwrap for native-input exact-out when the output IS WETH', () => {
+    // Output WETH shares the leftover's currency, so unwrapping would clobber
+    // the output. Route: WETH -> USDC -> WETH.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V3, [
+        v3Pool(USDC, WETH, 500, POOL_ADDR_1),
+        v3Pool(USDC, WETH, 3000, POOL_ADDR_2),
+      ]),
+      1_000_000_000_000_000n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactOut,
+      1_000_000_000_000_000n,
+      new CurrencyInfo(true, new Address(WETH)),
+      tokenCI(WETH),
+      ZERO_SLIPPAGE
+    );
+
+    expect(steps.map(s => s.type)).toEqual(['WRAP_ETH', 'V3_SWAP_EXACT_OUT']);
+  });
 });
 
 // === Exact-output ============================================================
@@ -988,10 +1061,7 @@ describe('SwapStepsFactory - V3 exact-out', () => {
 
 describe('SwapStepsFactory - V4 exact-out', () => {
   it('emits V4_SWAP with SWAP_EXACT_OUT_SINGLE for a single-pool route', () => {
-    // V4 exact-out action order differs from exact-in: SWAP first, then
-    // SETTLE_ALL (input, maxAmount), then TAKE_ALL (output, minAmount). The
-    // SDK accepts either ordering; we use this layout for exact-out because
-    // the input amount isn't known until the swap runs.
+    // Action order: SWAP, then SETTLE (input) and TAKE (output) via OPEN_DELTA.
     const quote = new QuoteBasic(
       new RouteBasic(Protocol.V4, [
         v4Pool(USDC, WETH, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
@@ -1026,17 +1096,18 @@ describe('SwapStepsFactory - V4 exact-out', () => {
             zeroForOne: true,
             amountOut: '1000000000000000000',
             amountInMaximum: '230000000',
-            hookData: '',
+            hookData: '0x',
           },
           {
-            action: 'SETTLE_ALL',
+            action: 'SETTLE',
             currency: USDC,
-            maxAmount: '230000000',
+            amount: '0',
           },
           {
-            action: 'TAKE_ALL',
+            action: 'TAKE',
             currency: WETH,
-            minAmount: '1000000000000000000',
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
           },
         ],
       },
@@ -1073,14 +1144,15 @@ describe('SwapStepsFactory - V4 exact-out', () => {
             amountInMaximum: '500000000000000000',
           }),
           {
-            action: 'SETTLE_ALL',
+            action: 'SETTLE',
             currency: WETH,
-            maxAmount: '500000000000000000',
+            amount: '0',
           },
           {
-            action: 'TAKE_ALL',
+            action: 'TAKE',
             currency: USDC,
-            minAmount: '1000000000',
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
           },
         ],
       },
@@ -1115,29 +1187,33 @@ describe('SwapStepsFactory - V4 exact-out', () => {
           {
             action: 'SWAP_EXACT_OUT',
             currencyOut: DAI,
-            // PathKey[] is reversed for V4 exact-out: walks from output
-            // back toward input.
+            // Forward (input->output) order; the router walks it in reverse.
             path: [
-              {
-                intermediateCurrency: WETH,
-                fee: 3000,
-                tickSpacing: 60,
-                hooks: ZERO_HOOKS,
-                hookData: '',
-              },
               {
                 intermediateCurrency: USDC,
                 fee: 500,
                 tickSpacing: 10,
                 hooks: ZERO_HOOKS,
-                hookData: '',
+                hookData: '0x',
+              },
+              {
+                intermediateCurrency: WETH,
+                fee: 3000,
+                tickSpacing: 60,
+                hooks: ZERO_HOOKS,
+                hookData: '0x',
               },
             ],
             amountOut: '1000000',
             amountInMaximum: '2000000',
           },
-          {action: 'SETTLE_ALL', currency: USDC, maxAmount: '2000000'},
-          {action: 'TAKE_ALL', currency: DAI, minAmount: '1000000'},
+          {action: 'SETTLE', currency: USDC, amount: '0'},
+          {
+            action: 'TAKE',
+            currency: DAI,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
         ],
       },
     ]);
@@ -1181,21 +1257,97 @@ describe('SwapStepsFactory - V4 exact-out', () => {
             zeroForOne: false,
             amountOut: '1000000000',
             amountInMaximum: '500000000000000000',
-            hookData: '',
+            hookData: '0x',
           },
           {
-            action: 'SETTLE_ALL',
+            action: 'SETTLE',
             currency: WETH,
-            maxAmount: '500000000000000000',
+            amount: '0',
           },
           {
-            action: 'TAKE_ALL',
+            action: 'TAKE',
             currency: USDC,
-            minAmount: '1000000000',
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
           },
         ],
       },
     ]);
+  });
+
+  it('multi-hop SWAP_EXACT_OUT path matches v4-sdk encodeRouteToPath (oracle)', () => {
+    // Pins our cloned path ordering to the SDK's canonical builder so the
+    // convention can't silently drift. Route: USDC -> WETH -> DAI.
+    const steps = buildSwapSteps(
+      new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [
+            v4Pool(USDC, WETH, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+            v4Pool(DAI, WETH, 3000, 60, ZERO_HOOKS, POOL_ID_V4_2),
+          ]),
+          2_000_000n
+        ),
+      ]),
+      TradeType.ExactOut,
+      1_000_000n,
+      tokenCI(USDC),
+      tokenCI(DAI),
+      ZERO_SLIPPAGE
+    );
+    const step = steps[0];
+    if (step.type !== 'V4_SWAP') throw new Error('expected V4_SWAP');
+    const swap = step.v4Actions[0];
+    if (swap.action !== 'SWAP_EXACT_OUT')
+      throw new Error('expected SWAP_EXACT_OUT');
+
+    // sqrtPriceX96 at tick 0 (satisfies the SDK Pool price/tick invariant).
+    const sqrtPriceAtTickZero = (2n ** 96n).toString();
+    const liquidity = '1000000000000';
+    const usdc = new Token(1, USDC, 6);
+    const weth = new Token(1, WETH, 18);
+    const dai = new Token(1, DAI, 18);
+    const route = new V4SdkRoute(
+      [
+        new V4SdkPool(
+          usdc,
+          weth,
+          500,
+          10,
+          ZERO_HOOKS,
+          sqrtPriceAtTickZero,
+          liquidity,
+          0
+        ),
+        new V4SdkPool(
+          dai,
+          weth,
+          3000,
+          60,
+          ZERO_HOOKS,
+          sqrtPriceAtTickZero,
+          liquidity,
+          0
+        ),
+      ],
+      usdc,
+      dai
+    );
+    const toComparablePathKey = (k: {
+      intermediateCurrency: string;
+      fee: number | string;
+      tickSpacing: number;
+      hooks: string;
+      hookData: string;
+    }) => ({
+      intermediateCurrency: k.intermediateCurrency.toLowerCase(),
+      fee: Number(k.fee),
+      tickSpacing: k.tickSpacing,
+      hooks: k.hooks.toLowerCase(),
+      hookData: k.hookData,
+    });
+    expect(swap.path.map(toComparablePathKey)).toEqual(
+      encodeRouteToPath(route, true).map(toComparablePathKey)
+    );
   });
 });
 
@@ -1398,12 +1550,14 @@ describe('SwapStepsFactory - MIXED', () => {
 });
 
 // === Exact-out slippage buffer (regression: V3TooMuchRequested on Base) =======
-// The per-leg input maximum (amountInMax / amountInMaximum / SETTLE_ALL
-// maxAmount) and the WRAP_ETH amount MUST carry the slippage buffer. The SDK's
-// `encodeSwaps` only pads the ingress total (msg.value / PERMIT2 pull) — it
-// encodes each step's cap verbatim. So with raw (0%) caps, any adverse price
-// movement makes a leg exceed its cap and revert `V3TooMuchRequested()`.
-// EXACT_INPUT is unaffected: its slippage lives in the final SWEEP min.
+// The per-leg input maximum (amountInMax / amountInMaximum) and the WRAP_ETH
+// amount MUST carry the slippage buffer. The SDK's `encodeSwaps` only pads the
+// ingress total (msg.value / PERMIT2 pull) — it encodes each step's cap
+// verbatim. So with raw (0%) caps, any adverse price movement makes a leg
+// exceed its cap and revert `V3TooMuchRequested()`. The V4 SETTLE carries no
+// cap (it settles the open delta from router custody); the swap action's
+// amountInMaximum is the V4 slippage guard. EXACT_INPUT is unaffected: its
+// slippage lives in the final SWEEP min.
 describe('SwapStepsFactory - exact-out slippage buffer', () => {
   // 0.5% => padded = raw * 10050 / 10000
   const SLIPPAGE = new Percent(50, 10_000);
@@ -1466,10 +1620,16 @@ describe('SwapStepsFactory - exact-out slippage buffer', () => {
         amountInMax: '1005000000000000',
         path: `0x${USDC.slice(2).toLowerCase()}0001f4${WETH.slice(2).toLowerCase()}`,
       },
+      // Unwrap the buffered over-wrap back to native for the input refund.
+      {
+        type: 'UNWRAP_WETH',
+        recipient: ROUTER_AS_RECIPIENT,
+        amountMin: '0',
+      },
     ]);
   });
 
-  it('pads V4 SWAP_EXACT_OUT_SINGLE amountInMaximum and SETTLE_ALL maxAmount', () => {
+  it('pads V4 SWAP_EXACT_OUT_SINGLE amountInMaximum (SETTLE carries no cap)', () => {
     const quote = new QuoteBasic(
       new RouteBasic(Protocol.V4, [
         v4Pool(USDC, WETH, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
@@ -1504,17 +1664,18 @@ describe('SwapStepsFactory - exact-out slippage buffer', () => {
             amountOut: '1000000000000000000',
             // 230_000_000 * 1.005 = 231_150_000
             amountInMaximum: '231150000',
-            hookData: '',
+            hookData: '0x',
           },
           {
-            action: 'SETTLE_ALL',
+            action: 'SETTLE',
             currency: USDC,
-            maxAmount: '231150000',
+            amount: '0',
           },
           {
-            action: 'TAKE_ALL',
+            action: 'TAKE',
             currency: WETH,
-            minAmount: '1000000000000000000',
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
           },
         ],
       },
