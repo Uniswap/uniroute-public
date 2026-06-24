@@ -30,6 +30,8 @@ export const LINEA_UPPER_SWAP_GAS_LIMIT = BigNumber.from(500000);
 export const ARC_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 export const MEGAETH_UPPER_SWAP_GAS_LIMIT = BigNumber.from(500000);
 export const ROBINHOOD_UPPER_SWAP_GAS_LIMIT = BigNumber.from(500000);
+// Ink is an OP-stack L2; use the same 200k limit as Optimism/Base.
+export const INK_UPPER_SWAP_GAS_LIMIT = BigNumber.from(200000);
 
 export const CHAIN_TO_GAS_LIMIT_MAP: {[chainId in ChainId]: BigNumber} = {
   [ChainId.MAINNET]: MAINNET_UPPER_SWAP_GAS_LIMIT,
@@ -57,4 +59,5 @@ export const CHAIN_TO_GAS_LIMIT_MAP: {[chainId in ChainId]: BigNumber} = {
   [ChainId.ARC]: ARC_UPPER_SWAP_GAS_LIMIT,
   [ChainId.MEGAETH]: MEGAETH_UPPER_SWAP_GAS_LIMIT,
   [ChainId.ROBINHOOD]: ROBINHOOD_UPPER_SWAP_GAS_LIMIT,
+  [ChainId.INK]: INK_UPPER_SWAP_GAS_LIMIT,
 };

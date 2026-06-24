@@ -190,6 +190,7 @@ export const TENDERLY_NOT_SUPPORTED_CHAINS = [
   ChainId.MONAD_TESTNET,
   ChainId.ARC,
   ChainId.ROBINHOOD,
+  ChainId.INK,
 ];
 
 // Chains that don't support Tenderly Node API but support Simulation API

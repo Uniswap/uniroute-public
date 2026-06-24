@@ -52,6 +52,7 @@ import {
   USDT_OPTIMISM,
   PATHUSD_TEMPO,
   USDC_ARC,
+  USDC_INK,
   getGasToken,
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
@@ -102,6 +103,7 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.ARC]: [USDC_ARC],
   [ChainId.MEGAETH]: [USDM_MEGAETH],
   [ChainId.ROBINHOOD]: [USDG_ROBINHOOD],
+  [ChainId.INK]: [USDC_INK],
 };
 
 export type GasPools = {
