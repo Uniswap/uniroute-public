@@ -922,6 +922,67 @@ describe('SwapStepsFactory - native input/output', () => {
 
     expect(steps.map(s => s.type)).toEqual(['WRAP_ETH', 'V3_SWAP_EXACT_OUT']);
   });
+
+  it('routes native through a native/WETH wrap-hook V4 pool without WRAP_ETH', () => {
+    // Some V4 deployments expose a native<->WETH "wrap" pool (fee 0, hook-based,
+    // 1:1). For native input, the route should enter as native (0x0) and walk
+    // native -> WETH -> USDC through it directly (no WRAP_ETH), matching the SDK.
+    const WRAP_HOOK = '0xB08211d57032Dd10b1974d4B876851a7F7596888';
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(NATIVE, WETH, 0, 1, WRAP_HOOK, POOL_ID_V4_1),
+        v4Pool(WETH, USDC, 500, 10, ZERO_HOOKS, POOL_ID_V4_2),
+      ]),
+      1_000_000_000_000_000n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactOut,
+      5_000_000n,
+      new CurrencyInfo(true, new Address(WETH)),
+      tokenCI(USDC),
+      ZERO_SLIPPAGE
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {
+            action: 'SWAP_EXACT_OUT',
+            currencyOut: USDC,
+            path: [
+              {
+                intermediateCurrency: NATIVE,
+                fee: 0,
+                tickSpacing: 1,
+                hooks: WRAP_HOOK,
+                hookData: '0x',
+              },
+              {
+                intermediateCurrency: WETH,
+                fee: 500,
+                tickSpacing: 10,
+                hooks: ZERO_HOOKS,
+                hookData: '0x',
+              },
+            ],
+            amountOut: '5000000',
+            amountInMaximum: '1000000000000000',
+          },
+          {action: 'SETTLE', currency: NATIVE, amount: '0'},
+          {
+            action: 'TAKE',
+            currency: USDC,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
+        ],
+      },
+    ]);
+  });
 });
 
 // === Exact-output ============================================================

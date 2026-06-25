@@ -525,9 +525,13 @@ function inferRouteTokenAddress(pool: Pool, ci: CurrencyInfo): string {
   if (!ci.isNative) {
     return ci.wrappedAddress.address;
   }
-  const wrapped = ci.wrappedAddress.address;
-  if (poolContains(pool, wrapped)) {
-    return wrapped;
+  // A V4 pool may hold native directly — incl. native/WETH wrap-hook pools that
+  // hold both, so check native before wrapped. Mirrors v4-sdk getPathCurrency.
+  if (poolContains(pool, NATIVE_ADDRESS)) {
+    return NATIVE_ADDRESS;
+  }
+  if (poolContains(pool, ci.wrappedAddress.address)) {
+    return ci.wrappedAddress.address;
   }
   return NATIVE_ADDRESS;
 }
