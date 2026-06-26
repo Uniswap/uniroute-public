@@ -90,7 +90,6 @@ import {
   buildSwapSpecification,
   buildSwapStepsMethodParameters,
 } from './swap/SwapStepsBuilder';
-import {parseSlippageTolerance} from './swap/shared';
 import {Struct} from '@bufbuild/protobuf';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {IQuoteRequestValidator} from './QuoteRequestValidator';
@@ -764,7 +763,8 @@ export class UniRouteBL implements IUniRoutedBL {
         portionBips,
         portionRecipient,
         debugInfo,
-        universalRouterSwapsteps
+        universalRouterSwapsteps,
+        options?.universalRouterVersion
       );
     } catch (error) {
       // If request fails, log metric + request details for debugging purposes
@@ -2232,7 +2232,8 @@ export class UniRouteBL implements IUniRoutedBL {
     // amounts and does not populate any portion-related fields. Caller is
     // responsible for *not* having called `getPortionAmount` against
     // `amountIn` upstream.
-    universalRouterSwapsteps: boolean = false
+    universalRouterSwapsteps: boolean = false,
+    universalRouterVersion?: UniversalRouterVersion
   ): Promise<QuoteResponse> {
     const tokenIn = erc20TokenToSdkToken(
       chain.chainId,
@@ -2669,9 +2670,7 @@ export class UniRouteBL implements IUniRoutedBL {
           amountIn,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
-          // Resolved tolerance for the exact-out caps (see buildSwapSteps);
-          // `?? 0` handles the degenerate no-slippage case.
-          parseSlippageTolerance((slippageTolerance ?? 0).toString())
+          universalRouterVersion
         );
       } catch (err) {
         await ctx.metrics.count(
@@ -3005,7 +3004,7 @@ export class UniRouteBL implements IUniRoutedBL {
                 amountIn,
                 tokenInCurrencyInfo,
                 tokenOutCurrencyInfo,
-                swapOptions!.slippageTolerance
+                universalRouterVersion
               );
               const spec = buildSwapSpecification({
                 swapOptions: swapOptions!,

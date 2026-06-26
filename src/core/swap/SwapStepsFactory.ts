@@ -9,13 +9,14 @@ import {Address} from '../../models/address/Address';
 import {TradeType} from '../../models/quote/TradeType';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {
+  isAtLeastV2_1_1,
   PathKey,
   PoolKey,
   ROUTER_AS_RECIPIENT,
   SwapStep,
+  UniversalRouterVersion,
   V4Action,
 } from '@uniswap/universal-router-sdk';
-import {Percent} from '@uniswap/sdk-core';
 
 const NATIVE_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -27,12 +28,56 @@ const SENTINEL_AMOUNT = (1n << 255n).toString();
 // amount field can't hold 2**255, so chained V4 swaps use this instead.
 const V4_OPEN_DELTA = '0';
 
-// Pads an exact-out route input by slippage for the per-leg cap and WRAP_ETH
-// amount: floor(input * (denom + num) / denom).
-function maxInputWithSlippage(input: bigint, slippage: Percent): bigint {
-  const numerator = BigInt(slippage.numerator.toString());
-  const denominator = BigInt(slippage.denominator.toString());
-  return (input * (denominator + numerator)) / denominator;
+const PRICE_PRECISION = 10n ** 36n;
+
+// 0-slippage per-hop price (amountOut * 1e36 / amountIn) for a single-hop quote.
+// Trading applies the per-pair slippage at encode. Multi-hop has no intermediate
+// amounts, so it opts out (matches the legacy flow). Returns undefined for
+// degenerate amounts (treated as a per-hop opt-out).
+function singleHopMinHopPriceX36(
+  tradeType: TradeType,
+  allocatedAmount: bigint,
+  quoteAmount: bigint
+): string | undefined {
+  const amountIn =
+    tradeType === TradeType.ExactIn ? allocatedAmount : quoteAmount;
+  const amountOut =
+    tradeType === TradeType.ExactIn ? quoteAmount : allocatedAmount;
+  if (amountIn <= 0n || amountOut <= 0n) {
+    return undefined;
+  }
+  return ((amountOut * PRICE_PRECISION) / amountIn).toString();
+}
+
+// Attaches a computed minHopPriceX36 to a single-hop quote's swap action:
+// scalar for V4 *_SINGLE actions, single-element array for V2/V3 (matches the
+// SDK SwapStep shape).
+function attachMinHopPriceX36(
+  steps: SwapStep[],
+  minHopPriceX36: string
+): SwapStep[] {
+  return steps.map(step => {
+    if (step.type === 'V4_SWAP') {
+      return {
+        ...step,
+        v4Actions: step.v4Actions.map(action =>
+          action.action === 'SWAP_EXACT_IN_SINGLE' ||
+          action.action === 'SWAP_EXACT_OUT_SINGLE'
+            ? {...action, minHopPriceX36}
+            : action
+        ),
+      };
+    }
+    if (
+      step.type === 'V2_SWAP_EXACT_IN' ||
+      step.type === 'V2_SWAP_EXACT_OUT' ||
+      step.type === 'V3_SWAP_EXACT_IN' ||
+      step.type === 'V3_SWAP_EXACT_OUT'
+    ) {
+      return {...step, minHopPriceX36: [minHopPriceX36]};
+    }
+    return step;
+  });
 }
 
 /**
@@ -41,12 +86,10 @@ function maxInputWithSlippage(input: bigint, slippage: Percent): bigint {
  * `ROUTER_AS_RECIPIENT` and Trading owns the `SwapSpecification` half of the
  * contract.
  *
- * EXACT_IN: `amount` is the input, split across quotes by `route.percentage`;
- * slippage is the SDK's final SWEEP min, so the steps carry none.
- *
- * EXACT_OUT: `amount` is the desired output, `quote.amount` the routed input.
- * The SDK pads only the ingress, not the per-leg input caps, so the caps and
- * WRAP_ETH are slippage-padded here (raw caps revert V3/V4TooMuchRequested).
+ * Slippage-free: the steps carry raw amounts (EXACT_IN per-leg mins are `0`;
+ * EXACT_OUT per-leg caps + WRAP_ETH are the unpadded routed input;
+ * minHopPriceX36 is the 0-slippage price). Trading owns all slippage
+ * application at encode (per-hop price, exact-out caps, and WRAP_ETH).
  */
 export function buildSwapSteps(
   quoteSplit: QuoteSplit,
@@ -54,9 +97,17 @@ export function buildSwapSteps(
   amount: bigint,
   tokenInCurrencyInfo: CurrencyInfo,
   tokenOutCurrencyInfo: CurrencyInfo,
-  slippageTolerance: Percent
+  universalRouterVersion: UniversalRouterVersion | undefined
 ): SwapStep[] {
   const allocatedAmounts = allocateAmounts(quoteSplit, amount);
+  // UR >= 2.1.1: single-hop quotes carry minHopPriceX36 computed at 0 slippage;
+  // Trading applies the per-pair haircut at encode. Multi-hop opts out: only
+  // leg-level amounts are known (allocateAmounts + quote.amount), never true
+  // per-hop amounts, so each hop can't be priced. This matches legacy, whose
+  // per-hop guard also opts out — uniroute's routing-api response only paints
+  // the route's boundary amounts (first pool in, last pool out) and leaves
+  // intermediate hops undefined. Multi-hop relies on the trade-level output min.
+  const includeMinHopPrice = isAtLeastV2_1_1(universalRouterVersion);
   const innerSteps: SwapStep[] = [];
 
   // Per-quote, the actual tokenIn/tokenOut used for routing may differ from
@@ -79,12 +130,10 @@ export function buildSwapSteps(
       tokenOutCurrencyInfo
     );
 
-    // Input units: ExactIn uses the allocated input; ExactOut pads the routed
-    // input (`quote.amount`) by slippage for the per-leg cap + WRAP_ETH.
+    // Raw input units (no slippage): ExactIn uses the allocated input, ExactOut
+    // the routed input (`quote.amount`). Trading pads exact-out caps + WRAP_ETH.
     const routeInputAmount =
-      tradeType === TradeType.ExactIn
-        ? allocatedAmount
-        : maxInputWithSlippage(quote.amount, slippageTolerance);
+      tradeType === TradeType.ExactIn ? allocatedAmount : quote.amount;
 
     if (
       tokenInCurrencyInfo.isNative &&
@@ -99,14 +148,21 @@ export function buildSwapSteps(
       needsUnwrapWeth = true;
     }
 
+    const quoteSteps = buildStepsForQuote(
+      quote,
+      tradeType,
+      allocatedAmount,
+      inferredTokenIn,
+      routeInputAmount
+    );
+    const minHopPriceX36 =
+      includeMinHopPrice && quote.route.path.length === 1
+        ? singleHopMinHopPriceX36(tradeType, allocatedAmount, quote.amount)
+        : undefined;
     innerSteps.push(
-      ...buildStepsForQuote(
-        quote,
-        tradeType,
-        allocatedAmount,
-        inferredTokenIn,
-        routeInputAmount
-      )
+      ...(minHopPriceX36
+        ? attachMinHopPriceX36(quoteSteps, minHopPriceX36)
+        : quoteSteps)
     );
   }
 

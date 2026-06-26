@@ -10,13 +10,16 @@ import {V4Pool} from '../../models/pool/V4Pool';
 import {Address} from '../../models/address/Address';
 import {TradeType} from '../../models/quote/TradeType';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
-import {ROUTER_AS_RECIPIENT} from '@uniswap/universal-router-sdk';
+import {
+  ROUTER_AS_RECIPIENT,
+  UniversalRouterVersion,
+} from '@uniswap/universal-router-sdk';
 import {
   Pool as V4SdkPool,
   Route as V4SdkRoute,
   encodeRouteToPath,
 } from '@uniswap/v4-sdk';
-import {Percent, Token} from '@uniswap/sdk-core';
+import {Token} from '@uniswap/sdk-core';
 
 // === Test fixtures ============================================================
 
@@ -81,10 +84,6 @@ const POOL_ADDR_1 = '0x0000000000000000000000000000000000001111';
 const POOL_ADDR_2 = '0x0000000000000000000000000000000000002222';
 const POOL_ADDR_3 = '0x0000000000000000000000000000000000003333';
 
-// Zero slippage => caps unpadded (x1), so structural tests assert raw amounts.
-// The padded-cap behavior is covered by the "exact-out slippage buffer" block.
-const ZERO_SLIPPAGE = new Percent(0, 1);
-
 const ZERO_HOOKS = '0x0000000000000000000000000000000000000000';
 const POOL_ID_V4_1 =
   '0x0000000000000000000000000000000000000000000000000000000000004001';
@@ -107,7 +106,7 @@ describe('SwapStepsFactory - V2', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -136,7 +135,7 @@ describe('SwapStepsFactory - V2', () => {
       1_000_000_000_000_000_000n,
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -168,7 +167,7 @@ describe('SwapStepsFactory - V2', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -200,7 +199,7 @@ describe('SwapStepsFactory - V3', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -230,7 +229,7 @@ describe('SwapStepsFactory - V3', () => {
       1_000_000_000_000_000_000n,
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -262,7 +261,7 @@ describe('SwapStepsFactory - V3', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -302,7 +301,7 @@ describe('SwapStepsFactory - V4', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -335,6 +334,57 @@ describe('SwapStepsFactory - V4', () => {
     ]);
   });
 
+  it('includes 0-slippage minHopPriceX36 on a single-hop SWAP_EXACT_IN_SINGLE when enabled', () => {
+    // amountIn = 1_000_000 (trade input), amountOut = quote.amount = 999.
+    // 0-slippage minHopPriceX36 = amountOut * 1e36 / amountIn = 999 * 1e30.
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(USDC, WETH, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+      ]),
+      999n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactIn,
+      1_000_000n,
+      tokenCI(USDC),
+      tokenCI(WETH),
+      UniversalRouterVersion.V2_1_1
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {action: 'SETTLE', currency: USDC, amount: '1000000'},
+          {
+            action: 'SWAP_EXACT_IN_SINGLE',
+            poolKey: {
+              currency0: USDC,
+              currency1: WETH,
+              fee: 500,
+              tickSpacing: 10,
+              hooks: ZERO_HOOKS,
+            },
+            zeroForOne: true,
+            amountIn: '1000000',
+            amountOutMinimum: '0',
+            minHopPriceX36: '999' + '0'.repeat(30),
+            hookData: '0x',
+          },
+          {
+            action: 'TAKE',
+            currency: WETH,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('flips zeroForOne when route tokenIn is pool.currency1 (WETH -> USDC)', () => {
     // Same pool (token0=USDC, token1=WETH). Route reversed -> zeroForOne=false.
     const quote = new QuoteBasic(
@@ -351,7 +401,7 @@ describe('SwapStepsFactory - V4', () => {
       1_000_000_000_000_000_000n,
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -402,7 +452,7 @@ describe('SwapStepsFactory - V4', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -470,7 +520,7 @@ describe('SwapStepsFactory - V4', () => {
       100_000_000n, // 100 USDC (6 decimals)
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toHaveLength(2);
@@ -513,7 +563,7 @@ describe('SwapStepsFactory - V4', () => {
       // convention); `isNative` distinguishes native vs wrapped intent.
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toHaveLength(1);
@@ -567,7 +617,7 @@ describe('SwapStepsFactory - V4', () => {
       1_000_000_000_000_000_000n,
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -621,7 +671,7 @@ describe('SwapStepsFactory - V4', () => {
       1_000_000n,
       tokenCI(TOKEN_LOWER_A),
       tokenCI(TOKEN_UPPER_B),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -672,7 +722,7 @@ describe('SwapStepsFactory - V4', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -724,7 +774,7 @@ describe('SwapStepsFactory - native input/output', () => {
       1_000_000_000_000_000_000n,
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -759,7 +809,7 @@ describe('SwapStepsFactory - native input/output', () => {
       1_000_000n,
       tokenCI(USDC),
       new CurrencyInfo(true, new Address(WETH)),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -795,7 +845,7 @@ describe('SwapStepsFactory - native input/output', () => {
       1_000_000_000_000_000_000n,
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     // Length 1: no WRAP_ETH, just the V4 step.
@@ -827,7 +877,7 @@ describe('SwapStepsFactory - native input/output', () => {
       1_000_000_000_000_000_000n, // 1 ETH
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     // Order: WRAP_ETH (30% only), V3 step (using WETH), V4 step (using NATIVE).
@@ -869,7 +919,7 @@ describe('SwapStepsFactory - native input/output', () => {
       2_000_000n,
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps.map(s => s.type)).toEqual([
@@ -893,7 +943,7 @@ describe('SwapStepsFactory - native input/output', () => {
       2_000_000n,
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps.map(s => s.type)).toEqual(['V3_SWAP_EXACT_OUT']);
@@ -917,7 +967,7 @@ describe('SwapStepsFactory - native input/output', () => {
       1_000_000_000_000_000n,
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps.map(s => s.type)).toEqual(['WRAP_ETH', 'V3_SWAP_EXACT_OUT']);
@@ -943,7 +993,7 @@ describe('SwapStepsFactory - native input/output', () => {
       5_000_000n,
       new CurrencyInfo(true, new Address(WETH)),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1005,7 +1055,7 @@ describe('SwapStepsFactory - V2 exact-out', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1035,7 +1085,7 @@ describe('SwapStepsFactory - V2 exact-out', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1067,7 +1117,7 @@ describe('SwapStepsFactory - V3 exact-out', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1100,7 +1150,7 @@ describe('SwapStepsFactory - V3 exact-out', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1138,7 +1188,7 @@ describe('SwapStepsFactory - V4 exact-out', () => {
       1_000_000_000_000_000_000n, // 1 WETH desired
       tokenCI(USDC),
       tokenCI(WETH),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1191,7 +1241,7 @@ describe('SwapStepsFactory - V4 exact-out', () => {
       1_000_000_000n, // 1000 USDC desired
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1238,7 +1288,7 @@ describe('SwapStepsFactory - V4 exact-out', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1299,7 +1349,7 @@ describe('SwapStepsFactory - V4 exact-out', () => {
       1_000_000_000n,
       tokenCI(WETH),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toEqual([
@@ -1353,7 +1403,7 @@ describe('SwapStepsFactory - V4 exact-out', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
     const step = steps[0];
     if (step.type !== 'V4_SWAP') throw new Error('expected V4_SWAP');
@@ -1434,7 +1484,7 @@ describe('SwapStepsFactory - MIXED', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     // Sentinel = 2^255 as decimal string.
@@ -1478,7 +1528,7 @@ describe('SwapStepsFactory - MIXED', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(DAI),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     const SENTINEL = (1n << 255n).toString();
@@ -1524,7 +1574,7 @@ describe('SwapStepsFactory - MIXED', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     const SENTINEL = (1n << 255n).toString();
@@ -1567,7 +1617,7 @@ describe('SwapStepsFactory - MIXED', () => {
       1_000_000n,
       tokenCI(USDC),
       tokenCI(USDC),
-      ZERO_SLIPPAGE
+      UniversalRouterVersion.V2_0
     );
 
     expect(steps).toHaveLength(2);
@@ -1604,142 +1654,8 @@ describe('SwapStepsFactory - MIXED', () => {
         1_000_000n,
         tokenCI(USDC),
         tokenCI(DAI),
-        ZERO_SLIPPAGE
+        UniversalRouterVersion.V2_0
       )
     ).toThrow(/MIXED/);
-  });
-});
-
-// === Exact-out slippage buffer (regression: V3TooMuchRequested on Base) =======
-// The per-leg input maximum (amountInMax / amountInMaximum) and the WRAP_ETH
-// amount MUST carry the slippage buffer. The SDK's `encodeSwaps` only pads the
-// ingress total (msg.value / PERMIT2 pull) — it encodes each step's cap
-// verbatim. So with raw (0%) caps, any adverse price movement makes a leg
-// exceed its cap and revert `V3TooMuchRequested()`. The V4 SETTLE carries no
-// cap (it settles the open delta from router custody); the swap action's
-// amountInMaximum is the V4 slippage guard. EXACT_INPUT is unaffected: its
-// slippage lives in the final SWEEP min.
-describe('SwapStepsFactory - exact-out slippage buffer', () => {
-  // 0.5% => padded = raw * 10050 / 10000
-  const SLIPPAGE = new Percent(50, 10_000);
-
-  it('pads V3_SWAP_EXACT_OUT amountInMax by slippage', () => {
-    const quote = new QuoteBasic(
-      new RouteBasic(Protocol.V3, [v3Pool(USDC, WETH, 500, POOL_ADDR_1)]),
-      1_500_000n
-    );
-    const split = new QuoteSplit([quote]);
-
-    const steps = buildSwapSteps(
-      split,
-      TradeType.ExactOut,
-      1_000_000n,
-      tokenCI(USDC),
-      tokenCI(WETH),
-      SLIPPAGE
-    );
-
-    expect(steps).toEqual([
-      {
-        type: 'V3_SWAP_EXACT_OUT',
-        recipient: ROUTER_AS_RECIPIENT,
-        amountOut: '1000000',
-        // 1_500_000 * 1.005 = 1_507_500 (was raw '1500000' => revert)
-        amountInMax: '1507500',
-        path: `0x${WETH.slice(2).toLowerCase()}0001f4${USDC.slice(2).toLowerCase()}`,
-      },
-    ]);
-  });
-
-  it('pads WRAP_ETH and amountInMax for native-input exact-out (the Base repro)', () => {
-    const quote = new QuoteBasic(
-      new RouteBasic(Protocol.V3, [v3Pool(USDC, WETH, 500, POOL_ADDR_1)]),
-      1_000_000_000_000_000n // 1e15 wei route-required WETH input
-    );
-    const split = new QuoteSplit([quote]);
-
-    const steps = buildSwapSteps(
-      split,
-      TradeType.ExactOut,
-      2_000_000n,
-      new CurrencyInfo(true, new Address(WETH)),
-      tokenCI(USDC),
-      SLIPPAGE
-    );
-
-    expect(steps).toEqual([
-      {
-        type: 'WRAP_ETH',
-        recipient: ROUTER_AS_RECIPIENT,
-        // 1e15 * 1.005 — must wrap the buffered max, not the raw input
-        amount: '1005000000000000',
-      },
-      {
-        type: 'V3_SWAP_EXACT_OUT',
-        recipient: ROUTER_AS_RECIPIENT,
-        amountOut: '2000000',
-        amountInMax: '1005000000000000',
-        path: `0x${USDC.slice(2).toLowerCase()}0001f4${WETH.slice(2).toLowerCase()}`,
-      },
-      // Unwrap the buffered over-wrap back to native for the input refund.
-      {
-        type: 'UNWRAP_WETH',
-        recipient: ROUTER_AS_RECIPIENT,
-        amountMin: '0',
-      },
-    ]);
-  });
-
-  it('pads V4 SWAP_EXACT_OUT_SINGLE amountInMaximum (SETTLE carries no cap)', () => {
-    const quote = new QuoteBasic(
-      new RouteBasic(Protocol.V4, [
-        v4Pool(USDC, WETH, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
-      ]),
-      230_000_000n
-    );
-    const split = new QuoteSplit([quote]);
-
-    const steps = buildSwapSteps(
-      split,
-      TradeType.ExactOut,
-      1_000_000_000_000_000_000n,
-      tokenCI(USDC),
-      tokenCI(WETH),
-      SLIPPAGE
-    );
-
-    expect(steps).toEqual([
-      {
-        type: 'V4_SWAP',
-        v4Actions: [
-          {
-            action: 'SWAP_EXACT_OUT_SINGLE',
-            poolKey: {
-              currency0: USDC,
-              currency1: WETH,
-              fee: 500,
-              tickSpacing: 10,
-              hooks: ZERO_HOOKS,
-            },
-            zeroForOne: true,
-            amountOut: '1000000000000000000',
-            // 230_000_000 * 1.005 = 231_150_000
-            amountInMaximum: '231150000',
-            hookData: '0x',
-          },
-          {
-            action: 'SETTLE',
-            currency: USDC,
-            amount: '0',
-          },
-          {
-            action: 'TAKE',
-            currency: WETH,
-            recipient: ROUTER_AS_RECIPIENT,
-            amount: '0',
-          },
-        ],
-      },
-    ]);
   });
 });
