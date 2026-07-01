@@ -252,6 +252,8 @@ export class EthSimulateV1Simulator extends Simulator {
             ctx.logger.error('eth_simulateV1 returned error', {
               result,
               error: (result[0].calls[swapCallIndex] as JsonRpcError).error,
+              chain: this.chainId,
+              swapSteps: swapOptions.universalRouterSwapsteps === true,
             });
           }
 

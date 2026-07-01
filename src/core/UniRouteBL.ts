@@ -2681,6 +2681,7 @@ export class UniRouteBL implements IUniRoutedBL {
         ctx.logger.warn('Failed to build swapSteps; returning empty list', {
           error: err instanceof Error ? err.message : String(err),
           tradeType,
+          chain: chain.chainId,
         });
       }
     }
@@ -3041,6 +3042,7 @@ export class UniRouteBL implements IUniRoutedBL {
                     swapStepsError instanceof Error
                       ? swapStepsError.message
                       : String(swapStepsError),
+                  chain: chain.chainId,
                 }
               );
               methodParameters = buildSwapMethodParameters(
@@ -3195,6 +3197,8 @@ export class UniRouteBL implements IUniRoutedBL {
             tokenOutCurrency,
             tokenInCurrencyInfo,
             tokenOutCurrencyInfo,
+            chain: chain.chainId,
+            swapSteps: universalRouterSwapsteps,
           });
         } else {
           simulationSuccesses++;

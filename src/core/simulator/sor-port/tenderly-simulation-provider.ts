@@ -310,7 +310,11 @@ export class FallbackTenderlySimulator extends Simulator {
         return tenderlyResult;
       }
     } catch (err) {
-      ctx.logger.error('Failed to simulate via Tenderly', {err: err});
+      ctx.logger.error('Failed to simulate via Tenderly', {
+        err: err,
+        chain: this.chainId,
+        swapSteps: swapOptions.universalRouterSwapsteps === true,
+      });
 
       if (err instanceof Error && err.message.includes('timeout')) {
         await ctx.metrics.count('Tenderly.Simulation.Timeout', 1, {
@@ -568,6 +572,7 @@ export class TenderlySimulator extends Simulator {
             error:
               resp?.simulation_results?.[swapCallIndex]?.transaction
                 ?.error_message,
+            swapSteps: swapOptions.universalRouterSwapsteps === true,
           });
           return {
             ...quoteSplit,
@@ -671,12 +676,21 @@ export class TenderlySimulator extends Simulator {
             };
             ctx.logger.error(
               'Failed to invoke Tenderly Node Endpoint for gas estimation bundle.',
-              {resp, chainId, body: JSON.stringify(body)}
+              {
+                resp,
+                chainId,
+                body: JSON.stringify(body),
+                swapSteps: swapOptions.universalRouterSwapsteps === true,
+              }
             );
           } catch {
             ctx.logger.error(
               'Failed to invoke Tenderly Node Endpoint for gas estimation bundle.',
-              {resp, chainId}
+              {
+                resp,
+                chainId,
+                swapSteps: swapOptions.universalRouterSwapsteps === true,
+              }
             );
           }
 
@@ -698,6 +712,7 @@ export class TenderlySimulator extends Simulator {
                   resp,
                   chainId,
                   body: JSON.stringify(simulationCalls),
+                  swapSteps: swapOptions.universalRouterSwapsteps === true,
                 }
               );
               // since we have simulation.TopNQuotes = 3, if Tenderly.Simulation.InsufficientToken count is multiple of 3,
