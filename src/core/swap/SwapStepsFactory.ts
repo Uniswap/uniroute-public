@@ -97,7 +97,10 @@ export function buildSwapSteps(
   amount: bigint,
   tokenInCurrencyInfo: CurrencyInfo,
   tokenOutCurrencyInfo: CurrencyInfo,
-  universalRouterVersion: UniversalRouterVersion | undefined
+  universalRouterVersion: UniversalRouterVersion | undefined,
+  // Set false to omit the 0-slippage minHopPriceX36 floor (simulation opts out;
+  // see the sim call site).
+  includeMinHopFloors = true
 ): SwapStep[] {
   const allocatedAmounts = allocateAmounts(quoteSplit, amount);
   // UR >= 2.1.1: single-hop quotes carry minHopPriceX36 computed at 0 slippage;
@@ -107,7 +110,8 @@ export function buildSwapSteps(
   // per-hop guard also opts out — uniroute's routing-api response only paints
   // the route's boundary amounts (first pool in, last pool out) and leaves
   // intermediate hops undefined. Multi-hop relies on the trade-level output min.
-  const includeMinHopPrice = isAtLeastV2_1_1(universalRouterVersion);
+  const includeMinHopPrice =
+    includeMinHopFloors && isAtLeastV2_1_1(universalRouterVersion);
   const innerSteps: SwapStep[] = [];
 
   // Per-quote, the actual tokenIn/tokenOut used for routing may differ from

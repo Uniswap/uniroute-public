@@ -2997,14 +2997,18 @@ export class UniRouteBL implements IUniRoutedBL {
         try {
           if (universalRouterSwapsteps) {
             try {
-              // Simulate the encodeSwaps calldata Trading will actually submit.
+              // Simulate the encodeSwaps calldata, but opt out of the
+              // 0-slippage minHopPriceX36 floor — it reverts on normal
+              // quote→sim price drift (spurious sim failures). The response
+              // steps keep the floor; Trading re-derives it with slippage.
               const swapSteps = buildSwapSteps(
                 quoteSplit,
                 tradeType,
                 amountIn,
                 tokenInCurrencyInfo,
                 tokenOutCurrencyInfo,
-                universalRouterVersion
+                universalRouterVersion,
+                false // opt out of minHopPriceX36 for simulation
               );
               const spec = buildSwapSpecification({
                 swapOptions: swapOptions!,

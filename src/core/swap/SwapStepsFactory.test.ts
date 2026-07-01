@@ -385,6 +385,55 @@ describe('SwapStepsFactory - V4', () => {
     ]);
   });
 
+  it('omits minHopPriceX36 when includeMinHopFloors is false (simulation opt-out)', () => {
+    const quote = new QuoteBasic(
+      new RouteBasic(Protocol.V4, [
+        v4Pool(USDC, WETH, 500, 10, ZERO_HOOKS, POOL_ID_V4_1),
+      ]),
+      999n
+    );
+    const split = new QuoteSplit([quote]);
+
+    const steps = buildSwapSteps(
+      split,
+      TradeType.ExactIn,
+      1_000_000n,
+      tokenCI(USDC),
+      tokenCI(WETH),
+      UniversalRouterVersion.V2_1_1,
+      false // opt out of the 0-slippage per-hop floor (simulation)
+    );
+
+    expect(steps).toEqual([
+      {
+        type: 'V4_SWAP',
+        v4Actions: [
+          {action: 'SETTLE', currency: USDC, amount: '1000000'},
+          {
+            action: 'SWAP_EXACT_IN_SINGLE',
+            poolKey: {
+              currency0: USDC,
+              currency1: WETH,
+              fee: 500,
+              tickSpacing: 10,
+              hooks: ZERO_HOOKS,
+            },
+            zeroForOne: true,
+            amountIn: '1000000',
+            amountOutMinimum: '0',
+            hookData: '0x',
+          },
+          {
+            action: 'TAKE',
+            currency: WETH,
+            recipient: ROUTER_AS_RECIPIENT,
+            amount: '0',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('flips zeroForOne when route tokenIn is pool.currency1 (WETH -> USDC)', () => {
     // Same pool (token0=USDC, token1=WETH). Route reversed -> zeroForOne=false.
     const quote = new QuoteBasic(
