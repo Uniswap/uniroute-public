@@ -16,7 +16,7 @@ import {Context} from '@uniswap/lib-uni/context';
 import {readFileSync} from 'fs';
 import {join} from 'path';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
-import {V2PoolInfo} from '../interface';
+import {V2PoolInfo, V4PoolInfo} from '../interface';
 import {sdkStreamMixin} from '@smithy/util-stream';
 import {Readable} from 'stream';
 import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
@@ -223,6 +223,48 @@ describe('S3SubgraphPoolDiscoverer', () => {
       expect(pools[0]).toHaveProperty('token1');
       expect(pools[0]).toHaveProperty('tvlETH');
       expect(pools[0]).toHaveProperty('tvlUSD');
+    });
+
+    it('should force select Parity Hook pools despite zero liquidity and zero TVL', () => {
+      const parityPool = {
+        id: '1',
+        feeTier: '3000',
+        liquidity: '0',
+        tickSpacing: '60',
+        hooks: '0x95518BFD15fC8dA9Fb62f7b5f5AF7A87cF7fE888', // LitePSM USDS (mixed case)
+        token0: {id: '0x6b175474e89094c44da98b954eedeac495271d0f'},
+        token1: {id: '0xdc035d45d973e3ec169d2276ddab16f1e407384f'},
+        tvlETH: 0,
+        tvlUSD: 0,
+      };
+      const nonParityPool = {
+        ...parityPool,
+        id: '2',
+        hooks: '0x0000000000000000000000000000000000000001',
+      };
+
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore - protected method access for testing
+      const forceSelectParity = discoverer.forceSelectSpecialPools(
+        parityPool as V4PoolInfo,
+        ChainId.MAINNET
+      );
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore - protected method access for testing
+      const forceSelectNonParity = discoverer.forceSelectSpecialPools(
+        nonParityPool as V4PoolInfo,
+        ChainId.MAINNET
+      );
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore - protected method access for testing
+      const forceSelectWrongChain = discoverer.forceSelectSpecialPools(
+        parityPool as V4PoolInfo,
+        ChainId.ARBITRUM
+      );
+
+      expect(forceSelectParity).toEqual(true);
+      expect(forceSelectNonParity).toEqual(false);
+      expect(forceSelectWrongChain).toEqual(false);
     });
   });
 

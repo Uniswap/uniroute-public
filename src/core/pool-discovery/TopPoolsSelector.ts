@@ -39,7 +39,10 @@ import {
 import {maybeDropPermissionedPools} from '../../models/hooks/PermissionedHooks';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
-import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {
+  AGG_HOOKS_PER_CHAIN,
+  PARITY_HOOKS_PER_CHAIN,
+} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 // Token-to-pool index for faster lookups
 interface TokenPoolIndex {
@@ -482,32 +485,83 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     });
   }
 
+  // Parity Hook pools (see PARITY_HOOKS_PER_CHAIN doc comment) use custom
+  // accounting, so liquidity/tvlUSD are structurally ~0 — they'd otherwise
+  // always sort to the bottom of a TVL-ranked pool set and get sliced off by
+  // topN limits, even for their own direct pair. Mirrors the forceSelect
+  // exemption S3SubgraphPoolDiscovererV4 applies at the pool-cache read step.
+  //
+  // Computed once per filterAndAddPools call (not per pool) since chainId is
+  // invariant across the call — undefined for chains with no parity hooks
+  // (i.e. all of them except mainnet today) so callers can skip the
+  // force-select split entirely.
+  protected static getParityHookAddressSet(
+    chainId: ChainId
+  ): Set<string> | undefined {
+    const parityHooks = PARITY_HOOKS_PER_CHAIN[chainId];
+    if (!parityHooks || parityHooks.length === 0) return undefined;
+    return new Set(parityHooks.map(hook => hook.toLowerCase()));
+  }
+
   protected static filterAndAddPools(
     poolsToFilter: UniPoolInfo[],
     filterFn: (pool: UniPoolInfo) => boolean,
     limit: number,
-    seenPoolIds: Set<string>
+    seenPoolIds: Set<string>,
+    chainId?: ChainId
   ): UniPoolInfo[] {
     // Helper function to filter and add pools without duplicates
-    const filteredAndSorted = poolsToFilter
-      .filter(pool => {
-        const poolId = pool.id.toLowerCase();
-        // Only include if not seen before and passes filter
-        if (!seenPoolIds.has(poolId) && filterFn(pool)) {
-          seenPoolIds.add(poolId);
-          return true;
-        }
-        return false;
-      })
-      .sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
+    const filtered = poolsToFilter.filter(pool => {
+      const poolId = pool.id.toLowerCase();
+      // Only include if not seen before and passes filter
+      if (!seenPoolIds.has(poolId) && filterFn(pool)) {
+        seenPoolIds.add(poolId);
+        return true;
+      }
+      return false;
+    });
+
+    const parityHookAddressSet =
+      chainId === undefined
+        ? undefined
+        : BasicTopPoolsSelector.getParityHookAddressSet(chainId);
+
+    if (!parityHookAddressSet) {
+      // No parity hooks configured for this chain — identical cost to
+      // before this feature existed.
+      const sorted = filtered.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
+      const poolsToRemove = sorted.slice(limit);
+      poolsToRemove.forEach(pool => {
+        seenPoolIds.delete(pool.id.toLowerCase());
+      });
+      return sorted.slice(0, limit);
+    }
+
+    const forced: UniPoolInfo[] = [];
+    const rankedRemainder: UniPoolInfo[] = [];
+    for (const pool of filtered) {
+      const hooks =
+        'hooks' in pool ? (pool as V4PoolInfo).hooks?.toLowerCase() : undefined;
+      if (hooks !== undefined && parityHookAddressSet.has(hooks)) {
+        forced.push(pool);
+      } else {
+        rankedRemainder.push(pool);
+      }
+    }
+    rankedRemainder.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
+
+    // Forced pools are additive — they don't consume a slot from the
+    // ordinary top-N budget, so a rarely-competing parity hook pool can't
+    // displace a legitimately higher-TVL pool from its usual spot.
+    const keptRemainder = rankedRemainder.slice(0, limit);
 
     // Remove pools that will be sliced from seenPoolIds
-    const poolsToRemove = filteredAndSorted.slice(limit);
+    const poolsToRemove = rankedRemainder.slice(limit);
     poolsToRemove.forEach(pool => {
       seenPoolIds.delete(pool.id.toLowerCase());
     });
 
-    return filteredAndSorted.slice(0, limit);
+    return [...forced, ...keptRemainder];
   }
 
   protected static poolContainsToken(
@@ -546,7 +600,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         BasicTopPoolsSelector.poolContainsToken(pool, tokenIn.address) &&
         BasicTopPoolsSelector.poolContainsToken(pool, tokenOut.address),
       poolSelectionConfig[chainId].topNDirectPairs,
-      selectedPoolIds
+      selectedPoolIds,
+      chainId
     );
 
     if (protocol === Protocol.V3) {
@@ -577,7 +632,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       tokenPoolIndex.tokenToPools.get(tokenIn.address.toLowerCase()) || [],
       pool => !BasicTopPoolsSelector.poolContainsToken(pool, tokenOut.address),
       poolSelectionConfig[chainId].topNOneHopPairs,
-      selectedPoolIds
+      selectedPoolIds,
+      chainId
     );
   }
 
@@ -593,7 +649,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       tokenPoolIndex.tokenToPools.get(tokenOut.address.toLowerCase()) || [],
       pool => !BasicTopPoolsSelector.poolContainsToken(pool, tokenIn.address),
       poolSelectionConfig[chainId].topNOneHopPairs,
-      selectedPoolIds
+      selectedPoolIds,
+      chainId
     );
   }
 
@@ -642,7 +699,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         tokenPoolIndex.tokenToPools.get(tokenId) || [],
         () => true, // All pools in the index already contain this token
         poolSelectionConfig[chainId].topNSecondHopPairs,
-        selectedPoolIds
+        selectedPoolIds,
+        chainId
       );
       secondHopPairs.push(...topPoolsForToken);
 
@@ -673,6 +731,14 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     chainId: ChainId,
     poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>
   ): UniPoolInfo[] {
+    // Deliberately no chainId here, unlike the other filterAndAddPools call
+    // sites in this class. filteredPools is the whole chain's pool universe,
+    // not scoped to tokenIn/tokenOut — force-selecting parity hook pools here
+    // would inject them into every single quote request on the chain
+    // regardless of relevance, not just requests where they're actually a
+    // plausible hop. The token-scoped call sites (getDirectPairs,
+    // getToken{In,Out}OnlyPairs, getTopNPoolsForIntermediaryToken,
+    // getTopBaseTokenPools) are where force-selection belongs.
     return BasicTopPoolsSelector.filterAndAddPools(
       filteredPools,
       () => true,
@@ -708,7 +774,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         intersectionPools,
         () => true, // All pools in intersection already contain both tokens
         poolSelectionConfig[chainId].topNWithBaseTokenEach,
-        selectedPoolIds
+        selectedPoolIds,
+        chainId
       );
       allBaseTokenPools.push(...selectedPools);
     }

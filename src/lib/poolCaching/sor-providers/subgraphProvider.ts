@@ -10,6 +10,7 @@ import {
   getPermissionedHookAddresses,
 } from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {getMajorTokens} from '../util/majorTokens';
+import {PARITY_HOOKS_PER_CHAIN} from '../util/hooksAddressesAllowlist';
 import retry from 'async-retry';
 import Timeout from 'await-timeout';
 import {gql, GraphQLClient} from 'graphql-request';
@@ -202,6 +203,40 @@ export abstract class SubgraphProvider<
       };
     };
 
+    // Parity Hooks (fixed-parity conversion hooks, e.g. PSM-style stablecoin
+    // converters — see PARITY_HOOKS_PER_CHAIN doc comment) use custom
+    // accounting (BeforeSwapReturnsDelta/AfterSwapReturnsDelta) rather than
+    // normal LP positions, so the standard concentrated-liquidity `liquidity`
+    // field is structurally always 0 for their pools — and their
+    // totalValueLockedETH may not reflect their real economic backing either.
+    // Neither liquidity nor TVL is a usable admission signal for this
+    // category, so hook-address membership (a small, explicitly curated
+    // list) is the sole gate — the same trust model as the plain
+    // HOOKS_ADDRESSES_ALLOWLIST, which also applies no liquidity floor.
+    const parityHooks =
+      this.protocol === Protocol.V4
+        ? (PARITY_HOOKS_PER_CHAIN[this.chainId] ?? []).map(h => h.toLowerCase())
+        : [];
+    const includeParityHookQuery = parityHooks.length > 0;
+    const parityHookQuery = {
+      name: 'V4 parity hook pools',
+      query: gql`
+        query getV4ParityHookPools($pageSize: Int!, $id: String, $parityHooks: [String!]!) {
+          pools(
+            first: $pageSize
+            ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
+            where: {
+              id_gt: $id,
+              hooks_in: $parityHooks
+            }
+          ) {
+            ${this.getPoolFields()}
+          }
+        }
+      `,
+      variables: {parityHooks},
+    };
+
     // Define separate queries for each filtering condition
     const queries = [
       // 1. Pools with high tracked ETH (for both V3 and V4)
@@ -286,6 +321,9 @@ export abstract class SubgraphProvider<
             permissionedHookQuery('token1_in'),
           ]
         : []),
+      // 5. V4: Parity Hook pools (see comment above). Skipped on chains with
+      // no parity hooks configured.
+      ...(includeParityHookQuery ? [parityHookQuery] : []),
     ];
 
     let allPools: TRawSubgraphPool[] = [];
@@ -460,11 +498,30 @@ export abstract class SubgraphProvider<
       // Include pools that either have positive liquidity or exceed the per-chain
       // tracked ETH threshold. The V4_MIN_TVL_ETH floor at the subgraph query
       // level already excludes V4 pools with totalValueLockedETH <= 0.001.
+      //
+      // Parity Hook pools are exempted from this liquidity/TVL check: their
+      // custom-accounting hooks structurally report liquidity=0, and their
+      // TVL isn't a reliable signal either (see parityHookQuery comment
+      // above), so this filter would otherwise silently undo the dedicated
+      // query that fetched them.
+      const parityHookAddressSet = new Set(
+        this.protocol === Protocol.V4
+          ? (PARITY_HOOKS_PER_CHAIN[this.chainId] ?? []).map(h =>
+              h.toLowerCase()
+            )
+          : []
+      );
       poolsSanitized = allPools
         .filter(pool => {
           const liquidity = parseInt(pool.liquidity);
           const tvl = parseFloat(pool.totalValueLockedETH);
-          return liquidity > 0 || tvl > this.trackedEthThreshold;
+          const hooks = 'hooks' in pool ? String(pool.hooks) : undefined;
+          return (
+            liquidity > 0 ||
+            tvl > this.trackedEthThreshold ||
+            (hooks !== undefined &&
+              parityHookAddressSet.has(hooks.toLowerCase()))
+          );
         })
         .map(pool => {
           return this.mapSubgraphPool(pool);

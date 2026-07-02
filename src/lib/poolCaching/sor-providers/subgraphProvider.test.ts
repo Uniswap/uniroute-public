@@ -137,3 +137,99 @@ describe('SubgraphProvider V4 permissioned-hook query', () => {
     }
   });
 });
+
+describe('SubgraphProvider V4 Parity Hook query', () => {
+  it('fetches Parity Hook pools by hook address with no TVL floor for Mainnet', async () => {
+    const {provider, calls} = makeRecordingProvider(ChainId.MAINNET);
+    await provider.getPools();
+
+    const parityCalls = calls.filter(c =>
+      c.query.includes('getV4ParityHookPools')
+    );
+    expect(parityCalls.length).toBe(1);
+    const {query: q, variables} = parityCalls[0]!;
+    expect(q).toContain('hooks_in: $parityHooks');
+    // Parity Hooks use custom accounting, so liquidity is structurally
+    // always 0 — neither a liquidity nor a TVL floor can be applied here.
+    // Hook-address membership is the sole admission gate.
+    expect(q).not.toContain('liquidity_gt');
+    expect(q).not.toContain('totalValueLockedETH_gt');
+
+    const parityHooks = (variables.parityHooks as string[]).map(h =>
+      h.toLowerCase()
+    );
+    expect(parityHooks).toContain('0x95518bfd15fc8da9fb62f7b5f5af7a87cf7fe888'); // LitePSM USDS
+    expect(parityHooks).toContain('0x9510184e76ff666660d23e3f22aa270180262888'); // LitePSM DAI
+  });
+
+  it('omits the Parity Hook query for a chain with no parity hooks configured (Arbitrum)', async () => {
+    const {provider, queries} = makeRecordingProvider(ChainId.ARBITRUM_ONE);
+    await provider.getPools();
+
+    expect(queries.some(q => q.includes('getV4ParityHookPools'))).toBe(false);
+    // The standard V4 queries still run.
+    expect(queries.some(q => q.includes('getV4HighLiquidityPools'))).toBe(true);
+  });
+
+  it('builds syntactically valid GraphQL including the Parity Hook query', async () => {
+    const {provider, queries} = makeRecordingProvider(ChainId.MAINNET);
+    await provider.getPools();
+
+    expect(queries.some(q => q.includes('getV4ParityHookPools'))).toBe(true);
+    for (const q of queries) {
+      expect(() => parse(q)).not.toThrow();
+    }
+  });
+
+  it('survives the post-fetch sanitize filter despite zero liquidity and zero TVL', async () => {
+    const parityHookPool = {
+      id: '0xparitypool',
+      feeTier: '3000',
+      tickSpacing: '60',
+      hooks: '0x95518bfd15fc8da9fb62f7b5f5af7a87cf7fe888', // LitePSM USDS
+      liquidity: '0',
+      token0: {
+        symbol: 'DAI',
+        id: '0x6b175474e89094c44da98b954eedeac495271d0f',
+        name: 'Dai Stablecoin',
+        decimals: '18',
+      },
+      token1: {
+        symbol: 'USDS',
+        id: '0xdc035d45d973e3ec169d2276ddab16f1e407384f',
+        name: 'USDS Stablecoin',
+        decimals: '18',
+      },
+      totalValueLockedUSD: '0',
+      totalValueLockedETH: '0',
+      totalValueLockedUSDUntracked: '0',
+    };
+
+    const provider = new V4SubgraphProvider(
+      ChainId.MAINNET,
+      0,
+      5000,
+      true,
+      0.01,
+      Number.MAX_VALUE,
+      'https://example.invalid/subgraph',
+      undefined,
+      mockLogger,
+      new MockMetric()
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (provider as any).client = {
+      request: async (query: string, variables: Record<string, unknown>) => {
+        // Only return the pool on the first page (id === '') so pagination
+        // terminates instead of looping on the same result forever.
+        if (query.includes('getV4ParityHookPools') && variables.id === '') {
+          return {pools: [parityHookPool]};
+        }
+        return {pools: []};
+      },
+    };
+
+    const pools = await provider.getPools();
+    expect(pools.some(p => p.id === '0xparitypool')).toBe(true);
+  });
+});

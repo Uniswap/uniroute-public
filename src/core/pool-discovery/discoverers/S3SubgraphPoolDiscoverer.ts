@@ -10,6 +10,7 @@ import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
 import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 import _ from 'lodash';
+import {PARITY_HOOKS_PER_CHAIN} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 interface BasePoolData {
   id: string;
@@ -353,6 +354,24 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
 > {
   protected override getDiscovererName(): string {
     return 'S3SubgraphPoolDiscovererV4';
+  }
+
+  /**
+   * Force select Parity Hook pools (see PARITY_HOOKS_PER_CHAIN doc comment
+   * in hooksAddressesAllowlist.ts). Their custom accounting means
+   * `liquidity` is structurally always 0 and `tvlETH` doesn't reflect their
+   * real economic backing, so the liquidity/TVL filter above would
+   * otherwise silently drop them here — even though they already cleared
+   * the pool-caching pipeline's own exemptions for the same reason.
+   */
+  protected override forceSelectSpecialPools(
+    pool: V4PoolInfo,
+    chainId: ChainId
+  ): boolean {
+    const parityHooks = PARITY_HOOKS_PER_CHAIN[chainId];
+    if (!parityHooks) return false;
+    const hooks = pool.hooks.toLowerCase();
+    return parityHooks.some(hook => hook.toLowerCase() === hooks);
   }
 
   protected override convertToPoolInfo(

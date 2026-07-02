@@ -13,6 +13,7 @@ import {
   FLUID_DEX_LITE,
   STABLE_SWAP_NG,
 } from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
+import {LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
@@ -922,6 +923,75 @@ describe('BasicTopPoolsSelector', () => {
       expect(result).toHaveLength(1);
       expect(seenPoolIds.has('0x123')).toBe(true);
     });
+
+    it('should force-include a parity hook pool past the limit despite zero TVL, when chainId is passed', () => {
+      const parityPool = {
+        ...mockV4PoolWithHooks,
+        id: '0xparity',
+        hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+        liquidity: '0',
+        tvlUSD: 0,
+        tvlETH: 0,
+      } as V4PoolInfo;
+      const highTvlPools = [0, 1].map(
+        i =>
+          ({
+            ...mockV4Pool,
+            id: `0xhightvl${i}`,
+            tvlUSD: 5000,
+          }) as V4PoolInfo
+      );
+      const seenPoolIds = new Set<string>();
+
+      const result = BasicTopPoolsSelector['filterAndAddPools'](
+        [...highTvlPools, parityPool],
+        () => true,
+        2, // limit smaller than the total pool count
+        seenPoolIds,
+        ChainId.MAINNET
+      );
+
+      expect(result.map(pool => pool.id)).toEqual(
+        expect.arrayContaining(['0xparity', '0xhightvl0', '0xhightvl1'])
+      );
+      expect(result).toHaveLength(3);
+    });
+
+    it('should not force-include pools with a non-parity hook address', () => {
+      const seenPoolIds = new Set<string>();
+
+      const result = BasicTopPoolsSelector['filterAndAddPools'](
+        [mockV4Pool, mockV4PoolWithHooks],
+        () => true,
+        1,
+        seenPoolIds,
+        ChainId.MAINNET
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(mockV4Pool.id);
+    });
+
+    it('should not force-include parity hook pools when chainId is omitted', () => {
+      const parityPool = {
+        ...mockV4PoolWithHooks,
+        id: '0xparity',
+        hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+        liquidity: '0',
+        tvlUSD: 0,
+      } as V4PoolInfo;
+      const seenPoolIds = new Set<string>();
+
+      const result = BasicTopPoolsSelector['filterAndAddPools'](
+        [mockV4Pool, parityPool],
+        () => true,
+        1,
+        seenPoolIds
+      );
+
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe(mockV4Pool.id);
+    });
   });
 
   describe('poolContainsToken', () => {
@@ -966,6 +1036,44 @@ describe('BasicTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
+    });
+
+    it('should include a parity hook direct pair pool even when outranked by topNDirectPairs on TVL', () => {
+      // poolSelectionConfig[ChainId.MAINNET].topNDirectPairs is 2 — three
+      // competing high-TVL pools would normally squeeze the zero-TVL parity
+      // hook pool out entirely.
+      const parityPool = {
+        ...mockV4PoolWithHooks,
+        id: '0xparity',
+        hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+        liquidity: '0',
+        tvlUSD: 0,
+        tvlETH: 0,
+      } as V4PoolInfo;
+      const highTvlPools = [0, 1, 2].map(
+        i =>
+          ({
+            ...mockV4Pool,
+            id: `0xhightvl${i}`,
+            tvlUSD: 5000,
+          }) as V4PoolInfo
+      );
+      const pools = [...highTvlPools, parityPool];
+      const selectedPoolIds = new Set<string>();
+      const tokenPoolIndex = buildTokenPoolIndex(pools);
+
+      const result = BasicTopPoolsSelector['getDirectPairs'](
+        pools,
+        ChainId.MAINNET,
+        Protocol.V4,
+        tokenIn,
+        tokenOut,
+        selectedPoolIds,
+        tokenPoolIndex,
+        poolSelectionConfig
+      );
+
+      expect(result.map(pool => pool.id)).toContain('0xparity');
     });
   });
 
@@ -1281,6 +1389,51 @@ describe('BasicTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
+    });
+
+    it('should NOT force-include a parity hook pool — this bucket is the whole chain, not scoped to a request', () => {
+      // Regression test: getTopNPairs operates on the entire chain-wide pool
+      // universe (not tokenIn/tokenOut-scoped), so force-selecting a parity
+      // hook pool here would inject it as a route candidate for every quote
+      // on the chain, not just requests where it's actually relevant.
+      const parityPool = {
+        ...mockV4PoolWithHooks,
+        id: '0xparity',
+        hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+        liquidity: '0',
+        tvlUSD: 0,
+        tvlETH: 0,
+      } as V4PoolInfo;
+      const highTvlPools = [0, 1].map(
+        i =>
+          ({
+            ...mockV4Pool,
+            id: `0xhightvl${i}`,
+            tvlUSD: 5000,
+          }) as V4PoolInfo
+      );
+      const filteredPools = [...highTvlPools, parityPool];
+      const selectedPoolIds = new Set<string>();
+      // poolSelectionConfig[ChainId.MAINNET].topNPairs — set a limit smaller
+      // than the pool count so the zero-TVL parity pool would only survive
+      // if force-selection were (incorrectly) applied here.
+      const configWithSmallLimit: typeof poolSelectionConfig = {
+        ...poolSelectionConfig,
+        [ChainId.MAINNET]: {
+          ...poolSelectionConfig[ChainId.MAINNET],
+          topNPairs: 2,
+        },
+      };
+
+      const result = BasicTopPoolsSelector['getTopNPairs'](
+        filteredPools,
+        selectedPoolIds,
+        ChainId.MAINNET,
+        configWithSmallLimit
+      );
+
+      expect(result.map(pool => pool.id)).not.toContain('0xparity');
+      expect(result).toHaveLength(2);
     });
   });
 

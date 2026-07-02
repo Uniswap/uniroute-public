@@ -520,6 +520,51 @@ export const VORTEXHOOK_ON_MAINNET =
 export const DIAMONDHANDSHOOK_ON_MAINNET =
   '0x1df8e3ce04a62922506e4ba303e1338583155044';
 
+export const LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET =
+  '0x95518bfd15fc8da9fb62f7b5f5af7a87cf7fe888';
+export const LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET =
+  '0x9510184e76ff666660d23e3f22aa270180262888';
+
+/**
+ * "Parity Hooks" — V4 hooks that perform fixed-parity conversions (1:1 or
+ * near-1:1 swaps between two representations of the same value, e.g. a PSM
+ * minting/redeeming between two stablecoins). Their reserves are custodied
+ * inside the PoolManager (so the standard V4Quoter prices them fine — no
+ * AggHookQuoter/AGG_HOOKS_PER_CHAIN treatment needed), but they use custom
+ * accounting (BeforeSwapReturnsDelta/AfterSwapReturnsDelta) rather than
+ * normal LP positions, so the standard concentrated-liquidity `liquidity`
+ * field is structurally always 0 for their pools — and their
+ * `totalValueLockedETH` as reported by the subgraph may not reflect their
+ * real economic backing either. Neither is a usable admission signal, so
+ * they get their own hook-address-keyed registry here rather than a generic
+ * per-hook special-case.
+ *
+ * Current behavior tied to this category: exemption from BOTH the
+ * subgraph's V4_MIN_TVL_ETH floor at the query level AND the post-fetch
+ * liquidity/TVL sanitize filter during pool-cache discovery (see
+ * `subgraphProvider.ts`) — hook-address membership (a small, explicitly
+ * curated list) is the sole admission gate, same trust model as the plain
+ * `HOOKS_ADDRESSES_ALLOWLIST`. This matters for their use as intermediate-hop
+ * candidates (direct-pair requests already find them via DirectPoolDiscoverer
+ * regardless of TVL/liquidity). Unlike the permissioned-hook query, no
+ * adapter/known-token bounding is applied here — there's no
+ * compliance-sensitive leak risk for a parity-conversion hook, so a plain
+ * `hooks_in` fetch is sufficient.
+ *
+ * Add future parity hooks (other PSM-style / fixed-conversion hooks) here to
+ * pick up the same treatment automatically.
+ */
+// Intersected with Record<number, string[]> (matching HOOKS_ADDRESSES_ALLOWLIST's
+// shape) so this can be indexed by both this file's @uniswap/sdk-core ChainId
+// and the separate, numerically-overlapping ChainId enum in lib/config.ts.
+export const PARITY_HOOKS_PER_CHAIN: Partial<Record<ChainId, string[]>> &
+  Record<number, string[]> = {
+  [ChainId.MAINNET]: [
+    LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
+    LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+  ],
+};
+
 export const ARMSYS_ON_BASE = '0x7fb4846d3987476577319f112731bb04f45880c8';
 
 // MEV-X Homelander — same address across all supported chains
@@ -591,6 +636,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     TAXHOOK_ON_MAINNET,
     VORTEXHOOK_ON_MAINNET,
     DIAMONDHANDSHOOK_ON_MAINNET,
+    LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
+    LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
