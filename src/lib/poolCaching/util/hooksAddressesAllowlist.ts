@@ -523,7 +523,7 @@ export const DIAMONDHANDSHOOK_ON_MAINNET =
 export const LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET =
   '0x958a0904940f744f8c6b72c043ceee3ea34ae888';
 export const LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET =
-  '0x95e56544e6fe5e91cb9bf2c408009f5494ed2888';
+  '0x958942af77dcd973b815b2a16bd88a5134c46888';
 
 /**
  * "Parity Hooks" — V4 hooks that perform fixed-parity conversions (1:1 or

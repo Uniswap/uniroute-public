@@ -159,7 +159,7 @@ describe('SubgraphProvider V4 Parity Hook query', () => {
       h.toLowerCase()
     );
     expect(parityHooks).toContain('0x958a0904940f744f8c6b72c043ceee3ea34ae888'); // LitePSM USDS
-    expect(parityHooks).toContain('0x95e56544e6fe5e91cb9bf2c408009f5494ed2888'); // LitePSM DAI
+    expect(parityHooks).toContain('0x958942af77dcd973b815b2a16bd88a5134c46888'); // LitePSM DAI
   });
 
   it('omits the Parity Hook query for a chain with no parity hooks configured (Arbitrum)', async () => {
