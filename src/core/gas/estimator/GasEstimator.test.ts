@@ -257,10 +257,10 @@ describe('GasEstimators', () => {
           1000
         );
 
-        // Base V4 single-hop gasUse 97_000 + parity hook overhead 250_000
-        expect(gasDetails.gasUse).toBe(BigInt(97000 + 250000));
+        // Base V4 single-hop gasUse 97_000 + parity hook overhead 500_000
+        expect(gasDetails.gasUse).toBe(BigInt(97000 + 500000));
         expect(gasDetails.gasCostInWei).toBe(
-          BigInt(1000) * BigInt(97000 + 250000)
+          BigInt(1000) * BigInt(97000 + 500000)
         );
       });
 
@@ -711,7 +711,7 @@ describe('GasEstimators', () => {
       );
 
       // Same V3+V4 heuristic base as above + PARITY_HOOK_GAS_OVERHEAD
-      expect(gasDetails.gasUse).toBe(BigInt(225000 + 250000));
+      expect(gasDetails.gasUse).toBe(BigInt(225000 + 500000));
     });
 
     it('should estimate gas consistently across individual and mixed routes', async () => {

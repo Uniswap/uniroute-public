@@ -24,9 +24,15 @@ import {PARITY_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesA
  *   - V4Quoter view-call gas for the full hop: 258k (superseded
  *     USDS hook deployment) / 275k (current USDS hook)
  *   - heuristic base for the same hop: ~60-97k
- * 250k covers the observed heuristic-vs-actual gap with margin.
- * Over-estimating is safe — it's a gas limit, unused gas is
- * refunded — while under-estimating reverts user transactions.
+ * The observed shortfall on a reverted 3-split EXACT_OUT trade was
+ * ~250-270k, and the V4Quoter view-call itself understates real
+ * tx-context cost (the agg-hook calibration measured quoter-vs-
+ * simulator misses of +67k..+188k), so 250k left near-zero margin
+ * for the current (pricier) hook deployment. 500k doubles that:
+ * over-estimating is safe — it's a gas limit, unused gas is
+ * refunded — while under-estimating reverts user transactions. The
+ * cost of the headroom is a mild gas-ranking penalty against parity
+ * routes, which is the safe direction to err.
  *
  * Unlike the agg-hook calibration this is NOT env-gated: parity
  * pools are quoted through the standard V4Quoter, so there is no
@@ -38,7 +44,7 @@ import {PARITY_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesA
  * Cardinality: bounded — only hooks in the curated
  * `PARITY_HOOKS_PER_CHAIN` registry contribute.
  */
-export const PARITY_HOOK_GAS_OVERHEAD = 250_000n;
+export const PARITY_HOOK_GAS_OVERHEAD = 500_000n;
 
 /**
  * Returns the total gas-unit adjustment for a route, adding
