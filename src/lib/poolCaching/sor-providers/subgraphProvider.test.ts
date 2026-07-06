@@ -158,8 +158,8 @@ describe('SubgraphProvider V4 Parity Hook query', () => {
     const parityHooks = (variables.parityHooks as string[]).map(h =>
       h.toLowerCase()
     );
-    expect(parityHooks).toContain('0x95518bfd15fc8da9fb62f7b5f5af7a87cf7fe888'); // LitePSM USDS
-    expect(parityHooks).toContain('0x9510184e76ff666660d23e3f22aa270180262888'); // LitePSM DAI
+    expect(parityHooks).toContain('0x958a0904940f744f8c6b72c043ceee3ea34ae888'); // LitePSM USDS
+    expect(parityHooks).toContain('0x95e56544e6fe5e91cb9bf2c408009f5494ed2888'); // LitePSM DAI
   });
 
   it('omits the Parity Hook query for a chain with no parity hooks configured (Arbitrum)', async () => {
@@ -186,7 +186,7 @@ describe('SubgraphProvider V4 Parity Hook query', () => {
       id: '0xparitypool',
       feeTier: '3000',
       tickSpacing: '60',
-      hooks: '0x95518bfd15fc8da9fb62f7b5f5af7a87cf7fe888', // LitePSM USDS
+      hooks: '0x958a0904940f744f8c6b72c043ceee3ea34ae888', // LitePSM USDS
       liquidity: '0',
       token0: {
         symbol: 'DAI',

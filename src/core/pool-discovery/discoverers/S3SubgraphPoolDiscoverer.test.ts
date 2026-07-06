@@ -231,7 +231,7 @@ describe('S3SubgraphPoolDiscoverer', () => {
         feeTier: '3000',
         liquidity: '0',
         tickSpacing: '60',
-        hooks: '0x95518BFD15fC8dA9Fb62f7b5f5AF7A87cF7fE888', // LitePSM USDS (mixed case)
+        hooks: '0x958A0904940f744f8c6b72c043CeeE3EA34AE888', // LitePSM USDS (mixed case)
         token0: {id: '0x6b175474e89094c44da98b954eedeac495271d0f'},
         token1: {id: '0xdc035d45d973e3ec169d2276ddab16f1e407384f'},
         tvlETH: 0,

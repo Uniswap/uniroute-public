@@ -5,7 +5,10 @@ import {V4GasEstimator} from './V4GasEstimator';
 import {MixedGasEstimator} from './MixedGasEstimator';
 import {RouteBasic} from '../../../models/route/RouteBasic';
 import {ChainId} from '../../../lib/config';
-import {QuoteBasic} from '../../../models/quote/QuoteBasic';
+import {
+  QuoteBasic,
+  V3QuoterResponseDetails,
+} from '../../../models/quote/QuoteBasic';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Pool} from '../../../models/pool/V3Pool';
@@ -210,6 +213,88 @@ describe('GasEstimators', () => {
           mockProvider,
           {} as IFreshPoolDetailsWrapper,
           true
+        );
+        const route = new RouteBasic(Protocol.V4, [v4Pool1]);
+        const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
+
+        const gasDetails = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        expect(gasDetails.gasUse).toBe(BigInt(97000));
+      });
+    });
+
+    describe('parity-hook gas overhead', () => {
+      // LitePSM USDS mainnet hook (from PARITY_HOOKS_PER_CHAIN)
+      const LITEPSM_USDS_HOOK = '0x958a0904940f744f8c6b72c043ceee3ea34ae888';
+
+      const v4PoolWithParityHook = new V4Pool(
+        token0,
+        token1,
+        0,
+        1,
+        LITEPSM_USDS_HOOK,
+        BigInt(0),
+        '0xa234567890123456789012345678901234567890',
+        BigInt(1000),
+        BigInt(0)
+      );
+
+      it('applies the overhead on the heuristic path with no kill-switch', async () => {
+        const estimator = new V4GasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper
+        );
+        const route = new RouteBasic(Protocol.V4, [v4PoolWithParityHook]);
+        const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
+
+        const gasDetails = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        // Base V4 single-hop gasUse 97_000 + parity hook overhead 250_000
+        expect(gasDetails.gasUse).toBe(BigInt(97000 + 250000));
+        expect(gasDetails.gasCostInWei).toBe(
+          BigInt(1000) * BigInt(97000 + 250000)
+        );
+      });
+
+      it('does NOT double-apply on the quoter-gas base path', async () => {
+        const estimator = new V4GasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper,
+          false,
+          true // v4UseQuoterGasAsBase
+        );
+        const route = new RouteBasic(Protocol.V4, [v4PoolWithParityHook]);
+        const quoterGas = 275_000n; // measured V4Quoter return for the hop
+        const quote = new QuoteBasic(
+          route,
+          BigInt(1000),
+          new V3QuoterResponseDetails(undefined, undefined, quoterGas),
+          undefined
+        );
+
+        const gasDetails = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+
+        // Quoter base already includes the hook callback; no fake-token
+        // TOKEN_OVERHEAD applies, so gasUse is exactly the quoter return.
+        expect(gasDetails.gasUse).toBe(quoterGas);
+      });
+
+      it('leaves no-hook V4 routes unchanged', async () => {
+        const estimator = new V4GasEstimator(
+          mockProvider,
+          {} as IFreshPoolDetailsWrapper
         );
         const route = new RouteBasic(Protocol.V4, [v4Pool1]);
         const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
@@ -597,6 +682,36 @@ describe('GasEstimators', () => {
       // V3 section: BASE_SWAP_COST + COST_PER_HOP + SINGLE_HOP_OVERHEAD + tick costs
       // V4 section: BASE_SWAP_COST + COST_PER_HOP + SINGLE_HOP_OVERHEAD
       expect(gasDetails.gasUse).toBe(BigInt(225000)); // (2000 + 80000 + 15000 + 31000) + (2000 + 80000 + 15000)
+    });
+
+    it('applies parity-hook overhead on a mixed route heuristic estimate', async () => {
+      const v4ParityPool = new V4Pool(
+        token1,
+        token2,
+        0,
+        1,
+        '0x958a0904940f744f8c6b72c043ceee3ea34ae888', // LitePSM USDS mainnet
+        BigInt(0),
+        '0xb234567890123456789012345678901234567890',
+        BigInt(1000),
+        BigInt(0)
+      );
+      const route = new RouteBasic(Protocol.MIXED, [v3Pool1, v4ParityPool]);
+      const quote = new QuoteBasic(
+        route,
+        BigInt(1000),
+        {initializedTicksCrossedList: [2]},
+        undefined
+      );
+
+      const gasDetails = await mixedEstimator.estimateRouteGas(
+        quote,
+        ChainId.MAINNET,
+        1000
+      );
+
+      // Same V3+V4 heuristic base as above + PARITY_HOOK_GAS_OVERHEAD
+      expect(gasDetails.gasUse).toBe(BigInt(225000 + 250000));
     });
 
     it('should estimate gas consistently across individual and mixed routes', async () => {
