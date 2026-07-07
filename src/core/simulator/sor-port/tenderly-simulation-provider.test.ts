@@ -1,6 +1,13 @@
-import {describe, beforeEach, it, expect, vi, afterEach} from 'vitest';
+import {
+  describe,
+  beforeEach,
+  it,
+  expect,
+  vi,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import {JsonRpcProvider} from '@ethersproject/providers';
-import axios from 'axios';
 import {
   TenderlySimulator,
   FallbackTenderlySimulator,
@@ -30,15 +37,6 @@ import {Address} from 'src/models/address/Address';
 import {MethodParameters} from 'src/lib/methodParameters';
 import {EthSimulateV1Simulator} from './eth-simulateV1-provider';
 import {Protocol} from '../../../models/pool/Protocol';
-
-// Mock axios
-vi.mock('axios', () => ({
-  default: {
-    create: vi.fn(() => ({
-      post: vi.fn(),
-    })),
-  },
-}));
 
 // Mock the ERC20 and Permit2 factories
 vi.mock('../../../../abis/src/generated/contracts', () => ({
@@ -83,7 +81,12 @@ describe('tenderly-simulation-provider', () => {
     let gasConverter: GasConverter;
     let simulator: TenderlySimulator;
     let ctx: Context;
-    let mockAxiosInstance: {post: ReturnType<typeof vi.fn>};
+    type TenderlyPostMock = (
+      url: string,
+      data: unknown,
+      config?: {headers?: Record<string, string>; timeout?: number}
+    ) => Promise<{data: unknown; status: number}>;
+    let axiosPostMock: Mock<TenderlyPostMock>;
 
     const USDC_ADDRESS = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
     const WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
@@ -156,13 +159,7 @@ describe('tenderly-simulation-provider', () => {
         getGasCostInUSDBasedOnGasCostInWei: vi.fn().mockReturnValue(3.88),
       } as unknown as GasConverter;
 
-      mockAxiosInstance = {
-        post: vi.fn(),
-      };
-      vi.mocked(axios.create).mockReturnValue(
-        mockAxiosInstance as unknown as ReturnType<typeof axios.create>
-      );
-
+      axiosPostMock = vi.fn<TenderlyPostMock>();
       ctx = {
         logger: {
           info: vi.fn(),
@@ -173,6 +170,18 @@ describe('tenderly-simulation-provider', () => {
           dist: vi.fn(),
           count: vi.fn(),
         },
+        axios: vi.fn(
+          async (config: {
+            url: string;
+            data: unknown;
+            headers?: Record<string, string>;
+            timeout?: number;
+          }) =>
+            axiosPostMock(config.url, config.data, {
+              headers: config.headers,
+              timeout: config.timeout,
+            })
+        ),
       } as unknown as Context;
     });
 
@@ -332,7 +341,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -378,7 +387,7 @@ describe('tenderly-simulation-provider', () => {
       });
 
       it('should return FAILED when Node API response is invalid', async () => {
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: {id: 1, jsonrpc: '2.0', result: []},
           status: 200,
         });
@@ -413,7 +422,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -482,7 +491,7 @@ describe('tenderly-simulation-provider', () => {
             ],
           };
 
-          mockAxiosInstance.post
+          axiosPostMock
             .mockResolvedValueOnce({data: nodeApiResponse, status: 200})
             .mockResolvedValueOnce({data: simApiResponse, status: 200});
 
@@ -495,11 +504,11 @@ describe('tenderly-simulation-provider', () => {
           );
 
           // Node sim call + save_if_fails Simulation API call
-          expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+          expect(axiosPostMock).toHaveBeenCalledTimes(2);
 
           // Second call should be to Simulation API
-          const [secondCallUrl, secondCallBody] =
-            mockAxiosInstance.post.mock.calls[1];
+          const [secondCallUrl, secondCallBody] = axiosPostMock.mock
+            .calls[1] as [string, {simulations: {save_if_fails: boolean}[]}];
           expect(secondCallUrl).toBe(
             'https://api.tenderly.co/api/v1/account/test-user/project/test-project/simulate-batch'
           );
@@ -551,7 +560,7 @@ describe('tenderly-simulation-provider', () => {
 
           const simApiError = new Error('Simulation API unavailable');
 
-          mockAxiosInstance.post
+          axiosPostMock
             .mockResolvedValueOnce({data: nodeApiResponse, status: 200})
             .mockRejectedValueOnce(simApiError);
 
@@ -563,7 +572,7 @@ describe('tenderly-simulation-provider', () => {
             ctx
           );
 
-          expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+          expect(axiosPostMock).toHaveBeenCalledTimes(2);
 
           expect(ctx.metrics.count).toHaveBeenCalledWith(
             'Tenderly.Simulation.InsufficientToken',
@@ -603,7 +612,7 @@ describe('tenderly-simulation-provider', () => {
             ],
           };
 
-          mockAxiosInstance.post.mockResolvedValueOnce({
+          axiosPostMock.mockResolvedValueOnce({
             data: nodeApiResponse,
             status: 200,
           });
@@ -617,7 +626,7 @@ describe('tenderly-simulation-provider', () => {
           );
 
           // Only the node simulation call, no save_if_fails Simulation API call
-          expect(mockAxiosInstance.post).toHaveBeenCalledTimes(1);
+          expect(axiosPostMock).toHaveBeenCalledTimes(1);
 
           expect(ctx.metrics.count).not.toHaveBeenCalledWith(
             'Tenderly.Simulation.InsufficientToken',
@@ -643,7 +652,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -681,7 +690,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -747,7 +756,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -781,7 +790,7 @@ describe('tenderly-simulation-provider', () => {
         );
 
         // Verify the correct endpoint was called (Simulation API, not Node API)
-        expect(mockAxiosInstance.post).toHaveBeenCalledWith(
+        expect(axiosPostMock).toHaveBeenCalledWith(
           'https://api.tenderly.co/api/v1/account/test-user/project/test-project/simulate-batch',
           expect.objectContaining({
             simulations: expect.any(Array),
@@ -816,7 +825,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -859,7 +868,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        mockAxiosInstance.post.mockResolvedValue({
+        axiosPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });

@@ -1,11 +1,12 @@
-import http from 'http';
-import https from 'https';
-
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {constants} from 'ethers';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
-import axios, {AxiosRequestConfig} from 'axios';
+import http from 'http';
+import https from 'https';
+import axios, {AxiosInstance} from 'axios';
+import {AxiosConfig} from '@uniswap/lib-uni';
+import {unirouteCtxAxios} from '../../../lib/unirouteCtxAxios';
 
 import {
   ERC20__factory,
@@ -344,11 +345,13 @@ export class TenderlySimulator extends Simulator {
   private gasConverter: GasConverter;
   private overrideEstimateMultiplier: {[chainId in ChainId]?: number};
   private tenderlyRequestTimeout?: number;
-  private tenderlyServiceInstance = axios.create({
-    // keep connections alive,
-    // maxSockets default is Infinity, so Infinity is read as 50 sockets
+  // Pooled axios for worker fallback — preserves pre-migration
+  // keep-alive behavior (ctx.axios uses the service-wide pool with keepAlive too).
+  private tenderlyServiceInstance: AxiosInstance = axios.create({
     httpAgent: new http.Agent({keepAlive: true}),
     httpsAgent: new https.Agent({keepAlive: true}),
+    // Match ctx.axios: never throw on HTTP status; callers check httpStatus.
+    validateStatus: () => true,
   });
 
   constructor(
@@ -879,6 +882,33 @@ export class TenderlySimulator extends Simulator {
     return '0x' + gasPrice.toString(16);
   }
 
+  private async postTenderly<T>(
+    ctx: Context,
+    url: string,
+    body: unknown,
+    headers?: Record<string, string>
+  ): Promise<{data: T; status: number}> {
+    const requestConfig: AxiosConfig = {
+      method: 'POST',
+      url,
+      data: body,
+      headers,
+      // 0 overrides the service bootstrap 5s default when unset (node endpoint).
+      timeout: this.tenderlyRequestTimeout ?? 0,
+      httpAgent: this.tenderlyServiceInstance.defaults.httpAgent,
+      httpsAgent: this.tenderlyServiceInstance.defaults.httpsAgent,
+    };
+    // ctx.axios (default) uses the service bootstrap pool (keepAlive: true).
+    // Fallback uses the dedicated Tenderly pool above — same as pre-migration.
+    const response = await unirouteCtxAxios(ctx, requestConfig, () =>
+      this.tenderlyServiceInstance.post<T>(url, body, {
+        headers,
+        timeout: this.tenderlyRequestTimeout ?? 0,
+      })
+    );
+    return {data: response.data, status: response.status};
+  }
+
   private async requestNodeSimulation(
     simulationCalls: TenderlySimulationRequest[],
     ctx: Context,
@@ -914,10 +944,6 @@ export class TenderlySimulator extends Simulator {
       ],
     };
 
-    const opts: AxiosRequestConfig = {
-      timeout: this.tenderlyRequestTimeout,
-    };
-
     try {
       ctx.logger.debug('Tenderly simulation request', {
         endpoint: nodeEndpoint,
@@ -926,10 +952,10 @@ export class TenderlySimulator extends Simulator {
 
       // For now, we don't timeout tenderly node endpoint, but we should before we live switch to node endpoint
       const {data: resp, status: httpStatus} =
-        await this.tenderlyServiceInstance.post<TenderlyResponseEstimateGasBundle>(
+        await this.postTenderly<TenderlyResponseEstimateGasBundle>(
+          ctx,
           nodeEndpoint,
-          body,
-          opts
+          body
         );
 
       if (httpStatus !== 200) {
@@ -994,13 +1020,6 @@ export class TenderlySimulator extends Simulator {
       estimate_gas: true,
     };
 
-    const opts: AxiosRequestConfig = {
-      headers: {
-        'X-Access-Key': this.tenderlyAccessKey,
-      },
-      timeout: this.tenderlyRequestTimeout,
-    };
-
     try {
       ctx.logger.debug('Tenderly simulation API request', {
         endpoint: url,
@@ -1008,10 +1027,11 @@ export class TenderlySimulator extends Simulator {
       });
 
       const {data: resp, status: httpStatus} =
-        await this.tenderlyServiceInstance.post<TenderlyResponseUniversalRouter>(
+        await this.postTenderly<TenderlyResponseUniversalRouter>(
+          ctx,
           url,
           body,
-          opts
+          {'X-Access-Key': this.tenderlyAccessKey}
         );
 
       if (httpStatus !== 200) {
