@@ -1,7 +1,7 @@
 import {SimulationStatus} from '../ISimulator';
 import {VIRTUAL_BASE} from '../../../lib/tokenUtils';
 
-export function breakDownTenderlySimulationError(
+export function breakDownSimulationError(
   tokenInAddress: string,
   tokenOutAddress: string,
   data?: string

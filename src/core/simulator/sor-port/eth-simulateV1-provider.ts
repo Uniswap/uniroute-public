@@ -22,6 +22,7 @@ import {
   encodeGethStateOverrides,
   GethStateOverrideMap,
 } from './stateOverrideEncoders';
+import {breakDownSimulationError} from './simulationErrorBreakDown';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {constants} from 'ethers';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
@@ -245,13 +246,16 @@ export class EthSimulateV1Simulator extends Simulator {
           result[0].calls.length < expectedCallCount ||
           'error' in result[0].calls[swapCallIndex]
         ) {
-          if (
+          const swapCallError =
             result?.[0]?.calls?.[swapCallIndex] &&
             'error' in result[0].calls[swapCallIndex]
-          ) {
+              ? (result[0].calls[swapCallIndex] as JsonRpcError).error
+              : undefined;
+
+          if (swapCallError) {
             ctx.logger.error('eth_simulateV1 returned error', {
               result,
-              error: (result[0].calls[swapCallIndex] as JsonRpcError).error,
+              error: swapCallError,
               chain: this.chainId,
               swapSteps: swapOptions.universalRouterSwapsteps === true,
             });
@@ -266,13 +270,21 @@ export class EthSimulateV1Simulator extends Simulator {
             ],
           });
 
+          // Parity with Tenderly node path: map the swap revert data to a
+          // specific SimulationStatus (e.g. SLIPPAGE_TOO_LOW) instead of a
+          // generic FAILED, so callers can distinguish slippage from real
+          // failures.
           return {
             ...quoteSplit,
             simulationResult: {
               estimatedGasUsed: 0n,
               estimatedGasUsedInQuoteToken: 0n,
               estimatedGasUsedInUSD: 0,
-              status: SimulationStatus.FAILED,
+              status: breakDownSimulationError(
+                quoteSplit.swapInfo!.tokenInWrappedAddress,
+                quoteSplit.swapInfo!.tokenOutWrappedAddress,
+                swapCallError?.data
+              ),
               description: 'Error simulating transaction via eth_simulateV1',
             },
           };

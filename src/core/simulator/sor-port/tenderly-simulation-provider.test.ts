@@ -54,9 +54,9 @@ vi.mock('../../../../abis/src/generated/contracts', () => ({
   },
 }));
 
-// Mock the breakDownTenderlySimulationError function
-vi.mock('./tenderlySimulationErrorBreakDown', () => ({
-  breakDownTenderlySimulationError: vi.fn(() => SimulationStatus.FAILED),
+// Mock the breakDownSimulationError function
+vi.mock('./simulationErrorBreakDown', () => ({
+  breakDownSimulationError: vi.fn(() => SimulationStatus.FAILED),
 }));
 
 describe('tenderly-simulation-provider', () => {

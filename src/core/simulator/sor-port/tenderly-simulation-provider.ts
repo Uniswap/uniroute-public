@@ -28,7 +28,7 @@ import {
   GethStateOverrideMap,
   TenderlyStateObjects,
 } from './stateOverrideEncoders';
-import {breakDownTenderlySimulationError} from './tenderlySimulationErrorBreakDown';
+import {breakDownSimulationError} from './simulationErrorBreakDown';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {ChainId} from '../../../lib/config';
 import {GasConverter} from '../../gas/converter/GasConverter';
@@ -772,7 +772,7 @@ export class TenderlySimulator extends Simulator {
                 estimatedGasUsed: 0n,
                 estimatedGasUsedInQuoteToken: 0n,
                 estimatedGasUsedInUSD: 0,
-                status: breakDownTenderlySimulationError(
+                status: breakDownSimulationError(
                   quoteSplit.swapInfo!.tokenInWrappedAddress,
                   quoteSplit.swapInfo!.tokenOutWrappedAddress,
                   (resp.result[swapCallIndex] as JsonRpcError).error.data
