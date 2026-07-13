@@ -15,6 +15,7 @@ import {
   QuoteRequest,
   QuoteResponse,
   Route,
+  RouteCandidate,
   TokenInRoute,
 } from '../../gen/uniroute/v1/api_pb';
 import {
@@ -192,6 +193,23 @@ function computeUsdBuckets(
   };
 }
 
+// Cap on RouteCandidate entries returned when includeRouteCandidates is set.
+export const MAX_ROUTE_CANDIDATES = 5;
+
+// Canonical whole-split route key. Also the identity used to match a split
+// against simulation-failure records and the served quote — keep the three
+// in sync by always going through this helper.
+function routeStringForQuoteSplit(quoteSplit: QuoteSplit): string {
+  return quoteSplit.quotes.map(quote => quote.route.toString()).join(', ');
+}
+
+// Canonical whole-split quoted amount (sum across split legs). Shared by the
+// response quoteAmount, debug candidates, simulation expected-out, and
+// routeCandidates so the four never diverge.
+function totalQuoteAmountForQuoteSplit(quoteSplit: QuoteSplit): bigint {
+  return quoteSplit.quotes.reduce((sum, quote) => sum + quote.amount, 0n);
+}
+
 export class UniRouteBL implements IUniRoutedBL {
   constructor(
     private readonly serviceConfig: IUniRouteServiceConfig,
@@ -339,6 +357,7 @@ export class UniRouteBL implements IUniRoutedBL {
       nsCtx,
       namespaceLogFields,
       debugLogs,
+      includeRouteCandidates,
       portionBips,
       portionRecipient,
       requestBlockNumber,
@@ -637,24 +656,25 @@ export class UniRouteBL implements IUniRoutedBL {
           .map(r => r.toString()),
       });
 
-      const {bestQuoteCandidates, bestQuote} = await this.runQuotePipeline(
-        ctx,
-        chain,
-        tokenInCurrencyInfo,
-        tokenOutCurrencyInfo,
-        amountIn,
-        tradeType,
-        protocols,
-        effectiveConfig,
-        routes,
-        tokensInfo,
-        request,
-        options,
-        metricTags,
-        requestBlockNumber,
-        gasPrice,
-        resolvedStateOverrides
-      );
+      const {bestQuoteCandidates, bestQuote, unviableRouteStrings} =
+        await this.runQuotePipeline(
+          ctx,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          amountIn,
+          tradeType,
+          protocols,
+          effectiveConfig,
+          routes,
+          tokensInfo,
+          request,
+          options,
+          metricTags,
+          requestBlockNumber,
+          gasPrice,
+          resolvedStateOverrides
+        );
 
       let status = QuoteStatus.Pending;
       if (bestQuote) {
@@ -744,6 +764,15 @@ export class UniRouteBL implements IUniRoutedBL {
         debugInfo = this.constructDebugInfo(routes, bestQuoteCandidates);
       }
 
+      const routeCandidates = includeRouteCandidates
+        ? this.constructRouteCandidates(
+            bestQuoteCandidates,
+            tradeType,
+            bestQuote!,
+            unviableRouteStrings
+          )
+        : undefined;
+
       // Populate response
       return await this.populateQuoteResponse(
         ctx,
@@ -764,7 +793,8 @@ export class UniRouteBL implements IUniRoutedBL {
         portionRecipient,
         debugInfo,
         universalRouterSwapsteps,
-        options?.universalRouterVersion
+        options?.universalRouterVersion,
+        routeCandidates
       );
     } catch (error) {
       // If request fails, log metric + request details for debugging purposes
@@ -843,6 +873,7 @@ export class UniRouteBL implements IUniRoutedBL {
       nsCtx,
       namespaceLogFields,
       debugLogs: request.debugLogs,
+      includeRouteCandidates: request.includeRouteCandidates === true,
       portionBips: request.portionBips,
       portionRecipient: request.portionRecipient,
       requestBlockNumber: request.blockNumber,
@@ -1485,6 +1516,7 @@ export class UniRouteBL implements IUniRoutedBL {
   ): Promise<{
     bestQuoteCandidates: QuoteSplit[];
     bestQuote: QuoteSplit | undefined;
+    unviableRouteStrings: string[];
   }> {
     const bestQuoteCandidates =
       await this.quoteStrategy.findBestQuoteCandidates(
@@ -1555,26 +1587,27 @@ export class UniRouteBL implements IUniRoutedBL {
     // undefined, which causes simulation backends (Tenderly, eth_estimateGas)
     // to use 'latest'. The resolved blockNumber is only used for the response
     // and for pool/quote fetching.
-    const bestQuote = await this.simulateAndPopulateBestQuote(
-      chain,
-      tokenInCurrencyInfo,
-      tokenOutCurrencyInfo,
-      amountIn,
-      tradeType,
-      topNQuotes,
-      tokensInfo,
-      request,
-      ctx,
-      metricTags,
-      gasPrice,
-      requestBlockNumber,
-      options?.permit2Disabled ?? false,
-      options?.universalRouterVersion,
-      options?.universalRouterSwapsteps === true,
-      resolvedStateOverrides
-    );
+    const {bestQuote, unviableRouteStrings} =
+      await this.simulateAndPopulateBestQuote(
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        amountIn,
+        tradeType,
+        topNQuotes,
+        tokensInfo,
+        request,
+        ctx,
+        metricTags,
+        gasPrice,
+        requestBlockNumber,
+        options?.permit2Disabled ?? false,
+        options?.universalRouterVersion,
+        options?.universalRouterSwapsteps === true,
+        resolvedStateOverrides
+      );
 
-    return {bestQuoteCandidates, bestQuote};
+    return {bestQuoteCandidates, bestQuote, unviableRouteStrings};
   }
 
   /**
@@ -2233,7 +2266,8 @@ export class UniRouteBL implements IUniRoutedBL {
     // responsible for *not* having called `getPortionAmount` against
     // `amountIn` upstream.
     universalRouterSwapsteps: boolean = false,
-    universalRouterVersion?: UniversalRouterVersion
+    universalRouterVersion?: UniversalRouterVersion,
+    routeCandidates?: RouteCandidate[]
   ): Promise<QuoteResponse> {
     const tokenIn = erc20TokenToSdkToken(
       chain.chainId,
@@ -2247,10 +2281,7 @@ export class UniRouteBL implements IUniRoutedBL {
     );
 
     // Calculate total quote amount by summing up all quote amounts
-    const totalQuoteAmount = quoteSplit.quotes.reduce(
-      (sum, quote) => sum + quote.amount,
-      0n
-    );
+    const totalQuoteAmount = totalQuoteAmountForQuoteSplit(quoteSplit);
 
     // Calculate amountIn distribution for each quote using original route percentages
     const quoteAmountsIn = allocateAmounts(quoteSplit, amountIn);
@@ -2279,9 +2310,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const gasPriceWei = quoteSplit.quotes[0]?.gasDetails?.gasPriceInWei;
 
     // Create route string by joining all quote routes
-    const routeString = quoteSplit.quotes
-      .map(quote => quote.route.toString())
-      .join(', ');
+    const routeString = routeStringForQuoteSplit(quoteSplit);
 
     // If simulation succeeded, update quoteGasAdjusted amount and gas estimates
     let finalQuoteGasAdjusted = quoteGasAdjusted;
@@ -2721,6 +2750,7 @@ export class UniRouteBL implements IUniRoutedBL {
       route: filteredAllPools.map(pools => new Route({pools})),
       hitsCachedRoutes: usedCachedRoutes,
       debugInfo: debugInfo,
+      routeCandidates,
       simulationStatus: quoteSplit.simulationResult?.status.toString(),
       simulationError:
         quoteSplit.simulationResult?.status === SimulationStatus.FAILED,
@@ -2790,6 +2820,81 @@ export class UniRouteBL implements IUniRoutedBL {
     return quoteResponse;
   }
 
+  /**
+   * Builds the routeCandidates response entries: quoted alternatives the
+   * router considered but did NOT serve. The served split and any split
+   * proven unviable (failed simulation, or failed trade build/encoding) are
+   * excluded. Ranked best-first by each candidate's own quoteGasAdjusted
+   * when every candidate has gas details, otherwise by raw quoteAmount for
+   * ALL candidates — a single scale, never mixed (per-candidate fallback
+   * would rank gas-details-missing candidates artificially high). Highest
+   * output first for EXACT_IN, lowest required input first for EXACT_OUT.
+   * The gas-adjusted math mirrors the response's quoteGasAdjusted semantics
+   * (EXACT_OUT adds gas), NOT SimpleQuoteSelector's internal ordering —
+   * candidate order is consistent with the displayed amounts rather than a
+   * replay of the selection pass. Amounts are quoter estimates — not the
+   * simulation/portion-corrected values the served quote carries.
+   */
+  private constructRouteCandidates(
+    bestQuoteCandidates: QuoteSplit[],
+    tradeType: TradeType,
+    servedQuote: QuoteSplit,
+    unviableRouteStrings: string[]
+  ): RouteCandidate[] {
+    const excludedRouteStrings = new Set([
+      routeStringForQuoteSplit(servedQuote),
+      ...unviableRouteStrings,
+    ]);
+    const ascending = tradeType === TradeType.ExactOut;
+    const candidates = bestQuoteCandidates
+      .map(quoteSplit => ({
+        quoteSplit,
+        routeString: routeStringForQuoteSplit(quoteSplit),
+      }))
+      .filter(({routeString}) => !excludedRouteStrings.has(routeString))
+      .map(({quoteSplit, routeString}) => {
+        const quoteAmount = totalQuoteAmountForQuoteSplit(quoteSplit);
+        const hasFullGasDetails = quoteSplit.quotes.every(
+          quote => quote.gasDetails?.gasCostInQuoteToken !== undefined
+        );
+        const gasCostInQuoteToken = quoteSplit.quotes.reduce(
+          (sum, quote) => sum + (quote.gasDetails?.gasCostInQuoteToken ?? 0n),
+          0n
+        );
+        return {
+          routeString,
+          quoteAmount,
+          quoteGasAdjusted: hasFullGasDetails
+            ? tradeType === TradeType.ExactIn
+              ? quoteAmount - gasCostInQuoteToken
+              : quoteAmount + gasCostInQuoteToken
+            : undefined,
+        };
+      });
+    // Rank on one scale only: gas-adjusted when every candidate has it,
+    // otherwise raw for all.
+    const rankGasAdjusted = candidates.every(
+      candidate => candidate.quoteGasAdjusted !== undefined
+    );
+    return candidates
+      .sort((a, b) => {
+        const aKey = rankGasAdjusted ? a.quoteGasAdjusted! : a.quoteAmount;
+        const bKey = rankGasAdjusted ? b.quoteGasAdjusted! : b.quoteAmount;
+        if (aKey === bKey) return 0;
+        const aFirst = ascending ? aKey < bKey : aKey > bKey;
+        return aFirst ? -1 : 1;
+      })
+      .slice(0, MAX_ROUTE_CANDIDATES)
+      .map(
+        candidate =>
+          new RouteCandidate({
+            routeString: candidate.routeString,
+            quoteAmount: candidate.quoteAmount.toString(),
+            quoteGasAdjusted: candidate.quoteGasAdjusted?.toString(),
+          })
+      );
+  }
+
   private constructDebugInfo(
     routes: RouteBasic<Pool>[],
     bestQuoteCandidates: QuoteSplit[]
@@ -2797,13 +2902,8 @@ export class UniRouteBL implements IUniRoutedBL {
     // Map and sort route candidates by totalQuoteAmount in descending order
     const sortedRouteCandidates = bestQuoteCandidates
       .map(quoteSplit => {
-        const routeString = quoteSplit.quotes
-          .map(quote => quote.route.toString())
-          .join(', ');
-        const totalQuoteAmount = quoteSplit.quotes.reduce(
-          (sum, quote) => sum + quote.amount,
-          0n
-        );
+        const routeString = routeStringForQuoteSplit(quoteSplit);
+        const totalQuoteAmount = totalQuoteAmountForQuoteSplit(quoteSplit);
         return {
           routeString,
           totalQuoteAmount,
@@ -2847,9 +2947,12 @@ export class UniRouteBL implements IUniRoutedBL {
     universalRouterVersion?: UniversalRouterVersion,
     universalRouterSwapsteps: boolean = false,
     resolvedStateOverrides?: ResolvedStateOverride[]
-  ): Promise<QuoteSplit | undefined> {
+  ): Promise<{
+    bestQuote: QuoteSplit | undefined;
+    unviableRouteStrings: string[];
+  }> {
     if (topNQuotes.length === 0) {
-      return undefined;
+      return {bestQuote: undefined, unviableRouteStrings: []};
     }
 
     // Simulation metrics carry a bounded swapSteps tag so swapsteps-mode
@@ -2864,6 +2967,10 @@ export class UniRouteBL implements IUniRoutedBL {
     let simulationSuccesses = 0;
     let simulationFailures = 0;
     const failedRoutes: string[] = [];
+    // Splits whose trade could not be built/encoded (logged individually at
+    // the failure site) — tracked separately from simulation failures so the
+    // sim-failure warn log keeps its exact signature.
+    const buildFailedRoutes: string[] = [];
     let firstSwapInfo: SwapInfo | undefined = undefined; // Store swapInfo from first successful trade build
 
     let swapOptions: SwapOptionsUniversalRouter | undefined;
@@ -2989,7 +3096,9 @@ export class UniRouteBL implements IUniRoutedBL {
             tradeType,
             metricTags,
           });
-          // Continue with next candidate quote
+          // Unbuildable trade — record so it never surfaces as a viable
+          // route candidate, then continue with the next candidate quote.
+          buildFailedRoutes.push(routeStringForQuoteSplit(quoteSplit));
           continue;
         }
 
@@ -3082,6 +3191,9 @@ export class UniRouteBL implements IUniRoutedBL {
                 .join(' -> ')
             ),
           });
+          // Unencodable swap — record so it never surfaces as a viable
+          // route candidate.
+          buildFailedRoutes.push(routeStringForQuoteSplit(quoteSplit));
           continue;
         }
 
@@ -3157,7 +3269,7 @@ export class UniRouteBL implements IUniRoutedBL {
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
           amountIn,
-          simulationQuote.quotes.reduce((sum, quote) => sum + quote.amount, 0n),
+          totalQuoteAmountForQuoteSplit(simulationQuote),
           ctx,
           gasPrice,
           blockNumber,
@@ -3185,9 +3297,7 @@ export class UniRouteBL implements IUniRoutedBL {
           simulatedQuote.simulationResult?.status === SimulationStatus.FAILED
         ) {
           simulationFailures++;
-          failedRoutes.push(
-            quoteSplit.quotes.map(q => q.route.toString()).join(', ')
-          );
+          failedRoutes.push(routeStringForQuoteSplit(quoteSplit));
           // Per-quote sim failure during multi-route pass; other routes still try — diagnostic, not server error.
           ctx.logger.warn('Simulation failed for quote:', {
             error: simulatedQuote.simulationResult?.description,
@@ -3302,7 +3412,10 @@ export class UniRouteBL implements IUniRoutedBL {
       });
     }
 
-    return bestQuote;
+    return {
+      bestQuote,
+      unviableRouteStrings: [...failedRoutes, ...buildFailedRoutes],
+    };
   }
 
   // Used to generate Routes for getCachedRoutesResponse

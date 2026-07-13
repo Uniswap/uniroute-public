@@ -2235,6 +2235,396 @@ describe('UniRouteBL', () => {
     });
   });
 
+  describe('route candidates (includeRouteCandidates)', () => {
+    // Strategy variant returning multiple candidate splits.
+    class MockedMultiQuoteStrategy extends BaseQuoteStrategy {
+      constructor(private readonly candidates: QuoteSplit[]) {
+        super(
+          {} as IQuoteFetcher,
+          {} as GasEstimateProvider,
+          {} as IGasConverter,
+          {} as RouteQuoteAllocator<Pool>,
+          {} as SimpleQuoteSelector,
+          {} as ITokenHandler,
+          new Map(),
+          {} as IFreshPoolDetailsWrapper
+        );
+      }
+
+      async findBestQuoteCandidates(): Promise<QuoteSplit[]> {
+        return this.candidates;
+      }
+
+      name(): string {
+        return 'MockedMultiQuoteStrategy';
+      }
+    }
+
+    const buildSplit = (
+      poolAddress: string,
+      amount: bigint,
+      gasCostInQuoteToken?: bigint
+    ): QuoteSplit =>
+      new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              new Address(baseRequest.tokenInAddress),
+              new Address(baseRequest.tokenOutAddress),
+              new Address(poolAddress),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+          amount,
+          undefined,
+          {
+            gasUse: BigInt('150000'),
+            gasPriceInWei: BigInt('30000000000'),
+            gasCostInWei: BigInt('4500000000000000'),
+            gasCostInEth: 0.0045,
+            gasCostInQuoteToken,
+          }
+        ),
+      ]);
+
+    const poolAddresses = [
+      '0x1111111111111111111111111111111111111111',
+      '0x2222222222222222222222222222222222222222',
+      '0x3333333333333333333333333333333333333333',
+      '0x4444444444444444444444444444444444444444',
+      '0x5555555555555555555555555555555555555555',
+      '0x6666666666666666666666666666666666666666',
+      '0x7777777777777777777777777777777777777777',
+    ];
+
+    // Fails simulation for splits routing through the given pool address,
+    // succeeds for everything else.
+    class SelectiveFailingSimulator implements ISimulator {
+      constructor(private readonly failPoolAddress: string) {}
+
+      async simulate(
+        chainId: ChainId,
+        swapOptions: unknown,
+        quoteSplit: QuoteSplit
+      ): Promise<QuoteSplit> {
+        const fails = quoteSplit.quotes
+          .map(quote => quote.route.toString())
+          .join(', ')
+          .includes(this.failPoolAddress);
+        return {
+          ...quoteSplit,
+          simulationResult: {
+            estimatedGasUsed: 0n,
+            estimatedGasUsedInQuoteToken: 0n,
+            estimatedGasUsedInUSD: 0,
+            status: fails ? SimulationStatus.FAILED : SimulationStatus.SUCCESS,
+            description: 'Selective simulation for testing',
+          },
+        };
+      }
+    }
+
+    const buildBL = (
+      strategy: MockedMultiQuoteStrategy,
+      config = serviceConfig,
+      simulator: ISimulator = dummySimulator
+    ) =>
+      new UniRouteBL(
+        config,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        strategy,
+        simulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+    it('omits routeCandidates when the flag is not set', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+      });
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy([
+          buildSplit(poolAddresses[0], BigInt('100')),
+        ])
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.routeCandidates).length(0);
+    });
+
+    it('excludes the served route and caps alternatives at 5 for EXACT_IN', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        includeRouteCandidates: true,
+      });
+      // 7 candidates with shuffled amounts; EXACT_IN best = highest output.
+      // The 700 split is served and therefore excluded from the candidates.
+      const amounts = [300n, 700n, 100n, 500n, 200n, 600n, 400n];
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy(
+          amounts.map((amount, i) => buildSplit(poolAddresses[i], amount))
+        )
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).equals('700');
+      expect(response.routeCandidates).length(5);
+      expect(response.routeCandidates.map(c => c.quoteAmount)).deep.equals([
+        '600',
+        '500',
+        '400',
+        '300',
+        '200',
+      ]);
+      // The served route (pool 1) never appears as an alternative
+      for (const candidate of response.routeCandidates) {
+        expect(candidate.routeString).not.contains(poolAddresses[1]);
+      }
+    });
+
+    it('sorts ascending for EXACT_OUT (lowest required input first)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+        includeRouteCandidates: true,
+      });
+      // 200 is the lowest required input, gets served, and is excluded.
+      const amounts = [500n, 200n, 800n];
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy(
+          amounts.map((amount, i) => buildSplit(poolAddresses[i], amount))
+        )
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.routeCandidates.map(c => c.quoteAmount)).deep.equals([
+        '500',
+        '800',
+      ]);
+    });
+
+    it('ranks by gas-adjusted amount when every candidate has gas details', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        includeRouteCandidates: true,
+      });
+      // 1000 is served and excluded. Raw order would be [950, 920] but
+      // gas-adjusted order is [920-20=900, 950-100=850].
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy([
+          buildSplit(poolAddresses[0], 1000n, 40n),
+          buildSplit(poolAddresses[1], 950n, 100n),
+          buildSplit(poolAddresses[2], 920n, 20n),
+        ])
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.routeCandidates).length(2);
+      expect(response.routeCandidates[0].quoteAmount).equals('920');
+      expect(response.routeCandidates[0].quoteGasAdjusted).equals('900');
+      expect(response.routeCandidates[1].quoteAmount).equals('950');
+      expect(response.routeCandidates[1].quoteGasAdjusted).equals('850');
+    });
+
+    it('ranks all candidates by raw amount when any lacks gas details', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        includeRouteCandidates: true,
+      });
+      // 1000 is served and excluded. One alternative lacks gas details, so
+      // ranking falls back to raw amounts for ALL candidates on one scale:
+      // [900, 800]. A per-candidate fallback would compare 900-200=700
+      // against raw 800 and rank the gas-details-missing 800 artificially
+      // high. Displayed quoteGasAdjusted stays set where available.
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy([
+          buildSplit(poolAddresses[0], 1000n, 10n),
+          buildSplit(poolAddresses[1], 900n, 200n),
+          buildSplit(poolAddresses[2], 800n),
+        ])
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.routeCandidates).length(2);
+      expect(response.routeCandidates[0].quoteAmount).equals('900');
+      expect(response.routeCandidates[0].quoteGasAdjusted).equals('700');
+      expect(response.routeCandidates[1].quoteAmount).equals('800');
+      expect(response.routeCandidates[1].quoteGasAdjusted).toBeUndefined();
+    });
+
+    it('excludes simulation-failed candidates', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        includeRouteCandidates: true,
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        slippageTolerance: 5,
+      });
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const simulationEnabledConfig = {
+        ...serviceConfig,
+        Simulation: {
+          ...serviceConfig.Simulation,
+          Enabled: true,
+          TopNQuotes: 3,
+        },
+      };
+
+      // Best split (pool 0) fails simulation; pool 1 passes and is served;
+      // pool 2 is never simulated and remains the only alternative.
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy([
+          buildSplit(poolAddresses[0], 1000n),
+          buildSplit(poolAddresses[1], 900n),
+          buildSplit(poolAddresses[2], 800n),
+        ]),
+        simulationEnabledConfig,
+        new SelectiveFailingSimulator(poolAddresses[0])
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).equals('900');
+      expect(response.routeCandidates.map(c => c.quoteAmount)).deep.equals([
+        '800',
+      ]);
+      expect(response.routeCandidates[0].routeString).contains(
+        poolAddresses[2]
+      );
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('excludes candidates whose trade build failed', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        includeRouteCandidates: true,
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        slippageTolerance: 5,
+      });
+
+      // Best split (pool 0, first in selector order) fails buildTrade;
+      // pool 1 builds + simulates and is served; pool 2 is the only
+      // remaining alternative.
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementationOnce(() => {
+          throw new Error('buildTrade failed for testing');
+        })
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const simulationEnabledConfig = {
+        ...serviceConfig,
+        Simulation: {
+          ...serviceConfig.Simulation,
+          Enabled: true,
+          TopNQuotes: 3,
+        },
+      };
+
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy([
+          buildSplit(poolAddresses[0], 1000n),
+          buildSplit(poolAddresses[1], 900n),
+          buildSplit(poolAddresses[2], 800n),
+        ]),
+        simulationEnabledConfig,
+        // Simulator that never fails — only the build failure is under test.
+        new SelectiveFailingSimulator(
+          '0x000000000000000000000000000000000000dEaD'
+        )
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).equals('900');
+      expect(response.routeCandidates.map(c => c.quoteAmount)).deep.equals([
+        '800',
+      ]);
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('keeps debugLogs routeCandidates output unchanged (desc, uncapped)', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_OUT',
+        debugLogs: true,
+      });
+      const amounts = [300n, 700n, 100n, 500n, 200n, 600n, 400n];
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy(
+          amounts.map((amount, i) => buildSplit(poolAddresses[i], amount))
+        )
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(response.error).toBeUndefined();
+      expect(response.routeCandidates).length(0);
+      // Debug candidates keep historical descending order even for EXACT_OUT,
+      // are uncapped, and carry no quoteGasAdjusted.
+      expect(
+        response.debugInfo?.routeCandidates.map(c => c.quoteAmount)
+      ).deep.equals(['700', '600', '500', '400', '300', '200', '100']);
+      expect(response.debugInfo?.routeCandidates[0].quoteGasAdjusted).equals(
+        ''
+      );
+    });
+  });
+
   describe('pool details updates', () => {
     it('should update pool details in response', async () => {
       const request = new QuoteRequest({
