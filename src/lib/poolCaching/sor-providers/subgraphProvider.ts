@@ -34,6 +34,46 @@ export interface ISubgraphProvider<TSubgraphPool> {
 export const PAGE_SIZE = 1000; // 1k is max possible query size from subgraph.
 export const BASE_V4_PAGE_SIZE = 500; // TheGraph v4 base max pagesize is 3600, but ellipfra query page size perf better with smaller page size
 
+// ROBINHOOD is not in sdk-core ChainId yet — same workaround as cacheConfig.ts
+const CHAIN_ID_ROBINHOOD = 4663;
+
+// Chains whose V4 pool set is too large to walk with a single sequential
+// id_gt cursor inside the provider timeout (e.g. memetoken launchpads
+// creating pools at a high rate). The fetch is split into N id-keyspace
+// ranges paginated in parallel; results are merged and deduped by id.
+export const V4_SUBGRAPH_FETCH_SHARDS_BY_CHAIN: {[chainId: number]: number} = {
+  [CHAIN_ID_ROBINHOOD]: 4,
+};
+
+export interface IdShard {
+  startId: string; // exclusive lower bound (id_gt); '' = keyspace start
+  endId?: string; // exclusive upper bound (id_lt); undefined = keyspace end
+}
+
+/**
+ * Splits the 0x-prefixed bytes32 id keyspace into `shardCount` contiguous
+ * ranges using 2-nibble boundaries (256 slots). Pool ids are uniformly
+ * distributed hashes, so ranges get roughly equal pool counts. Boundary
+ * strings compare correctly against full-length lowercase hex ids under
+ * the subgraph's lexicographic id_gt/id_lt ('0x3f...' < '0x40' < '0x40a...').
+ */
+export function computeIdShards(shardCount: number): IdShard[] {
+  if (shardCount <= 1) {
+    return [{startId: ''}];
+  }
+  const slots = 256;
+  const count = Math.min(shardCount, slots);
+  const boundary = (i: number) =>
+    '0x' +
+    Math.floor((i * slots) / count)
+      .toString(16)
+      .padStart(2, '0');
+  return Array.from({length: count}, (_, i) => ({
+    startId: i === 0 ? '' : boundary(i),
+    endId: i === count - 1 ? undefined : boundary(i + 1),
+  }));
+}
+
 // Minimum TVL threshold applied at the subgraph query level for V4 pools.
 // V4 pools with totalValueLockedETH <= this value are excluded from queries.
 export const V4_MIN_TVL_ETH = 0.001;
@@ -104,7 +144,6 @@ export abstract class SubgraphProvider<
     if (!this.subgraphUrl) {
       throw new Error(`No subgraph url for chain id: ${this.chainId}`);
     }
-    this.logger.info('bearerToken is', this.bearerToken);
 
     if (this.bearerToken) {
       this.client = new GraphQLClient(this.subgraphUrl, {
@@ -136,10 +175,24 @@ export abstract class SubgraphProvider<
         ? BASE_V4_PAGE_SIZE
         : PAGE_SIZE;
 
+    const shardCount =
+      this.protocol === Protocol.V4
+        ? V4_SUBGRAPH_FETCH_SHARDS_BY_CHAIN[this.chainId] ?? 1
+        : 1;
+    const shards = computeIdShards(shardCount);
+    // Interpolated into each query only for bounded shards — GraphQL rejects
+    // declared-but-unused variables, so the unbounded shard omits $endId.
+    const endIdVar = (shard: IdShard) =>
+      shard.endId !== undefined ? ', $endId: String' : '';
+    const endIdWhere = (shard: IdShard) =>
+      shard.endId !== undefined ? 'id_lt: $endId,' : '';
+
     this.logger.info(
       `Getting ${
         this.protocol
-      } pools from the subgraph with page size ${pageSizeToUse}${
+      } pools from the subgraph with page size ${pageSizeToUse} across ${
+        shards.length
+      } id-range shard(s)${
         providerConfig?.blockNumber
           ? ` as of block ${providerConfig?.blockNumber}`
           : ''
@@ -183,13 +236,14 @@ export abstract class SubgraphProvider<
         adapterField === 'token0_in' ? 'token1_in' : 'token0_in';
       return {
         name: `V4 permissioned hook pools ${adapterField}`,
-        query: gql`
-          query getV4PermissionedHookPools($pageSize: Int!, $id: String, $permissionedHooks: [String!]!, $permissionedAdapters: [String!]!, $knownTokens: [String!]!) {
+        query: (shard: IdShard) => gql`
+          query getV4PermissionedHookPools($pageSize: Int!, $id: String, $permissionedHooks: [String!]!, $permissionedAdapters: [String!]!, $knownTokens: [String!]!${endIdVar(shard)}) {
             pools(
               first: $pageSize
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
+                ${endIdWhere(shard)}
                 liquidity_gt: "0",
                 hooks_in: $permissionedHooks,
                 ${adapterField}: $permissionedAdapters,
@@ -231,13 +285,14 @@ export abstract class SubgraphProvider<
     const includeTvlBypassQuery = tvlBypassHooks.length > 0;
     const tvlBypassHookQuery = {
       name: 'V4 TVL-bypass hook pools',
-      query: gql`
-        query getV4TvlBypassHookPools($pageSize: Int!, $id: String, $tvlBypassHooks: [String!]!) {
+      query: (shard: IdShard) => gql`
+        query getV4TvlBypassHookPools($pageSize: Int!, $id: String, $tvlBypassHooks: [String!]!${endIdVar(shard)}) {
           pools(
             first: $pageSize
             ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
             where: {
               id_gt: $id,
+              ${endIdWhere(shard)}
               hooks_in: $tvlBypassHooks
             }
           ) {
@@ -253,13 +308,14 @@ export abstract class SubgraphProvider<
       // 1. Pools with high tracked ETH (for both V3 and V4)
       {
         name: 'High tracked ETH pools',
-        query: gql`
-          query getHighTrackedETHPools($pageSize: Int!, $id: String, $threshold: String!) {
+        query: (shard: IdShard) => gql`
+          query getHighTrackedETHPools($pageSize: Int!, $id: String, $threshold: String!${endIdVar(shard)}) {
             pools(
               first: $pageSize
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
+                ${endIdWhere(shard)}
                 totalValueLockedETH_gt: $threshold
               }
             ) {
@@ -276,13 +332,14 @@ export abstract class SubgraphProvider<
         ? [
             {
               name: 'V4 high liquidity pools',
-              query: gql`
-          query getV4HighLiquidityPools($pageSize: Int!, $id: String, $minTvl: String!) {
+              query: (shard: IdShard) => gql`
+          query getV4HighLiquidityPools($pageSize: Int!, $id: String, $minTvl: String!${endIdVar(shard)}) {
             pools(
               first: $pageSize
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
+                ${endIdWhere(shard)}
                 liquidity_gt: "0",
                 totalValueLockedETH_gt: $minTvl
               }
@@ -302,13 +359,14 @@ export abstract class SubgraphProvider<
         ? [
             {
               name: 'V3 zero ETH pools',
-              query: gql`
-          query getV3ZeroETHPools($pageSize: Int!, $id: String) {
+              query: (shard: IdShard) => gql`
+          query getV3ZeroETHPools($pageSize: Int!, $id: String${endIdVar(shard)}) {
             pools(
               first: $pageSize
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
+                ${endIdWhere(shard)}
                 liquidity_gt: "0",
                 totalValueLockedETH: "0"
               }
@@ -346,9 +404,23 @@ export abstract class SubgraphProvider<
 
         const fetchPoolsForQuery = async (
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          queryConfig: any
+          queryConfig: any,
+          shard: IdShard,
+          shardIndex: number
         ): Promise<TRawSubgraphPool[]> => {
-          let lastId = '';
+          const queryDocument = queryConfig.query(shard);
+          // 1-indexed for logs; the `shard` metric tag stays 0-indexed.
+          const shardLabel =
+            shards.length > 1
+              ? ` shard ${shardIndex + 1}/${shards.length}`
+              : '';
+          // Tag per-shard only when actually sharded — unsharded chains keep
+          // their exact pre-existing metric series (no new tag, no split).
+          const shardedMetricTags =
+            shards.length > 1
+              ? {...this.metricTags, shard: String(shardIndex)}
+              : this.metricTags;
+          let lastId = shard.startId;
           let pools: TRawSubgraphPool[] = [];
           let poolsPage: TRawSubgraphPool[] = [];
           let totalPages = 0;
@@ -358,14 +430,15 @@ export abstract class SubgraphProvider<
 
             const start = Date.now();
             this.logger.info(
-              `Starting fetching for ${queryConfig.name} page ${totalPages} with page size ${pageSizeToUse}`
+              `Starting fetching for ${queryConfig.name}${shardLabel} page ${totalPages} with page size ${pageSizeToUse}`
             );
 
             const poolsResult = await this.client.request<{
               pools: TRawSubgraphPool[];
-            }>(queryConfig.query, {
+            }>(queryDocument, {
               pageSize: pageSizeToUse,
               id: lastId,
+              ...(shard.endId !== undefined ? {endId: shard.endId} : {}),
               ...queryConfig.variables,
             });
 
@@ -383,10 +456,10 @@ export abstract class SubgraphProvider<
                 .toLowerCase()}.paginate.pageSize`,
               poolsPage.length,
               undefined,
-              this.metricTags
+              shardedMetricTags
             );
             this.logger.info(
-              `Fetched ${poolsPage.length} pools for ${queryConfig.name} in ${
+              `Fetched ${poolsPage.length} pools for ${queryConfig.name}${shardLabel} in ${
                 Date.now() - start
               }ms`
             );
@@ -398,7 +471,7 @@ export abstract class SubgraphProvider<
               .toLowerCase()}.paginate`,
             totalPages,
             undefined,
-            this.metricTags
+            shardedMetricTags
           );
           this.metric.putMetric(
             `SubgraphProvider.getPools.${queryConfig.name
@@ -406,16 +479,18 @@ export abstract class SubgraphProvider<
               .toLowerCase()}.pools.length`,
             pools.length,
             undefined,
-            this.metricTags
+            shardedMetricTags
           );
 
           return pools;
         };
 
         try {
-          // Fetch pools for each query in parallel
-          const poolPromises = queries.map(queryConfig =>
-            fetchPoolsForQuery(queryConfig)
+          // Fetch pools for each query × id-range shard in parallel
+          const poolPromises = queries.flatMap(queryConfig =>
+            shards.map((shard, shardIndex) =>
+              fetchPoolsForQuery(queryConfig, shard, shardIndex)
+            )
           );
           const allPoolsArrays = await Promise.all(poolPromises);
 

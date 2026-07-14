@@ -1,5 +1,8 @@
 import {getEnv} from './otherUtils';
-import {parsePositiveIntEnvOrDefault} from './envParsing';
+import {
+  parsePositiveIntEnvOrDefault,
+  parsePositiveIntRecordEnvOrEmpty,
+} from './envParsing';
 
 export const UniRouteServiceName = 'uniroute';
 
@@ -26,6 +29,12 @@ const getPoolDiscoveryCacheTtls = () => ({
   tokenInOutPoolsCacheEntryTtlSeconds: parsePositiveIntEnvOrDefault(
     'POOL_DISCOVERY_TOKEN_IN_OUT_POOLS_CACHE_TTL_SECONDS',
     DEFAULT_TOKEN_IN_OUT_POOLS_CACHE_ENTRY_TTL_SECONDS
+  ),
+
+  // e.g. '{"__PLACEHOLDER__":__PLACEHOLDER__}'). Lets fast-churn chains (Robinhood launchpad)
+  // serve fresh pool snapshots without lowering the global TTLs.
+  poolsCacheEntryTtlSecondsByChain: parsePositiveIntRecordEnvOrEmpty(
+    'POOL_DISCOVERY_POOLS_CACHE_TTL_SECONDS_BY_CHAIN'
   ),
 });
 
@@ -82,6 +91,8 @@ export interface IUniRouteServiceConfig {
     AllPoolsCacheEntryTtlSeconds: number;
     // TokenIn/TokenOut/Chain/Protocol pools Ttl (uniRoutes)
     TokenInOutPoolsCacheEntryTtlSeconds: number;
+
+    PoolsCacheEntryTtlSecondsByChain?: Record<number, number>;
   };
   CachedRoutes: {
     // Whether to enable cached routes.
@@ -188,8 +199,11 @@ export interface IUniRouteServiceConfig {
 export const getUniRouteSyncConfig = (
   s3PoolBucketName?: string
 ): IUniRouteServiceConfig => {
-  const {allPoolsCacheEntryTtlSeconds, tokenInOutPoolsCacheEntryTtlSeconds} =
-    getPoolDiscoveryCacheTtls();
+  const {
+    allPoolsCacheEntryTtlSeconds,
+    tokenInOutPoolsCacheEntryTtlSeconds,
+    poolsCacheEntryTtlSecondsByChain,
+  } = getPoolDiscoveryCacheTtls();
 
   return {
     QuoteService: QuoteService.UniRoute,
@@ -206,6 +220,7 @@ export const getUniRouteSyncConfig = (
       TokenCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
+      PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
     },
     CachedRoutes: {
       Enabled: true,
@@ -281,8 +296,11 @@ export const getUniRouteSyncConfig = (
 export const getQuickRouteSyncConfig = (
   s3PoolBucketName?: string
 ): IUniRouteServiceConfig => {
-  const {allPoolsCacheEntryTtlSeconds, tokenInOutPoolsCacheEntryTtlSeconds} =
-    getPoolDiscoveryCacheTtls();
+  const {
+    allPoolsCacheEntryTtlSeconds,
+    tokenInOutPoolsCacheEntryTtlSeconds,
+    poolsCacheEntryTtlSecondsByChain,
+  } = getPoolDiscoveryCacheTtls();
 
   return {
     QuoteService: QuoteService.QuickRoute,
@@ -299,6 +317,7 @@ export const getQuickRouteSyncConfig = (
       TokenCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
+      PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
     },
     CachedRoutes: {
       Enabled: true,

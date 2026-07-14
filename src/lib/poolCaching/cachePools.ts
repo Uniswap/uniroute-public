@@ -5,7 +5,11 @@
 
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
-import {S3Client, PutObjectCommand} from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 
 import {
@@ -36,6 +40,16 @@ export interface CachePoolsConfig {
   s3CacheKey: string;
 }
 
+// S3 object-metadata key recording when a snapshot's subgraph fetch STARTED.
+// Freshness arbitration between concurrent writers compares these, not write
+// times. S3 lowercases metadata keys (x-amz-meta-*), so keep this lowercase.
+export const FETCH_START_METADATA_KEY = 'fetch-start-time';
+
+// A recorded fetch start meaningfully in the future is corrupt (a writer
+// with a broken clock); trusting it would freeze the key until that time.
+// Beyond this tolerance the metadata is treated as absent.
+const FETCH_START_MAX_FUTURE_SKEW_MS = 5 * 60_000;
+
 function prefixedLogger(logger: Logger, prefix: string): Logger {
   return {
     info: (msg, ...extra) => logger.info(`${prefix} ${msg}`, ...extra),
@@ -57,6 +71,8 @@ async function cachePoolsForChainProtocol(
     chainProtocol;
   const metricTags = {chainId: String(chainId), protocol: String(protocol)};
   logger = prefixedLogger(logger, `[${chainId}_${protocol}]`);
+  const fetchStartTime = new Date();
+  const compressedKey = S3_POOL_CACHE_KEY(config.s3CacheKey, chainId, protocol);
 
   logger.info('Getting pools');
   metricInstance.putMetric(
@@ -531,7 +547,6 @@ async function cachePoolsForChainProtocol(
   }
 
   const beforeS3 = Date.now();
-  const compressedKey = S3_POOL_CACHE_KEY(config.s3CacheKey, chainId, protocol);
   logger.info(
     `Got ${pools.length} pools from the subgraph. Saving to ${compressedKey}`
   );
@@ -548,13 +563,116 @@ async function cachePoolsForChainProtocol(
     (1024 * 1024)
   ).toFixed(2);
 
-  const result = await s3.send(
-    new PutObjectCommand({
-      Bucket: config.s3Bucket,
-      Key: compressedKey,
-      Body: compressedPools,
-    })
-  );
+  const skipStaleWrite = (why: string) => {
+    logger.info(`Skipping S3 write: ${compressedKey} ${why}`);
+    metricInstance.putMetric(
+      'CachePools.s3.skipped_stale_write',
+      1,
+      MetricLoggerUnit.Count,
+      metricTags
+    );
+  };
+
+  // Freshness arbitration: several writers can target this key (fast
+  // Robinhood cron, all-chains cron, on-demand one-shot, and timed-out runs
+  // that withTimeout detached but could not cancel), and write ORDER does
+  // not imply data freshness — a detached orphan can write late with older
+  // data. The winner is the snapshot with the newest FETCH start: each
+  // snapshot records its fetch start in object metadata, we skip when the
+  // existing object's recorded fetch start is at least as fresh as ours,
+  // and the put is conditioned (IfMatch / IfNoneMatch) on exactly the
+  // version the pre-write head observed. A conditional-write conflict means
+  // the object changed under us — re-check against the new version and
+  // retry. Objects written before this scheme lack the metadata; their
+  // LastModified (an upper bound on their fetch start) is the fallback.
+  let result;
+  const MAX_WRITE_ATTEMPTS = 3;
+  for (let attempt = 1; ; attempt++) {
+    let putCondition: {IfMatch?: string; IfNoneMatch?: string} = {};
+    try {
+      const head = await s3.send(
+        new HeadObjectCommand({Bucket: config.s3Bucket, Key: compressedKey})
+      );
+      const existingRaw = head.Metadata?.[FETCH_START_METADATA_KEY];
+      const parsedFetchStart = existingRaw ? new Date(existingRaw) : undefined;
+      const existingFetchStart =
+        parsedFetchStart !== undefined &&
+        !Number.isNaN(parsedFetchStart.getTime()) &&
+        parsedFetchStart.getTime() <=
+          Date.now() + FETCH_START_MAX_FUTURE_SKEW_MS
+          ? parsedFetchStart
+          : undefined;
+      const existingIsFresher =
+        existingFetchStart !== undefined
+          ? existingFetchStart >= fetchStartTime
+          : head.LastModified !== undefined &&
+            head.LastModified > fetchStartTime;
+      if (existingIsFresher) {
+        skipStaleWrite(
+          `already holds data fetched at ${existingFetchStart?.toISOString() ?? `<=${head.LastModified?.toISOString()}`}, at least as fresh as this run's ${fetchStartTime.toISOString()}`
+        );
+        return;
+      }
+      if (head.ETag) {
+        putCondition = {IfMatch: head.ETag};
+      }
+    } catch (err) {
+      const name = (err as {name?: string})?.name;
+      const status = (err as {$metadata?: {httpStatusCode?: number}})?.$metadata
+        ?.httpStatusCode;
+      if (name === 'NotFound' || status === 404) {
+        // First write for this key — reject if another writer creates it first.
+        putCondition = {IfNoneMatch: '*'};
+      } else {
+        // Fail CLOSED: without seeing the incumbent we cannot arbitrate,
+        // and an unconditional write could clobber fresher data with a
+        // stale orphan snapshot. Retry, then surface as a task failure —
+        // a missed write ages the snapshot by one cadence and is visible;
+        // a stale clobber is silent.
+        if (attempt < MAX_WRITE_ATTEMPTS) {
+          logger.info(
+            `HeadObject failed for ${compressedKey} (attempt ${attempt}); retrying freshness check`
+          );
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    try {
+      result = await s3.send(
+        new PutObjectCommand({
+          Bucket: config.s3Bucket,
+          Key: compressedKey,
+          Body: compressedPools,
+          Metadata: {[FETCH_START_METADATA_KEY]: fetchStartTime.toISOString()},
+          ...putCondition,
+        })
+      );
+      break;
+    } catch (err) {
+      const name = (err as {name?: string})?.name;
+      const status = (err as {$metadata?: {httpStatusCode?: number}})?.$metadata
+        ?.httpStatusCode;
+      const conflict =
+        status === 412 ||
+        status === 409 ||
+        status === 404 || // IfMatch put against a key deleted since the head
+        name === 'PreconditionFailed' ||
+        name === 'ConditionalRequestConflict' ||
+        name === 'NoSuchKey';
+      if (conflict && attempt < MAX_WRITE_ATTEMPTS) {
+        // The object changed (or vanished) under us. Do NOT assume the
+        // competing writer's data is fresher or that its write succeeded —
+        // re-head and re-arbitrate against whatever is there now.
+        logger.info(
+          `Conditional S3 write conflict for ${compressedKey} (attempt ${attempt}); re-checking`
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
 
   metricInstance.putMetric(
     'CachePools.s3.latency',
@@ -587,25 +705,57 @@ async function cachePoolsForChainProtocol(
   );
 }
 
+export interface CacheAllPoolsResult {
+  succeeded: number;
+  failed: number;
+  // Settles only when every underlying per-chain+protocol task has settled,
+  // INCLUDING tasks the per-job timeout detached (withTimeout cannot cancel
+  // them). Overlap guards must wait on this, not on cacheAllPools itself.
+  workSettled: Promise<void>;
+}
+
 /**
  * Runs all pool caching jobs in batches of `batchSize` to control memory usage.
  * Each job fetches pools from subgraph for a given chain+protocol, compresses, and uploads to S3.
+ * Per-job failures are tolerated (logged + counted); callers decide from the
+ * returned counts whether the run as a whole is healthy.
  */
 export async function cacheAllPools(
   logger: Logger,
   metricInstance: IMetric,
   config: CachePoolsConfig,
   batchSize = 5,
-  perJobTimeoutMs = 300000
-): Promise<void> {
+  perJobTimeoutMs = 300000,
+  only?: Array<{chainId: number; protocol: Protocol}>
+): Promise<CacheAllPoolsResult> {
   const s3 = new S3Client({region: process.env.AWS_REGION || 'us-east-2'});
   const cronLogger = prefixedLogger(logger, '[SubgraphCron]');
-  const chainProtocols = createChainProtocols(cronLogger, metricInstance);
+  let chainProtocols = createChainProtocols(cronLogger, metricInstance);
+  if (only !== undefined && only.length > 0) {
+    chainProtocols = chainProtocols.filter(cp =>
+      only.some(o => o.chainId === cp.chainId && o.protocol === cp.protocol)
+    );
+    if (chainProtocols.length === 0) {
+      // Misconfiguration (e.g. the target chain was removed from
+      // createChainProtocols): without this the run would silently no-op.
+      // Callers see it via the {succeeded: 0, failed: 0} result.
+      cronLogger.error(
+        `'only' filter (${only.map(o => `${o.chainId}_${o.protocol}`).join(', ')}) matched no configured chain+protocols — nothing will be cached`
+      );
+    }
+  }
 
   cronLogger.info(
-    `Starting pool caching for ${chainProtocols.length} chain+protocol combinations (batch size: ${batchSize}, per-job timeout: ${perJobTimeoutMs}ms)`
+    `Starting pool caching for ${chainProtocols.length} chain+protocol combinations${
+      only !== undefined && only.length > 0
+        ? ` (only ${only.map(o => `${o.chainId}_${o.protocol}`).join(', ')})`
+        : ''
+    } (batch size: ${batchSize}, per-job timeout: ${perJobTimeoutMs}ms)`
   );
 
+  let succeeded = 0;
+  let failed = 0;
+  const allRawTasks: Promise<void>[] = [];
   for (let i = 0; i < chainProtocols.length; i += batchSize) {
     const batch = chainProtocols.slice(i, i + batchSize);
     const batchLabel = `batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chainProtocols.length / batchSize)}`;
@@ -614,18 +764,16 @@ export async function cacheAllPools(
       `Processing ${batchLabel}: ${batch.map(cp => `${cp.protocol}/${cp.chainId}`).join(', ')}`
     );
 
+    const rawTasks = batch.map(cp =>
+      cachePoolsForChainProtocol(cp, s3, config, cronLogger, metricInstance)
+    );
+    allRawTasks.push(...rawTasks);
     const results = await Promise.allSettled(
-      batch.map(cp =>
+      rawTasks.map((task, idx) =>
         withTimeout(
-          cachePoolsForChainProtocol(
-            cp,
-            s3,
-            config,
-            cronLogger,
-            metricInstance
-          ),
+          task,
           perJobTimeoutMs,
-          `${cp.chainId}_${cp.protocol}`
+          `${batch[idx]!.chainId}_${batch[idx]!.protocol}`
         )
       )
     );
@@ -633,6 +781,7 @@ export async function cacheAllPools(
     results.forEach((result, idx) => {
       const cp = batch[idx]!;
       if (result.status === 'rejected') {
+        failed += 1;
         const reason = result.reason;
         cronLogger.error(
           `[${cp.chainId}_${cp.protocol}] Failed to cache pools: ${reason instanceof Error ? reason.message : String(reason)}`,
@@ -644,9 +793,18 @@ export async function cacheAllPools(
           MetricLoggerUnit.Count,
           {chainId: String(cp.chainId), protocol: String(cp.protocol)}
         );
+      } else {
+        succeeded += 1;
       }
     });
   }
 
-  cronLogger.info('Pool caching complete');
+  cronLogger.info(
+    `Pool caching complete (${succeeded} succeeded, ${failed} failed)`
+  );
+  return {
+    succeeded,
+    failed,
+    workSettled: Promise.allSettled(allRawTasks).then(() => undefined),
+  };
 }

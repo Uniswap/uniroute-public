@@ -2,6 +2,7 @@ import {describe, it, expect, vi} from 'vitest';
 import {parse} from 'graphql';
 import {ChainId} from '@uniswap/sdk-core';
 import {V4SubgraphProvider} from './v4/subgraphProvider';
+import {computeIdShards} from './subgraphProvider';
 import type {Logger} from './util/log';
 import {IMetric} from './util/metric';
 
@@ -26,11 +27,18 @@ class MockMetric extends IMetric {
 }
 
 /**
- * Records every GraphQL query string passed to request(), and always returns an
- * empty page so pagination terminates immediately. Lets us assert which queries
- * the provider builds without hitting a real subgraph.
+ * Records every GraphQL query string passed to request(), and (by default)
+ * always returns an empty page so pagination terminates immediately. Lets us
+ * assert which queries the provider builds without hitting a real subgraph.
+ * Pass `respond` to script non-empty pages for specific (query, variables).
  */
-function makeRecordingProvider(chainId: ChainId): {
+function makeRecordingProvider(
+  chainId: ChainId,
+  respond?: (
+    query: string,
+    variables: Record<string, unknown>
+  ) => {pools: unknown[]}
+): {
   provider: V4SubgraphProvider;
   queries: string[];
   calls: {query: string; variables: Record<string, unknown>}[];
@@ -55,7 +63,7 @@ function makeRecordingProvider(chainId: ChainId): {
     request: async (query: string, variables: Record<string, unknown>) => {
       queries.push(query);
       calls.push({query, variables: variables ?? {}});
-      return {pools: []};
+      return respond ? respond(query, variables ?? {}) : {pools: []};
     },
   };
   return {provider, queries, calls};
@@ -179,16 +187,20 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     const bypassCalls = calls.filter(c =>
       c.query.includes('getV4TvlBypassHookPools')
     );
-    expect(bypassCalls.length).toBe(1);
-    const tvlBypassHooks = (
-      bypassCalls[0]!.variables.tvlBypassHooks as string[]
-    ).map(h => h.toLowerCase());
-    expect(tvlBypassHooks).toContain(
-      '0x2cd91bd228ff4c537031d6b8204782090c84c0cc'
-    ); // IndexFeeHook
-    expect(tvlBypassHooks).toContain(
-      '0x2539029365c03b131cca25cb10ff4519a1dcc0cc'
-    ); // PensionTaxHook
+    // Robinhood V4 is id-range sharded: the TVL-bypass query fans out once
+    // per shard (all carrying the same hooks variable).
+    expect(bypassCalls.length).toBe(4);
+    for (const call of bypassCalls) {
+      const tvlBypassHooks = (call.variables.tvlBypassHooks as string[]).map(
+        h => h.toLowerCase()
+      );
+      expect(tvlBypassHooks).toContain(
+        '0x2cd91bd228ff4c537031d6b8204782090c84c0cc'
+      ); // IndexFeeHook
+      expect(tvlBypassHooks).toContain(
+        '0x2539029365c03b131cca25cb10ff4519a1dcc0cc'
+      ); // PensionTaxHook
+    }
   });
 
   it('omits the TVL-bypass Hook query for a chain with none configured (Arbitrum)', async () => {
@@ -262,5 +274,132 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
 
     const pools = await provider.getPools();
     expect(pools.some(p => p.id === '0xparitypool')).toBe(true);
+  });
+});
+
+describe('computeIdShards', () => {
+  it('returns a single unbounded shard for count <= 1', () => {
+    expect(computeIdShards(1)).toEqual([{startId: ''}]);
+    expect(computeIdShards(0)).toEqual([{startId: ''}]);
+  });
+
+  it('splits the keyspace at 2-nibble boundaries for 4 shards', () => {
+    expect(computeIdShards(4)).toEqual([
+      {startId: '', endId: '0x40'},
+      {startId: '0x40', endId: '0x80'},
+      {startId: '0x80', endId: '0xc0'},
+      {startId: '0xc0', endId: undefined},
+    ]);
+  });
+
+  it('produces contiguous coverage for non-power-of-two counts', () => {
+    const shards = computeIdShards(3);
+    expect(shards[0]!.startId).toBe('');
+    expect(shards[shards.length - 1]!.endId).toBeUndefined();
+    for (let i = 1; i < shards.length; i++) {
+      expect(shards[i]!.startId).toBe(shards[i - 1]!.endId);
+    }
+  });
+
+  it('boundary strings order correctly against full-length lowercase pool ids', () => {
+    // The subgraph's id_gt/id_lt is lexicographic; every real id is
+    // 0x + 64 lowercase hex chars. A pool just below/above each boundary
+    // must land in the right shard.
+    const below = '0x3f' + 'f'.repeat(62);
+    const at = '0x40' + '0'.repeat(62);
+    expect(below < '0x40').toBe(true); // belongs to shard [.., 0x40)
+    expect(at > '0x40').toBe(true); // belongs to shard [0x40, ..)
+  });
+});
+
+describe('SubgraphProvider V4 id-range sharding', () => {
+  const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
+
+  it('fans each query out into 4 concurrent id-range shards on Robinhood', async () => {
+    const {provider, calls} = makeRecordingProvider(CHAIN_ID_ROBINHOOD);
+    await provider.getPools();
+
+    const highLiquidityCalls = calls.filter(c =>
+      c.query.includes('getV4HighLiquidityPools')
+    );
+    expect(highLiquidityCalls.length).toBe(4);
+    expect(
+      highLiquidityCalls.map(c => ({
+        id: c.variables.id,
+        endId: c.variables.endId,
+      }))
+    ).toEqual(
+      expect.arrayContaining([
+        {id: '', endId: '0x40'},
+        {id: '0x40', endId: '0x80'},
+        {id: '0x80', endId: '0xc0'},
+        {id: '0xc0', endId: undefined},
+      ])
+    );
+
+    // Bounded shards declare and use $endId; the last (unbounded) shard
+    // must omit it entirely — GraphQL rejects declared-but-unused variables.
+    for (const c of highLiquidityCalls) {
+      if (c.variables.endId !== undefined) {
+        expect(c.query).toContain('$endId: String');
+        expect(c.query).toContain('id_lt: $endId');
+      } else {
+        expect(c.query).not.toContain('$endId');
+        expect(c.query).not.toContain('id_lt');
+      }
+    }
+  });
+
+  it('builds syntactically valid GraphQL for every sharded query', async () => {
+    const {provider, queries} = makeRecordingProvider(CHAIN_ID_ROBINHOOD);
+    await provider.getPools();
+
+    expect(queries.length).toBeGreaterThan(0);
+    for (const q of queries) {
+      expect(() => parse(q)).not.toThrow();
+    }
+  });
+
+  it('keeps a single unbounded fetch per query on non-sharded chains (Arbitrum)', async () => {
+    const {provider, calls} = makeRecordingProvider(ChainId.ARBITRUM_ONE);
+    await provider.getPools();
+
+    const highLiquidityCalls = calls.filter(c =>
+      c.query.includes('getV4HighLiquidityPools')
+    );
+    expect(highLiquidityCalls.length).toBe(1);
+    expect(highLiquidityCalls[0]!.variables.endId).toBeUndefined();
+    expect(highLiquidityCalls[0]!.query).not.toContain('id_lt');
+    expect(highLiquidityCalls[0]!.variables.id).toBe('');
+  });
+
+  it('dedupes a pool returned by more than one shard', async () => {
+    const dupPool = {
+      id: '0x50' + 'ab'.repeat(31),
+      feeTier: '3000',
+      tickSpacing: '60',
+      hooks: '0x0000000000000000000000000000000000000000',
+      liquidity: '1000000',
+      token0: {symbol: 'A', id: '0x1111', name: 'A', decimals: '18'},
+      token1: {symbol: 'B', id: '0x2222', name: 'B', decimals: '18'},
+      totalValueLockedUSD: '20000',
+      totalValueLockedETH: '10',
+      totalValueLockedUSDUntracked: '0',
+    };
+    // Return the same pool from the FIRST page of two different shards
+    // (boundary overlap can't happen in practice, but the merge must be
+    // robust to it). Later pages (id === dupPool.id) return empty so
+    // pagination terminates.
+    const {provider} = makeRecordingProvider(
+      CHAIN_ID_ROBINHOOD,
+      (query, variables) =>
+        query.includes('getV4HighLiquidityPools') &&
+        (variables.id === '' || variables.id === '0x40')
+          ? {pools: [dupPool]}
+          : {pools: []}
+    );
+
+    const pools = await provider.getPools();
+    expect(pools.filter(p => p.id === dupPool.id).length).toBe(1);
   });
 });

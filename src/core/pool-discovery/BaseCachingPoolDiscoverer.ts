@@ -135,7 +135,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         }
       );
       await this.getPoolsCache.set(cacheKey, retrievedPoolsStr, {
-        ttl: this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds,
+        ttl:
+          this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
+            chainId
+          ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds,
       });
     }
 
@@ -309,8 +312,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
 
       if (cacheDirective.shouldUseCache) {
         await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
-          ttl: this.serviceConfig.RedisCache
-            .TokenInOutPoolsCacheEntryTtlSeconds,
+          ttl:
+            this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
+              chainId
+            ] ??
+            this.serviceConfig.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds,
         });
       }
     }

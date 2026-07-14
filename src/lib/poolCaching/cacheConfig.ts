@@ -12,7 +12,7 @@ const CHAIN_ID_TEMPO = 4217 as ChainId;
 // MEGAETH is not in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_MEGAETH = 4326 as ChainId;
 // ROBINHOOD is not in sdk-core — define locally until sdk-core is upgraded
-const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
+export const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
 // ARC is not in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_ARC = 5042 as ChainId;
 

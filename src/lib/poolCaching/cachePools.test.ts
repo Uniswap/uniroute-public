@@ -12,10 +12,22 @@ vi.mock('@aws-sdk/client-s3', () => ({
     send = sendMock;
   },
   PutObjectCommand: class MockPutObjectCommand {
+    readonly commandType = 'PutObject';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    constructor(public readonly input: any) {}
+  },
+  HeadObjectCommand: class MockHeadObjectCommand {
+    readonly commandType = 'HeadObject';
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(public readonly input: any) {}
   },
 }));
+
+// Each successful write is a HeadObject (freshness guard) then a PutObject.
+const putObjectCalls = () =>
+  sendMock.mock.calls
+    .map(call => call[0])
+    .filter(cmd => cmd.commandType === 'PutObject');
 
 // We need a mutable reference so each test can override the return value
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -145,13 +157,87 @@ describe('cacheAllPools', () => {
   it('completes successfully with empty chainProtocols', async () => {
     await expect(
       cacheAllPools(mockLogger, mockMetric, config)
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({succeeded: 0, failed: 0});
   });
 
   it('completes with custom batch size', async () => {
     await expect(
       cacheAllPools(mockLogger, mockMetric, config, 3)
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({succeeded: 0, failed: 0});
+  });
+
+  it('processes only the matching chain+protocol when `only` is set', async () => {
+    const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
+    const robinhoodGetPools = vi.fn().mockResolvedValue([]);
+    const mainnetGetPools = vi.fn().mockResolvedValue([]);
+    mockChainProtocols = [
+      {
+        protocol: Protocol.V4,
+        chainId: CHAIN_ID_ROBINHOOD,
+        timeout: 90000,
+        provider: {getPools: robinhoodGetPools},
+      },
+      {
+        protocol: Protocol.V2,
+        chainId: ChainId.MAINNET,
+        timeout: 90000,
+        provider: {getPools: mainnetGetPools},
+      },
+    ];
+
+    await cacheAllPools(mockLogger, mockMetric, config, 5, 300000, [
+      {chainId: CHAIN_ID_ROBINHOOD, protocol: Protocol.V4},
+    ]);
+
+    expect(robinhoodGetPools).toHaveBeenCalled();
+    expect(mainnetGetPools).not.toHaveBeenCalled();
+  });
+
+  it('logs an error when `only` matches no configured chain+protocols', async () => {
+    mockChainProtocols = [
+      {
+        protocol: Protocol.V2,
+        chainId: ChainId.MAINNET,
+        timeout: 90000,
+        provider: {getPools: vi.fn().mockResolvedValue([])},
+      },
+    ];
+
+    // e.g. the target chain was removed from createChainProtocols — the run
+    // must be self-reporting, not a silent success-shaped no-op.
+    await expect(
+      cacheAllPools(mockLogger, mockMetric, config, 5, 300000, [
+        {chainId: 999999 as ChainId, protocol: Protocol.V4},
+      ])
+    ).resolves.toMatchObject({succeeded: 0, failed: 0});
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      expect.stringContaining('matched no configured chain+protocols')
+    );
+    expect(putObjectCalls()).toHaveLength(0);
+  });
+
+  it('processes everything when `only` is undefined or empty', async () => {
+    const getPoolsA = vi.fn().mockResolvedValue([]);
+    const getPoolsB = vi.fn().mockResolvedValue([]);
+    mockChainProtocols = [
+      {
+        protocol: Protocol.V4,
+        chainId: ChainId.UNICHAIN,
+        timeout: 90000,
+        provider: {getPools: getPoolsA},
+      },
+      {
+        protocol: Protocol.V2,
+        chainId: ChainId.MAINNET,
+        timeout: 90000,
+        provider: {getPools: getPoolsB},
+      },
+    ];
+
+    await cacheAllPools(mockLogger, mockMetric, config, 5, 300000, []);
+
+    expect(getPoolsA).toHaveBeenCalled();
+    expect(getPoolsB).toHaveBeenCalled();
   });
 
   // --- V2 MAINNET special case ---
@@ -460,7 +546,7 @@ describe('cacheAllPools', () => {
       ];
 
       await cacheAllPools(mockLogger, mockMetric, config);
-      expect(sendMock).not.toHaveBeenCalled();
+      expect(putObjectCalls()).toHaveLength(0);
       expect(mockLogger.info).toHaveBeenCalledWith(
         expect.stringContaining('No pools found from the subgraph')
       );
@@ -477,7 +563,7 @@ describe('cacheAllPools', () => {
       ];
 
       await cacheAllPools(mockLogger, mockMetric, config);
-      expect(sendMock).not.toHaveBeenCalled();
+      expect(putObjectCalls()).toHaveLength(0);
     });
   });
 
@@ -498,7 +584,7 @@ describe('cacheAllPools', () => {
       // Should not throw because Promise.allSettled is used
       await expect(
         cacheAllPools(mockLogger, mockMetric, config)
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to cache pools'),
         expect.anything()
@@ -520,8 +606,8 @@ describe('cacheAllPools', () => {
       ];
 
       await cacheAllPools(mockLogger, mockMetric, config);
-      expect(sendMock).toHaveBeenCalledTimes(1);
-      const cmd = sendMock.mock.calls[0][0];
+      expect(putObjectCalls()).toHaveLength(1);
+      const cmd = putObjectCalls()[0];
       expect(cmd.input.Bucket).toBe('test-bucket');
       expect(cmd.input.Key).toContain('poolCacheGzip.json');
       expect(cmd.input.Body).toBeInstanceOf(Buffer);
@@ -562,14 +648,397 @@ describe('cacheAllPools', () => {
 
       await expect(
         cacheAllPools(mockLogger, mockMetric, config, 2)
-      ).resolves.toBeUndefined();
+      ).resolves.toMatchObject({succeeded: 2, failed: 1});
       // First batch: polygon V2 succeeds, polygon V3 fails
       // Second batch: arbitrum V2 succeeds
-      expect(sendMock).toHaveBeenCalledTimes(2);
+      expect(putObjectCalls()).toHaveLength(2);
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to cache pools'),
         expect.anything()
       );
+    });
+
+    it('skips the write when the existing snapshot was fetched more recently (metadata arbitration)', async () => {
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          // Another writer's snapshot records a FRESHER fetch start than
+          // this run's — even if it was written earlier, its data wins.
+          return {
+            LastModified: new Date('2020-01-01T00:00:00Z'), // write time is irrelevant
+            Metadata: {
+              'fetch-start-time': new Date(Date.now() + 60_000).toISOString(),
+            },
+          };
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(putObjectCalls()).toHaveLength(0);
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping S3 write')
+      );
+    });
+
+    it('writes (and records its fetch start) when the existing snapshot was fetched earlier', async () => {
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          return {
+            LastModified: new Date(Date.now() + 60_000), // late write of OLD data
+            Metadata: {
+              'fetch-start-time': new Date(
+                '2026-01-01T00:00:00Z'
+              ).toISOString(),
+            },
+          };
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(puts[0].input.Metadata['fetch-start-time']).toBeTypeOf('string');
+    });
+
+    it('falls back to LastModified when the existing object predates the metadata scheme', async () => {
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          // Legacy object, no fetch-start metadata, written after this
+          // run's fetch started — conservatively treated as fresher.
+          return {LastModified: new Date(Date.now() + 60_000)};
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(putObjectCalls()).toHaveLength(0);
+    });
+
+    it('conditions the put on the pre-write ETag (IfMatch)', async () => {
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          return {
+            LastModified: new Date('2026-01-01T00:00:00Z'),
+            ETag: '"abc123"',
+          };
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(puts[0].input.IfMatch).toBe('"abc123"');
+    });
+
+    it('uses IfNoneMatch for the first-ever write (head NotFound)', async () => {
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          const err = new Error('no such key');
+          err.name = 'NotFound';
+          throw err;
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(puts[0].input.IfNoneMatch).toBe('*');
+    });
+
+    it('re-arbitrates on a conditional-put conflict and skips when the winner is fresher', async () => {
+      let headCalls = 0;
+      let putCalls = 0;
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          headCalls += 1;
+          if (headCalls === 1) {
+            // Stale snapshot at first check — we decide to write.
+            return {
+              ETag: '"v1"',
+              Metadata: {
+                'fetch-start-time': new Date(
+                  '2026-01-01T00:00:00Z'
+                ).toISOString(),
+              },
+            };
+          }
+          // After the conflict: a competing writer landed FRESHER data.
+          return {
+            ETag: '"v2"',
+            Metadata: {
+              'fetch-start-time': new Date(Date.now() + 60_000).toISOString(),
+            },
+          };
+        }
+        putCalls += 1;
+        // First put loses the conditional race.
+        const err = new Error('pre-condition did not hold');
+        err.name = 'PreconditionFailed';
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (err as any).$metadata = {httpStatusCode: 412};
+        throw err;
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(putCalls).toBe(1);
+      expect(mockLogger.info).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping S3 write')
+      );
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('re-arbitrates on a conditional-put conflict and retries when its own data is still fresher', async () => {
+      let putCalls = 0;
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          // The competing writer holds OLDER data both times (e.g. a late
+          // orphan write) — our snapshot should still land.
+          return {
+            ETag: `"v${putCalls + 1}"`,
+            Metadata: {
+              'fetch-start-time': new Date(
+                '2026-01-01T00:00:00Z'
+              ).toISOString(),
+            },
+          };
+        }
+        putCalls += 1;
+        if (putCalls === 1) {
+          const err = new Error('pre-condition did not hold');
+          err.name = 'PreconditionFailed';
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (err as any).$metadata = {httpStatusCode: 412};
+          throw err;
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(putCalls).toBe(2);
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('retries via the first-write path when the key is deleted between head and put (404)', async () => {
+      let headCalls = 0;
+      let putCalls = 0;
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          headCalls += 1;
+          if (headCalls === 1) {
+            return {
+              ETag: '"v1"',
+              Metadata: {
+                'fetch-start-time': new Date(
+                  '2026-01-01T00:00:00Z'
+                ).toISOString(),
+              },
+            };
+          }
+          // Object was deleted before our conditional put landed.
+          const notFound = new Error('no such key');
+          notFound.name = 'NotFound';
+          throw notFound;
+        }
+        putCalls += 1;
+        if (putCalls === 1) {
+          const err = new Error('key deleted');
+          err.name = 'NoSuchKey';
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (err as any).$metadata = {httpStatusCode: 404};
+          throw err;
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(putCalls).toBe(2);
+      const puts = putObjectCalls();
+      expect(puts[1].input.IfNoneMatch).toBe('*');
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the freshness HeadObject fails with a non-404 error', async () => {
+      let headCalls = 0;
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          headCalls += 1;
+          // Transient S3 error (throttle / 503) — NOT a missing object.
+          throw new Error('ServiceUnavailable');
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      // Without seeing the incumbent we cannot arbitrate — never write
+      // unconditionally (a stale orphan could clobber fresher data);
+      // retry then surface the task as failed.
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
+      expect(headCalls).toBe(3);
+      expect(putObjectCalls()).toHaveLength(0);
+    });
+
+    it('ignores corrupt far-future fetch-start metadata instead of freezing the key', async () => {
+      sendMock.mockImplementation(async cmd => {
+        if (cmd.commandType === 'HeadObject') {
+          return {
+            ETag: '"v1"',
+            LastModified: new Date('2026-01-01T00:00:00Z'),
+            Metadata: {
+              // A writer with a broken clock recorded a fetch start far in
+              // the future; trusting it would block every write until then.
+              'fetch-start-time': new Date(
+                Date.now() + 24 * 60 * 60_000
+              ).toISOString(),
+            },
+          };
+        }
+        return {};
+      });
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([makePool('0xaaa', '0x1111', '0x2222')]),
+          },
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(putObjectCalls()).toHaveLength(1);
     });
 
     it('processes multiple batches correctly', async () => {
@@ -594,7 +1063,7 @@ describe('cacheAllPools', () => {
       // Note: V2 mainnet will trigger the special filtering path but still succeed
       await cacheAllPools(mockLogger, mockMetric, config, 2);
       // All 5 entries should produce S3 uploads
-      expect(sendMock).toHaveBeenCalledTimes(5);
+      expect(putObjectCalls()).toHaveLength(5);
     });
   });
 });
