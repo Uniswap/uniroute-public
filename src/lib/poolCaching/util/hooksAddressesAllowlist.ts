@@ -419,6 +419,8 @@ export const LIVO_SWAP_HOOK_ON_MAINNET =
   '0x627fa6f76fa96b10bae1b6fba280a3c9264500cc';
 export const LIVO_SWAP_HOOK_V2_ON_MAINNET =
   '0x068241d20c59980abeaeded990d2441f05f5c0cc';
+export const LIVO_SWAP_HOOK_V3_ON_MAINNET =
+  '0x10392843021a1af0abe3b1a21f14673dc05340cc';
 
 export const ESTATE_BONDING_CURVE_HOOK_ON_BASE =
   '0x66799c2eb2590006820f6cb826133176ecdda888';
@@ -506,6 +508,10 @@ export const SETHHOOK_ON_BASE = '0xe0e522e5888e398d9e5d4d90a48c489425cb2888';
 
 export const CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BSC_v2 =
   '0x0fcb2c049786054fd35330db361a75a88903a8cc';
+export const CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD =
+  '0x48b8f6ad3a1b4aa477314c9a23035b8f84dde8cc';
+export const CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD =
+  '0x65efdf8cce99b53c925df878df275df21cb6e8cc';
 
 export const THE_POOL_ON_ARBITRUM =
   '0x486579de6391053df88a073cebd673dd545200cc';
@@ -588,8 +594,59 @@ export const BONKER_DYNAMIC_FEE_HOOK_ON_BASE =
 export const BONKER_STATIC_FEE_HOOK_ON_BASE =
   '0xc9156c1868e122ef5b3e6ed946e1e88ff7da68cc';
 
+export const URULAUNCH_HOOK_ON_BASE =
+  '0x367bf580a1a6cc784f30a77713e02eca76210044';
+
 export const DOPPLER_HOOKS_ADDRESS_ON_ROBINHOOD =
   '0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544';
+export const INDEX_FEE_HOOK_ON_ROBINHOOD =
+  '0x2cd91bd228ff4c537031d6b8204782090c84c0cc';
+export const PENSION_TAX_HOOK_ON_ROBINHOOD =
+  '0x2539029365c03b131cca25cb10ff4519a1dcc0cc';
+
+/**
+ * "Zero-measured-TVL Hooks" — allowlisted V4 hooks whose pools hold real,
+ * tradeable liquidity but whose subgraph-reported `totalValueLockedETH` is
+ * structurally 0 (or below `V4_MIN_TVL_ETH`), so the standard V4 discovery
+ * query would drop them from the routing cache and the pair becomes
+ * unroutable despite having liquidity. Two distinct causes seen in practice:
+ *
+ *   1. Hook-accounted reserves. Hooks that hold reserves via custom accounting
+ *      (`BeforeSwapReturnsDelta` / `poolManager.mint`+`take`) rather than
+ *      normal LP positions leave the concentrated-liquidity `liquidity` field
+ *      at 0. The v4-subgraph's `findNativePerToken` only bumps a counter
+ *      token's `derivedETH` from pools where `liquidity > 0`, so even an
+ *      ETH-paired pool never prices its counter token → `totalValueLockedETH`
+ *      computes to 0.
+ *   2. Unpriced counter token. The pool's only counter token has no other
+ *      ETH/stablecoin-priced pool, so its `derivedETH` stays 0 regardless of
+ *      real balances (same zero-TVL outcome).
+ *
+ * Treatment is identical to `PARITY_HOOKS_PER_CHAIN`: exempt from BOTH the
+ * subgraph `V4_MIN_TVL_ETH` floor at the query level AND the post-fetch
+ * liquidity/TVL sanitize (see `subgraphProvider.ts`). Hook-address membership
+ * is the sole admission gate — same trust model as `HOOKS_ADDRESSES_ALLOWLIST`
+ * (every address here must also appear in that map).
+ *
+ * This is a routing-cache workaround for a v4-subgraph pricing limitation.
+ * Remove entries here once the subgraph derives a price for the counter token
+ * (e.g. a token↔WETH pool is seeded, or the subgraph learns to price from
+ * hook-accounted reserves).
+ */
+// Intersected with Record<number, string[]> for the same dual-ChainId-enum
+// indexing reason as PARITY_HOOKS_PER_CHAIN above.
+export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
+  Record<ChainId, string[]>
+> &
+  Record<number, string[]> = {
+  [ChainId.MAINNET]: [LIVO_SWAP_HOOK_V3_ON_MAINNET],
+  [ChainId.ROBINHOOD]: [
+    INDEX_FEE_HOOK_ON_ROBINHOOD,
+    PENSION_TAX_HOOK_ON_ROBINHOOD,
+    CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
+    CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
+  ],
+};
 
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
@@ -632,6 +689,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ASH_HOOK_ON_MAINNET,
     LIVO_SWAP_HOOK_ON_MAINNET,
     LIVO_SWAP_HOOK_V2_ON_MAINNET,
+    LIVO_SWAP_HOOK_V3_ON_MAINNET,
     UNIAGENT_V4_HOOK_ON_MAINNET,
     BASELINE_HOOK_ON_MAINNET,
     MEV_X_HOMELANDER_ON_MAINNET,
@@ -817,6 +875,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_BASE,
     BONKER_DYNAMIC_FEE_HOOK_ON_BASE,
     BONKER_STATIC_FEE_HOOK_ON_BASE,
+    URULAUNCH_HOOK_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
@@ -859,7 +918,14 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.XLAYER]: [ADDRESS_ZERO, AEGIS_V3, AEGIS_DFM_ON_XLAYER],
   [ChainId.LINEA]: [ADDRESS_ZERO],
   [ChainId.MEGAETH]: [ADDRESS_ZERO, TEST_HOOK_ON_MEGAETH],
-  [ChainId.ROBINHOOD]: [ADDRESS_ZERO, DOPPLER_HOOKS_ADDRESS_ON_ROBINHOOD],
+  [ChainId.ROBINHOOD]: [
+    ADDRESS_ZERO,
+    DOPPLER_HOOKS_ADDRESS_ON_ROBINHOOD,
+    INDEX_FEE_HOOK_ON_ROBINHOOD,
+    PENSION_TAX_HOOK_ON_ROBINHOOD,
+    CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
+    CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
+  ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
   [CHAIN_ID_ARC]: [ADDRESS_ZERO],

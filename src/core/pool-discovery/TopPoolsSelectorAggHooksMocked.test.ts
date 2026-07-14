@@ -52,9 +52,10 @@ vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
     FluidDexT1: {[1]: ['0xaaaa000000000000000000000000000000000001']},
   },
   // Empty — these tests exercise agg hook exclusion/inclusion only, not the
-  // parity hook force-select carve-out. Must still be present since
-  // isForceSelectedPool reads it unconditionally.
+  // parity / zero-measured-TVL force-select carve-out. Both must still be
+  // present since getTvlBypassHookAddressSet reads them unconditionally.
   PARITY_HOOKS_PER_CHAIN: {},
+  ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: {},
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(['FluidDexT1']),
   GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET:
     '0x4509b7eb3f9641226804fea4976963435d1c6080',

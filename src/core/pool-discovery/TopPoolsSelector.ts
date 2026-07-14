@@ -42,6 +42,7 @@ import {IPoolSelectionConfig} from '../../lib/config';
 import {
   AGG_HOOKS_PER_CHAIN,
   PARITY_HOOKS_PER_CHAIN,
+  ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
 } from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 // Token-to-pool index for faster lookups
@@ -485,22 +486,25 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     });
   }
 
-  // Parity Hook pools (see PARITY_HOOKS_PER_CHAIN doc comment) use custom
-  // accounting, so liquidity/tvlUSD are structurally ~0 — they'd otherwise
-  // always sort to the bottom of a TVL-ranked pool set and get sliced off by
-  // topN limits, even for their own direct pair. Mirrors the forceSelect
-  // exemption S3SubgraphPoolDiscovererV4 applies at the pool-cache read step.
+  // TVL-bypass hook pools (parity hooks + zero-measured-TVL hooks — see the
+  // PARITY_HOOKS_PER_CHAIN and ZERO_MEASURED_TVL_HOOKS_PER_CHAIN doc comments)
+  // report structurally ~0 liquidity/tvlUSD, so they'd otherwise always sort
+  // to the bottom of a TVL-ranked pool set and get sliced off by topN limits,
+  // even for their own direct pair. Mirrors the forceSelect exemption
+  // S3SubgraphPoolDiscovererV4 applies at the pool-cache read step.
   //
   // Computed once per filterAndAddPools call (not per pool) since chainId is
-  // invariant across the call — undefined for chains with no parity hooks
-  // (i.e. all of them except mainnet today) so callers can skip the
-  // force-select split entirely.
-  protected static getParityHookAddressSet(
+  // invariant across the call — undefined for chains with neither registry
+  // configured so callers can skip the force-select split entirely.
+  protected static getTvlBypassHookAddressSet(
     chainId: ChainId
   ): Set<string> | undefined {
-    const parityHooks = PARITY_HOOKS_PER_CHAIN[chainId];
-    if (!parityHooks || parityHooks.length === 0) return undefined;
-    return new Set(parityHooks.map(hook => hook.toLowerCase()));
+    const bypassHooks = [
+      ...(PARITY_HOOKS_PER_CHAIN[chainId] ?? []),
+      ...(ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[chainId] ?? []),
+    ];
+    if (bypassHooks.length === 0) return undefined;
+    return new Set(bypassHooks.map(hook => hook.toLowerCase()));
   }
 
   protected static filterAndAddPools(
@@ -521,13 +525,13 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       return false;
     });
 
-    const parityHookAddressSet =
+    const tvlBypassHookAddressSet =
       chainId === undefined
         ? undefined
-        : BasicTopPoolsSelector.getParityHookAddressSet(chainId);
+        : BasicTopPoolsSelector.getTvlBypassHookAddressSet(chainId);
 
-    if (!parityHookAddressSet) {
-      // No parity hooks configured for this chain — identical cost to
+    if (!tvlBypassHookAddressSet) {
+      // No TVL-bypass hooks configured for this chain — identical cost to
       // before this feature existed.
       const sorted = filtered.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
       const poolsToRemove = sorted.slice(limit);
@@ -542,7 +546,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     for (const pool of filtered) {
       const hooks =
         'hooks' in pool ? (pool as V4PoolInfo).hooks?.toLowerCase() : undefined;
-      if (hooks !== undefined && parityHookAddressSet.has(hooks)) {
+      if (hooks !== undefined && tvlBypassHookAddressSet.has(hooks)) {
         forced.push(pool);
       } else {
         rankedRemainder.push(pool);

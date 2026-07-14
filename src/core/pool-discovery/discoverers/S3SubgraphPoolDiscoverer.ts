@@ -10,7 +10,10 @@ import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
 import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 import _ from 'lodash';
-import {PARITY_HOOKS_PER_CHAIN} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {
+  PARITY_HOOKS_PER_CHAIN,
+  ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
+} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 interface BasePoolData {
   id: string;
@@ -357,21 +360,26 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
   }
 
   /**
-   * Force select Parity Hook pools (see PARITY_HOOKS_PER_CHAIN doc comment
-   * in hooksAddressesAllowlist.ts). Their custom accounting means
-   * `liquidity` is structurally always 0 and `tvlETH` doesn't reflect their
-   * real economic backing, so the liquidity/TVL filter above would
-   * otherwise silently drop them here — even though they already cleared
-   * the pool-caching pipeline's own exemptions for the same reason.
+   * Force select TVL-bypass hook pools (parity hooks + zero-measured-TVL
+   * hooks — see the PARITY_HOOKS_PER_CHAIN and
+   * ZERO_MEASURED_TVL_HOOKS_PER_CHAIN doc comments in
+   * hooksAddressesAllowlist.ts). Their `liquidity` is structurally 0 and
+   * `tvlETH` doesn't reflect their real economic backing, so the liquidity/TVL
+   * filter above would otherwise silently drop them here — even though they
+   * already cleared the pool-caching pipeline's own exemptions for the same
+   * reason.
    */
   protected override forceSelectSpecialPools(
     pool: V4PoolInfo,
     chainId: ChainId
   ): boolean {
-    const parityHooks = PARITY_HOOKS_PER_CHAIN[chainId];
-    if (!parityHooks) return false;
+    const bypassHooks = [
+      ...(PARITY_HOOKS_PER_CHAIN[chainId] ?? []),
+      ...(ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[chainId] ?? []),
+    ];
+    if (bypassHooks.length === 0) return false;
     const hooks = pool.hooks.toLowerCase();
-    return parityHooks.some(hook => hook.toLowerCase() === hooks);
+    return bypassHooks.some(hook => hook.toLowerCase() === hooks);
   }
 
   protected override convertToPoolInfo(

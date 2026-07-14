@@ -138,44 +138,75 @@ describe('SubgraphProvider V4 permissioned-hook query', () => {
   });
 });
 
-describe('SubgraphProvider V4 Parity Hook query', () => {
-  it('fetches Parity Hook pools by hook address with no TVL floor for Mainnet', async () => {
+describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
+  it('fetches TVL-bypass Hook pools by hook address with no TVL floor for Mainnet', async () => {
     const {provider, calls} = makeRecordingProvider(ChainId.MAINNET);
     await provider.getPools();
 
-    const parityCalls = calls.filter(c =>
-      c.query.includes('getV4ParityHookPools')
+    const bypassCalls = calls.filter(c =>
+      c.query.includes('getV4TvlBypassHookPools')
     );
-    expect(parityCalls.length).toBe(1);
-    const {query: q, variables} = parityCalls[0]!;
-    expect(q).toContain('hooks_in: $parityHooks');
-    // Parity Hooks use custom accounting, so liquidity is structurally
-    // always 0 — neither a liquidity nor a TVL floor can be applied here.
-    // Hook-address membership is the sole admission gate.
+    expect(bypassCalls.length).toBe(1);
+    const {query: q, variables} = bypassCalls[0]!;
+    expect(q).toContain('hooks_in: $tvlBypassHooks');
+    // TVL-bypass Hooks report structurally-zero liquidity/TVL — neither a
+    // liquidity nor a TVL floor can be applied here. Hook-address membership
+    // is the sole admission gate.
     expect(q).not.toContain('liquidity_gt');
     expect(q).not.toContain('totalValueLockedETH_gt');
 
-    const parityHooks = (variables.parityHooks as string[]).map(h =>
+    const tvlBypassHooks = (variables.tvlBypassHooks as string[]).map(h =>
       h.toLowerCase()
     );
-    expect(parityHooks).toContain('0x958a0904940f744f8c6b72c043ceee3ea34ae888'); // LitePSM USDS
-    expect(parityHooks).toContain('0x958942af77dcd973b815b2a16bd88a5134c46888'); // LitePSM DAI
+    // Parity registry (PARITY_HOOKS_PER_CHAIN) contributes LitePSM.
+    expect(tvlBypassHooks).toContain(
+      '0x958a0904940f744f8c6b72c043ceee3ea34ae888'
+    ); // LitePSM USDS
+    expect(tvlBypassHooks).toContain(
+      '0x958942af77dcd973b815b2a16bd88a5134c46888'
+    ); // LitePSM DAI
+    // Zero-measured-TVL registry (ZERO_MEASURED_TVL_HOOKS_PER_CHAIN)
+    // contributes LivoSwap V3 on Mainnet.
+    expect(tvlBypassHooks).toContain(
+      '0x10392843021a1af0abe3b1a21f14673dc05340cc'
+    ); // LivoSwap V3
   });
 
-  it('omits the Parity Hook query for a chain with no parity hooks configured (Arbitrum)', async () => {
+  it('fetches the Robinhood zero-measured-TVL hooks by address', async () => {
+    const {provider, calls} = makeRecordingProvider(ChainId.ROBINHOOD);
+    await provider.getPools();
+
+    const bypassCalls = calls.filter(c =>
+      c.query.includes('getV4TvlBypassHookPools')
+    );
+    expect(bypassCalls.length).toBe(1);
+    const tvlBypassHooks = (
+      bypassCalls[0]!.variables.tvlBypassHooks as string[]
+    ).map(h => h.toLowerCase());
+    expect(tvlBypassHooks).toContain(
+      '0x2cd91bd228ff4c537031d6b8204782090c84c0cc'
+    ); // IndexFeeHook
+    expect(tvlBypassHooks).toContain(
+      '0x2539029365c03b131cca25cb10ff4519a1dcc0cc'
+    ); // PensionTaxHook
+  });
+
+  it('omits the TVL-bypass Hook query for a chain with none configured (Arbitrum)', async () => {
     const {provider, queries} = makeRecordingProvider(ChainId.ARBITRUM_ONE);
     await provider.getPools();
 
-    expect(queries.some(q => q.includes('getV4ParityHookPools'))).toBe(false);
+    expect(queries.some(q => q.includes('getV4TvlBypassHookPools'))).toBe(
+      false
+    );
     // The standard V4 queries still run.
     expect(queries.some(q => q.includes('getV4HighLiquidityPools'))).toBe(true);
   });
 
-  it('builds syntactically valid GraphQL including the Parity Hook query', async () => {
+  it('builds syntactically valid GraphQL including the TVL-bypass Hook query', async () => {
     const {provider, queries} = makeRecordingProvider(ChainId.MAINNET);
     await provider.getPools();
 
-    expect(queries.some(q => q.includes('getV4ParityHookPools'))).toBe(true);
+    expect(queries.some(q => q.includes('getV4TvlBypassHookPools'))).toBe(true);
     for (const q of queries) {
       expect(() => parse(q)).not.toThrow();
     }
@@ -222,7 +253,7 @@ describe('SubgraphProvider V4 Parity Hook query', () => {
       request: async (query: string, variables: Record<string, unknown>) => {
         // Only return the pool on the first page (id === '') so pagination
         // terminates instead of looping on the same result forever.
-        if (query.includes('getV4ParityHookPools') && variables.id === '') {
+        if (query.includes('getV4TvlBypassHookPools') && variables.id === '') {
           return {pools: [parityHookPool]};
         }
         return {pools: []};
