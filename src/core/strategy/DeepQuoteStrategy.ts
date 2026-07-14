@@ -3,6 +3,7 @@ import {Protocol} from '../../models/pool/Protocol';
 import {
   buildMetricKey,
   ChainId,
+  getRouteSplitTimeoutMs,
   IUniRouteServiceConfig,
   OPTIMISM_STACK_CHAINS,
 } from '../../lib/config';
@@ -448,6 +449,10 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
 
     // Use QuoteBestSplitFinder to find optimal route combinations
     const findSplitsStartTime = Date.now();
+    const routeSplitTimeoutMs = getRouteSplitTimeoutMs(
+      serviceConfig.RouteFinder,
+      chain.chainId
+    );
     ctx.logger.debug('Starting findBestSplits');
     const splitRoutes = await this.quoteBestSplitFinder.findBestSplits(
       chain.chainId,
@@ -455,7 +460,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       serviceConfig.RouteFinder.RouteSplitPercentage,
       serviceConfig.RouteFinder.MaxSplits,
       serviceConfig.RouteFinder.MaxSplitRoutes,
-      serviceConfig.RouteFinder.RouteSplitTimeoutMs,
+      routeSplitTimeoutMs,
       tradeType,
       metricTags,
       ctx,
@@ -473,7 +478,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       tradeType,
       protocols: protocols.join(',').toLowerCase(),
       findBestSplitsLatencyMs,
-      routeSplitTimeoutMs: serviceConfig.RouteFinder.RouteSplitTimeoutMs,
+      routeSplitTimeoutMs,
       maxSplits: serviceConfig.RouteFinder.MaxSplits,
       maxSplitRoutes: serviceConfig.RouteFinder.MaxSplitRoutes,
       splitRoutes: splitRoutes.length,

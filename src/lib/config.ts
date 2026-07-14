@@ -127,6 +127,9 @@ export interface IUniRouteServiceConfig {
     MaxSplitRoutes: number;
     // The timeout for the route splitting.
     RouteSplitTimeoutMs: number;
+
+    // getRouteSplitTimeoutMs) — it can only lower the budget, never raise it.
+    RouteSplitTimeoutMsCapByChain?: Partial<Record<ChainId, number>>;
     // The percentage increment to try split routing (must divide __PLACEHOLDER__ evenly).
     RouteSplitPercentage: number;
     // Allow mixed pools in the route finder
@@ -226,6 +229,11 @@ export const getUniRouteSyncConfig = (
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitPercentage: __PLACEHOLDER__,
       RouteSplitTimeoutMs: __PLACEHOLDER__,
+      // Robinhood stock-token liquidity is thin, so large-notional quotes
+      // keep improving per split level and the search runs to the full
+      // budget; trading's client cuts the call off at 5s, so anything past
+      // ~3s here is wasted and surfaces as a timeout/__PLACEHOLDER__ (SWAP-__PLACEHOLDER__).
+      RouteSplitTimeoutMsCapByChain: {[ChainId.ROBINHOOD]: __PLACEHOLDER__},
       AllowMixedPools: true,
       CrossChainLiquidityPoolsEnabled: new Set<ChainId>(MIXED_SUPPORTED),
     },
@@ -379,6 +387,8 @@ export const getUniRouteAsyncConfig = (
       MaxRoutes: 600,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitTimeoutMs: __PLACEHOLDER__,
+      // Async populates the route cache — keep the full deep-search budget.
+      RouteSplitTimeoutMsCapByChain: undefined,
     },
   };
 };
@@ -394,6 +404,18 @@ export const getQuickRouteAsyncConfig = (
       Type: LambdaType.Async,
     },
   };
+};
+
+/** Effective split-search budget for a chain: the configured timeout, lowered
+ * (never raised) by the chain's entry in RouteSplitTimeoutMsCapByChain. */
+export const getRouteSplitTimeoutMs = (
+  routeFinderConfig: IUniRouteServiceConfig['RouteFinder'],
+  chainId: ChainId
+): number => {
+  const cap = routeFinderConfig.RouteSplitTimeoutMsCapByChain?.[chainId];
+  return cap === undefined
+    ? routeFinderConfig.RouteSplitTimeoutMs
+    : Math.min(routeFinderConfig.RouteSplitTimeoutMs, cap);
 };
 
 /** Reduced RouteFinder overrides for sync cache-miss path (lower latency, smaller search space). */
