@@ -3246,6 +3246,105 @@ describe('UniRouteBL', () => {
       metricsSpy.mockRestore();
     });
 
+    it('funds the sim with the raw amountIn on split routes, not the floored trade.inputAmount', async () => {
+      // Chosen so Σ floor(amountIn·pctᵢ/100) = amountIn - 1: the funding side
+      // must still match the legs, which allocateAmounts sums to the raw
+      // amountIn (last leg absorbs the remainder).
+      const amountIn = 1_000_000_000_000_000_001n;
+      const request = new QuoteRequest({
+        ...baseRequest, // ETH in, USDC out
+        amount: amountIn.toString(),
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        slippageTolerance: 5,
+      });
+
+      const v3WethUsdcPool = (addr: string) =>
+        new V3Pool(
+          new Address(WETH),
+          new Address(baseRequest.tokenOutAddress),
+          500,
+          new Address(addr),
+          1_000_000_000_000n,
+          79228162514264337593543950336n,
+          0n
+        );
+      // Native ETH in -> USDC out, split 15/85 across two V3 pools.
+      const splitQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V3, [v3WethUsdcPool(POOL_A)], 15),
+          BigInt('150000'),
+          undefined,
+          gasDetails
+        ),
+        new QuoteBasic(
+          new RouteBasic(Protocol.V3, [v3WethUsdcPool(POOL_B)], 85),
+          BigInt('850000'),
+          undefined,
+          gasDetails
+        ),
+      ]);
+
+      // Mirror buildTrade's per-route flooring: its inputAmount is 1 wei short
+      // of the raw amountIn for this split.
+      const flooredInput = (amountIn * 15n) / 100n + (amountIn * 85n) / 100n;
+      expect(flooredInput).toBe(amountIn - 1n);
+      const tradeMock = {
+        tradeType: SdkTradeType.EXACT_INPUT,
+        inputAmount: CurrencyAmount.fromRawAmount(
+          Ether.onChain(1),
+          flooredInput.toString()
+        ),
+        outputAmount: CurrencyAmount.fromRawAmount(
+          new Token(1, baseRequest.tokenOutAddress, 6),
+          '1000000'
+        ),
+        priceImpact: {toFixed: () => '0.01'},
+      } as unknown as Trade<Currency, Currency, SdkTradeType>;
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(() => tradeMock);
+      const capturing = new CapturingSimulator();
+
+      const uniRouteBL = new UniRouteBL(
+        simConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(splitQuote),
+        capturing,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      await uniRouteBL.quote(ctx, request, {
+        universalRouterSwapsteps: true,
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+      });
+
+      // Native input: msg.value is the spec's funding amount and must equal
+      // the raw amountIn (= Σ leg amounts), not the floored trade.inputAmount.
+      const mp = capturing.captured?.swapInfo?.methodParameters;
+      expect(mp).toBeDefined();
+      expect(BigInt(mp!.value)).toBe(amountIn);
+
+      buildTradeSpy.mockRestore();
+    });
+
     it('falls back to legacy calldata when the factory throws (MIXED EXACT_OUT)', async () => {
       const request = new QuoteRequest({
         ...baseRequest,

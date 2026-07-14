@@ -3120,9 +3120,19 @@ export class UniRouteBL implements IUniRoutedBL {
                 universalRouterVersion,
                 false // opt out of minHopPriceX36 for simulation
               );
+              // The spec's routing.amount funds the router (Permit2 pull /
+              // msg.value) and must equal Σ leg amounts: buildSwapSteps
+              // allocates the raw amountIn, while trade.inputAmount floors
+              // each split route independently (up to nRoutes-1 wei short).
               const spec = buildSwapSpecification({
                 swapOptions: swapOptions!,
-                inputAmount: trade.inputAmount,
+                inputAmount:
+                  tradeType === TradeType.ExactIn
+                    ? CurrencyAmount.fromRawAmount(
+                        trade.inputAmount.currency,
+                        amountIn.toString()
+                      )
+                    : trade.inputAmount,
                 outputAmount: trade.outputAmount,
                 tradeType:
                   tradeType === TradeType.ExactIn
