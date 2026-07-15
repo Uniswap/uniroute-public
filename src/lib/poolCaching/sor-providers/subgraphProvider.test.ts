@@ -166,18 +166,15 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     const tvlBypassHooks = (variables.tvlBypassHooks as string[]).map(h =>
       h.toLowerCase()
     );
-    // Parity registry (PARITY_HOOKS_PER_CHAIN) contributes LitePSM.
+    // Parity registry (PARITY_HOOKS_PER_CHAIN) contributes LitePSM. Mainnet has
+    // no ZERO_MEASURED_TVL_HOOKS_PER_CHAIN entries, so the bypass set is exactly
+    // the two LitePSM hooks.
     expect(tvlBypassHooks).toContain(
       '0x958a0904940f744f8c6b72c043ceee3ea34ae888'
     ); // LitePSM USDS
     expect(tvlBypassHooks).toContain(
       '0x958942af77dcd973b815b2a16bd88a5134c46888'
     ); // LitePSM DAI
-    // Zero-measured-TVL registry (ZERO_MEASURED_TVL_HOOKS_PER_CHAIN)
-    // contributes LivoSwap V3 on Mainnet.
-    expect(tvlBypassHooks).toContain(
-      '0x10392843021a1af0abe3b1a21f14673dc05340cc'
-    ); // LivoSwap V3
   });
 
   it('fetches the Robinhood zero-measured-TVL hooks by address', async () => {

@@ -600,48 +600,39 @@ export const INDEX_FEE_HOOK_ON_ROBINHOOD =
   '0x2cd91bd228ff4c537031d6b8204782090c84c0cc';
 export const PENSION_TAX_HOOK_ON_ROBINHOOD =
   '0x2539029365c03b131cca25cb10ff4519a1dcc0cc';
+export const RIVERS_LAUNCH_HOOK_ON_ROBINHOOD =
+  '0x12783b423b9cf1a136bd7e0f8baca5944f5baacc';
+export const SHARES_HOOK_ON_ROBINHOOD =
+  '0x25a1bb2313e4b24307e8259b177431a61bfe04cc';
+export const PLEB_INDEX_FEE_HOOK_ON_ROBINHOOD =
+  '0xa507e8c472918338c6c15eb894c9703581b060cc';
+// LivoSwapHook — two Robinhood deployments of the same verified contract at
+// different LP fee tiers (1% and 0.5%).
+export const LIVO_SWAP_HOOK_ON_ROBINHOOD =
+  '0xbffe76cc9e506285032b2e5d1b74b579e39ac0cc';
+export const LIVO_SWAP_HOOK_ON_ROBINHOOD_2 =
+  '0xb00f65499050a4752f7027e578faf690efff40cc';
+
+export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
+  '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
 
 /**
- * "Zero-measured-TVL Hooks" — allowlisted V4 hooks whose pools hold real,
- * tradeable liquidity but whose subgraph-reported `totalValueLockedETH` is
- * structurally 0 (or below `V4_MIN_TVL_ETH`), so the standard V4 discovery
- * query would drop them from the routing cache and the pair becomes
- * unroutable despite having liquidity. Two distinct causes seen in practice:
- *
- *   1. Hook-accounted reserves. Hooks that hold reserves via custom accounting
- *      (`BeforeSwapReturnsDelta` / `poolManager.mint`+`take`) rather than
- *      normal LP positions leave the concentrated-liquidity `liquidity` field
- *      at 0. The v4-subgraph's `findNativePerToken` only bumps a counter
- *      token's `derivedETH` from pools where `liquidity > 0`, so even an
- *      ETH-paired pool never prices its counter token → `totalValueLockedETH`
- *      computes to 0.
- *   2. Unpriced counter token. The pool's only counter token has no other
- *      ETH/stablecoin-priced pool, so its `derivedETH` stays 0 regardless of
- *      real balances (same zero-TVL outcome).
- *
- * Treatment is identical to `PARITY_HOOKS_PER_CHAIN`: exempt from BOTH the
- * subgraph `V4_MIN_TVL_ETH` floor at the query level AND the post-fetch
- * liquidity/TVL sanitize (see `subgraphProvider.ts`). Hook-address membership
- * is the sole admission gate — same trust model as `HOOKS_ADDRESSES_ALLOWLIST`
- * (every address here must also appear in that map).
- *
- * This is a routing-cache workaround for a v4-subgraph pricing limitation.
- * Remove entries here once the subgraph derives a price for the counter token
- * (e.g. a token↔WETH pool is seeded, or the subgraph learns to price from
- * hook-accounted reserves).
+ * Allowlisted V4 hooks whose pools hold real liquidity but whose
+ * subgraph-reported `totalValueLockedETH` is below `V4_MIN_TVL_ETH` (e.g.
+ * hook-accounted reserves or an unpriced counter token), so the standard
+ * discovery query would drop them. Addresses listed here are admitted to the
+ * routing cache by hook address, bypassing the TVL/liquidity floor — same
+ * treatment and trust model as `PARITY_HOOKS_PER_CHAIN`. Every address must
+ * also appear in `HOOKS_ADDRESSES_ALLOWLIST`; remove an entry once its pool
+ * clears the floor on its own.
  */
-// Intersected with Record<number, string[]> for the same dual-ChainId-enum
-// indexing reason as PARITY_HOOKS_PER_CHAIN above.
 export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
   Record<ChainId, string[]>
 > &
   Record<number, string[]> = {
-  [ChainId.MAINNET]: [LIVO_SWAP_HOOK_V3_ON_MAINNET],
   [ChainId.ROBINHOOD]: [
     INDEX_FEE_HOOK_ON_ROBINHOOD,
     PENSION_TAX_HOOK_ON_ROBINHOOD,
-    CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
-    CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
   ],
 };
 
@@ -708,6 +699,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET,
+    PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -921,6 +913,11 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     PENSION_TAX_HOOK_ON_ROBINHOOD,
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
     CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
+    RIVERS_LAUNCH_HOOK_ON_ROBINHOOD,
+    SHARES_HOOK_ON_ROBINHOOD,
+    PLEB_INDEX_FEE_HOOK_ON_ROBINHOOD,
+    LIVO_SWAP_HOOK_ON_ROBINHOOD,
+    LIVO_SWAP_HOOK_ON_ROBINHOOD_2,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
