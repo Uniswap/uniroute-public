@@ -2272,8 +2272,15 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           0n
         );
 
-        // Update best amount if this combination is better
-        if (totalAmount > currentLevelBestAmount) {
+        // Update best amount if this combination is better — direction-aware:
+        // EXACT_OUT amounts are required inputs, so lower is better.
+        const isBetter =
+          bestCombinationKey === null
+            ? totalAmount > 0n
+            : tradeType === TradeType.ExactOut
+              ? totalAmount < currentLevelBestAmount
+              : totalAmount > currentLevelBestAmount;
+        if (isBetter) {
           currentLevelBestAmount = totalAmount;
           bestCombinationKey = key;
           bestFoundAtLevel = currentSearchLevel;
@@ -2555,7 +2562,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           buildMetricKey('QuoteBestSplitFinder.Level.SkippedInfeasible'),
           1,
           {
-            tags: metricTags,
+            tags: [...metricTags, `level:${level}`],
           }
         );
         continue;
@@ -2635,12 +2642,17 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         break;
       }
 
-      // Calculate improvement percentage
+      // Calculate improvement percentage — direction-aware: EXACT_OUT
+      // improves by LOWERING the required input, so the delta is inverted
+      // (with the raw subtraction an IMPROVING exact-out level computed a
+      // negative improvement and tripped the low_improvement exit).
       if (previousLevelBestAmount > 0n) {
+        const levelDelta =
+          tradeType === TradeType.ExactOut
+            ? previousLevelBestAmount - currentLevelBestAmount
+            : currentLevelBestAmount - previousLevelBestAmount;
         const improvement =
-          (Number(currentLevelBestAmount - previousLevelBestAmount) /
-            Number(previousLevelBestAmount)) *
-          100;
+          (Number(levelDelta) / Number(previousLevelBestAmount)) * 100;
 
         ctx.logger.debug(
           `QuoteBestSplitFinder: Level ${level} improvement: ${improvement.toFixed(5)}%`
@@ -2690,7 +2702,9 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         buildMetricKey('QuoteBestSplitFinder.TimedOut'),
         1,
         {
-          tags: metricTags,
+          // hasResult:true = the timeout still delivered best-so-far
+          // combinations; hasResult:false = timed out empty-handed.
+          tags: [...metricTags, `hasResult:${result.length > 0}`],
         }
       );
     } else {
@@ -2738,6 +2752,28 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       bestAmount: currentLevelBestAmount.toString(),
     });
     const earlyExitTag = `earlyExitReason:${earlyExitReason ?? 'normal'}`;
+    // Discovery level of the RETURNED winner (result[0] after the
+    // gas-adjusted sort). NOT bestFoundAtLevel: that tracks the raw-amount
+    // frontrunner, which disagrees whenever gas costs shift the ranking and
+    // is wrong-signed for EXACT_OUT (lower is better there).
+    const winnerFoundAtLevel =
+      result.length > 0
+        ? combinationFirstSeenLevel.get(getCombinationKey(result[0])) ?? 0
+        : 0;
+    // Coarsened bucket-shape tag: the largest split-eligible percentage
+    // bucket, bounded to 5 values. `le20` is the huge-trade shape where only
+    // deep splits can complete; `none` means only the 100% bucket had quotes.
+    const maxLegPctTag = `maxLegPct:${
+      maxSplitEligiblePct === 0
+        ? 'none'
+        : maxSplitEligiblePct <= 20
+          ? 'le20'
+          : maxSplitEligiblePct <= 35
+            ? 'le35'
+            : maxSplitEligiblePct <= 50
+              ? 'le50'
+              : 'gt50'
+    }`;
     await Promise.all([
       ctx.metrics.count(
         buildMetricKey('QuoteBestSplitFinder.PrunedByConflict'),
@@ -2750,8 +2786,26 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         {tags: metricTags}
       ),
       ctx.metrics.count(buildMetricKey('QuoteBestSplitFinder.EarlyExit'), 1, {
-        tags: [...metricTags, earlyExitTag, `testAggHooks:${testAggHooks}`],
+        tags: [
+          ...metricTags,
+          earlyExitTag,
+          maxLegPctTag,
+          `testAggHooks:${testAggHooks}`,
+        ],
       }),
+      // Level the returned winner was first discovered at (bounded by
+      // maxSplits; `none` = no combinations found). Distinguishes "deep
+      // search runs" from "deep search wins".
+      ctx.metrics.count(
+        buildMetricKey('QuoteBestSplitFinder.BestFoundAtLevel'),
+        1,
+        {
+          tags: [
+            ...metricTags,
+            `level:${winnerFoundAtLevel === 0 ? 'none' : winnerFoundAtLevel}`,
+          ],
+        }
+      ),
     ]);
 
     // Chosen-split gas comparison: PR #8161/#8195/#8272 closed the per-

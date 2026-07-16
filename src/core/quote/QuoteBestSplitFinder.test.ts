@@ -106,11 +106,15 @@ describe('QuoteBestSplitFinder', () => {
 
   const createMockQuote = (
     route: RouteBasic<MockPool>,
-    amount: bigint
+    amount: bigint,
+    gasCostInQuoteToken?: bigint
   ): QuoteBasic =>
     ({
       route,
       amount,
+      ...(gasCostInQuoteToken !== undefined
+        ? {gasDetails: {gasCostInQuoteToken}}
+        : {}),
     }) as QuoteBasic;
 
   describe('findBestSplits', () => {
@@ -377,14 +381,75 @@ describe('QuoteBestSplitFinder', () => {
 
       // Levels 2-4 are provably infeasible (level * 20 < 100) and must be
       // skipped without running their DFS.
-      const skippedCalls = vi
-        .mocked(mockContext.metrics.count)
-        .mock.calls.filter(call =>
-          String(call[0]).includes(
-            'QuoteBestSplitFinder.Level.SkippedInfeasible'
-          )
-        );
+      const metricCalls = vi.mocked(mockContext.metrics.count).mock.calls;
+      const skippedCalls = metricCalls.filter(call =>
+        String(call[0]).includes('QuoteBestSplitFinder.Level.SkippedInfeasible')
+      );
       expect(skippedCalls).toHaveLength(3);
+      expect(
+        skippedCalls.map(call => (call[2] as {tags: string[]}).tags).flat()
+      ).toEqual(expect.arrayContaining(['level:2', 'level:3', 'level:4']));
+
+      // The winning combination came from level 5, and the bucket shape is
+      // the huge-trade one (max split-eligible leg <= 20%).
+      const bestFoundCall = metricCalls.find(call =>
+        String(call[0]).includes('QuoteBestSplitFinder.BestFoundAtLevel')
+      );
+      expect((bestFoundCall?.[2] as {tags: string[]}).tags).toContain(
+        'level:5'
+      );
+      const earlyExitCall = metricCalls.find(call =>
+        String(call[0]).includes('QuoteBestSplitFinder.EarlyExit')
+      );
+      expect((earlyExitCall?.[2] as {tags: string[]}).tags).toContain(
+        'maxLegPct:le20'
+      );
+    });
+
+    it('tags BestFoundAtLevel with the gas-adjusted winner level, not the raw frontrunner', async () => {
+      // Raw frontrunner is the 100% route (2000 > 1900), but gas-adjusted
+      // the level-2 split wins (1900 - 100 = 1800 vs 2000 - 300 = 1700).
+      const fullQuote = createMockQuote(
+        createMockRoute([createMockPool(mockToken0, mockToken1, '0xab1')], 100),
+        2000n,
+        300n
+      );
+      const quotes50 = Array.from({length: 2}, (_, i) =>
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, `0xac${i + 1}`)],
+            50
+          ),
+          950n,
+          50n
+        )
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [fullQuote]],
+        [50, quotes50],
+      ]);
+
+      const result = await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        50,
+        2,
+        100,
+        10000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      expect(result[0]).toHaveLength(2);
+      const bestFoundCall = vi
+        .mocked(mockContext.metrics.count)
+        .mock.calls.find(call =>
+          String(call[0]).includes('QuoteBestSplitFinder.BestFoundAtLevel')
+        );
+      expect((bestFoundCall?.[2] as {tags: string[]}).tags).toContain(
+        'level:2'
+      );
     });
 
     it('does not settle for a poor 100% route when better splits exist past an infeasible level', async () => {
@@ -492,6 +557,16 @@ describe('QuoteBestSplitFinder', () => {
       // Best-so-far ordering survives the timeout.
       expect(result[0][0]).toBe(fullQuotes[0].route);
 
+      // The timeout delivered a non-empty best-so-far result.
+      const timedOutCall = vi
+        .mocked(mockContext.metrics.count)
+        .mock.calls.find(call =>
+          String(call[0]).includes('QuoteBestSplitFinder.TimedOut')
+        );
+      expect((timedOutCall?.[2] as {tags: string[]}).tags).toContain(
+        'hasResult:true'
+      );
+
       dateNowSpy.mockRestore();
     });
 
@@ -572,6 +647,114 @@ describe('QuoteBestSplitFinder', () => {
       expect(observabilityCall?.[1]?.earlyExitReason).toBe('timeout');
 
       dateNowSpy.mockRestore();
+    });
+
+    it('tracks the EXACT_OUT best combination direction-aware (lower input is better)', async () => {
+      // EXACT_OUT amounts are required inputs: the level-2 split needing 960
+      // beats the 100% route needing 1000. The raw `>` tracker recorded the
+      // 100% route as best (bestFoundAtLevel 1, bestAmount 1000).
+      const fullQuote = createMockQuote(
+        createMockRoute([createMockPool(mockToken0, mockToken1, '0xba1')], 100),
+        1000n
+      );
+      const quotes50 = Array.from({length: 2}, (_, i) =>
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, `0xbc${i + 1}`)],
+            50
+          ),
+          480n
+        )
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [fullQuote]],
+        [50, quotes50],
+      ]);
+
+      const result = await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        50,
+        2,
+        100,
+        10000,
+        TradeType.ExactOut,
+        [],
+        mockContext
+      );
+
+      expect(result[0]).toHaveLength(2);
+
+      const observabilityCall = (
+        mockContext.logger.debug as ReturnType<typeof vi.fn>
+      ).mock.calls.find(
+        ([msg]) =>
+          typeof msg === 'string' &&
+          msg === 'QuoteBestSplitFinder observability'
+      );
+      expect(observabilityCall?.[1]?.bestFoundAtLevel).toBe(2);
+      expect(observabilityCall?.[1]?.bestAmount).toBe('960');
+    });
+
+    it('does not low_improvement-exit an improving EXACT_OUT search', async () => {
+      // Each deeper level lowers the required input (1000 -> 960 -> 940 ->
+      // 920). With the raw delta, level 3's improvement computed negative
+      // and tripped the low_improvement exit before level 4 was searched.
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [
+          100,
+          [
+            createMockQuote(
+              createMockRoute(
+                [createMockPool(mockToken0, mockToken1, '0xda1')],
+                100
+              ),
+              1000n
+            ),
+          ],
+        ],
+        [
+          50,
+          Array.from({length: 2}, (_, i) =>
+            createMockQuote(
+              createMockRoute(
+                [createMockPool(mockToken0, mockToken1, `0xdb${i + 1}`)],
+                50
+              ),
+              480n
+            )
+          ),
+        ],
+        [
+          25,
+          Array.from({length: 4}, (_, i) =>
+            createMockQuote(
+              createMockRoute(
+                [createMockPool(mockToken0, mockToken1, `0xdc${i + 1}`)],
+                25
+              ),
+              230n
+            )
+          ),
+        ],
+      ]);
+
+      const result = await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        25,
+        4,
+        100,
+        10000,
+        TradeType.ExactOut,
+        [],
+        mockContext
+      );
+
+      // The 4-way split (4 x 230 = 920) is the true winner and must be
+      // reachable — the search may not stop at level 3.
+      expect(result[0]).toHaveLength(4);
+      expect(result[0].every(route => route.percentage === 25)).toBe(true);
     });
 
     it('should generate all possible combinations respecting MAX_VALID_QUOTES_PER_PERCENTAGE', async () => {
