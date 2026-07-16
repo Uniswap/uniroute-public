@@ -14,9 +14,54 @@ import {GasConverter} from '../../gas/converter/GasConverter';
 import {BigNumber} from '@ethersproject/bignumber';
 import {SimulationStatus} from '../ISimulator';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
+import {breakDownSimulationError} from './simulationErrorBreakDown';
 
 // We multiply eth estimate gas by this to add a buffer for gas limits
 const DEFAULT_ESTIMATE_MULTIPLIER = 1.2;
+
+const MAX_REVERT_DATA_SEARCH_DEPTH = 5;
+const REVERT_DATA_REGEX = /^0x[0-9a-f]{8,}$/i;
+
+/**
+ * Digs the JSON-RPC revert data out of an ethers v5 estimateGas error.
+ * Depending on how the provider wraps the failure, the data sits at
+ * `e.data`, `e.error.data`, `e.error.error.data`, or inside the raw JSON
+ * `body` string, so search those keys recursively (bounded).
+ */
+export function extractRevertData(
+  value: unknown,
+  depth = 0
+): string | undefined {
+  if (
+    value === null ||
+    value === undefined ||
+    depth > MAX_REVERT_DATA_SEARCH_DEPTH
+  ) {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    try {
+      return extractRevertData(JSON.parse(value), depth + 1);
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof value !== 'object') {
+    return undefined;
+  }
+  const candidate = value as {data?: unknown; error?: unknown; body?: unknown};
+  if (
+    typeof candidate.data === 'string' &&
+    REVERT_DATA_REGEX.test(candidate.data)
+  ) {
+    return candidate.data;
+  }
+  return (
+    extractRevertData(candidate.data, depth + 1) ??
+    extractRevertData(candidate.error, depth + 1) ??
+    extractRevertData(candidate.body, depth + 1)
+  );
+}
 
 export class EthEstimateGasSimulator extends Simulator {
   private overrideEstimateMultiplier: {[chainId in ChainId]?: number};
@@ -74,15 +119,26 @@ export class EthEstimateGasSimulator extends Simulator {
           ...(blockNumber !== undefined ? {blockTag: blockNumber} : {}),
         });
       } catch (e) {
-        ctx.logger.error('Error estimating gas', {e});
+        const revertData = extractRevertData(e);
+        ctx.logger.error('Error estimating gas', {e, revertData});
+        // Parity with the eth_simulateV1 path: map the revert data to a
+        // specific SimulationStatus (e.g. SLIPPAGE_TOO_LOW) instead of a
+        // generic FAILED, so callers can distinguish slippage from real
+        // failures.
         return {
           ...quoteSplit,
           simulationResult: {
             estimatedGasUsed: 0n,
             estimatedGasUsedInQuoteToken: 0n,
             estimatedGasUsedInUSD: 0,
-            status: SimulationStatus.FAILED,
-            description: 'Error estimating gas',
+            status: breakDownSimulationError(
+              quoteSplit.swapInfo!.tokenInWrappedAddress,
+              quoteSplit.swapInfo!.tokenOutWrappedAddress,
+              revertData
+            ),
+            description: revertData
+              ? 'Transaction reverted during eth_estimateGas'
+              : 'Error estimating gas',
           },
         };
       }
