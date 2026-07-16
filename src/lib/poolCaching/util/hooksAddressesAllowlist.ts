@@ -583,6 +583,9 @@ export const BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_BNB =
 export const BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_MAINNET =
   '0xe4544f99e39b0d120366814f9c84a6beab2350cc';
 
+export const VERSUS_PROTECTED_HOOK_ON_BNB =
+  '0xeb67fef5b5dc83bffc4059bdbbfb8b368ac650cc';
+
 export const FWATOKENHOOK_ON_MAINNET =
   '0x3a84bc99fd208bdc0fee2eb72a9d6c9a7271a444';
 
@@ -606,15 +609,35 @@ export const SHARES_HOOK_ON_ROBINHOOD =
   '0x25a1bb2313e4b24307e8259b177431a61bfe04cc';
 export const PLEB_INDEX_FEE_HOOK_ON_ROBINHOOD =
   '0xa507e8c472918338c6c15eb894c9703581b060cc';
-// LivoSwapHook — two Robinhood deployments of the same verified contract at
-// different LP fee tiers (1% and 0.5%).
+// LivoSwapHook — multiple Robinhood deployments of the same verified contract
+// (different LP fee tiers / versions).
 export const LIVO_SWAP_HOOK_ON_ROBINHOOD =
   '0xbffe76cc9e506285032b2e5d1b74b579e39ac0cc';
 export const LIVO_SWAP_HOOK_ON_ROBINHOOD_2 =
   '0xb00f65499050a4752f7027e578faf690efff40cc';
+export const LIVO_SWAP_HOOK_ON_ROBINHOOD_3 =
+  '0xdb1902bc975992828616b0224d9c5ff907e9c0cc';
+export const PUMP_V4_HOOK_ON_ROBINHOOD =
+  '0x14bcc18fdb0e7a427122b9c2f1a40ff7d63eaacc';
+export const MEME_ETF_PORTFOLIO_FEE_HOOK_ON_ROBINHOOD =
+  '0x29a2a39143f5aafba61bb8c649bc7c7d50b1e0cc';
+export const ROB_FEE_HOOK_ON_ROBINHOOD =
+  '0x5f794cf7faba3c8526079292726f29e5a88f40cc';
+export const LITTLE_JOHN_BONDING_HOOK_ON_ROBINHOOD =
+  '0xa8a5c4932ba4cc71347dcab30329c2816ba028cc';
+export const LITTLE_JOHN_HOOK_ON_ROBINHOOD =
+  '0x23739445e76d83a40f87fe2fd6a53e73badf60cc';
+// Rivers LaunchHook — additional Robinhood deployments (V2 / V3) of the
+// verified LaunchHook contract, separate from RIVERS_LAUNCH_HOOK_ON_ROBINHOOD.
+export const RIVERS_LAUNCH_HOOK_V2_ON_ROBINHOOD =
+  '0xcd87186fc4f809241f3e7ff3ca557bb7cc962acc';
+export const RIVERS_LAUNCH_HOOK_V3_ON_ROBINHOOD =
+  '0x59e2cea84bf858b66d46b22742bef4304ee0aacc';
 
 export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
+export const NFTX_V4_HOOK_ON_MAINNET =
+  '0xd2094b5cdb1a12b6274e4a4d3a252cd94c51efcc';
 
 /**
  * Allowlisted V4 hooks whose pools hold real liquidity but whose
@@ -700,6 +723,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET,
     PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET,
+    NFTX_V4_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -764,6 +788,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BACKGEOORACLE_ON_BNB,
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BSC_v2,
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_BNB,
+    VERSUS_PROTECTED_HOOK_ON_BNB,
   ],
   [ChainId.AVALANCHE]: [
     ADDRESS_ZERO,
@@ -918,6 +943,14 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     PLEB_INDEX_FEE_HOOK_ON_ROBINHOOD,
     LIVO_SWAP_HOOK_ON_ROBINHOOD,
     LIVO_SWAP_HOOK_ON_ROBINHOOD_2,
+    LIVO_SWAP_HOOK_ON_ROBINHOOD_3,
+    PUMP_V4_HOOK_ON_ROBINHOOD,
+    MEME_ETF_PORTFOLIO_FEE_HOOK_ON_ROBINHOOD,
+    ROB_FEE_HOOK_ON_ROBINHOOD,
+    LITTLE_JOHN_BONDING_HOOK_ON_ROBINHOOD,
+    LITTLE_JOHN_HOOK_ON_ROBINHOOD,
+    RIVERS_LAUNCH_HOOK_V2_ON_ROBINHOOD,
+    RIVERS_LAUNCH_HOOK_V3_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
