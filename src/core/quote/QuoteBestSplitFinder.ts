@@ -2114,6 +2114,9 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     const combinationFirstSeenLevel = new Map<string, number>();
     const startTime = Date.now();
     let timedOut = false;
+    // Whether any per-level filterAndSortResults ran (levels can all be
+    // skipped as infeasible, leaving `result` unsorted).
+    let resultSorted = false;
     let earlyExitReason:
       | 'timeout'
       | 'no_new_routes'
@@ -2432,6 +2435,19 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       elapsedMs: Date.now() - startTime,
     });
 
+    // Largest percentage bucket that actually has quotes and can appear as a
+    // split leg (legs are never 100%). Bounds which split levels are feasible:
+    // level L can only cover 100% when L * maxSplitEligiblePct >= 100. For
+    // huge trades the large-share buckets are empty (those quotes revert
+    // on-chain), so shallow levels are provably dead and only deep splits of
+    // small legs can complete.
+    let maxSplitEligiblePct = 0;
+    for (const [pct, pctQuotes] of percentageToSortedQuotes) {
+      if (pct < 100 && pctQuotes.length > 0 && pct > maxSplitEligiblePct) {
+        maxSplitEligiblePct = pct;
+      }
+    }
+
     // Helper function to generate combinations level by level
     const generateCombinationsForLevel = async (
       splitLevel: number,
@@ -2453,6 +2469,11 @@ export class QuoteBestSplitFinder<TPool extends Pool>
 
       // If we can't complete this combination, return
       if (splitLevel === 0 || remainingPercentage === 0) {
+        return;
+      }
+
+      // The legs left can't cover the remaining percentage — dead branch.
+      if (splitLevel * maxSplitEligiblePct < remainingPercentage) {
         return;
       }
 
@@ -2523,6 +2544,22 @@ export class QuoteBestSplitFinder<TPool extends Pool>
 
     // Generate combinations level by level, from 2 splits up to maxSplits
     for (let level = 2; level <= maxSplits && !timedOut; level++) {
+      // Skip levels that provably can't sum to 100% before spending any DFS
+      // budget or touching the per-level bookkeeping — a skipped level must
+      // not trip the no_new_routes / low_improvement exits below.
+      if (level * maxSplitEligiblePct < 100) {
+        ctx.logger.debug(
+          `QuoteBestSplitFinder: skipping infeasible level ${level} (maxSplitEligiblePct=${maxSplitEligiblePct})`
+        );
+        await ctx.metrics.count(
+          buildMetricKey('QuoteBestSplitFinder.Level.SkippedInfeasible'),
+          1,
+          {
+            tags: metricTags,
+          }
+        );
+        continue;
+      }
       currentSearchLevel = level;
       await ctx.metrics.count(
         buildMetricKey(`QuoteBestSplitFinder.Level.Invocations.${level}`),
@@ -2581,9 +2618,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         quoteMap,
         tradeType
       );
+      resultSorted = true;
 
-      // Exit early if no new routes were added (check before filtering)
-      if (unfilteredResultLength === previousResultLength) {
+      // Exit early if no new routes were added (check before filtering) —
+      // but never with an empty result: for huge trades the shallow buckets
+      // are all empty and the first complete combinations only appear at
+      // deeper levels, so an empty level here proves nothing about them.
+      if (
+        unfilteredResultLength === previousResultLength &&
+        result.length > 0
+      ) {
         ctx.logger.debug(
           `QuoteBestSplitFinder: No new routes added at level ${level}, exiting early`
         );
@@ -2622,6 +2666,20 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
 
       previousLevelBestAmount = currentLevelBestAmount;
+    }
+
+    // Every level can be skipped as infeasible (e.g. only the 100% bucket has
+    // quotes), in which case no per-level filterAndSortResults ran and the
+    // result is still in insertion order — sort it here. Guarded so a
+    // truncated-then-sorted result keeps the per-level full-route-first
+    // ordering instead of being re-sorted globally.
+    if (!resultSorted) {
+      result = this.filterAndSortResults(
+        result,
+        maxSplitRoutes,
+        quoteMap,
+        tradeType
+      );
     }
 
     if (timedOut) {

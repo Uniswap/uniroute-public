@@ -243,12 +243,11 @@ export const getUniRouteSyncConfig = (
       MaxSplits: __PLACEHOLDER__,
       MaxSplitRoutes: __PLACEHOLDER__,
       RouteSplitPercentage: __PLACEHOLDER__,
+      // Must stay below trading's 5s UniRoute client cutoff (RoutingHybridQuoter
+      // raceWithTimeout / pulumi axios timeout) so a timeout early-exit still
+      // delivers the best-so-far splits to the client instead of a client-side
+      // abandonment surfacing as no-quote (SWAP-__PLACEHOLDER__).
       RouteSplitTimeoutMs: __PLACEHOLDER__,
-      // Robinhood stock-token liquidity is thin, so large-notional quotes
-      // keep improving per split level and the search runs to the full
-      // budget; trading's client cuts the call off at 5s, so anything past
-      // ~3s here is wasted and surfaces as a timeout/__PLACEHOLDER__ (SWAP-__PLACEHOLDER__).
-      RouteSplitTimeoutMsCapByChain: {[ChainId.ROBINHOOD]: __PLACEHOLDER__},
       AllowMixedPools: true,
       CrossChainLiquidityPoolsEnabled: new Set<ChainId>(MIXED_SUPPORTED),
     },

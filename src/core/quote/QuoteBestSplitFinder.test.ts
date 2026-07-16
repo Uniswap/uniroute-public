@@ -342,6 +342,159 @@ describe('QuoteBestSplitFinder', () => {
       dateNowSpy.mockRestore();
     });
 
+    it('keeps descending past empty shallow levels and returns deep splits (huge-trade shape)', async () => {
+      // Huge-trade shape: every bucket above 20% is empty (those route-shares
+      // revert on-chain), so levels 2-4 can't sum to 100% and the first
+      // complete combinations exist only at depth 5 (5 legs of 20%).
+      const quotes20 = Array.from({length: 5}, (_, i) =>
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, `0xaa${i + 1}`)],
+            20
+          ),
+          200n
+        )
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [20, quotes20],
+      ]);
+
+      const result = await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        5,
+        7,
+        100,
+        10000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      expect(result.length).toBeGreaterThan(0);
+      expect(result[0]).toHaveLength(5);
+      expect(result[0].every(route => route.percentage === 20)).toBe(true);
+
+      // Levels 2-4 are provably infeasible (level * 20 < 100) and must be
+      // skipped without running their DFS.
+      const skippedCalls = vi
+        .mocked(mockContext.metrics.count)
+        .mock.calls.filter(call =>
+          String(call[0]).includes(
+            'QuoteBestSplitFinder.Level.SkippedInfeasible'
+          )
+        );
+      expect(skippedCalls).toHaveLength(3);
+    });
+
+    it('does not settle for a poor 100% route when better splits exist past an infeasible level', async () => {
+      // A bad full route exists, level 2 is infeasible (max split-eligible
+      // bucket is 35%, 2 * 35 < 100), and a much better 3-way split
+      // (35 + 35 + 30) exists at level 3. The old no_new_routes exit broke at
+      // level 2 and returned only the full route.
+      const fullQuote = createMockQuote(
+        createMockRoute([createMockPool(mockToken0, mockToken1, '0xff1')], 100),
+        100n
+      );
+      const quotes35 = Array.from({length: 2}, (_, i) =>
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, `0xbb${i + 1}`)],
+            35
+          ),
+          350n
+        )
+      );
+      const quotes30 = [
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, '0xcc1')],
+            30
+          ),
+          300n
+        ),
+      ];
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [fullQuote]],
+        [35, quotes35],
+        [30, quotes30],
+      ]);
+
+      const result = await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        5,
+        7,
+        100,
+        10000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      expect(result[0]).toHaveLength(3);
+      const percentages = result[0].map(route => route.percentage).sort();
+      expect(percentages).toEqual([30, 35, 35]);
+    });
+
+    it('returns the accumulated best-so-far combinations when the timeout fires', async () => {
+      const fullQuotes = Array.from({length: 2}, (_, i) =>
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, `0xdd${i + 1}`)],
+            100
+          ),
+          BigInt(1000 - i * 100)
+        )
+      );
+      const quotes50 = Array.from({length: 2}, (_, i) =>
+        createMockQuote(
+          createMockRoute(
+            [createMockPool(mockToken0, mockToken1, `0xee${i + 1}`)],
+            50
+          ),
+          500n
+        )
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, fullQuotes],
+        [50, quotes50],
+      ]);
+
+      // First Date.now call captures startTime; subsequent calls fall through
+      // to the real clock, so the first level-2 DFS timeout check trips.
+      const dateNowSpy = vi
+        .spyOn(Date, 'now')
+        .mockImplementationOnce(() => 1000);
+
+      const result = await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        5,
+        7,
+        100,
+        100,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      expect(mockContext.logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Timed out after')
+      );
+      expect(result).toHaveLength(2);
+      expect(
+        result.every(
+          combination =>
+            combination.length === 1 && combination[0].percentage === 100
+        )
+      ).toBe(true);
+      // Best-so-far ordering survives the timeout.
+      expect(result[0][0]).toBe(fullQuotes[0].route);
+
+      dateNowSpy.mockRestore();
+    });
+
     it('does not infer convergence from a truncated level when timeout fires mid-recursion', async () => {
       // Repro of the regression the timed-out-level guard fixes: if
       // generateCombinationsForLevel is cut off mid-recursion the level's
