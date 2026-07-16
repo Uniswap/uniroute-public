@@ -87,8 +87,7 @@ class TestGasEstimateProvider extends GasEstimateProvider {
     );
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async getCurrentGasPrice(chainId: ChainId): Promise<number> {
+  async getCurrentGasPrice(_ctx: Context, _chainId: ChainId): Promise<number> {
     return 30000000000; // 30 gwei
   }
 

@@ -195,6 +195,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     ctx.logger.debug('Starting gasEstimate');
     const gasPriceWei = serviceConfig.GasEstimation.Enabled
       ? await this.gasEstimateProvider.getCurrentGasPrice(
+          ctx,
           chain.chainId,
           blockNumber
         )
@@ -212,7 +213,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       orbitGasDataProvider &&
       serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled
     ) {
-      arbitrumGasData = await orbitGasDataProvider.getGasData();
+      arbitrumGasData = await orbitGasDataProvider.getGasData(ctx);
     }
     if (
       (orbitGasDataProvider &&

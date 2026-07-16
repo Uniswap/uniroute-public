@@ -1,4 +1,5 @@
 import {describe, it, expect, vi, beforeEach} from 'vitest';
+import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {BigNumber} from '@ethersproject/bignumber';
 import {ArbitrumGasDataProvider} from './gas-data-provider';
 import {BaseProvider} from '@ethersproject/providers';
@@ -59,11 +60,22 @@ describe('ArbitrumGasDataProvider', () => {
 
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      const result = await provider.getGasData();
+      const ctx = buildTestContext();
+      const result = await provider.getGasData(ctx);
 
       expect(result).toHaveProperty('perL2TxFee');
       expect(result).toHaveProperty('perL1CalldataFee');
       expect(result).toHaveProperty('perArbGasTotal');
+      expect(
+        ctx.metrics.countStore['UniRouteService.Metric.ArbitrumGasData.RpcCall']
+      ).toBe(1);
+      expect(ctx.metrics.distStore).toContainEqual(
+        expect.objectContaining({
+          metric_name:
+            'UniRouteService.Metric.ArbitrumGasData.RpcCall.Latency.dist',
+          opts: expect.objectContaining({tags: ['status:success']}),
+        })
+      );
     });
 
     it('should return perL2TxFee from gasData[0]', async () => {
@@ -79,7 +91,7 @@ describe('ArbitrumGasDataProvider', () => {
 
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      const result = await provider.getGasData();
+      const result = await provider.getGasData(buildTestContext());
 
       expect(result.perL2TxFee.eq(perL2TxFee)).toBe(true);
     });
@@ -97,7 +109,7 @@ describe('ArbitrumGasDataProvider', () => {
 
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      const result = await provider.getGasData();
+      const result = await provider.getGasData(buildTestContext());
 
       // 1600000 / 16 = 100000
       expect(result.perL1CalldataFee.eq(BigNumber.from('100000'))).toBe(true);
@@ -116,7 +128,7 @@ describe('ArbitrumGasDataProvider', () => {
 
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      const result = await provider.getGasData();
+      const result = await provider.getGasData(buildTestContext());
 
       expect(result.perArbGasTotal.eq(perArbGasTotal)).toBe(true);
     });
@@ -136,7 +148,7 @@ describe('ArbitrumGasDataProvider', () => {
       ];
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      await provider.getGasData();
+      await provider.getGasData(buildTestContext());
 
       expect(GasDataArbitrum__factory.connect).toHaveBeenCalledWith(
         ARB_GASINFO_ADDRESS,
@@ -157,7 +169,7 @@ describe('ArbitrumGasDataProvider', () => {
 
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      const result = await provider.getGasData();
+      const result = await provider.getGasData(buildTestContext());
 
       expect(result.perL2TxFee.eq(largeValue)).toBe(true);
       expect(result.perArbGasTotal.eq(largeValue)).toBe(true);
@@ -175,7 +187,7 @@ describe('ArbitrumGasDataProvider', () => {
 
       mockContract.getPricesInWei.mockResolvedValue(mockGasData);
 
-      const result = await provider.getGasData();
+      const result = await provider.getGasData(buildTestContext());
 
       expect(result.perL2TxFee.eq(BigNumber.from('0'))).toBe(true);
       expect(result.perL1CalldataFee.eq(BigNumber.from('0'))).toBe(true);
@@ -187,8 +199,21 @@ describe('ArbitrumGasDataProvider', () => {
         new Error('Contract call failed')
       );
 
-      await expect(provider.getGasData()).rejects.toThrow(
+      const ctx = buildTestContext();
+      await expect(provider.getGasData(ctx)).rejects.toThrow(
         'Contract call failed'
+      );
+      expect(
+        ctx.metrics.countStore['UniRouteService.Metric.ArbitrumGasData.RpcCall']
+      ).toBe(1);
+      expect(ctx.metrics.distStore).toContainEqual(
+        expect.objectContaining({
+          metric_name:
+            'UniRouteService.Metric.ArbitrumGasData.RpcCall.Latency.dist',
+          opts: expect.objectContaining({
+            tags: ['status:failure', 'reason:rpc_error'],
+          }),
+        })
       );
     });
   });

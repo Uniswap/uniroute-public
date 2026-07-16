@@ -464,6 +464,24 @@ export const buildMetricKey = (metric: string) => {
   return `UniRouteService.Metric.${metric}`;
 };
 
+export const TAG_STATUS_SUCCESS = 'status:success';
+export const TAG_STATUS_FAILURE = 'status:failure';
+
+export enum MetricFailureReason {
+  RPC_ERROR = 'rpc_error',
+  REDIS_READ_ERROR = 'redis_read_error',
+  SQS_SEND_ERROR = 'sqs_send_error',
+}
+
+/** `status:` tag, plus the hardcoded `reason:` tag on failure. */
+export const buildStatusTags = (
+  succeeded: boolean,
+  failureReason: MetricFailureReason
+): string[] =>
+  succeeded
+    ? [TAG_STATUS_SUCCESS]
+    : [TAG_STATUS_FAILURE, `reason:${failureReason}`];
+
 export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.MAINNET,
   ChainId.OPTIMISM,

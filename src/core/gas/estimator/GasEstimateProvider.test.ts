@@ -75,8 +75,7 @@ class OnDemandGasEstimator extends BaseGasEstimator {
 }
 
 class OnDemandGasEstimateProvider extends GasEstimateProvider {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async getCurrentGasPrice(chainId: ChainId): Promise<number> {
+  async getCurrentGasPrice(_ctx: Context, _chainId: ChainId): Promise<number> {
     return 0;
   }
 }
@@ -349,5 +348,92 @@ describe('GasEstimateProvider', () => {
         testData.ctx
       )
     ).toEqual(new GasDetails(BigInt(0), BigInt(0), 0, BigInt(0)));
+  });
+});
+
+describe('GasEstimateProvider.getCurrentGasPrice gas oracle metrics', () => {
+  const buildProvider = (send: (method: string) => Promise<unknown>) => {
+    const rpcProviderMap = new Map<ChainId, JsonRpcProvider>();
+    rpcProviderMap.set(ChainId.MAINNET, {
+      send,
+    } as unknown as JsonRpcProvider);
+    return new GasEstimateProvider(
+      rpcProviderMap,
+      new OnDemandGasEstimator(BigInt(2)),
+      new OnDemandGasEstimator(BigInt(3)),
+      new OnDemandGasEstimator(BigInt(4)),
+      new OnDemandGasEstimator(BigInt(5))
+    );
+  };
+
+  it('emits success metrics for eth_gasPrice', async () => {
+    const provider = buildProvider(async () => '0x3b9aca00');
+    const ctx = buildTestContext();
+
+    const gasPrice = await provider.getCurrentGasPrice(ctx, ChainId.MAINNET);
+
+    expect(gasPrice).toBe(1000000000);
+    expect(
+      ctx.metrics.countStore['UniRouteService.Metric.GasOracle.RpcCall']
+    ).toBe(1);
+    expect(ctx.metrics.distStore).toContainEqual(
+      expect.objectContaining({
+        metric_name: 'UniRouteService.Metric.GasOracle.RpcCall.Latency.dist',
+        opts: expect.objectContaining({
+          tags: ['chain:MAINNET', 'rpc:eth_gasPrice', 'status:success'],
+        }),
+      })
+    );
+  });
+
+  it('emits success metrics for eth_feeHistory when a block number is given', async () => {
+    const provider = buildProvider(async (method: string) =>
+      method === 'eth_feeHistory' ? {baseFeePerGas: ['0x77359400']} : '0x0'
+    );
+    const ctx = buildTestContext();
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      ctx,
+      ChainId.MAINNET,
+      12345
+    );
+
+    expect(gasPrice).toBe(2000000000);
+    expect(ctx.metrics.distStore).toContainEqual(
+      expect.objectContaining({
+        metric_name: 'UniRouteService.Metric.GasOracle.RpcCall.Latency.dist',
+        opts: expect.objectContaining({
+          tags: ['chain:MAINNET', 'rpc:eth_feeHistory', 'status:success'],
+        }),
+      })
+    );
+  });
+
+  it('emits failure metrics and rethrows when the RPC send rejects', async () => {
+    const provider = buildProvider(async () => {
+      throw new Error('rpc down');
+    });
+    const ctx = buildTestContext();
+
+    await expect(
+      provider.getCurrentGasPrice(ctx, ChainId.MAINNET)
+    ).rejects.toThrow('rpc down');
+
+    expect(
+      ctx.metrics.countStore['UniRouteService.Metric.GasOracle.RpcCall']
+    ).toBe(1);
+    expect(ctx.metrics.distStore).toContainEqual(
+      expect.objectContaining({
+        metric_name: 'UniRouteService.Metric.GasOracle.RpcCall.Latency.dist',
+        opts: expect.objectContaining({
+          tags: [
+            'chain:MAINNET',
+            'rpc:eth_gasPrice',
+            'status:failure',
+            'reason:rpc_error',
+          ],
+        }),
+      })
+    );
   });
 });

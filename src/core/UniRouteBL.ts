@@ -52,6 +52,7 @@ import {
   isExternalProtocol,
   UNISWAP_NATIVE_PROTOCOLS,
   allUniswapAndSomeExternalProtocolsAndMixed,
+  withLatencyMetric,
 } from '../lib/helpers';
 import {Erc20Token} from '../models/token/Erc20Token';
 import {Protocol} from '../models/pool/Protocol';
@@ -912,6 +913,10 @@ export class UniRouteBL implements IUniRoutedBL {
     const getTokensStartTime = Date.now();
     ctx.logger.debug('Starting getTokens and block number fetch');
 
+    // Chain-only tags for the per-RPC latency dists: the full request
+    // metricTags vector (protocols, requestSource, ...) multiplies series
+    // count without adding signal for a single RPC call.
+    const rpcMetricTags = [`chain:${ChainId[chain.chainId]}`];
     const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
       this.tokenHandler.getTokens(
         chain,
@@ -928,10 +933,14 @@ export class UniRouteBL implements IUniRoutedBL {
       requestBlockNumber !== undefined
         ? Promise.resolve(requestBlockNumber)
         : this.serviceConfig.ResponseRequirements.NeedsBlockNumber
-          ? this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
+          ? withLatencyMetric('GetBlockNumber', ctx, rpcMetricTags, () =>
+              this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
+            )
           : Promise.resolve<number>(0),
       needToFetchGasPrice
-        ? this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
+        ? withLatencyMetric('GetGasPrice', ctx, rpcMetricTags, () =>
+            this.rpcProviderMap.get(chain.chainId)!.getGasPrice()
+          )
         : Promise.resolve<BigNumber | undefined>(undefined),
     ]);
     // Use gasPriceResult if it is defined and greater than 0, otherwise use undefined
@@ -1006,7 +1015,8 @@ export class UniRouteBL implements IUniRoutedBL {
         chain.chainId,
         tokenInCurrencyInfo.wrappedAddress,
         tokenOutCurrencyInfo.wrappedAddress,
-        tradeType
+        tradeType,
+        ctx
       ),
       this.cachedRoutesRepository.readCachedRoutes(
         nsCtx,
@@ -1848,7 +1858,8 @@ export class UniRouteBL implements IUniRoutedBL {
       tokenInCurrencyInfo.wrappedAddress,
       tokenOutCurrencyInfo.wrappedAddress,
       tradeType,
-      amountIn
+      amountIn,
+      ctx
     );
     if (wrote) {
       await ctx.metrics.count(buildMetricKey('NoRouteCache.Set'), 1, {

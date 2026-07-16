@@ -1,9 +1,22 @@
 // Ported from SOR
 import {BigNumber} from '@ethersproject/bignumber';
 import {BaseProvider} from '@ethersproject/providers';
+import {Context} from '@uniswap/lib-uni/context';
 
 import {GasDataArbitrum__factory} from '../../../abis/src/generated/contracts/factories/GasDataArbitrum__factory';
 import {ARB_GASINFO_ADDRESS} from './gas-helpers';
+import {
+  buildMetricKey,
+  buildStatusTags,
+  MetricFailureReason,
+} from '../../lib/config';
+
+const METRIC_ARBITRUM_GAS_DATA_RPC_CALL = buildMetricKey(
+  'ArbitrumGasData.RpcCall'
+);
+const METRIC_ARBITRUM_GAS_DATA_RPC_CALL_LATENCY = buildMetricKey(
+  'ArbitrumGasData.RpcCall.Latency.dist'
+);
 
 /**
  * Provider for getting gas constants on L2s.
@@ -16,7 +29,7 @@ export interface IL2GasDataProvider<T> {
    * Gets the data constants needed to calculate the l1 security fee on L2s like arbitrum and optimism.
    * @returns An object that includes the data necessary for the off chain estimations.
    */
-  getGasData(): Promise<T>;
+  getGasData(ctx: Context): Promise<T>;
 }
 
 /**
@@ -39,17 +52,41 @@ export class ArbitrumGasDataProvider
     this.gasFeesAddress = ARB_GASINFO_ADDRESS;
   }
 
-  public async getGasData() {
+  public async getGasData(ctx: Context) {
     const gasDataContract = GasDataArbitrum__factory.connect(
       this.gasFeesAddress,
       this.provider
     );
-    const gasData = await gasDataContract.getPricesInWei();
+    const startTime = Date.now();
+    let gasData;
+    try {
+      gasData = await gasDataContract.getPricesInWei();
+    } catch (error) {
+      await this.emitGasDataMetrics(ctx, startTime, false);
+      throw error;
+    }
+    await this.emitGasDataMetrics(ctx, startTime, true);
     const perL1CalldataByte = gasData[1];
     return {
       perL2TxFee: gasData[0],
       perL1CalldataFee: perL1CalldataByte.div(16),
       perArbGasTotal: gasData[5],
     };
+  }
+
+  private async emitGasDataMetrics(
+    ctx: Context,
+    startTime: number,
+    succeeded: boolean
+  ): Promise<void> {
+    const tags = buildStatusTags(succeeded, MetricFailureReason.RPC_ERROR);
+    await ctx.metrics.count(METRIC_ARBITRUM_GAS_DATA_RPC_CALL, 1, {
+      tags,
+    });
+    await ctx.metrics.dist(
+      METRIC_ARBITRUM_GAS_DATA_RPC_CALL_LATENCY,
+      Date.now() - startTime,
+      {tags}
+    );
   }
 }

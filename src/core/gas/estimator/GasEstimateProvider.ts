@@ -1,6 +1,12 @@
 import {IGasEstimator} from './IGasEstimator';
 import {GasDetails} from '../../../models/gas/GasDetails';
-import {ChainId, IUniRouteServiceConfig} from '../../../lib/config';
+import {
+  buildMetricKey,
+  buildStatusTags,
+  ChainId,
+  IUniRouteServiceConfig,
+  MetricFailureReason,
+} from '../../../lib/config';
 import {Protocol} from '../../../models/pool/Protocol';
 import {QuoteBasic} from '../../../models/quote/QuoteBasic';
 import {JsonRpcProvider} from '@ethersproject/providers';
@@ -9,6 +15,11 @@ import {Context} from '@uniswap/lib-uni/context';
 import {ArbitrumGasData} from '../gas-data-provider';
 import {CurrencyInfo} from 'src/models/currency/CurrencyInfo';
 import {TradeType} from '../../../models/quote/TradeType';
+
+const METRIC_GAS_ORACLE_RPC_CALL = buildMetricKey('GasOracle.RpcCall');
+const METRIC_GAS_ORACLE_RPC_CALL_LATENCY = buildMetricKey(
+  'GasOracle.RpcCall.Latency.dist'
+);
 
 export interface IGasEstimateProvider {
   estimateGas(
@@ -24,7 +35,11 @@ export interface IGasEstimateProvider {
     gasPriceWei?: number,
     l2GasData?: ArbitrumGasData
   ): Promise<GasDetails>;
-  getCurrentGasPrice(chainId: ChainId, blockNumber?: number): Promise<number>;
+  getCurrentGasPrice(
+    ctx: Context,
+    chainId: ChainId,
+    blockNumber?: number
+  ): Promise<number>;
 }
 
 export class GasEstimateProvider implements IGasEstimateProvider {
@@ -56,7 +71,7 @@ export class GasEstimateProvider implements IGasEstimateProvider {
     const gasPriceWeiToUse =
       gasPriceWei !== undefined
         ? gasPriceWei
-        : await this.getCurrentGasPrice(chainId);
+        : await this.getCurrentGasPrice(ctx, chainId);
     const provider = this.rpcProviderMap.get(chainId)!;
 
     switch (quote.route.protocol) {
@@ -126,6 +141,7 @@ export class GasEstimateProvider implements IGasEstimateProvider {
   }
 
   public async getCurrentGasPrice(
+    ctx: Context,
     chainId: ChainId,
     blockNumber?: number
   ): Promise<number> {
@@ -133,18 +149,66 @@ export class GasEstimateProvider implements IGasEstimateProvider {
 
     if (blockNumber !== undefined) {
       const blockHex = '0x' + blockNumber.toString(16);
-      const feeHistory = await provider.send('eth_feeHistory', [
-        '0x1',
-        blockHex,
-        [],
-      ]);
+      const feeHistory = await this.timedRpcSend(
+        ctx,
+        chainId,
+        provider,
+        'eth_feeHistory',
+        ['0x1', blockHex, []]
+      );
       const baseFeePerGas = feeHistory.baseFeePerGas?.[0];
       if (baseFeePerGas) {
         return parseInt(baseFeePerGas, 16);
       }
     }
 
-    const gasPrice = await provider.send('eth_gasPrice', []);
+    const gasPrice = await this.timedRpcSend(
+      ctx,
+      chainId,
+      provider,
+      'eth_gasPrice',
+      []
+    );
     return parseInt(gasPrice, 16);
+  }
+
+  private async timedRpcSend(
+    ctx: Context,
+    chainId: ChainId,
+    provider: JsonRpcProvider,
+    method: 'eth_feeHistory' | 'eth_gasPrice',
+    params: unknown[]
+  ) {
+    const startTime = Date.now();
+    const baseTags = [`chain:${ChainId[chainId]}`, `rpc:${method}`];
+    try {
+      const result = await provider.send(method, params);
+      await this.emitGasOracleMetrics(
+        ctx,
+        [...baseTags, ...buildStatusTags(true, MetricFailureReason.RPC_ERROR)],
+        startTime
+      );
+      return result;
+    } catch (error) {
+      await this.emitGasOracleMetrics(
+        ctx,
+        [...baseTags, ...buildStatusTags(false, MetricFailureReason.RPC_ERROR)],
+        startTime
+      );
+      throw error;
+    }
+  }
+
+  private async emitGasOracleMetrics(
+    ctx: Context,
+    tags: string[],
+    startTime: number
+  ): Promise<void> {
+    await ctx.metrics.count(METRIC_GAS_ORACLE_RPC_CALL, 1, {tags});
+    await ctx.metrics.dist(
+      METRIC_GAS_ORACLE_RPC_CALL_LATENCY,
+      Date.now() - startTime,
+      {tags}
+    );
   }
 }

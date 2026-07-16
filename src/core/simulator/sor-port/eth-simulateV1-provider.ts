@@ -1,5 +1,15 @@
 import {JsonRpcProvider} from '@ethersproject/providers';
-import {ChainId} from '../../../lib/config';
+import {
+  ChainId,
+  TAG_STATUS_FAILURE,
+  TAG_STATUS_SUCCESS,
+} from '../../../lib/config';
+
+// Emitted without the UniRouteService.Metric. prefix (pre-existing raw-name
+// simulation metrics, shared with the Tenderly provider dashboards).
+const METRIC_UNIRPC_SIMULATION_LATENCY = 'UniRpcV2.Simulation.Latency.dist';
+const METRIC_UNIRPC_SIMULATION_REQUEST = 'UniRpcV2.Simulation.Request';
+const TAG_SIM_TYPE_ETH_SIMULATE_V1 = 'simType:eth_simulateV1';
 
 import {
   ERC20__factory,
@@ -261,11 +271,23 @@ export class EthSimulateV1Simulator extends Simulator {
             });
           }
 
-          await ctx.metrics.count('UniRpcV2.Simulation.Request', 1, {
+          await ctx.metrics.dist(
+            METRIC_UNIRPC_SIMULATION_LATENCY,
+            simulationLatency,
+            {
+              tags: [
+                `chain:${this.chainId}`,
+                TAG_STATUS_FAILURE,
+                TAG_SIM_TYPE_ETH_SIMULATE_V1,
+              ],
+            }
+          );
+
+          await ctx.metrics.count(METRIC_UNIRPC_SIMULATION_REQUEST, 1, {
             tags: [
               `chain:${this.chainId}`,
-              'status:failure',
-              'simType:eth_simulateV1',
+              TAG_STATUS_FAILURE,
+              TAG_SIM_TYPE_ETH_SIMULATE_V1,
               ...swapStepsTags,
             ],
           });
@@ -298,18 +320,22 @@ export class EthSimulateV1Simulator extends Simulator {
         );
 
         await ctx.metrics.dist(
-          'UniRpcV2.Simulation.Latency.dist',
+          METRIC_UNIRPC_SIMULATION_LATENCY,
           simulationLatency,
           {
-            tags: [`chain:${this.chainId}`, 'simType:eth_simulateV1'],
+            tags: [
+              `chain:${this.chainId}`,
+              TAG_STATUS_SUCCESS,
+              TAG_SIM_TYPE_ETH_SIMULATE_V1,
+            ],
           }
         );
 
-        await ctx.metrics.count('UniRpcV2.Simulation.Request', 1, {
+        await ctx.metrics.count(METRIC_UNIRPC_SIMULATION_REQUEST, 1, {
           tags: [
             `chain:${this.chainId}`,
-            'status:success',
-            'simType:eth_simulateV1',
+            TAG_STATUS_SUCCESS,
+            TAG_SIM_TYPE_ETH_SIMULATE_V1,
             ...swapStepsTags,
           ],
         });
@@ -339,11 +365,11 @@ export class EthSimulateV1Simulator extends Simulator {
       } catch (e) {
         ctx.logger.error('Error simulating with eth_simulateV1', e);
 
-        await ctx.metrics.count('UniRpcV2.Simulation.Request', 1, {
+        await ctx.metrics.count(METRIC_UNIRPC_SIMULATION_REQUEST, 1, {
           tags: [
             `chain:${this.chainId}`,
-            'status:failure',
-            'simType:eth_simulateV1',
+            TAG_STATUS_FAILURE,
+            TAG_SIM_TYPE_ETH_SIMULATE_V1,
             ...swapStepsTags,
           ],
         });

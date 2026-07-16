@@ -1394,7 +1394,7 @@ describe('tenderly-simulation-provider', () => {
           'UniRpcV2.Simulation.Latency.dist',
           expect.any(Number),
           {
-            tags: ['chain:1', 'simType:eth_simulateV1'],
+            tags: ['chain:1', 'status:success', 'simType:eth_simulateV1'],
           }
         );
 

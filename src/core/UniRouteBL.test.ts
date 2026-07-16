@@ -284,8 +284,7 @@ class TestFreshPoolDetailsWrapper implements IFreshPoolDetailsWrapper {
 }
 
 class OnDemandGasEstimateProvider extends GasEstimateProvider {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async getCurrentGasPrice(chainId: ChainId): Promise<number> {
+  async getCurrentGasPrice(_ctx: Context, _chainId: ChainId): Promise<number> {
     return 0;
   }
 }
@@ -792,7 +791,8 @@ describe('UniRouteBL', () => {
         wrappedEth,
         usdc,
         TradeType.ExactIn,
-        amount
+        amount,
+        buildTestContext()
       );
 
       const {handlerContext, headers} = buildHandlerContextWithHeaders();
@@ -855,7 +855,8 @@ describe('UniRouteBL', () => {
         wrappedEth,
         usdc,
         TradeType.ExactIn,
-        amount
+        amount,
+        buildTestContext()
       );
 
       const {handlerContext, headers} = buildHandlerContextWithHeaders();
