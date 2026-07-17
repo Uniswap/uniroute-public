@@ -4,7 +4,9 @@ import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
 import {
   IPoolDiscoverer,
+  isPoolsArrayMemoStable,
   ITopPoolsSelector,
+  markPoolsArrayMemoStable,
   markPoolsForTokensUncacheable,
   PoolsForTokensCacheDirective,
   PoolsForTokensCacheSkipReason,
@@ -58,6 +60,28 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     ]
   ) {}
 
+  // Memoizes the parsed full-snapshot array per getPools cache key so a
+  // per-pair cache miss doesn't re-JSON.parse a multi-MB snapshot string.
+  // Entries are replaced in place when the underlying cache string rotates;
+  // size is bounded by the (chainId, protocol) keys this discoverer serves.
+  private readonly snapshotParseMemo = new Map<
+    string,
+    {source: string; parsed: TPool[]}
+  >();
+
+  // Memoizes filterUnsupportedTokenPools output per (pools array, deny-list
+  // payload) identity. Deny-list payloads are content-addressed and shared
+  // by FeatureGatedTokensRepository, so reference keying is correct and
+  // bounded; old entries are GC'd with their snapshot arrays.
+  private readonly complianceFilterMemo = new WeakMap<
+    TPool[],
+    WeakMap<Set<string>, TPool[]>
+  >();
+
+  protected get snapshotMemoEnabled(): boolean {
+    return this.serviceConfig.PoolDiscovery?.SnapshotMemoEnabled ?? false;
+  }
+
   private assertSupportedProtocol(protocol: Protocol): void {
     if (!this.supportedProtocols.includes(protocol)) {
       throw new Error(
@@ -70,19 +94,102 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // This name will be used as a prefix in cache keys to avoid conflicts between different implementations.
   protected abstract getDiscovererName(): string;
 
+  private static filterByDenySet<T extends UniPoolInfo>(
+    pools: T[],
+    globalSet: Set<string>
+  ): T[] {
+    return pools.filter(pool => {
+      return (
+        !globalSet.has(pool.token0.id.toLowerCase()) &&
+        !globalSet.has(pool.token1.id.toLowerCase())
+      );
+    });
+  }
+
   protected async filterUnsupportedTokenPools(
     pools: TPool[],
     ctx: Context
   ): Promise<TPool[]> {
     const {globalSet} =
       await this.featureGatedTokensRepository.getSnapshot(ctx);
-    const filteredPools = pools.filter(pool => {
-      return (
-        !globalSet.has(pool.token0.id.toLowerCase()) &&
-        !globalSet.has(pool.token1.id.toLowerCase())
-      );
-    });
-    return filteredPools;
+    return BaseCachingPoolDiscoverer.filterByDenySet(pools, globalSet);
+  }
+
+  // Same output as filterUnsupportedTokenPools, but memoized on the identity
+  // of (pools, deny-list payload). For a fixed snapshot + deny payload this
+  // returns a STABLE array reference, which downstream selection-view memos
+  // key on.
+  protected async filterUnsupportedTokenPoolsMemoized(
+    pools: TPool[],
+    ctx: Context
+  ): Promise<TPool[]> {
+    const {globalSet} =
+      await this.featureGatedTokensRepository.getSnapshot(ctx);
+    let byDenySet = this.complianceFilterMemo.get(pools);
+    if (byDenySet === undefined) {
+      byDenySet = new WeakMap();
+      this.complianceFilterMemo.set(pools, byDenySet);
+    }
+    const memoized = byDenySet.get(globalSet);
+    if (memoized !== undefined) {
+      return memoized;
+    }
+    const filtered = BaseCachingPoolDiscoverer.filterByDenySet(
+      pools,
+      globalSet
+    );
+    byDenySet.set(globalSet, filtered);
+    // Stability PROPAGATES: only outputs derived from an identity-stable
+    // input can themselves recur. The per-pair getPoolsForTokens miss path
+    // also runs through here with fresh per-request arrays from
+    // Direct/Static discoverers — marking those would defeat the
+    // selector-side gate. For stable inputs, also self-seed: re-filtering
+    // the output with the same deny payload is a no-op, so callers that
+    // filter an already-filtered array (the S3 getPoolsForTokens miss
+    // path) get the same reference back instead of a duplicate full-chain
+    // array per snapshot rotation.
+    if (isPoolsArrayMemoStable(pools)) {
+      const selfSeed = new WeakMap<Set<string>, TPool[]>();
+      selfSeed.set(globalSet, filtered);
+      this.complianceFilterMemo.set(filtered, selfSeed);
+      markPoolsArrayMemoStable(filtered);
+    }
+    return filtered;
+  }
+
+  // Reuses the previously parsed snapshot when the cached string is unchanged
+  // (InMemoryRedisCache returns the same string object until the entry is
+  // rewritten, so the comparison is a pointer check in the steady state).
+  private async getParsedSnapshot(
+    cacheKey: string,
+    source: string,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<TPool[]> {
+    // Parse and publish before any await: with no suspension point between
+    // the memo read and write, concurrent same-tick misses cannot each
+    // re-parse the snapshot — the second caller sees the first one's entry.
+    const memo = this.snapshotParseMemo.get(cacheKey);
+    const result =
+      memo !== undefined && memo.source === source ? 'hit' : 'miss';
+    let parsed: TPool[];
+    if (memo !== undefined && result === 'hit') {
+      parsed = memo.parsed;
+    } else {
+      parsed = JSON.parse(source) as TPool[];
+      this.snapshotParseMemo.set(cacheKey, {source, parsed});
+      // The parsed snapshot is the stability ROOT: it recurs for the cache
+      // entry's lifetime, and the compliance filter propagates the mark to
+      // its derived arrays.
+      markPoolsArrayMemoStable(parsed);
+    }
+    await ctx.metrics.count(
+      buildMetricKey('PoolDiscoverer.SnapshotParse.Cache'),
+      1,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`, `result:${result}`]}
+    );
+    return parsed;
   }
 
   // Gets pools from the cache if available, otherwise fetches them from the _getPools implementation.
@@ -103,11 +210,25 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     try {
       const retrievedPoolsStr = await this.getPoolsCache.get(cacheKey);
       if (retrievedPoolsStr !== undefined) {
-        retrievedPools = JSON.parse(retrievedPoolsStr);
-        retrievedPools = await this.filterUnsupportedTokenPools(
-          retrievedPools!,
-          ctx
-        );
+        if (this.snapshotMemoEnabled) {
+          const parsed = await this.getParsedSnapshot(
+            cacheKey,
+            retrievedPoolsStr,
+            chainId,
+            protocol,
+            ctx
+          );
+          retrievedPools = await this.filterUnsupportedTokenPoolsMemoized(
+            parsed,
+            ctx
+          );
+        } else {
+          retrievedPools = JSON.parse(retrievedPoolsStr);
+          retrievedPools = await this.filterUnsupportedTokenPools(
+            retrievedPools!,
+            ctx
+          );
+        }
         ctx.logger.debug(
           `[${this.discovererName}] Retrieved ${protocol} pools from cache`,
           {
@@ -123,11 +244,38 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     if (retrievedPools === undefined) {
       status = 'miss';
       retrievedPools = await this._getPools(chainId, protocol, ctx);
-      retrievedPools = await this.filterUnsupportedTokenPools(
-        retrievedPools,
-        ctx
-      );
-      const retrievedPoolsStr = JSON.stringify(retrievedPools);
+      let retrievedPoolsStr: string;
+      if (this.snapshotMemoEnabled) {
+        const {globalSet} =
+          await this.featureGatedTokensRepository.getSnapshot(ctx);
+        retrievedPoolsStr = JSON.stringify(
+          BaseCachingPoolDiscoverer.filterByDenySet(retrievedPools, globalSet)
+        );
+        // Round-trip through JSON before memoizing so flag-on serves the
+        // exact objects flag-off would (a cache read always JSON.parses):
+        // e.g. a property explicitly set to undefined keeps its key on the
+        // in-memory graph but is dropped by JSON — and `'tvlUSD' in pool`
+        // checks are sensitive to that difference.
+        retrievedPools = JSON.parse(retrievedPoolsStr) as TPool[];
+        // Seed both memos with the exact string written to the cache so the
+        // first post-miss read is a memo hit. Re-filtering with the same
+        // deny payload is a no-op, so the array seeds its own
+        // compliance-memo entry.
+        this.snapshotParseMemo.set(cacheKey, {
+          source: retrievedPoolsStr,
+          parsed: retrievedPools,
+        });
+        const byDenySet = new WeakMap<Set<string>, TPool[]>();
+        byDenySet.set(globalSet, retrievedPools);
+        this.complianceFilterMemo.set(retrievedPools, byDenySet);
+        markPoolsArrayMemoStable(retrievedPools);
+      } else {
+        retrievedPools = await this.filterUnsupportedTokenPools(
+          retrievedPools,
+          ctx
+        );
+        retrievedPoolsStr = JSON.stringify(retrievedPools);
+      }
       ctx.logger.debug(
         `[${this.discovererName}] Caching retrieved ${protocol} pools`,
         {
@@ -242,11 +390,13 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         ctx
       );
 
-      // Filter out pools with unsupported tokens
-      retrievedPools = await this.filterUnsupportedTokenPools(
-        retrievedPools,
-        ctx
-      );
+      // Filter out pools with unsupported tokens. The memoized variant keys
+      // on the array identity _getPoolsForTokens returned — for S3
+      // discoverers that's the stable full-snapshot array, so this full pass
+      // runs once per (snapshot, deny payload) instead of per request.
+      retrievedPools = this.snapshotMemoEnabled
+        ? await this.filterUnsupportedTokenPoolsMemoized(retrievedPools, ctx)
+        : await this.filterUnsupportedTokenPools(retrievedPools, ctx);
 
       // use topPoolSelector to filter pools - we need to make sure a small number of pools is returned here.
       // The selector may flip cacheDirective.shouldUseCache to signal that the

@@ -7,6 +7,7 @@ import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {
+  isPoolsArrayMemoStable,
   ITopPoolsSelector,
   markPoolsForTokensUncacheable,
   PoolsForTokensCacheDirective,
@@ -590,5 +591,180 @@ describe('BaseCachingPoolDiscoverer', () => {
     expect(poolsForTokensCacheKey).toBe(
       'TestPoolDiscoverer#POOLSFORTOKENS#1#v2#0x1111111111111111111111111111111111111111#0x2222222222222222222222222222222222222222'
     );
+  });
+
+  describe('snapshot parse + compliance memoization', () => {
+    const memoConfig: IUniRouteServiceConfig = {
+      ...serviceConfig,
+      PoolDiscovery: {SnapshotMemoEnabled: true},
+    };
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+
+    const makeSnapshotPools = (ids: string[]): UniPoolInfo[] =>
+      ids.map(
+        id =>
+          ({
+            id,
+            feeTier: '3000',
+            tickSpacing: '1',
+            hooks: '0x1111111111111111111111111111111111111111',
+            liquidity: '1000',
+            token0: {id: `0xaaa${id.replace('0x', '')}`},
+            token1: {id: `0xbbb${id.replace('0x', '')}`},
+            tvlETH: 1000,
+            tvlUSD: 1000,
+          }) as unknown as UniPoolInfo
+      );
+
+    let memoDiscoverer: TestPoolDiscoverer;
+
+    beforeEach(() => {
+      memoDiscoverer = new TestPoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache
+      );
+    });
+
+    it('returns a stable array reference across getPools calls while the snapshot is unchanged', async () => {
+      const cachedPools = makeSnapshotPools(['0x1', '0x2']);
+      getPoolsCache.get = vi
+        .fn()
+        .mockResolvedValue(JSON.stringify(cachedPools));
+
+      const first = await memoDiscoverer.getPools(chainId, protocol, ctx);
+      const second = await memoDiscoverer.getPools(chainId, protocol, ctx);
+
+      expect(first).toEqual(cachedPools);
+      expect(second).toBe(first);
+      // The stable output is what unlocks the selector's view memo.
+      expect(isPoolsArrayMemoStable(first)).toBe(true);
+    });
+
+    it('re-parses when the cached snapshot string changes', async () => {
+      const snapshotA = makeSnapshotPools(['0x1']);
+      const snapshotB = makeSnapshotPools(['0x1', '0x2']);
+      getPoolsCache.get = vi
+        .fn()
+        .mockResolvedValueOnce(JSON.stringify(snapshotA))
+        .mockResolvedValueOnce(JSON.stringify(snapshotB));
+
+      const first = await memoDiscoverer.getPools(chainId, protocol, ctx);
+      const second = await memoDiscoverer.getPools(chainId, protocol, ctx);
+
+      expect(first).toEqual(snapshotA);
+      expect(second).toEqual(snapshotB);
+      expect(second).not.toBe(first);
+    });
+
+    it('re-filters when the deny-list payload changes between calls', async () => {
+      const cachedPools = makeSnapshotPools(['0x1', '0x2']);
+      let snapshot = {globalSet: new Set<string>()};
+      const denyRepo = {
+        getSnapshot: async () => snapshot,
+      } as unknown as FeatureGatedTokensRepository;
+      const discoverer = new TestPoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        denyRepo
+      );
+      getPoolsCache.get = vi
+        .fn()
+        .mockResolvedValue(JSON.stringify(cachedPools));
+
+      const first = await discoverer.getPools(chainId, protocol, ctx);
+      expect(first).toHaveLength(2);
+
+      // New payload object denying pool 0x2's token0.
+      snapshot = {globalSet: new Set(['0xaaa2'])};
+      const second = await discoverer.getPools(chainId, protocol, ctx);
+
+      expect(second.map(p => p.id)).toEqual(['0x1']);
+      expect(second).not.toBe(first);
+    });
+
+    it('produces the same content as the flag-off path', async () => {
+      const cachedPools = makeSnapshotPools(['0x1', '0x2', '0x3']);
+      getPoolsCache.get = vi
+        .fn()
+        .mockResolvedValue(JSON.stringify(cachedPools));
+
+      const legacyFirst = await poolDiscoverer.getPools(chainId, protocol, ctx);
+      const legacySecond = await poolDiscoverer.getPools(
+        chainId,
+        protocol,
+        ctx
+      );
+      const memoized = await memoDiscoverer.getPools(chainId, protocol, ctx);
+
+      expect(memoized).toEqual(legacyFirst);
+      // Flag-off keeps today's fresh-array-per-call behavior.
+      expect(legacySecond).not.toBe(legacyFirst);
+    });
+
+    it('seeds the parse memo on the getPools miss path', async () => {
+      // Miss (cache empty) → _getPools result cached + memo seeded with the
+      // exact string written; the next hit must reuse the same array.
+      let stored: string | undefined = undefined;
+      getPoolsCache.get = vi.fn().mockImplementation(async () => stored);
+      getPoolsCache.set = vi.fn().mockImplementation(async (_k, v) => {
+        stored = v;
+      });
+
+      const first = await memoDiscoverer.getPools(chainId, protocol, ctx);
+      const second = await memoDiscoverer.getPools(chainId, protocol, ctx);
+
+      expect(second).toBe(first);
+    });
+
+    it('does not mark per-request _getPoolsForTokens arrays as memo-stable', async () => {
+      // Direct/Static discoverers return fresh arrays per pair; stability
+      // must not leak onto them via the compliance-filter self-seed, or the
+      // selector-side gate is defeated (round-2 adversarial finding).
+      const observed: boolean[] = [];
+      const recordingSelector = {
+        filterPools: async (pools: UniPoolInfo[]) => {
+          observed.push(isPoolsArrayMemoStable(pools));
+          return pools;
+        },
+      } as unknown as ITopPoolsSelector<UniPoolInfo>;
+
+      await memoDiscoverer.getPoolsForTokens(
+        chainId,
+        protocol,
+        new Address('0x1111111111111111111111111111111111111111'),
+        new Address('0x2222222222222222222222222222222222222222'),
+        recordingSelector,
+        undefined,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+
+      expect(observed).toEqual([false]);
+    });
+
+    it('getPoolsForTokens miss path behaves identically with the flag on', async () => {
+      const first = await memoDiscoverer.getPoolsForTokens(
+        chainId,
+        protocol,
+        new Address('0x1111111111111111111111111111111111111111'),
+        new Address('0x2222222222222222222222222222222222222222'),
+        topPoolSelector,
+        undefined,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+
+      expect(first.map(p => p.id)).toEqual(['test-pool-for-tokens']);
+      expect(getPoolsForTokensCache.set).toHaveBeenCalledWith(
+        expect.any(String),
+        JSON.stringify(first),
+        expect.any(Object)
+      );
+    });
   });
 });

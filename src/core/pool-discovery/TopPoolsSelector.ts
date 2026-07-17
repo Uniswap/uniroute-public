@@ -1,5 +1,6 @@
 import {Address} from '../../models/address/Address';
 import {
+  isPoolsArrayMemoStable,
   ITopPoolsSelector,
   markPoolsForTokensUncacheable,
   PoolsForTokensCacheDirective,
@@ -49,6 +50,16 @@ import {
 interface TokenPoolIndex {
   tokenToPools: Map<string, UniPoolInfo[]>;
   poolToTokens: Map<string, Set<string>>;
+}
+
+// Pair-independent selection state derived from one pool snapshot. Building
+// this is the O(all pools) part of filterPools; everything pair-specific is
+// O(topN) lookups against it. `tvlSortedPools` is a build-time copy sorted by
+// the getTopNPairs comparator and must never be mutated after build.
+interface SelectionView {
+  filteredPools: UniPoolInfo[];
+  tokenPoolIndex: TokenPoolIndex;
+  tvlSortedPools: UniPoolInfo[];
 }
 
 // Helper function to get pool liquidity based on pool type (using USD value for now)
@@ -146,10 +157,21 @@ export function getMaxFilteredPoolCount(config: IPoolSelectionConfig): number {
 }
 
 export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
+  // Selection views memoized by (pools array, deny-list payload) identity.
+  // Layer-1 memoization in BaseCachingPoolDiscoverer keeps both references
+  // stable for the lifetime of a snapshot, so views rebuild exactly when the
+  // snapshot or deny list actually changes and are GC'd with the old arrays.
+  // The inner key is the ≤4-valued hooksOptions variant per chain/protocol.
+  private readonly selectionViewMemo = new WeakMap<
+    UniPoolInfo[],
+    WeakMap<Set<string>, Map<string, SelectionView>>
+  >();
+
   constructor(
     private readonly chainRepository: IChainRepository,
     private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
-    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository
+    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository,
+    private readonly snapshotMemoEnabled: boolean = false
   ) {}
 
   public async filterPools(
@@ -172,59 +194,113 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // Only consider pools where neither tokens are in the blocked token list.
     const {globalSet: unsupportedTokens} =
       await this.featureGatedTokensRepository.getSnapshot(ctx);
-    const filteredUnsupportedPools =
-      BasicTopPoolsSelector.filterUnsupportedPools(
-        pools,
-        chainId,
-        unsupportedTokens
-      );
-    ctx.logger.debug('Filtering unsupported tokens from pools', {
-      chainId,
-      totalChainPools: pools.length,
-      filteredUnsupportedPools: filteredUnsupportedPools.length,
-    });
-
-    // Also filter out pools that don't match the hooks options,
-    // only if the uniswap protocol is v4.
-    // Additionally, exclude agg hook pools — those are handled exclusively by
-    // AggHooksTopPoolsSelector and must not appear in BasicTopPoolsSelector results.
-    const aggHookAddressSet = new Set(
-      Object.values(AGG_HOOKS_PER_CHAIN).flatMap(perChain =>
-        (perChain?.[chainId] ?? []).map(addr => addr.toLowerCase())
-      )
-    );
 
     const chain =
       protocol === Protocol.V4
         ? await this.chainRepository.getChain(chainId)
         : undefined;
-    let permissionedFilteredPools: UniPoolInfo[];
-    if (chain !== undefined) {
-      const dropResult = await maybeDropPermissionedPools(
-        filteredUnsupportedPools as V4PoolInfo[],
-        chain,
-        nsCtx,
-        tokenIn,
-        tokenOut,
-        ctx,
-        buildMetricKey('TopPoolsSelector.PermissionedPoolDropped')
+
+    // The view memo only engages for arrays the discoverer marked as
+    // identity-stable (memoized snapshot outputs). Per-request arrays from
+    // Direct/Static discoverers would structurally miss an identity-keyed
+    // memo every call — churning WeakMap entries and flooding the
+    // SelectionView.Cache hit/miss signal the flag rollout is judged by —
+    // so they silently keep the legacy path (which is cheap on their small
+    // universes).
+    const arrayMemoStable = isPoolsArrayMemoStable(pools);
+
+    // The permissioned-hook drop is pair- and namespace-dependent, so the
+    // snapshot-keyed selection view cannot be reused on chains that configure
+    // permissioned hooks (only Sepolia today) — those keep the legacy path.
+    const permissionedChain =
+      chain !== undefined && (chain.permissionedHookAddresses?.length ?? 0) > 0;
+
+    const canUseSelectionView =
+      this.snapshotMemoEnabled && arrayMemoStable && !permissionedChain;
+
+    let filteredPools: UniPoolInfo[];
+    let tokenPoolIndex: TokenPoolIndex;
+    let tvlSortedPools: UniPoolInfo[] | undefined;
+
+    if (canUseSelectionView) {
+      const view = await this.getOrBuildSelectionView(
+        pools,
+        unsupportedTokens,
+        chainId,
+        protocol,
+        hooksOptions,
+        ctx
       );
-      permissionedFilteredPools = dropResult.filteredPools;
-      if (!dropResult.shouldCache) {
-        markPoolsForTokensUncacheable(
-          cacheDirective,
-          PoolsForTokensCacheSkipReason.PermissionedHookInactiveNamespace
+      filteredPools = view.filteredPools;
+      tokenPoolIndex = view.tokenPoolIndex;
+      tvlSortedPools = view.tvlSortedPools;
+      ctx.logger.debug('Filtering unsupported tokens from pools', {
+        chainId,
+        totalChainPools: pools.length,
+        filteredPools: filteredPools.length,
+      });
+    } else {
+      // `bypass` marks a stable snapshot array we CHOSE not to memoize
+      // (permissioned chain). Unstable per-request arrays stay silent —
+      // emitting per direct-pool request would drown the signal.
+      if (this.snapshotMemoEnabled && arrayMemoStable) {
+        await ctx.metrics.count(
+          buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
+          1,
+          {
+            tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:bypass'],
+          }
         );
       }
-    } else {
-      permissionedFilteredPools = filteredUnsupportedPools;
-    }
+      const filteredUnsupportedPools =
+        BasicTopPoolsSelector.filterUnsupportedPools(
+          pools,
+          chainId,
+          unsupportedTokens
+        );
+      ctx.logger.debug('Filtering unsupported tokens from pools', {
+        chainId,
+        totalChainPools: pools.length,
+        filteredUnsupportedPools: filteredUnsupportedPools.length,
+      });
 
-    const filteredPools = permissionedFilteredPools.filter(pool => {
-      if (protocol === Protocol.V4) {
-        // Exclude agg hook pools regardless of hooksOptions,
-        // Because we have separate AggHooksTopPoolsSelector for agg hook pools.
-        if (aggHookAddressSet.has((pool as V4PoolInfo).hooks?.toLowerCase())) {
+      // Also filter out pools that don't match the hooks options,
+      // only if the uniswap protocol is v4.
+      // Additionally, exclude agg hook pools — those are handled exclusively by
+      // AggHooksTopPoolsSelector and must not appear in BasicTopPoolsSelector results.
+      const aggHookAddressSet =
+        BasicTopPoolsSelector.getAggHookAddressSet(chainId);
+
+      let permissionedFilteredPools: UniPoolInfo[];
+      if (chain !== undefined) {
+        const dropResult = await maybeDropPermissionedPools(
+          filteredUnsupportedPools as V4PoolInfo[],
+          chain,
+          nsCtx,
+          tokenIn,
+          tokenOut,
+          ctx,
+          buildMetricKey('TopPoolsSelector.PermissionedPoolDropped')
+        );
+        permissionedFilteredPools = dropResult.filteredPools;
+        if (!dropResult.shouldCache) {
+          markPoolsForTokensUncacheable(
+            cacheDirective,
+            PoolsForTokensCacheSkipReason.PermissionedHookInactiveNamespace
+          );
+        }
+      } else {
+        permissionedFilteredPools = filteredUnsupportedPools;
+      }
+
+      filteredPools = permissionedFilteredPools.filter(pool => {
+        if (
+          BasicTopPoolsSelector.isExcludedAggHookPool(
+            pool,
+            protocol,
+            aggHookAddressSet
+          )
+        ) {
           ctx.logger.debug('Excluding agg hook pool', {
             chainId,
             protocol,
@@ -233,32 +309,22 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
           });
           return false;
         }
+        return BasicTopPoolsSelector.matchesHooksOptions(
+          pool,
+          protocol,
+          hooksOptions
+        );
+      });
 
-        if (
-          hooksOptions === undefined ||
-          hooksOptions === HooksOptions.HOOKS_INCLUSIVE
-        ) {
-          return true;
-        }
+      ctx.logger.debug("Filtering pools that don't match the hooks options", {
+        chainId,
+        filteredUnsupportedPools: filteredUnsupportedPools.length,
+        filteredPools: filteredPools.length,
+      });
 
-        if (hooksOptions === HooksOptions.HOOKS_ONLY) {
-          return (pool as V4PoolInfo).hooks !== ADDRESS_ZERO;
-        }
-        if (hooksOptions === HooksOptions.NO_HOOKS) {
-          return (pool as V4PoolInfo).hooks === ADDRESS_ZERO;
-        }
-      }
-      return true;
-    });
-
-    ctx.logger.debug("Filtering pools that don't match the hooks options", {
-      chainId,
-      filteredUnsupportedPools: filteredUnsupportedPools.length,
-      filteredPools: filteredPools.length,
-    });
-
-    // Build token-to-pool index for faster lookups
-    const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
+      // Build token-to-pool index for faster lookups
+      tokenPoolIndex = buildTokenPoolIndex(filteredPools);
+    }
 
     // Keep track of selected pool addresses to avoid duplicates
     const selectedPoolIds = new Set<string>();
@@ -314,12 +380,22 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       );
 
     // 6. get top N pools with highest liquidity (excluding already selected pools)
-    const topNPairs = BasicTopPoolsSelector.getTopNPairs(
-      filteredPools,
-      selectedPoolIds,
-      chainId,
-      this.poolSelectionConfig
-    );
+    // The selection-view path walks the pre-sorted copy instead of
+    // re-sorting the whole universe per request; output is identical.
+    const topNPairs =
+      tvlSortedPools !== undefined
+        ? BasicTopPoolsSelector.getTopNPairsFromSorted(
+            tvlSortedPools,
+            selectedPoolIds,
+            chainId,
+            this.poolSelectionConfig
+          )
+        : BasicTopPoolsSelector.getTopNPairs(
+            filteredPools,
+            selectedPoolIds,
+            chainId,
+            this.poolSelectionConfig
+          );
 
     // 7. Get top base token pools for tokenIn and tokenOut
     const topBaseTokenPoolsTokenIn = BasicTopPoolsSelector.getTopBaseTokenPools(
@@ -484,6 +560,152 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         !unsupportedTokens.has(pool.token1.id.toLowerCase())
       );
     });
+  }
+
+  protected static getAggHookAddressSet(chainId: ChainId): Set<string> {
+    return new Set(
+      Object.values(AGG_HOOKS_PER_CHAIN).flatMap(perChain =>
+        (perChain?.[chainId] ?? []).map(addr => addr.toLowerCase())
+      )
+    );
+  }
+
+  // V4 pools bearing an agg hook are excluded from BasicTopPoolsSelector
+  // results regardless of hooksOptions — AggHooksTopPoolsSelector owns those.
+  protected static isExcludedAggHookPool(
+    pool: UniPoolInfo,
+    protocol: Protocol,
+    aggHookAddressSet: Set<string>
+  ): boolean {
+    return (
+      protocol === Protocol.V4 &&
+      aggHookAddressSet.has((pool as V4PoolInfo).hooks?.toLowerCase())
+    );
+  }
+
+  protected static matchesHooksOptions(
+    pool: UniPoolInfo,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined
+  ): boolean {
+    if (protocol !== Protocol.V4) {
+      return true;
+    }
+    if (
+      hooksOptions === undefined ||
+      hooksOptions === HooksOptions.HOOKS_INCLUSIVE
+    ) {
+      return true;
+    }
+    if (hooksOptions === HooksOptions.HOOKS_ONLY) {
+      return (pool as V4PoolInfo).hooks !== ADDRESS_ZERO;
+    }
+    if (hooksOptions === HooksOptions.NO_HOOKS) {
+      return (pool as V4PoolInfo).hooks === ADDRESS_ZERO;
+    }
+    return true;
+  }
+
+  private async getOrBuildSelectionView(
+    pools: UniPoolInfo[],
+    unsupportedTokens: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined,
+    ctx: Context
+  ): Promise<SelectionView> {
+    let byDenySet = this.selectionViewMemo.get(pools);
+    if (byDenySet === undefined) {
+      byDenySet = new WeakMap();
+      this.selectionViewMemo.set(pools, byDenySet);
+    }
+    let byVariant = byDenySet.get(unsupportedTokens);
+    if (byVariant === undefined) {
+      byVariant = new Map();
+      byDenySet.set(unsupportedTokens, byVariant);
+    }
+    // Canonicalized: hooksOptions only affects V4 filtering, and undefined
+    // is filter-identical to HOOKS_INCLUSIVE — collapsing those variants
+    // avoids building content-identical views per alias.
+    const variantKey =
+      protocol === Protocol.V4
+        ? `${chainId}#${protocol}#${hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE}`
+        : `${chainId}#${protocol}`;
+    const existing = byVariant.get(variantKey);
+    if (existing !== undefined) {
+      await ctx.metrics.count(
+        buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
+        1,
+        {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:hit']}
+      );
+      return existing;
+    }
+
+    // Build and publish before any await: the build below is fully
+    // synchronous, so with no suspension point between the memo read above
+    // and the set below, concurrent same-tick misses cannot each rebuild the
+    // view — the second caller sees the first one's entry. Metrics are
+    // emitted only after publication.
+    const buildStartTime = Date.now();
+    const aggHookAddressSet =
+      BasicTopPoolsSelector.getAggHookAddressSet(chainId);
+    const filteredUnsupportedPools =
+      BasicTopPoolsSelector.filterUnsupportedPools(
+        pools,
+        chainId,
+        unsupportedTokens
+      );
+    const filteredPools = filteredUnsupportedPools.filter(
+      pool =>
+        !BasicTopPoolsSelector.isExcludedAggHookPool(
+          pool,
+          protocol,
+          aggHookAddressSet
+        ) &&
+        BasicTopPoolsSelector.matchesHooksOptions(pool, protocol, hooksOptions)
+    );
+    const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
+    const tvlSortedPools =
+      BasicTopPoolsSelector.buildTvlSortedPools(filteredPools);
+    const view: SelectionView = {filteredPools, tokenPoolIndex, tvlSortedPools};
+    byVariant.set(variantKey, view);
+    await ctx.metrics.count(
+      buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
+      1,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:miss']}
+    );
+    await ctx.metrics.dist(
+      buildMetricKey('TopPoolsSelector.SelectionView.Build.Latency.dist'),
+      Date.now() - buildStartTime,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+    );
+    return view;
+  }
+
+  // Builds the pre-sorted array getTopNPairsFromSorted walks. Dedupes by
+  // pool id FIRST (first occurrence in input order wins) to match legacy
+  // getTopNPairs, whose seen-set filter runs before its sort — sorting
+  // before deduping would let a higher-TVL duplicate displace the
+  // occurrence the legacy path keeps.
+  //
+  // Precondition: getPoolTVL(pool) is a finite number for every input. A
+  // NaN TVL makes the comparator inconsistent, and then NO ordering
+  // contract exists on either path (legacy sorts a different subset per
+  // request, so it is equally unspecified) — parity under NaN is
+  // undefinable rather than broken here. Snapshot entries are JSON
+  // round-tripped and TVL-filtered upstream, which excludes NaN in
+  // practice.
+  public static buildTvlSortedPools(pools: UniPoolInfo[]): UniPoolInfo[] {
+    const seenIds = new Set<string>();
+    const uniquePools = pools.filter(pool => {
+      const poolId = pool.id.toLowerCase();
+      if (seenIds.has(poolId)) {
+        return false;
+      }
+      seenIds.add(poolId);
+      return true;
+    });
+    return uniquePools.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
   }
 
   // TVL-bypass hook pools (parity hooks + zero-measured-TVL hooks — see the
@@ -751,6 +973,32 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     );
   }
 
+  // Selection-view counterpart of getTopNPairs. The input is pre-sorted by
+  // the same comparator; a stable sort commutes with the seen-set filter, so
+  // walking it yields the same pools in the same order as filter→sort→slice.
+  // Same deliberate omission of the TVL-bypass as getTopNPairs — see above.
+  public static getTopNPairsFromSorted(
+    tvlSortedPools: UniPoolInfo[],
+    selectedPoolIds: Set<string>,
+    chainId: ChainId,
+    poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>
+  ): UniPoolInfo[] {
+    const limit = poolSelectionConfig[chainId].topNPairs;
+    const selected: UniPoolInfo[] = [];
+    for (const pool of tvlSortedPools) {
+      if (selected.length >= limit) {
+        break;
+      }
+      const poolId = pool.id.toLowerCase();
+      if (selectedPoolIds.has(poolId)) {
+        continue;
+      }
+      selectedPoolIds.add(poolId);
+      selected.push(pool);
+    }
+    return selected;
+  }
+
   public static getTopBaseTokenPools(
     selectedPoolIds: Set<string>,
     chainId: ChainId,
@@ -964,9 +1212,19 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 export class AggHooksTopPoolsSelector
   implements ITopPoolsSelector<UniPoolInfo>
 {
+  // The agg-hook result is always uncacheable (see the cache-skip below), so
+  // without memoization the O(all pools) agg-subset scan runs on every
+  // request. Keyed by snapshot array identity (stable via Layer-1 memo in
+  // BaseCachingPoolDiscoverer) and the (chainId, protocol) variant.
+  private readonly aggSubsetMemo = new WeakMap<
+    UniPoolInfo[],
+    Map<string, UniPoolInfo[]>
+  >();
+
   constructor(
     private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
-    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository
+    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository,
+    private readonly snapshotMemoEnabled: boolean = false
   ) {}
 
   public async filterPools(
@@ -1003,9 +1261,42 @@ export class AggHooksTopPoolsSelector
       ).map(addr => addr.toLowerCase())
     );
 
-    const aggHooksPools = pools.filter(pool =>
-      aggHookAddressSet.has((pool as V4PoolInfo).hooks?.toLowerCase())
-    );
+    let aggHooksPools: UniPoolInfo[];
+    // Same stability gate as BasicTopPoolsSelector: only identity-stable
+    // snapshot arrays can recur, so only they are worth memoizing (and only
+    // they emit the cache signal).
+    if (this.snapshotMemoEnabled && isPoolsArrayMemoStable(pools)) {
+      let byVariant = this.aggSubsetMemo.get(pools);
+      if (byVariant === undefined) {
+        byVariant = new Map();
+        this.aggSubsetMemo.set(pools, byVariant);
+      }
+      const variantKey = `${chainId}#${protocol}`;
+      const memoized = byVariant.get(variantKey);
+      if (memoized !== undefined) {
+        aggHooksPools = memoized;
+      } else {
+        aggHooksPools = pools.filter(pool =>
+          aggHookAddressSet.has((pool as V4PoolInfo).hooks?.toLowerCase())
+        );
+        byVariant.set(variantKey, aggHooksPools);
+      }
+      await ctx.metrics.count(
+        buildMetricKey('TopPoolsSelector.AggSubset.Cache'),
+        1,
+        {
+          tags: [
+            `chain:${chainId}`,
+            `protocol:${protocol}`,
+            `result:${memoized !== undefined ? 'hit' : 'miss'}`,
+          ],
+        }
+      );
+    } else {
+      aggHooksPools = pools.filter(pool =>
+        aggHookAddressSet.has((pool as V4PoolInfo).hooks?.toLowerCase())
+      );
+    }
 
     ctx.logger.debug('AggHooksTopPoolsSelector filtering agg hook pools', {
       chainId,

@@ -7,6 +7,23 @@ import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 
 export type UniPoolInfo = V2PoolInfo | V3PoolInfo | V4PoolInfo;
 
+// Registry of pool arrays whose identity is stable across requests (the
+// memoized snapshot-backed outputs of BaseCachingPoolDiscoverer). The
+// selection-view/agg-subset memos in TopPoolsSelector only engage for
+// registered arrays — per-request arrays from Direct/Static discoverers
+// would structurally miss an identity-keyed memo on every call, churning
+// WeakMap entries and flooding the cache hit/miss metrics the flag rollout
+// is monitored by. WeakSet, so entries are GC'd with their arrays.
+const MEMO_STABLE_POOL_ARRAYS = new WeakSet<UniPoolInfo[]>();
+
+export function markPoolsArrayMemoStable(pools: UniPoolInfo[]): void {
+  MEMO_STABLE_POOL_ARRAYS.add(pools);
+}
+
+export function isPoolsArrayMemoStable(pools: UniPoolInfo[]): boolean {
+  return MEMO_STABLE_POOL_ARRAYS.has(pools);
+}
+
 export interface IPoolDiscoverer<TPool extends UniPoolInfo> {
   getPools(
     chainId: ChainId,

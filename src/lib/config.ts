@@ -1,5 +1,6 @@
 import {getEnv} from './otherUtils';
 import {
+  parseBooleanEnvOrDefault,
   parsePositiveIntEnvOrDefault,
   parsePositiveIntRecordEnvOrEmpty,
 } from './envParsing';
@@ -37,6 +38,9 @@ const getPoolDiscoveryCacheTtls = () => ({
     'POOL_DISCOVERY_POOLS_CACHE_TTL_SECONDS_BY_CHAIN'
   ),
 });
+
+const getPoolDiscoverySnapshotMemoEnabled = () =>
+  parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_MEMO_ENABLED', false);
 
 // TODO: use this ChainId enum for now
 // Once all monorepo projects switch to PartialChainIdMap<T> from @uniswap/lib-sharedconfig/chainConfig
@@ -93,6 +97,14 @@ export interface IUniRouteServiceConfig {
     TokenInOutPoolsCacheEntryTtlSeconds: number;
 
     PoolsCacheEntryTtlSecondsByChain?: Record<number, number>;
+  };
+  PoolDiscovery: {
+    // Memoize parsed pool snapshots and pair-independent selection views
+    // in-process, so a per-pair pool-cache miss costs O(topN) instead of
+    // O(all pools on the chain). Pure performance flag — selection output
+    // is identical either way. Kill switch: set
+    // POOL_DISCOVERY_SNAPSHOT_MEMO_ENABLED to 'false' and redeploy.
+    SnapshotMemoEnabled: boolean;
   };
   CachedRoutes: {
     // Whether to enable cached routes.
@@ -222,6 +234,9 @@ export const getUniRouteSyncConfig = (
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
     },
+    PoolDiscovery: {
+      SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
+    },
     CachedRoutes: {
       Enabled: true,
       AggHooksReadEnabled: true,
@@ -317,6 +332,9 @@ export const getQuickRouteSyncConfig = (
       AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
+    },
+    PoolDiscovery: {
+      SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
     },
     CachedRoutes: {
       Enabled: true,

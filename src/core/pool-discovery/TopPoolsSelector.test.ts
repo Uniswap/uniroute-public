@@ -19,7 +19,9 @@ import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
 import {
+  markPoolsArrayMemoStable,
   PoolsForTokensCacheSkipReason,
+  UniPoolInfo,
   V2PoolInfo,
   V3PoolInfo,
   V4PoolInfo,
@@ -2318,5 +2320,415 @@ describe('getMaxFilteredPoolCount', () => {
     // anywhere, this constant should grow and the pinned value above must be
     // updated.
     expect(MAX_MANUAL_DIRECT_PAIRS_FALLBACK).toBe(7);
+  });
+});
+
+describe('snapshot memoization (SnapshotMemoEnabled)', () => {
+  const TOKEN_A = '0x00000000000000000000000000000000000000a1';
+  const TOKEN_B = '0x00000000000000000000000000000000000000b2';
+  const TOKEN_C = '0x00000000000000000000000000000000000000c3';
+  const TOKEN_D = '0x00000000000000000000000000000000000000d4';
+  const WETH = WRAPPED_NATIVE_CURRENCY[ChainId.MAINNET].address.toLowerCase();
+  const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
+  const HOOK = '0x1234567890123456789012345678901234567890';
+
+  let chainRepository: IChainRepository;
+  let legacySelector: BasicTopPoolsSelector;
+  let memoSelector: BasicTopPoolsSelector;
+  let ctx: Context;
+  const featureGatedTokensRepository = FeatureGatedTokensRepository.empty();
+
+  const makeV4Pool = (
+    id: string,
+    token0: string,
+    token1: string,
+    tvlUSD: number,
+    hooks: string = ADDRESS_ZERO
+  ): V4PoolInfo =>
+    ({
+      id,
+      token0: {id: token0},
+      token1: {id: token1},
+      tvlUSD,
+      tvlETH: tvlUSD,
+      feeTier: '3000',
+      tickSpacing: '60',
+      hooks,
+      liquidity: '10000',
+    }) as V4PoolInfo;
+
+  // Universe engaging every stage: direct pairs with TVL ties, one-hop pools,
+  // second-hop via intermediary, base-token (USDC) pools, WETH/ETH pools,
+  // hooked pools, and an agg-hook pool that Basic must exclude.
+  const buildV4Universe = (): V4PoolInfo[] => [
+    makeV4Pool('0xd1', TOKEN_A, TOKEN_B, 500),
+    makeV4Pool('0xd2', TOKEN_A, TOKEN_B, 500), // TVL tie with 0xd1
+    makeV4Pool('0xd1', TOKEN_A, TOKEN_B, 450), // duplicate id, different TVL
+    makeV4Pool('0xd3', TOKEN_A, TOKEN_B, 900, HOOK),
+    makeV4Pool('0xh1', TOKEN_A, TOKEN_C, 800),
+    makeV4Pool('0xh2', TOKEN_B, TOKEN_C, 700, HOOK),
+    makeV4Pool('0xh3', TOKEN_C, TOKEN_D, 600),
+    makeV4Pool('0xw1', TOKEN_A, WETH, 1200),
+    makeV4Pool('0xw2', TOKEN_B, WETH, 1100),
+    makeV4Pool('0xe1', TOKEN_A, ADDRESS_ZERO, 300),
+    makeV4Pool('0xu1', TOKEN_A, USDC, 1000),
+    makeV4Pool('0xu2', TOKEN_B, USDC, 950),
+    makeV4Pool('0xt1', TOKEN_C, WETH, 2000),
+    makeV4Pool('0xt2', TOKEN_D, USDC, 1900),
+    makeV4Pool('0xagg', TOKEN_A, TOKEN_B, 5000, FLUID_DEX_LITE[0]),
+  ];
+
+  const buildV3Universe = (): V3PoolInfo[] =>
+    buildV4Universe().map(
+      pool =>
+        ({
+          id: pool.id,
+          token0: pool.token0,
+          token1: pool.token1,
+          tvlUSD: pool.tvlUSD,
+          tvlETH: pool.tvlETH,
+          feeTier: '3000',
+          liquidity: '10000',
+        }) as V3PoolInfo
+    );
+
+  const buildV2Universe = (): V2PoolInfo[] =>
+    buildV4Universe().map(
+      pool =>
+        ({
+          id: pool.id,
+          token0: pool.token0,
+          token1: pool.token1,
+          reserveUSD: pool.tvlUSD,
+          reserve: pool.tvlUSD,
+          supply: 10000,
+        }) as V2PoolInfo
+    );
+
+  beforeEach(() => {
+    chainRepository = new HardcodedChainRepository();
+    legacySelector = new BasicTopPoolsSelector(
+      chainRepository,
+      poolSelectionConfig,
+      featureGatedTokensRepository
+    );
+    memoSelector = new BasicTopPoolsSelector(
+      chainRepository,
+      poolSelectionConfig,
+      featureGatedTokensRepository,
+      true
+    );
+    ctx = buildTestContext();
+  });
+
+  const HOOKS_VARIANTS: Array<HooksOptions | undefined> = [
+    undefined,
+    HooksOptions.HOOKS_INCLUSIVE,
+    HooksOptions.HOOKS_ONLY,
+    HooksOptions.NO_HOOKS,
+  ];
+
+  const PAIRS: Array<[Address, Address]> = [
+    [new Address(TOKEN_A), new Address(TOKEN_B)],
+    [new Address(TOKEN_A), new Address(TOKEN_D)],
+    [new Address(TOKEN_C), new Address(USDC)],
+  ];
+
+  // The selection-view memo only engages for arrays the discoverer marked
+  // identity-stable; tests mark their universes to exercise the fast path.
+  const stable = <T extends UniPoolInfo[]>(pools: T): T => {
+    markPoolsArrayMemoStable(pools);
+    return pools;
+  };
+
+  it('produces output identical to the legacy path across protocols, hooksOptions, and pairs', async () => {
+    const universes: Array<[Protocol, UniPoolInfo[]]> = [
+      [Protocol.V2, stable(buildV2Universe())],
+      [Protocol.V3, stable(buildV3Universe())],
+      [Protocol.V4, stable(buildV4Universe())],
+    ];
+    for (const [protocol, pools] of universes) {
+      for (const hooksOptions of HOOKS_VARIANTS) {
+        for (const [tokenIn, tokenOut] of PAIRS) {
+          const legacyResult = await legacySelector.filterPools(
+            pools,
+            ChainId.MAINNET,
+            tokenIn,
+            tokenOut,
+            protocol,
+            hooksOptions,
+            EMPTY_NAMESPACE_CONTEXT,
+            ctx,
+            {shouldUseCache: true}
+          );
+          const memoResult = await memoSelector.filterPools(
+            pools,
+            ChainId.MAINNET,
+            tokenIn,
+            tokenOut,
+            protocol,
+            hooksOptions,
+            EMPTY_NAMESPACE_CONTEXT,
+            ctx,
+            {shouldUseCache: true}
+          );
+          expect(memoResult, `${protocol} ${hooksOptions} ${tokenIn}`).toEqual(
+            legacyResult
+          );
+        }
+      }
+    }
+  });
+
+  it('stays consistent on repeated calls against the same pools array (memoized view reuse)', async () => {
+    const pools = stable(buildV4Universe());
+    const [tokenIn, tokenOut] = PAIRS[0];
+    const args = [
+      pools,
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      {shouldUseCache: true},
+    ] as const;
+
+    const first = await memoSelector.filterPools(...args);
+    const second = await memoSelector.filterPools(...args);
+    expect(second).toEqual(first);
+  });
+
+  it('keeps legacy behavior (and output parity) for arrays not marked memo-stable', async () => {
+    // Direct/Static discoverers pass fresh per-request arrays; the fast
+    // path must not engage for them, and output must still match legacy.
+    const unmarkedPools = buildV4Universe();
+    const [tokenIn, tokenOut] = PAIRS[0];
+
+    const legacyResult = await legacySelector.filterPools(
+      unmarkedPools,
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      {shouldUseCache: true}
+    );
+    const memoResult = await memoSelector.filterPools(
+      unmarkedPools,
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      {shouldUseCache: true}
+    );
+
+    expect(memoResult).toEqual(legacyResult);
+  });
+
+  it('rebuilds the view when a new pools array is supplied', async () => {
+    const pools = stable(buildV4Universe());
+    const [tokenIn, tokenOut] = PAIRS[0];
+    // Warm the memo with the original universe.
+    await memoSelector.filterPools(
+      pools,
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      {shouldUseCache: true}
+    );
+
+    const grownPools = stable([
+      ...pools,
+      makeV4Pool('0xnew', TOKEN_A, TOKEN_B, 99999),
+    ]);
+    const legacyResult = await legacySelector.filterPools(
+      grownPools,
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      {shouldUseCache: true}
+    );
+    const memoResult = await memoSelector.filterPools(
+      grownPools,
+      ChainId.MAINNET,
+      tokenIn,
+      tokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      {shouldUseCache: true}
+    );
+
+    expect(memoResult.map(p => p.id)).toContain('0xnew');
+    expect(memoResult).toEqual(legacyResult);
+  });
+
+  it('bypasses the fast path on permissioned-hook chains and matches legacy behavior', async () => {
+    const SEPOLIA_PERMISSIONED_HOOK =
+      '0x2435accb60e5feead7b670c35a02b0de101a4880';
+    const sepoliaTokenIn = new Address(
+      '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14'
+    );
+    const sepoliaTokenOut = new Address(
+      '0x41C0d18d34C61e36145491a6e5cf971819f14159'
+    );
+    const permPool = makeV4Pool(
+      '0xperm',
+      sepoliaTokenIn.address.toLowerCase(),
+      sepoliaTokenOut.address.toLowerCase(),
+      5000,
+      SEPOLIA_PERMISSIONED_HOOK
+    );
+    const normalPool = makeV4Pool(
+      '0xnorm',
+      sepoliaTokenIn.address.toLowerCase(),
+      sepoliaTokenOut.address.toLowerCase(),
+      5000
+    );
+
+    const sepoliaPools = stable([permPool, normalPool]);
+    const legacyDirective = {shouldUseCache: true};
+    const memoDirective = {shouldUseCache: true};
+    const legacyResult = await legacySelector.filterPools(
+      sepoliaPools,
+      ChainId.SEPOLIA,
+      sepoliaTokenIn,
+      sepoliaTokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      legacyDirective
+    );
+    const memoResult = await memoSelector.filterPools(
+      sepoliaPools,
+      ChainId.SEPOLIA,
+      sepoliaTokenIn,
+      sepoliaTokenOut,
+      Protocol.V4,
+      undefined,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx,
+      memoDirective
+    );
+
+    expect(memoResult.map(p => p.id)).not.toContain('0xperm');
+    expect(memoResult).toEqual(legacyResult);
+    expect(memoDirective).toEqual(legacyDirective);
+  });
+
+  describe('getTopNPairsFromSorted', () => {
+    it('matches getTopNPairs including TVL ties and pre-selected pools', () => {
+      const pools: UniPoolInfo[] = [
+        makeV4Pool('0x1', TOKEN_A, TOKEN_B, 500),
+        makeV4Pool('0x2', TOKEN_A, TOKEN_C, 500), // tie with 0x1
+        makeV4Pool('0x3', TOKEN_B, TOKEN_C, 900),
+        makeV4Pool('0x4', TOKEN_C, TOKEN_D, 900), // tie with 0x3
+        makeV4Pool('0x5', TOKEN_A, TOKEN_D, 100),
+      ];
+      const seenLegacy = new Set<string>(['0x3']);
+      const seenFast = new Set<string>(['0x3']);
+
+      const legacy = BasicTopPoolsSelector.getTopNPairs(
+        pools,
+        seenLegacy,
+        ChainId.MAINNET,
+        poolSelectionConfig
+      );
+      const sorted = BasicTopPoolsSelector.buildTvlSortedPools(pools);
+      const fast = BasicTopPoolsSelector.getTopNPairsFromSorted(
+        sorted,
+        seenFast,
+        ChainId.MAINNET,
+        poolSelectionConfig
+      );
+
+      expect(fast).toEqual(legacy);
+      expect(seenFast).toEqual(seenLegacy);
+    });
+
+    it('matches getTopNPairs when the universe has duplicate pool ids with different TVLs', () => {
+      // Legacy dedupes via the seen-set BEFORE sorting, so the first
+      // occurrence (in input order) wins even when a later duplicate has
+      // higher TVL. buildTvlSortedPools must preserve that.
+      const pools: UniPoolInfo[] = [
+        makeV4Pool('0xdup', TOKEN_A, TOKEN_B, 1),
+        makeV4Pool('0xdup', TOKEN_A, TOKEN_B, 1000),
+        makeV4Pool('0x9', TOKEN_B, TOKEN_C, 500),
+      ];
+      const seenLegacy = new Set<string>();
+      const seenFast = new Set<string>();
+
+      const legacy = BasicTopPoolsSelector.getTopNPairs(
+        pools,
+        seenLegacy,
+        ChainId.MAINNET,
+        poolSelectionConfig
+      );
+      const fast = BasicTopPoolsSelector.getTopNPairsFromSorted(
+        BasicTopPoolsSelector.buildTvlSortedPools(pools),
+        seenFast,
+        ChainId.MAINNET,
+        poolSelectionConfig
+      );
+
+      expect(fast).toEqual(legacy);
+      expect(fast.map(p => getPoolTVL(p))).toContain(1); // first occurrence kept
+      expect(seenFast).toEqual(seenLegacy);
+    });
+  });
+
+  describe('AggHooksTopPoolsSelector subset memoization', () => {
+    it('matches legacy output and stays consistent on repeated calls', async () => {
+      const legacyAgg = new AggHooksTopPoolsSelector(
+        aggHooksPoolSelectionPerChainConfig,
+        featureGatedTokensRepository
+      );
+      const memoAgg = new AggHooksTopPoolsSelector(
+        aggHooksPoolSelectionPerChainConfig,
+        featureGatedTokensRepository,
+        true
+      );
+      const pools = stable(buildV4Universe());
+      const [tokenIn, tokenOut] = PAIRS[0];
+
+      const run = (selector: AggHooksTopPoolsSelector) =>
+        selector.filterPools(
+          pools,
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          undefined,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx,
+          {shouldUseCache: true}
+        );
+
+      const legacyResult = await run(legacyAgg);
+      const memoFirst = await run(memoAgg);
+      const memoSecond = await run(memoAgg);
+
+      expect(memoFirst).toEqual(legacyResult);
+      expect(memoSecond).toEqual(memoFirst);
+      // The agg universe is restricted to agg-hook pools only.
+      expect(memoFirst.map(p => p.id)).toEqual(['0xagg']);
+    });
   });
 });
