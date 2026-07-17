@@ -8843,8 +8843,8 @@ describe('QuoteBestSplitFinder', () => {
     // are real registered addresses from the allowlist registry;
     // the test relies on the registry returning a non-undefined
     // protocol for them.
-    const FLUID_DEX_T1_DOMINANT = '0xf154d602fff1239e9f8e4416fa3308e526402888';
-    const FLUID_DEX_T1_SECONDARY = '0xf17bf002c67a176af7bb0a87f4122aba86e66888';
+    const FLUID_DEX_T1_DOMINANT = '0xf143f8c995846bda830d1e3ba98d631079ede888';
+    const FLUID_DEX_T1_SECONDARY = '0xf1e16488795901174365eb84103f20bd28096888';
     const STABLE_SWAP_NG_ADDR = STABLE_SWAP_NG[0]!;
 
     const aggHookRouteAt = (poolAddr: string, hookAddr: string, pct: number) =>
@@ -8933,7 +8933,7 @@ describe('QuoteBestSplitFinder', () => {
     });
 
     it('lowercases mixed-case hook addresses for tag stability', () => {
-      const mixedCase = '0xF154D602fff1239e9f8e4416fa3308e526402888';
+      const mixedCase = '0xF143F8C995846bda830d1e3ba98d631079ede888';
       const aggHook = aggHookRouteAt(
         '0xe300000000000000000000000000000000000000',
         mixedCase,
