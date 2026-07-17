@@ -66,7 +66,16 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // size is bounded by the (chainId, protocol) keys this discoverer serves.
   private readonly snapshotParseMemo = new Map<
     string,
-    {source: string; parsed: TPool[]}
+    {source: string; parsed: TPool[]; fetchedAtMs: number}
+  >();
+
+  // In-flight fetches joinable for coalescing. Entries older than the join
+  // max age are replaced rather than joined: the S3 client has no default
+  // socket timeout, so a hung fetch must not pin the key until restart.
+  private static readonly SNAPSHOT_REFRESH_JOIN_MAX_AGE_MS = 60_000;
+  private readonly snapshotRefreshPromises = new Map<
+    string,
+    {promise: Promise<TPool[]>; startedAtMs: number}
   >();
 
   // Memoizes filterUnsupportedTokenPools output per (pools array, deny-list
@@ -80,6 +89,16 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
 
   protected get snapshotMemoEnabled(): boolean {
     return this.serviceConfig.PoolDiscovery?.SnapshotMemoEnabled ?? false;
+  }
+
+  protected get snapshotSwrEnabled(): boolean {
+    return this.serviceConfig.PoolDiscovery?.SnapshotSwrEnabled ?? false;
+  }
+
+  private get snapshotMaxStaleMs(): number {
+    return (
+      (this.serviceConfig.PoolDiscovery?.SnapshotMaxStaleSeconds ?? 2700) * 1000
+    );
   }
 
   private assertSupportedProtocol(protocol: Protocol): void {
@@ -178,7 +197,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       parsed = memo.parsed;
     } else {
       parsed = JSON.parse(source) as TPool[];
-      this.snapshotParseMemo.set(cacheKey, {source, parsed});
+      this.snapshotParseMemo.set(cacheKey, {
+        source,
+        parsed,
+        fetchedAtMs: Date.now(),
+      });
       // The parsed snapshot is the stability ROOT: it recurs for the cache
       // entry's lifetime, and the compliance filter propagates the mark to
       // its derived arrays.
@@ -190,6 +213,207 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       {tags: [`chain:${chainId}`, `protocol:${protocol}`, `result:${result}`]}
     );
     return parsed;
+  }
+
+  private async loadAndCachePools(
+    cacheKey: string,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<TPool[]> {
+    let retrievedPools = await this._getPools(chainId, protocol, ctx);
+    let retrievedPoolsStr: string;
+    let memoGlobalSet: Set<string> | undefined;
+    if (this.snapshotMemoEnabled) {
+      const {globalSet} =
+        await this.featureGatedTokensRepository.getSnapshot(ctx);
+      memoGlobalSet = globalSet;
+      retrievedPoolsStr = JSON.stringify(
+        BaseCachingPoolDiscoverer.filterByDenySet(retrievedPools, globalSet)
+      );
+      // Round-trip through JSON before memoizing so flag-on serves the
+      // exact objects flag-off would (a cache read always JSON.parses):
+      // e.g. a property explicitly set to undefined keeps its key on the
+      // in-memory graph but is dropped by JSON — and `'tvlUSD' in pool`
+      // checks are sensitive to that difference.
+      retrievedPools = JSON.parse(retrievedPoolsStr) as TPool[];
+    } else {
+      retrievedPools = await this.filterUnsupportedTokenPools(
+        retrievedPools,
+        ctx
+      );
+      retrievedPoolsStr = JSON.stringify(retrievedPools);
+    }
+    ctx.logger.debug(
+      `[${this.discovererName}] Caching retrieved ${protocol} pools`,
+      {
+        cacheKey,
+      }
+    );
+    await this.getPoolsCache.set(cacheKey, retrievedPoolsStr, {
+      ttl:
+        this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
+          chainId
+        ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds,
+    });
+
+    if (this.snapshotMemoEnabled) {
+      if (memoGlobalSet === undefined) {
+        throw new Error('Snapshot memo deny-list payload missing');
+      }
+      this.snapshotParseMemo.set(cacheKey, {
+        source: retrievedPoolsStr,
+        parsed: retrievedPools,
+        fetchedAtMs: Date.now(),
+      });
+      // Seed both memos with the exact string written to the cache so the
+      // first post-miss read is a memo hit. Re-filtering with the same
+      // deny payload is a no-op, so the array seeds its own
+      // compliance-memo entry.
+      const byDenySet = new WeakMap<Set<string>, TPool[]>();
+      byDenySet.set(memoGlobalSet, retrievedPools);
+      this.complianceFilterMemo.set(retrievedPools, byDenySet);
+      markPoolsArrayMemoStable(retrievedPools);
+    }
+
+    return retrievedPools;
+  }
+
+  private getOrStartSnapshotRefresh(
+    cacheKey: string,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<TPool[]> {
+    const joinable = this.getJoinableSnapshotRefresh(cacheKey);
+    if (joinable !== undefined) {
+      return joinable;
+    }
+    const entry = {
+      startedAtMs: Date.now(),
+      promise: undefined as unknown as Promise<TPool[]>,
+    };
+    entry.promise = this.loadAndCachePools(
+      cacheKey,
+      chainId,
+      protocol,
+      ctx
+    ).finally(() => {
+      // Identity check: an aged-out entry replaced by a newer fetch must
+      // not delete the newer fetch's registration when it finally settles.
+      //
+      // Caveat: an aged-out fetch is not cancelled (the S3 SDK has no socket
+      // timeout), so if it eventually resolves it still runs loadAndCachePools
+      // to completion and can overwrite the newer fetch's cache + parse-memo
+      // entry with older data, re-stamping fetchedAtMs as fresh. This is
+      // bounded (requires a >SNAPSHOT_REFRESH_JOIN_MAX_AGE_MS hang that later
+      // succeeds) and self-heals on the next refresh; a fetch-start timestamp
+      // or a registration guard on the write path would close it fully.
+      if (this.snapshotRefreshPromises.get(cacheKey) === entry) {
+        this.snapshotRefreshPromises.delete(cacheKey);
+      }
+    });
+    this.snapshotRefreshPromises.set(cacheKey, entry);
+    return entry.promise;
+  }
+
+  // Returns the memoized snapshot when it is still within the stale-serve
+  // window (and SWR + memo are both on), otherwise undefined. Callers get the
+  // entry back so they can serve `parsed` without re-reading the memo.
+  private getServableStaleSnapshot(
+    cacheKey: string
+  ): {source: string; parsed: TPool[]; fetchedAtMs: number} | undefined {
+    const memo = this.snapshotParseMemo.get(cacheKey);
+    if (
+      this.snapshotSwrEnabled &&
+      this.snapshotMemoEnabled &&
+      memo !== undefined &&
+      Date.now() - memo.fetchedAtMs <= this.snapshotMaxStaleMs
+    ) {
+      return memo;
+    }
+    return undefined;
+  }
+
+  private getJoinableSnapshotRefresh(
+    cacheKey: string
+  ): Promise<TPool[]> | undefined {
+    const existing = this.snapshotRefreshPromises.get(cacheKey);
+    if (
+      existing !== undefined &&
+      Date.now() - existing.startedAtMs <=
+        BaseCachingPoolDiscoverer.SNAPSHOT_REFRESH_JOIN_MAX_AGE_MS
+    ) {
+      return existing.promise;
+    }
+    return undefined;
+  }
+
+  private startBackgroundSnapshotRefresh(
+    cacheKey: string,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): void {
+    // A joinable in-flight fetch already has a metric-emitting starter;
+    // returning avoids double-counting SnapshotRefresh for the same fetch.
+    if (this.getJoinableSnapshotRefresh(cacheKey) !== undefined) {
+      return;
+    }
+    const refreshPromise = this.getOrStartSnapshotRefresh(
+      cacheKey,
+      chainId,
+      protocol,
+      ctx
+    );
+    void (async () => {
+      try {
+        await refreshPromise;
+      } catch (error) {
+        ctx.logger.error(
+          `[${this.discovererName}] Background pool snapshot refresh failed`,
+          {cacheKey, chainId, protocol, error}
+        );
+        try {
+          await ctx.metrics.count(
+            buildMetricKey('PoolDiscoverer.SnapshotRefresh'),
+            1,
+            {
+              tags: [
+                `chain:${ChainId[chainId]}`,
+                `protocol:${protocol}`,
+                'status:failure',
+                'reason:fetch_error',
+              ],
+            }
+          );
+        } catch (metricError) {
+          ctx.logger.warn(
+            `[${this.discovererName}] Failed to emit snapshot refresh failure metric`,
+            {cacheKey, chainId, protocol, metricError}
+          );
+        }
+        return;
+      }
+      try {
+        await ctx.metrics.count(
+          buildMetricKey('PoolDiscoverer.SnapshotRefresh'),
+          1,
+          {
+            tags: [
+              `chain:${ChainId[chainId]}`,
+              `protocol:${protocol}`,
+              'status:success',
+            ],
+          }
+        );
+      } catch (metricError) {
+        ctx.logger.warn(
+          `[${this.discovererName}] Failed to emit snapshot refresh success metric`,
+          {cacheKey, chainId, protocol, metricError}
+        );
+      }
+    })();
   }
 
   // Gets pools from the cache if available, otherwise fetches them from the _getPools implementation.
@@ -238,56 +462,38 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       }
     } catch (e) {
       if (!(e instanceof ErrorNotFound)) {
-        throw e;
+        // A cache-layer failure is when stale serving matters most; fall
+        // through to the SWR path if it has usable data, else preserve the
+        // original throw.
+        if (this.getServableStaleSnapshot(cacheKey) === undefined) {
+          throw e;
+        }
+        ctx.logger.warn(
+          `[${this.discovererName}] Pool snapshot cache read failed; serving stale snapshot`,
+          {cacheKey, chainId, protocol, error: e}
+        );
       }
     }
     if (retrievedPools === undefined) {
       status = 'miss';
-      retrievedPools = await this._getPools(chainId, protocol, ctx);
-      let retrievedPoolsStr: string;
-      if (this.snapshotMemoEnabled) {
-        const {globalSet} =
-          await this.featureGatedTokensRepository.getSnapshot(ctx);
-        retrievedPoolsStr = JSON.stringify(
-          BaseCachingPoolDiscoverer.filterByDenySet(retrievedPools, globalSet)
-        );
-        // Round-trip through JSON before memoizing so flag-on serves the
-        // exact objects flag-off would (a cache read always JSON.parses):
-        // e.g. a property explicitly set to undefined keeps its key on the
-        // in-memory graph but is dropped by JSON — and `'tvlUSD' in pool`
-        // checks are sensitive to that difference.
-        retrievedPools = JSON.parse(retrievedPoolsStr) as TPool[];
-        // Seed both memos with the exact string written to the cache so the
-        // first post-miss read is a memo hit. Re-filtering with the same
-        // deny payload is a no-op, so the array seeds its own
-        // compliance-memo entry.
-        this.snapshotParseMemo.set(cacheKey, {
-          source: retrievedPoolsStr,
-          parsed: retrievedPools,
-        });
-        const byDenySet = new WeakMap<Set<string>, TPool[]>();
-        byDenySet.set(globalSet, retrievedPools);
-        this.complianceFilterMemo.set(retrievedPools, byDenySet);
-        markPoolsArrayMemoStable(retrievedPools);
-      } else {
-        retrievedPools = await this.filterUnsupportedTokenPools(
-          retrievedPools,
+      const staleSnapshot = this.getServableStaleSnapshot(cacheKey);
+      if (staleSnapshot !== undefined) {
+        status = 'stale';
+        this.startBackgroundSnapshotRefresh(cacheKey, chainId, protocol, ctx);
+        retrievedPools = await this.filterUnsupportedTokenPoolsMemoized(
+          staleSnapshot.parsed,
           ctx
         );
-        retrievedPoolsStr = JSON.stringify(retrievedPools);
+      } else {
+        retrievedPools = this.snapshotSwrEnabled
+          ? await this.getOrStartSnapshotRefresh(
+              cacheKey,
+              chainId,
+              protocol,
+              ctx
+            )
+          : await this.loadAndCachePools(cacheKey, chainId, protocol, ctx);
       }
-      ctx.logger.debug(
-        `[${this.discovererName}] Caching retrieved ${protocol} pools`,
-        {
-          cacheKey,
-        }
-      );
-      await this.getPoolsCache.set(cacheKey, retrievedPoolsStr, {
-        ttl:
-          this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
-            chainId
-          ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds,
-      });
     }
 
     await ctx.metrics.count(

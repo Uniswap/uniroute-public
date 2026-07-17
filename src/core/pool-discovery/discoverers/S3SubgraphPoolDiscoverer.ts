@@ -9,11 +9,17 @@ import {IRedisCache} from '@uniswap/lib-cache';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
 import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
+import {promisify} from 'node:util';
 import _ from 'lodash';
 import {
   PARITY_HOOKS_PER_CHAIN,
   ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
 } from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
+
+// Async inflate is unconditional (not behind the snapshot SWR flag): it keeps
+// the decompressed output identical to inflateSync while moving the work off
+// the event loop, so it changes flag-off request timing but not results.
+const inflateAsync = promisify(zlib.inflate);
 
 interface BasePoolData {
   id: string;
@@ -132,7 +138,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
       // Decompress and parse the data
       const before2 = Date.now();
-      const poolString = zlib.inflateSync(poolsBuffer).toString('utf-8');
+      const poolString = (await inflateAsync(poolsBuffer)).toString('utf-8');
       const poolsData = JSON.parse(poolString) as TPoolData[];
       const after2 = Date.now();
 

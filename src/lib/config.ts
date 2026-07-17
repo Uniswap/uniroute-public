@@ -21,6 +21,7 @@ export const DefaultSlippageToleranceForAsync = __PLACEHOLDER__;
 
 const DEFAULT_ALL_POOLS_CACHE_ENTRY_TTL_SECONDS = __PLACEHOLDER__ * __PLACEHOLDER__;
 const DEFAULT_TOKEN_IN_OUT_POOLS_CACHE_ENTRY_TTL_SECONDS = __PLACEHOLDER__ * __PLACEHOLDER__;
+const DEFAULT_POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS = __PLACEHOLDER__ * __PLACEHOLDER__;
 
 const getPoolDiscoveryCacheTtls = () => ({
   allPoolsCacheEntryTtlSeconds: parsePositiveIntEnvOrDefault(
@@ -41,6 +42,15 @@ const getPoolDiscoveryCacheTtls = () => ({
 
 const getPoolDiscoverySnapshotMemoEnabled = () =>
   parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_MEMO_ENABLED', false);
+
+const getPoolDiscoverySnapshotSwrEnabled = () =>
+  parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_SWR_ENABLED', false);
+
+const getPoolDiscoverySnapshotMaxStaleSeconds = () =>
+  parsePositiveIntEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS',
+    DEFAULT_POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS
+  );
 
 // TODO: use this ChainId enum for now
 // Once all monorepo projects switch to PartialChainIdMap<T> from @uniswap/lib-sharedconfig/chainConfig
@@ -105,6 +115,14 @@ export interface IUniRouteServiceConfig {
     // is identical either way. Kill switch: set
     // POOL_DISCOVERY_SNAPSHOT_MEMO_ENABLED to 'false' and redeploy.
     SnapshotMemoEnabled: boolean;
+    // Enables single-flight snapshot loading and stale-while-revalidate
+    // serving when SnapshotMemoEnabled is also on.
+    SnapshotSwrEnabled: boolean;
+    // Upper bound for serving stale parsed snapshots after the in-memory
+    // snapshot cache expires, measured from when THIS process parsed the
+    // snapshot — which can already be near the entry's TTL, so worst-case
+    // data age is pool-cache TTL + this value.
+    SnapshotMaxStaleSeconds: number;
   };
   CachedRoutes: {
     // Whether to enable cached routes.
@@ -236,6 +254,8 @@ export const getUniRouteSyncConfig = (
     },
     PoolDiscovery: {
       SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
+      SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
+      SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
     },
     CachedRoutes: {
       Enabled: true,
@@ -335,6 +355,8 @@ export const getQuickRouteSyncConfig = (
     },
     PoolDiscovery: {
       SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
+      SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
+      SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
     },
     CachedRoutes: {
       Enabled: true,

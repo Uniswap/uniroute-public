@@ -147,6 +147,46 @@ class TestPoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
   }
 }
 
+class ClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
+  constructor(
+    protected serviceConfig: IUniRouteServiceConfig,
+    protected getPoolsCache: IRedisCache<string, string>,
+    protected getPoolsForTokensCache: IRedisCache<string, string>,
+    private readonly loadPools: () => Promise<UniPoolInfo[]>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository = FeatureGatedTokensRepository.empty()
+  ) {
+    super(
+      serviceConfig,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      featureGatedTokensRepository,
+      'ClosurePoolDiscoverer'
+    );
+  }
+
+  protected getDiscovererName(): string {
+    return 'ClosurePoolDiscoverer';
+  }
+
+  protected async _getPools(): Promise<UniPoolInfo[]> {
+    return this.loadPools();
+  }
+
+  protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
+    return [];
+  }
+}
+
+const createDeferred = <T>() => {
+  let resolve: (value: T) => void = () => {};
+  let reject: (reason: unknown) => void = () => {};
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return {promise, resolve, reject};
+};
+
 describe('BaseCachingPoolDiscoverer', () => {
   let getPoolsCache: IRedisCache<string, string>;
   let getPoolsForTokensCache: IRedisCache<string, string>;
@@ -596,7 +636,19 @@ describe('BaseCachingPoolDiscoverer', () => {
   describe('snapshot parse + compliance memoization', () => {
     const memoConfig: IUniRouteServiceConfig = {
       ...serviceConfig,
-      PoolDiscovery: {SnapshotMemoEnabled: true},
+      PoolDiscovery: {
+        ...serviceConfig.PoolDiscovery,
+        SnapshotMemoEnabled: true,
+      },
+    };
+    const swrConfig: IUniRouteServiceConfig = {
+      ...serviceConfig,
+      PoolDiscovery: {
+        ...serviceConfig.PoolDiscovery,
+        SnapshotMemoEnabled: true,
+        SnapshotSwrEnabled: true,
+        SnapshotMaxStaleSeconds: 2700,
+      },
     };
     const chainId = ChainId.MAINNET;
     const protocol = Protocol.V4;
@@ -765,6 +817,309 @@ describe('BaseCachingPoolDiscoverer', () => {
         JSON.stringify(first),
         expect.any(Object)
       );
+    });
+
+    it('coalesces concurrent getPools misses when snapshot SWR is enabled', async () => {
+      const noMemoSwrConfig: IUniRouteServiceConfig = {
+        ...serviceConfig,
+        PoolDiscovery: {
+          ...serviceConfig.PoolDiscovery,
+          SnapshotMemoEnabled: false,
+          SnapshotSwrEnabled: true,
+        },
+      };
+      let loadCount = 0;
+      const deferred = createDeferred<UniPoolInfo[]>();
+      const discoverer = new ClosurePoolDiscoverer(
+        noMemoSwrConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => {
+          loadCount += 1;
+          return deferred.promise;
+        }
+      );
+
+      const requests = Array.from({length: 5}, () =>
+        discoverer.getPools(chainId, protocol, ctx)
+      );
+      await Promise.resolve();
+      expect(loadCount).toBe(1);
+
+      const freshPools = makeSnapshotPools(['0xfresh']);
+      deferred.resolve(freshPools);
+      const results = await Promise.all(requests);
+
+      expect(results).toEqual([
+        freshPools,
+        freshPools,
+        freshPools,
+        freshPools,
+        freshPools,
+      ]);
+      expect(getPoolsCache.set).toHaveBeenCalledTimes(1);
+    });
+
+    it('serves fresh-enough stale memo data and refreshes cache in the background', async () => {
+      let cacheAvailable = true;
+      let storedSnapshot: string | undefined;
+      getPoolsCache.get = vi.fn().mockImplementation(async () => {
+        return cacheAvailable ? storedSnapshot : undefined;
+      });
+      getPoolsCache.set = vi.fn().mockImplementation(async (_key, value) => {
+        storedSnapshot = value;
+      });
+
+      const stalePools = makeSnapshotPools(['0xstale']);
+      const freshPools = makeSnapshotPools(['0xfresh']);
+      const backgroundRefresh = createDeferred<UniPoolInfo[]>();
+      let loadCount = 0;
+      const discoverer = new ClosurePoolDiscoverer(
+        swrConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => {
+          loadCount += 1;
+          if (loadCount === 1) {
+            return stalePools;
+          }
+          return backgroundRefresh.promise;
+        }
+      );
+
+      const first = await discoverer.getPools(chainId, protocol, ctx);
+      expect(first).toEqual(stalePools);
+
+      cacheAvailable = false;
+      const second = await discoverer.getPools(chainId, protocol, ctx);
+
+      expect(second).toBe(first);
+      expect(loadCount).toBe(2);
+      expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
+        tags: ['result', 'stale'],
+      });
+
+      backgroundRefresh.resolve(freshPools);
+      await vi.waitFor(() => {
+        expect(getPoolsCache.set).toHaveBeenCalledTimes(2);
+      });
+      await vi.waitFor(() => {
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          expect.stringContaining('PoolDiscoverer.SnapshotRefresh'),
+          1,
+          {
+            tags: [
+              `chain:${ChainId[chainId]}`,
+              `protocol:${protocol}`,
+              'status:success',
+            ],
+          }
+        );
+      });
+
+      cacheAvailable = true;
+      const third = await discoverer.getPools(chainId, protocol, ctx);
+      expect(third).toEqual(freshPools);
+    });
+
+    it('blocks on fetch when the memo entry is older than SnapshotMaxStaleSeconds', async () => {
+      vi.useFakeTimers({toFake: ['Date']});
+      try {
+        vi.setSystemTime(new Date(0));
+        const maxStaleConfig: IUniRouteServiceConfig = {
+          ...swrConfig,
+          PoolDiscovery: {
+            ...swrConfig.PoolDiscovery,
+            SnapshotMaxStaleSeconds: 1,
+          },
+        };
+        const stalePools = makeSnapshotPools(['0xstale']);
+        const freshPools = makeSnapshotPools(['0xfresh']);
+        const refresh = createDeferred<UniPoolInfo[]>();
+        let loadCount = 0;
+        const discoverer = new ClosurePoolDiscoverer(
+          maxStaleConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          async () => {
+            loadCount += 1;
+            return loadCount === 1 ? stalePools : refresh.promise;
+          }
+        );
+
+        await discoverer.getPools(chainId, protocol, ctx);
+        vi.setSystemTime(new Date(2000));
+
+        let settled = false;
+        const secondRequest = discoverer
+          .getPools(chainId, protocol, ctx)
+          .then(pools => {
+            settled = true;
+            return pools;
+          });
+        await Promise.resolve();
+
+        expect(loadCount).toBe(2);
+        expect(settled).toBe(false);
+
+        refresh.resolve(freshPools);
+        const second = await secondRequest;
+
+        expect(second).toEqual(freshPools);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps pre-SWR concurrent miss behavior when the flag is off', async () => {
+      let loadCount = 0;
+      const discoverer = new ClosurePoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => {
+          loadCount += 1;
+          return makeSnapshotPools([`0x${loadCount}`]);
+        }
+      );
+
+      await Promise.all(
+        Array.from({length: 3}, () =>
+          discoverer.getPools(chainId, protocol, ctx)
+        )
+      );
+
+      expect(loadCount).toBe(3);
+      expect(getPoolsCache.set).toHaveBeenCalledTimes(3);
+    });
+
+    it('catches background refresh failures and retries on the next miss', async () => {
+      const stalePools = makeSnapshotPools(['0xstale']);
+      const retriedPools = makeSnapshotPools(['0xretried']);
+      const failedRefresh = createDeferred<UniPoolInfo[]>();
+      const retryRefresh = createDeferred<UniPoolInfo[]>();
+      let loadCount = 0;
+      const discoverer = new ClosurePoolDiscoverer(
+        swrConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => {
+          loadCount += 1;
+          if (loadCount === 1) {
+            return stalePools;
+          }
+          if (loadCount === 2) {
+            return failedRefresh.promise;
+          }
+          return retryRefresh.promise;
+        }
+      );
+
+      const first = await discoverer.getPools(chainId, protocol, ctx);
+      const second = await discoverer.getPools(chainId, protocol, ctx);
+
+      expect(second).toBe(first);
+      failedRefresh.reject(new Error('refresh failed'));
+      await vi.waitFor(() => {
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          expect.stringContaining('PoolDiscoverer.SnapshotRefresh'),
+          1,
+          {
+            tags: [
+              `chain:${ChainId[chainId]}`,
+              `protocol:${protocol}`,
+              'status:failure',
+              'reason:fetch_error',
+            ],
+          }
+        );
+      });
+
+      const third = await discoverer.getPools(chainId, protocol, ctx);
+      expect(third).toBe(first);
+      expect(loadCount).toBe(3);
+
+      retryRefresh.resolve(retriedPools);
+      await vi.waitFor(() => {
+        expect(getPoolsCache.set).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('serves stale data when the snapshot cache read fails', async () => {
+      const stalePools = makeSnapshotPools(['0xstale']);
+      const refresh = createDeferred<UniPoolInfo[]>();
+      let loadCount = 0;
+      const discoverer = new ClosurePoolDiscoverer(
+        swrConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => {
+          loadCount += 1;
+          return loadCount === 1 ? stalePools : refresh.promise;
+        }
+      );
+
+      const first = await discoverer.getPools(chainId, protocol, ctx);
+
+      getPoolsCache.get = vi.fn().mockRejectedValue(new Error('redis down'));
+      const second = await discoverer.getPools(chainId, protocol, ctx);
+
+      expect(second).toBe(first);
+      expect(loadCount).toBe(2);
+      expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
+        tags: ['result', 'stale'],
+      });
+    });
+
+    it('rethrows snapshot cache read failures when SWR is off', async () => {
+      const discoverer = new ClosurePoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => makeSnapshotPools(['0xfresh'])
+      );
+      await discoverer.getPools(chainId, protocol, ctx);
+
+      getPoolsCache.get = vi.fn().mockRejectedValue(new Error('redis down'));
+
+      await expect(discoverer.getPools(chainId, protocol, ctx)).rejects.toThrow(
+        'redis down'
+      );
+    });
+
+    it('starts a new fetch instead of joining an in-flight refresh older than the join max age', async () => {
+      vi.useFakeTimers({toFake: ['Date']});
+      try {
+        vi.setSystemTime(new Date(0));
+        const hungFetch = createDeferred<UniPoolInfo[]>();
+        const freshPools = makeSnapshotPools(['0xfresh']);
+        let loadCount = 0;
+        const discoverer = new ClosurePoolDiscoverer(
+          swrConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          async () => {
+            loadCount += 1;
+            return loadCount === 1 ? hungFetch.promise : freshPools;
+          }
+        );
+
+        const hungRequest = discoverer.getPools(chainId, protocol, ctx);
+        const joinedRequest = discoverer.getPools(chainId, protocol, ctx);
+        await Promise.resolve();
+        expect(loadCount).toBe(1);
+
+        vi.setSystemTime(new Date(61_000));
+        const second = await discoverer.getPools(chainId, protocol, ctx);
+
+        expect(loadCount).toBe(2);
+        expect(second).toEqual(freshPools);
+
+        hungFetch.resolve(makeSnapshotPools(['0xlate']));
+        await Promise.all([hungRequest, joinedRequest]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });
