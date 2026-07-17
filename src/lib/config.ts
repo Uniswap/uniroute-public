@@ -413,6 +413,9 @@ export const getUniRouteAsyncConfig = (
     Lambda: {
       ...syncConfig.Lambda,
       Type: LambdaType.Async,
+      // Gates the /quoteLong HTTP route only (the SQS worker path is
+      // unbounded). Sized for pre-split p99 (~__PLACEHOLDER__.5s worst bucket) + the 30s
+      // split budget + post-split work, with margin.
       TimeoutSeconds: __PLACEHOLDER__,
     },
     RouteFinder: {
@@ -422,8 +425,15 @@ export const getUniRouteAsyncConfig = (
       MaxExtendedRoutes: __PLACEHOLDER__,
       MaxRoutes: 600,
       MaxSplitRoutes: __PLACEHOLDER__,
+      // Async populates the route cache. Large-notional deep searches
+      // saturate the budget (usd_massive p95 was PINNED at the previous 20s
+      // cap with a __PLACEHOLDER__% timeout rate; usd_1M p95 = __PLACEHOLDER__.2s) and each split
+      // level deeper costs ~__PLACEHOLDER__-13x the last — 30s un-pins usd_1M and buys
+      // usd_massive roughly one more level. Worst-case processing time
+      // feeds the SQS VisibilityTimeout sizing in freshRequestsQueue.ts —
+      // raise that too if this grows.
       RouteSplitTimeoutMs: __PLACEHOLDER__,
-      // Async populates the route cache — keep the full deep-search budget.
+      // Keep the full deep-search budget on every chain.
       RouteSplitTimeoutMsCapByChain: undefined,
     },
   };
