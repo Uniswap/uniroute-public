@@ -9,7 +9,7 @@ import {
   aggHookGasCalibrationAdjustment,
   aggHookQuoterGasFallback,
 } from '../aggHookGasCalibration';
-import {parityHookGasAdjustment} from '../parityHookGasCalibration';
+import {zlcaHookGasAdjustment} from '../zlcaHookGasCalibration';
 import {getGasToken} from '../../../lib/tokenUtils';
 import {CurrencyAmount} from '@uniswap/sdk-core';
 import {TOKEN_OVERHEAD} from '../gas-costs';
@@ -107,9 +107,9 @@ export class V4GasEstimator extends V3GasEstimator {
     }
 
     if (quoterBase !== undefined) {
-      // No parity-hook adjustment on this path: the V4Quoter's
+      // No ZLCA-hook adjustment on this path: the V4Quoter's
       // gasEstimate already executes the hook callback, so adding
-      // PARITY_HOOK_GAS_OVERHEAD here would double-count it.
+      // the ZLCA per-hop overhead here would double-count it.
       const tokenOverhead = TOKEN_OVERHEAD(chainId, quote.route);
       const calibration = this.AGG_HOOK_GAS_CALIBRATION_ENABLED
         ? aggHookGasCalibrationAdjustment(quote.route.path, chainId)
@@ -132,14 +132,14 @@ export class V4GasEstimator extends V3GasEstimator {
       ? aggHookGasCalibrationAdjustment(quote.route.path, chainId)
       : 0n;
 
-    // Parity-hook overhead is NOT env-gated: the heuristic knows
+    // ZLCA-hook overhead is NOT env-gated: the heuristic knows
     // nothing about hook execution, and an under-estimate here
     // becomes a reverting tx gas limit downstream (see
-    // parityHookGasCalibration.ts). Only applied on this path — the
+    // zlcaHookGasCalibration.ts). Only applied on this path — the
     // quoter base above already includes the hook callback.
-    const parityAdjustment = parityHookGasAdjustment(quote.route.path, chainId);
+    const zlcaAdjustment = zlcaHookGasAdjustment(quote.route.path, chainId);
 
-    const totalAdjustment = calibration + parityAdjustment;
+    const totalAdjustment = calibration + zlcaAdjustment;
     if (totalAdjustment === 0n) {
       return heuristicGasDetails;
     }

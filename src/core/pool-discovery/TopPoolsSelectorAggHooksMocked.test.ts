@@ -51,10 +51,12 @@ vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
   AGG_HOOKS_PER_CHAIN: {
     FluidDexT1: {[1]: ['0xaaaa000000000000000000000000000000000001']},
   },
-  // Empty — these tests exercise agg hook exclusion/inclusion only, not the
-  // parity / zero-measured-TVL force-select carve-out. Both must still be
-  // present since getTvlBypassHookAddressSet reads them unconditionally.
-  PARITY_HOOKS_PER_CHAIN: {},
+  // No TVL-bypass hooks — these tests exercise agg hook exclusion/inclusion
+  // only, not the ZLCA / zero-measured-TVL force-select carve-out. The
+  // function must still be present since filterAndAddPools calls it
+  // unconditionally when a chainId is passed.
+  getTvlBypassHookAddresses: () => undefined,
+  ZLCA_HOOKS_PER_CHAIN: {},
   ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: {},
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(['FluidDexT1']),
   GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET:

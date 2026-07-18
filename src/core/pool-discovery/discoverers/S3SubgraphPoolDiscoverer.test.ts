@@ -225,8 +225,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
       expect(pools[0]).toHaveProperty('tvlUSD');
     });
 
-    it('should force select Parity Hook pools despite zero liquidity and zero TVL', () => {
-      const parityPool = {
+    it('should force select ZLCA Hook pools despite zero liquidity and zero TVL', () => {
+      const zlcaPool = {
         id: '1',
         feeTier: '3000',
         liquidity: '0',
@@ -237,33 +237,37 @@ describe('S3SubgraphPoolDiscoverer', () => {
         tvlETH: 0,
         tvlUSD: 0,
       };
-      const nonParityPool = {
-        ...parityPool,
+      const nonZlcaPool = {
+        ...zlcaPool,
         id: '2',
         hooks: '0x0000000000000000000000000000000000000001',
       };
+      const dualpoolPool = {
+        ...zlcaPool,
+        id: '3',
+        hooks: '0x00000078BD49D5279a99b5F4011a5C61eE8caaC0', // dualpool (mixed case)
+      };
 
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore - protected method access for testing
-      const forceSelectParity = discoverer.forceSelectSpecialPools(
-        parityPool as V4PoolInfo,
+      const forceSelectZlca = discoverer['forceSelectSpecialPools'](
+        zlcaPool as V4PoolInfo,
         ChainId.MAINNET
       );
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore - protected method access for testing
-      const forceSelectNonParity = discoverer.forceSelectSpecialPools(
-        nonParityPool as V4PoolInfo,
+      const forceSelectNonZlca = discoverer['forceSelectSpecialPools'](
+        nonZlcaPool as V4PoolInfo,
         ChainId.MAINNET
       );
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore - protected method access for testing
-      const forceSelectWrongChain = discoverer.forceSelectSpecialPools(
-        parityPool as V4PoolInfo,
+      const forceSelectDualpool = discoverer['forceSelectSpecialPools'](
+        dualpoolPool as V4PoolInfo,
+        ChainId.MAINNET
+      );
+      const forceSelectWrongChain = discoverer['forceSelectSpecialPools'](
+        zlcaPool as V4PoolInfo,
         ChainId.ARBITRUM
       );
 
-      expect(forceSelectParity).toEqual(true);
-      expect(forceSelectNonParity).toEqual(false);
+      expect(forceSelectZlca).toEqual(true);
+      expect(forceSelectNonZlca).toEqual(false);
+      expect(forceSelectDualpool).toEqual(true);
       expect(forceSelectWrongChain).toEqual(false);
     });
   });

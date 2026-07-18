@@ -227,11 +227,11 @@ describe('GasEstimators', () => {
       });
     });
 
-    describe('parity-hook gas overhead', () => {
-      // LitePSM USDS mainnet hook (from PARITY_HOOKS_PER_CHAIN)
+    describe('ZLCA-hook gas overhead', () => {
+      // LitePSM USDS mainnet hook (from ZLCA_HOOKS_PER_CHAIN)
       const LITEPSM_USDS_HOOK = '0x958a0904940f744f8c6b72c043ceee3ea34ae888';
 
-      const v4PoolWithParityHook = new V4Pool(
+      const v4PoolWithZlcaHook = new V4Pool(
         token0,
         token1,
         0,
@@ -248,7 +248,7 @@ describe('GasEstimators', () => {
           mockProvider,
           {} as IFreshPoolDetailsWrapper
         );
-        const route = new RouteBasic(Protocol.V4, [v4PoolWithParityHook]);
+        const route = new RouteBasic(Protocol.V4, [v4PoolWithZlcaHook]);
         const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
 
         const gasDetails = await estimator.estimateRouteGas(
@@ -257,7 +257,7 @@ describe('GasEstimators', () => {
           1000
         );
 
-        // Base V4 single-hop gasUse 97_000 + parity hook overhead 500_000
+        // Base V4 single-hop gasUse 97_000 + LitePSM ZLCA overhead 500_000
         expect(gasDetails.gasUse).toBe(BigInt(97000 + 500000));
         expect(gasDetails.gasCostInWei).toBe(
           BigInt(1000) * BigInt(97000 + 500000)
@@ -271,7 +271,7 @@ describe('GasEstimators', () => {
           false,
           true // v4UseQuoterGasAsBase
         );
-        const route = new RouteBasic(Protocol.V4, [v4PoolWithParityHook]);
+        const route = new RouteBasic(Protocol.V4, [v4PoolWithZlcaHook]);
         const quoterGas = 275_000n; // measured V4Quoter return for the hop
         const quote = new QuoteBasic(
           route,
@@ -684,8 +684,8 @@ describe('GasEstimators', () => {
       expect(gasDetails.gasUse).toBe(BigInt(225000)); // (2000 + 80000 + 15000 + 31000) + (2000 + 80000 + 15000)
     });
 
-    it('applies parity-hook overhead on a mixed route heuristic estimate', async () => {
-      const v4ParityPool = new V4Pool(
+    it('applies ZLCA-hook overhead on a mixed route heuristic estimate', async () => {
+      const v4ZlcaPool = new V4Pool(
         token1,
         token2,
         0,
@@ -696,7 +696,7 @@ describe('GasEstimators', () => {
         BigInt(1000),
         BigInt(0)
       );
-      const route = new RouteBasic(Protocol.MIXED, [v3Pool1, v4ParityPool]);
+      const route = new RouteBasic(Protocol.MIXED, [v3Pool1, v4ZlcaPool]);
       const quote = new QuoteBasic(
         route,
         BigInt(1000),
@@ -710,7 +710,7 @@ describe('GasEstimators', () => {
         1000
       );
 
-      // Same V3+V4 heuristic base as above + PARITY_HOOK_GAS_OVERHEAD
+      // Same V3+V4 heuristic base as above + the LitePSM ZLCA overhead
       expect(gasDetails.gasUse).toBe(BigInt(225000 + 500000));
     });
 

@@ -13,7 +13,10 @@ import {
   FLUID_DEX_LITE,
   STABLE_SWAP_NG,
 } from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
-import {LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {
+  DUALPOOL_HOOK_ON_MAINNET,
+  LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
@@ -926,11 +929,19 @@ describe('BasicTopPoolsSelector', () => {
       expect(seenPoolIds.has('0x123')).toBe(true);
     });
 
-    it('should force-include a parity hook pool past the limit despite zero TVL, when chainId is passed', () => {
-      const parityPool = {
+    it('should force-include ZLCA hook pools (LitePSM and dualpool) past the limit despite zero TVL, when chainId is passed', () => {
+      const zlcaPool = {
         ...mockV4PoolWithHooks,
-        id: '0xparity',
+        id: '0xzlca',
         hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+        liquidity: '0',
+        tvlUSD: 0,
+        tvlETH: 0,
+      } as V4PoolInfo;
+      const dualpoolPool = {
+        ...mockV4PoolWithHooks,
+        id: '0xdualpool',
+        hooks: DUALPOOL_HOOK_ON_MAINNET,
         liquidity: '0',
         tvlUSD: 0,
         tvlETH: 0,
@@ -946,7 +957,7 @@ describe('BasicTopPoolsSelector', () => {
       const seenPoolIds = new Set<string>();
 
       const result = BasicTopPoolsSelector['filterAndAddPools'](
-        [...highTvlPools, parityPool],
+        [...highTvlPools, zlcaPool, dualpoolPool],
         () => true,
         2, // limit smaller than the total pool count
         seenPoolIds,
@@ -954,12 +965,17 @@ describe('BasicTopPoolsSelector', () => {
       );
 
       expect(result.map(pool => pool.id)).toEqual(
-        expect.arrayContaining(['0xparity', '0xhightvl0', '0xhightvl1'])
+        expect.arrayContaining([
+          '0xzlca',
+          '0xdualpool',
+          '0xhightvl0',
+          '0xhightvl1',
+        ])
       );
-      expect(result).toHaveLength(3);
+      expect(result).toHaveLength(4);
     });
 
-    it('should not force-include pools with a non-parity hook address', () => {
+    it('should not force-include pools with a non-ZLCA hook address', () => {
       const seenPoolIds = new Set<string>();
 
       const result = BasicTopPoolsSelector['filterAndAddPools'](
@@ -974,10 +990,10 @@ describe('BasicTopPoolsSelector', () => {
       expect(result[0].id).toBe(mockV4Pool.id);
     });
 
-    it('should not force-include parity hook pools when chainId is omitted', () => {
-      const parityPool = {
+    it('should not force-include ZLCA hook pools when chainId is omitted', () => {
+      const zlcaPool = {
         ...mockV4PoolWithHooks,
-        id: '0xparity',
+        id: '0xzlca',
         hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
         liquidity: '0',
         tvlUSD: 0,
@@ -985,7 +1001,7 @@ describe('BasicTopPoolsSelector', () => {
       const seenPoolIds = new Set<string>();
 
       const result = BasicTopPoolsSelector['filterAndAddPools'](
-        [mockV4Pool, parityPool],
+        [mockV4Pool, zlcaPool],
         () => true,
         1,
         seenPoolIds
@@ -1040,13 +1056,13 @@ describe('BasicTopPoolsSelector', () => {
       expect(result[0].id).toBe('0x123');
     });
 
-    it('should include a parity hook direct pair pool even when outranked by topNDirectPairs on TVL', () => {
+    it('should include a ZLCA hook direct pair pool even when outranked by topNDirectPairs on TVL', () => {
       // poolSelectionConfig[ChainId.MAINNET].topNDirectPairs is 2 — three
-      // competing high-TVL pools would normally squeeze the zero-TVL parity
+      // competing high-TVL pools would normally squeeze the zero-TVL ZLCA
       // hook pool out entirely.
-      const parityPool = {
+      const zlcaPool = {
         ...mockV4PoolWithHooks,
-        id: '0xparity',
+        id: '0xzlca',
         hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
         liquidity: '0',
         tvlUSD: 0,
@@ -1060,7 +1076,7 @@ describe('BasicTopPoolsSelector', () => {
             tvlUSD: 5000,
           }) as V4PoolInfo
       );
-      const pools = [...highTvlPools, parityPool];
+      const pools = [...highTvlPools, zlcaPool];
       const selectedPoolIds = new Set<string>();
       const tokenPoolIndex = buildTokenPoolIndex(pools);
 
@@ -1075,7 +1091,7 @@ describe('BasicTopPoolsSelector', () => {
         poolSelectionConfig
       );
 
-      expect(result.map(pool => pool.id)).toContain('0xparity');
+      expect(result.map(pool => pool.id)).toContain('0xzlca');
     });
   });
 
@@ -1393,14 +1409,14 @@ describe('BasicTopPoolsSelector', () => {
       expect(result[0].id).toBe('0x123');
     });
 
-    it('should NOT force-include a parity hook pool — this bucket is the whole chain, not scoped to a request', () => {
+    it('should NOT force-include a ZLCA hook pool — this bucket is the whole chain, not scoped to a request', () => {
       // Regression test: getTopNPairs operates on the entire chain-wide pool
-      // universe (not tokenIn/tokenOut-scoped), so force-selecting a parity
+      // universe (not tokenIn/tokenOut-scoped), so force-selecting a ZLCA
       // hook pool here would inject it as a route candidate for every quote
       // on the chain, not just requests where it's actually relevant.
-      const parityPool = {
+      const zlcaPool = {
         ...mockV4PoolWithHooks,
-        id: '0xparity',
+        id: '0xzlca',
         hooks: LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
         liquidity: '0',
         tvlUSD: 0,
@@ -1414,10 +1430,10 @@ describe('BasicTopPoolsSelector', () => {
             tvlUSD: 5000,
           }) as V4PoolInfo
       );
-      const filteredPools = [...highTvlPools, parityPool];
+      const filteredPools = [...highTvlPools, zlcaPool];
       const selectedPoolIds = new Set<string>();
       // poolSelectionConfig[ChainId.MAINNET].topNPairs — set a limit smaller
-      // than the pool count so the zero-TVL parity pool would only survive
+      // than the pool count so the zero-TVL ZLCA pool would only survive
       // if force-selection were (incorrectly) applied here.
       const configWithSmallLimit: typeof poolSelectionConfig = {
         ...poolSelectionConfig,
@@ -1434,7 +1450,7 @@ describe('BasicTopPoolsSelector', () => {
         configWithSmallLimit
       );
 
-      expect(result.map(pool => pool.id)).not.toContain('0xparity');
+      expect(result.map(pool => pool.id)).not.toContain('0xzlca');
       expect(result).toHaveLength(2);
     });
   });

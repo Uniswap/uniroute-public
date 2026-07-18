@@ -166,15 +166,18 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     const tvlBypassHooks = (variables.tvlBypassHooks as string[]).map(h =>
       h.toLowerCase()
     );
-    // Parity registry (PARITY_HOOKS_PER_CHAIN) contributes LitePSM. Mainnet has
-    // no ZERO_MEASURED_TVL_HOOKS_PER_CHAIN entries, so the bypass set is exactly
-    // the two LitePSM hooks.
+    // ZLCA registry (ZLCA_HOOKS_PER_CHAIN) contributes the LitePSM and
+    // dualpool hooks. Mainnet has no ZERO_MEASURED_TVL_HOOKS_PER_CHAIN
+    // entries, so the bypass set is exactly these three.
     expect(tvlBypassHooks).toContain(
       '0x958a0904940f744f8c6b72c043ceee3ea34ae888'
     ); // LitePSM USDS
     expect(tvlBypassHooks).toContain(
       '0x958942af77dcd973b815b2a16bd88a5134c46888'
     ); // LitePSM DAI
+    expect(tvlBypassHooks).toContain(
+      '0x00000078bd49d5279a99b5f4011a5c61ee8caac0'
+    ); // dualpool
   });
 
   it('fetches the Robinhood zero-measured-TVL hooks by address', async () => {
@@ -222,8 +225,8 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
   });
 
   it('survives the post-fetch sanitize filter despite zero liquidity and zero TVL', async () => {
-    const parityHookPool = {
-      id: '0xparitypool',
+    const zlcaHookPool = {
+      id: '0xzlcapool',
       feeTier: '3000',
       tickSpacing: '60',
       hooks: '0x958a0904940f744f8c6b72c043ceee3ea34ae888', // LitePSM USDS
@@ -263,14 +266,14 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
         // Only return the pool on the first page (id === '') so pagination
         // terminates instead of looping on the same result forever.
         if (query.includes('getV4TvlBypassHookPools') && variables.id === '') {
-          return {pools: [parityHookPool]};
+          return {pools: [zlcaHookPool]};
         }
         return {pools: []};
       },
     };
 
     const pools = await provider.getPools();
-    expect(pools.some(p => p.id === '0xparitypool')).toBe(true);
+    expect(pools.some(p => p.id === '0xzlcapool')).toBe(true);
   });
 });
 

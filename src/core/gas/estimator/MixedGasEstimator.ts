@@ -19,7 +19,7 @@ import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWra
 import {Protocol} from '../../../models/pool/Protocol';
 import {Pool} from '../../../models/pool/Pool';
 import {aggHookGasCalibrationAdjustment} from '../aggHookGasCalibration';
-import {parityHookGasAdjustment} from '../parityHookGasCalibration';
+import {zlcaHookGasAdjustment} from '../zlcaHookGasCalibration';
 
 // V2-specific constants
 const COST_PER_EXTRA_HOP_V2 = BigNumber.from(50000);
@@ -114,8 +114,8 @@ export class MixedGasEstimator extends BaseGasEstimator {
           TOKEN_OVERHEAD(chainId, sectionRoute)
         );
       }
-      // applyParityAdjustment=false: the MixedQuoter gasEstimate
-      // already executes hook callbacks, including parity hooks.
+      // applyZlcaAdjustment=false: the MixedQuoter gasEstimate
+      // already executes hook callbacks, including ZLCA hooks.
       return this.buildGasDetailsWithCalibration(
         quote,
         chainId,
@@ -205,8 +205,8 @@ export class MixedGasEstimator extends BaseGasEstimator {
 
   /**
    * Composes the final `GasDetails` from a base gas use plus the
-   * agg-hook calibration when enabled and the parity-hook overhead
-   * when `applyParityAdjustment` is set (heuristic base only).
+   * agg-hook calibration when enabled and the ZLCA-hook overhead
+   * when `applyZlcaAdjustment` is set (heuristic base only).
    * Shared by both the quoter-return base path and the per-section
    * heuristic path so the calibration semantics stay identical
    * regardless of which baseline was chosen.
@@ -216,7 +216,7 @@ export class MixedGasEstimator extends BaseGasEstimator {
     chainId: ChainId,
     gasPriceWei: number,
     baseGasUseBn: BigNumber,
-    applyParityAdjustment: boolean
+    applyZlcaAdjustment: boolean
   ): GasDetails {
     let gasUseBn = baseGasUseBn;
     if (this.AGG_HOOK_GAS_CALIBRATION_ENABLED) {
@@ -229,17 +229,14 @@ export class MixedGasEstimator extends BaseGasEstimator {
       }
     }
 
-    // Parity-hook overhead is NOT env-gated (see
-    // parityHookGasCalibration.ts) but only applies on the heuristic
+    // ZLCA-hook overhead is NOT env-gated (see
+    // zlcaHookGasCalibration.ts) but only applies on the heuristic
     // base — quoter-based estimates already include the hook
     // callback.
-    if (applyParityAdjustment) {
-      const parityAdjustment = parityHookGasAdjustment(
-        quote.route.path,
-        chainId
-      );
-      if (parityAdjustment > 0n) {
-        gasUseBn = gasUseBn.add(BigNumber.from(parityAdjustment.toString()));
+    if (applyZlcaAdjustment) {
+      const zlcaAdjustment = zlcaHookGasAdjustment(quote.route.path, chainId);
+      if (zlcaAdjustment > 0n) {
+        gasUseBn = gasUseBn.add(BigNumber.from(zlcaAdjustment.toString()));
       }
     }
 

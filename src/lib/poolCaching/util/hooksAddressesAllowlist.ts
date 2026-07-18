@@ -524,44 +524,73 @@ export const LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET =
 export const LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET =
   '0x958942af77dcd973b815b2a16bd88a5134c46888';
 
+export const DUALPOOL_HOOK_ON_MAINNET =
+  '0x00000078bd49d5279a99b5f4011a5c61ee8caac0';
+
 /**
- * "Parity Hooks" — V4 hooks that perform fixed-parity conversions (1:1 or
- * near-1:1 swaps between two representations of the same value, e.g. a PSM
- * minting/redeeming between two stablecoins). Their reserves are custodied
- * inside the PoolManager (so the standard V4Quoter prices them fine — no
- * AggHookQuoter/AGG_HOOKS_PER_CHAIN treatment needed), but they use custom
- * accounting (BeforeSwapReturnsDelta/AfterSwapReturnsDelta) rather than
- * normal LP positions, so the standard concentrated-liquidity `liquidity`
- * field is structurally always 0 for their pools — and their
- * `totalValueLockedETH` as reported by the subgraph may not reflect their
- * real economic backing either. Neither is a usable admission signal, so
- * they get their own hook-address-keyed registry here rather than a generic
- * per-hook special-case.
+ * "ZLCA Hooks" — Zero-Liquidity Custom-Accounting hooks: V4 hooks whose
+ * custom accounting (e.g. a PSM-style fixed-parity conversion via
+ * BeforeSwapReturnsDelta like the LitePSM hooks, or JIT-provisioned
+ * liquidity like the dualpool hook) means their pools hold no ordinary LP
+ * positions, so the standard concentrated-liquidity `liquidity` field is
+ * structurally always 0 — and their subgraph `totalValueLockedETH` may not
+ * reflect real economic backing either. Neither is a usable admission
+ * signal, so they are admitted to routing purely by membership in this
+ * registry (a small, explicitly curated list — same trust model as the
+ * plain `HOOKS_ADDRESSES_ALLOWLIST`, and every address here must ALSO
+ * appear there). Their reserves are custodied inside the PoolManager, so
+ * the standard V4Quoter prices them fine — no
+ * AggHookQuoter/AGG_HOOKS_PER_CHAIN treatment needed.
  *
- * Current behavior tied to this category: exemption from BOTH the
+ * Routing behavior tied to this category: exemption from BOTH the
  * subgraph's V4_MIN_TVL_ETH floor at the query level AND the post-fetch
  * liquidity/TVL sanitize filter during pool-cache discovery (see
- * `subgraphProvider.ts`) — hook-address membership (a small, explicitly
- * curated list) is the sole admission gate, same trust model as the plain
- * `HOOKS_ADDRESSES_ALLOWLIST`. This matters for their use as intermediate-hop
- * candidates (direct-pair requests already find them via DirectPoolDiscoverer
- * regardless of TVL/liquidity). Unlike the permissioned-hook query, no
- * adapter/known-token bounding is applied here — there's no
- * compliance-sensitive leak risk for a parity-conversion hook, so a plain
- * `hooks_in` fetch is sufficient.
+ * `subgraphProvider.ts`), plus force-selection past TVL-ranked topN cuts
+ * (see `TopPoolsSelector.ts` / `S3SubgraphPoolDiscovererV4`). This matters
+ * for their use as intermediate-hop candidates (direct-pair requests
+ * already find them via DirectPoolDiscoverer regardless of TVL/liquidity).
+ * Unlike the permissioned-hook query, no adapter/known-token bounding is
+ * applied — safe only while no hook here can have compliance-sensitive
+ * pools. Do not add a hook whose pools can involve permissioned or
+ * compliance-sensitive tokens without adding bounding like the
+ * permissioned-hook query's.
  *
- * Add future parity hooks (other PSM-style / fixed-conversion hooks) here to
- * pick up the same treatment automatically.
+ * The map value is the hook's per-hop gas overhead (gas units), added on
+ * the HEURISTIC estimation path for every leg through one of its pools
+ * (see `zlcaHookGasCalibration.ts`). These hooks do real work in their
+ * swap callbacks that the V3-style heuristic (tuned for plain
+ * concentrated-liquidity hops at ~60-97k) cannot see, and an
+ * under-estimated `gasUseEstimate` becomes the tx gas limit downstream
+ * (trading uses it verbatim instead of simulating) — so a shortfall
+ * reverts user swaps (OOG at the final Permit2 settle,
+ * TRANSFER_FROM_FAILED), not just mis-ranks routes. Over-estimating is
+ * safe (unused gas is refunded) at the cost of a gas-ranking penalty
+ * against the hook's routes — the right direction to err. Quoter-based
+ * estimates must NOT add it: the V4Quoter's `gasEstimate` already includes
+ * the hook callback.
+ *
+ * Values: the LitePSM 500k was calibrated 2026-07-06 on mainnet — hook
+ * callback frame ~218k in a reverted prod-shape trace, V4Quoter view-call
+ * 258-275k for the full hop vs a ~60-97k heuristic base, doubled for
+ * headroom since quoter view-calls understate tx-context cost by
+ * +67k..+188k in the agg-hook calibration. The dualpool 3M is per the hook
+ * team's guidance.
+ *
+ * Add future zero-liquidity custom-accounting hooks here to pick up the
+ * same treatment automatically.
  */
-// Intersected with Record<number, string[]> (matching HOOKS_ADDRESSES_ALLOWLIST's
+// Intersected with Record<number, ...> (matching HOOKS_ADDRESSES_ALLOWLIST's
 // shape) so this can be indexed by both this file's @uniswap/sdk-core ChainId
 // and the separate, numerically-overlapping ChainId enum in lib/config.ts.
-export const PARITY_HOOKS_PER_CHAIN: Partial<Record<ChainId, string[]>> &
-  Record<number, string[]> = {
-  [ChainId.MAINNET]: [
-    LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
-    LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
-  ],
+export const ZLCA_HOOKS_PER_CHAIN: Partial<
+  Record<ChainId, Record<string, bigint>>
+> &
+  Record<number, Record<string, bigint>> = {
+  [ChainId.MAINNET]: {
+    [LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET]: 500_000n,
+    [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: 500_000n,
+    [DUALPOOL_HOOK_ON_MAINNET]: 3_000_000n,
+  },
 };
 
 export const ARMSYS_ON_BASE = '0x7fb4846d3987476577319f112731bb04f45880c8';
@@ -645,9 +674,10 @@ export const NFTX_V4_HOOK_ON_MAINNET =
  * hook-accounted reserves or an unpriced counter token), so the standard
  * discovery query would drop them. Addresses listed here are admitted to the
  * routing cache by hook address, bypassing the TVL/liquidity floor — same
- * treatment and trust model as `PARITY_HOOKS_PER_CHAIN`. Every address must
- * also appear in `HOOKS_ADDRESSES_ALLOWLIST`; remove an entry once its pool
- * clears the floor on its own.
+ * routing-admission treatment and trust model as `ZLCA_HOOKS_PER_CHAIN`
+ * (but with no per-hop gas overhead). Every address must also appear in
+ * `HOOKS_ADDRESSES_ALLOWLIST`; remove an entry once its pool clears the
+ * floor on its own.
  */
 export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
   Record<ChainId, string[]>
@@ -658,6 +688,40 @@ export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
     PENSION_TAX_HOOK_ON_ROBINHOOD,
   ],
 };
+
+// Union of both TVL-bypass registries, built once at module load (same
+// rationale as AGG_HOOKS_REVERSE_LOOKUP): chainId -> lowercased hook set.
+const TVL_BYPASS_HOOKS_BY_CHAIN = new Map<number, Set<string>>();
+{
+  const addHooks = (chainIdStr: string, hooks: string[]) => {
+    if (hooks.length === 0) return;
+    const chainId = Number(chainIdStr);
+    const set = TVL_BYPASS_HOOKS_BY_CHAIN.get(chainId) ?? new Set<string>();
+    hooks.forEach(hook => set.add(hook.toLowerCase()));
+    TVL_BYPASS_HOOKS_BY_CHAIN.set(chainId, set);
+  };
+  for (const [chainIdStr, hooks] of Object.entries(ZLCA_HOOKS_PER_CHAIN)) {
+    addHooks(chainIdStr, Object.keys(hooks));
+  }
+  for (const [chainIdStr, hooks] of Object.entries(
+    ZERO_MEASURED_TVL_HOOKS_PER_CHAIN
+  )) {
+    addHooks(chainIdStr, hooks);
+  }
+}
+
+/**
+ * TVL-bypass hook addresses for a chain (ZLCA ∪ zero-measured-TVL,
+ * lowercased), or undefined when neither registry has entries — callers
+ * use the undefined to skip bypass handling entirely. Single source of
+ * truth for the routing-admission consumers (subgraph fetch + sanitize
+ * exemption, top-pool force-selection, cache-read force-select).
+ */
+export function getTvlBypassHookAddresses(
+  chainId: number
+): ReadonlySet<string> | undefined {
+  return TVL_BYPASS_HOOKS_BY_CHAIN.get(chainId);
+}
 
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
@@ -720,6 +784,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     DIAMONDHANDSHOOK_ON_MAINNET,
     LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
     LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+    DUALPOOL_HOOK_ON_MAINNET,
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET,
     PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET,

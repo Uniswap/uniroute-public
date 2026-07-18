@@ -42,8 +42,7 @@ import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
 import {
   AGG_HOOKS_PER_CHAIN,
-  PARITY_HOOKS_PER_CHAIN,
-  ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
+  getTvlBypassHookAddresses,
 } from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 
 // Token-to-pool index for faster lookups
@@ -708,27 +707,6 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return uniquePools.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
   }
 
-  // TVL-bypass hook pools (parity hooks + zero-measured-TVL hooks — see the
-  // PARITY_HOOKS_PER_CHAIN and ZERO_MEASURED_TVL_HOOKS_PER_CHAIN doc comments)
-  // report structurally ~0 liquidity/tvlUSD, so they'd otherwise always sort
-  // to the bottom of a TVL-ranked pool set and get sliced off by topN limits,
-  // even for their own direct pair. Mirrors the forceSelect exemption
-  // S3SubgraphPoolDiscovererV4 applies at the pool-cache read step.
-  //
-  // Computed once per filterAndAddPools call (not per pool) since chainId is
-  // invariant across the call — undefined for chains with neither registry
-  // configured so callers can skip the force-select split entirely.
-  protected static getTvlBypassHookAddressSet(
-    chainId: ChainId
-  ): Set<string> | undefined {
-    const bypassHooks = [
-      ...(PARITY_HOOKS_PER_CHAIN[chainId] ?? []),
-      ...(ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[chainId] ?? []),
-    ];
-    if (bypassHooks.length === 0) return undefined;
-    return new Set(bypassHooks.map(hook => hook.toLowerCase()));
-  }
-
   protected static filterAndAddPools(
     poolsToFilter: UniPoolInfo[],
     filterFn: (pool: UniPoolInfo) => boolean,
@@ -747,10 +725,14 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       return false;
     });
 
+    // TVL-bypass hook pools report structurally ~0 liquidity/tvlUSD, so
+    // they'd otherwise always sort to the bottom of a TVL-ranked pool set
+    // and get sliced off by topN limits, even for their own direct pair.
+    // Mirrors the forceSelect exemption S3SubgraphPoolDiscovererV4 applies
+    // at the pool-cache read step. Undefined for chains with no TVL-bypass
+    // hooks configured so we can skip the force-select split entirely.
     const tvlBypassHookAddressSet =
-      chainId === undefined
-        ? undefined
-        : BasicTopPoolsSelector.getTvlBypassHookAddressSet(chainId);
+      chainId === undefined ? undefined : getTvlBypassHookAddresses(chainId);
 
     if (!tvlBypassHookAddressSet) {
       // No TVL-bypass hooks configured for this chain — identical cost to
@@ -777,7 +759,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     rankedRemainder.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
 
     // Forced pools are additive — they don't consume a slot from the
-    // ordinary top-N budget, so a rarely-competing parity hook pool can't
+    // ordinary top-N budget, so a rarely-competing ZLCA hook pool can't
     // displace a legitimately higher-TVL pool from its usual spot.
     const keptRemainder = rankedRemainder.slice(0, limit);
 
@@ -959,7 +941,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   ): UniPoolInfo[] {
     // Deliberately no chainId here, unlike the other filterAndAddPools call
     // sites in this class. filteredPools is the whole chain's pool universe,
-    // not scoped to tokenIn/tokenOut — force-selecting parity hook pools here
+    // not scoped to tokenIn/tokenOut — force-selecting ZLCA hook pools here
     // would inject them into every single quote request on the chain
     // regardless of relevance, not just requests where they're actually a
     // plausible hop. The token-scoped call sites (getDirectPairs,

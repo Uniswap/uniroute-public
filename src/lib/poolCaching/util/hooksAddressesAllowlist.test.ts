@@ -3,6 +3,10 @@ import {
   AGG_HOOKS_PER_CHAIN,
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST,
   getProtocolForAggHookAddress,
+  getTvlBypassHookAddresses,
+  HOOKS_ADDRESSES_ALLOWLIST,
+  ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
+  ZLCA_HOOKS_PER_CHAIN,
 } from './hooksAddressesAllowlist';
 import {
   FLUID_DEX_1,
@@ -140,5 +144,64 @@ describe('getProtocolForAggHookAddress', () => {
         }
       }
     });
+  });
+});
+
+describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST', () => {
+  // ZLCA / zero-measured-TVL entries are only ADMITTED to routing by the
+  // TVL-bypass query, but still have to survive allowlist filtering —
+  // custom-accounting hooks have no auto-allowlist escape in
+  // v4HooksPoolsFiltering, so a registry entry missing from the allowlist
+  // is silently unroutable dead config.
+  const allowlistFor = (chainIdStr: string) =>
+    new Set(
+      (HOOKS_ADDRESSES_ALLOWLIST[Number(chainIdStr)] ?? []).map(address =>
+        address.toLowerCase()
+      )
+    );
+
+  it('every ZLCA hook is lowercase and allowlisted on its chain', () => {
+    for (const [chainIdStr, hooks] of Object.entries(ZLCA_HOOKS_PER_CHAIN)) {
+      const allowlist = allowlistFor(chainIdStr);
+      for (const hook of Object.keys(hooks)) {
+        // Lowercase keys are load-bearing: zlcaHookGasAdjustment looks up
+        // lowercased pool hook addresses directly against these keys.
+        expect(hook, `ZLCA hook ${hook} on chain ${chainIdStr}`).toBe(
+          hook.toLowerCase()
+        );
+        expect(
+          allowlist.has(hook),
+          `ZLCA hook ${hook} on chain ${chainIdStr} is missing from HOOKS_ADDRESSES_ALLOWLIST`
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('every zero-measured-TVL hook is allowlisted on its chain', () => {
+    for (const [chainIdStr, hooks] of Object.entries(
+      ZERO_MEASURED_TVL_HOOKS_PER_CHAIN
+    )) {
+      const allowlist = allowlistFor(chainIdStr);
+      for (const hook of hooks) {
+        expect(
+          allowlist.has(hook.toLowerCase()),
+          `zero-measured-TVL hook ${hook} on chain ${chainIdStr} is missing from HOOKS_ADDRESSES_ALLOWLIST`
+        ).toBe(true);
+      }
+    }
+  });
+
+  it('getTvlBypassHookAddresses unions both registries and is undefined elsewhere', () => {
+    const mainnet = getTvlBypassHookAddresses(ChainId.MAINNET);
+    for (const hook of Object.keys(
+      ZLCA_HOOKS_PER_CHAIN[ChainId.MAINNET] ?? {}
+    )) {
+      expect(mainnet?.has(hook)).toBe(true);
+    }
+    const robinhood = getTvlBypassHookAddresses(4663);
+    for (const hook of ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[4663] ?? []) {
+      expect(robinhood?.has(hook.toLowerCase())).toBe(true);
+    }
+    expect(getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)).toBeUndefined();
   });
 });

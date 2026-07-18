@@ -10,10 +10,7 @@ import {
   getPermissionedHookAddresses,
 } from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {getMajorTokens} from '../util/majorTokens';
-import {
-  PARITY_HOOKS_PER_CHAIN,
-  ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
-} from '../util/hooksAddressesAllowlist';
+import {getTvlBypassHookAddresses} from '../util/hooksAddressesAllowlist';
 import retry from 'async-retry';
 import Timeout from 'await-timeout';
 import {gql, GraphQLClient} from 'graphql-request';
@@ -266,21 +263,14 @@ export abstract class SubgraphProvider<
     // treated identically here (fetched by hook address with no liquidity/TVL
     // floor — hook-address membership is the sole admission gate, same trust
     // model as the plain HOOKS_ADDRESSES_ALLOWLIST):
-    //   - PARITY_HOOKS_PER_CHAIN: fixed-parity conversion hooks (PSM-style)
-    //     whose custom accounting (BeforeSwapReturnsDelta) keeps `liquidity` 0.
+    //   - ZLCA_HOOKS_PER_CHAIN: zero-liquidity custom-accounting hooks whose
+    //     custom accounting keeps `liquidity` structurally 0.
     //   - ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: hooks whose pools price to 0 in
     //     the subgraph (hook-accounted reserves leaving liquidity=0, or an
     //     unpriced counter token) — see that registry's doc comment.
     const tvlBypassHooks =
       this.protocol === Protocol.V4
-        ? Array.from(
-            new Set(
-              [
-                ...(PARITY_HOOKS_PER_CHAIN[this.chainId] ?? []),
-                ...(ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[this.chainId] ?? []),
-              ].map(h => h.toLowerCase())
-            )
-          )
+        ? Array.from(getTvlBypassHookAddresses(this.chainId) ?? [])
         : [];
     const includeTvlBypassQuery = tvlBypassHooks.length > 0;
     const tvlBypassHookQuery = {
@@ -391,7 +381,7 @@ export abstract class SubgraphProvider<
           ]
         : []),
       // 5. V4: TVL-bypass hook pools (see comment above). Skipped on chains
-      // with no parity / zero-measured-TVL hooks configured.
+      // with no ZLCA / zero-measured-TVL hooks configured.
       ...(includeTvlBypassQuery ? [tvlBypassHookQuery] : []),
     ];
 
@@ -589,15 +579,11 @@ export abstract class SubgraphProvider<
       // their pools structurally report liquidity=0 and/or unreliable TVL
       // (see tvlBypassHookQuery comment above), so this filter would otherwise
       // silently undo the dedicated query that fetched them. Both registries
-      // (parity + zero-measured-TVL) are exempted identically.
-      const tvlBypassHookAddressSet = new Set(
-        this.protocol === Protocol.V4
-          ? [
-              ...(PARITY_HOOKS_PER_CHAIN[this.chainId] ?? []),
-              ...(ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[this.chainId] ?? []),
-            ].map(h => h.toLowerCase())
-          : []
-      );
+      // (ZLCA + zero-measured-TVL) are exempted identically.
+      const tvlBypassHookAddressSet =
+        (this.protocol === Protocol.V4
+          ? getTvlBypassHookAddresses(this.chainId)
+          : undefined) ?? new Set<string>();
       poolsSanitized = allPools
         .filter(pool => {
           const liquidity = parseInt(pool.liquidity);

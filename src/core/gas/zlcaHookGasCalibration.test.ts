@@ -1,8 +1,5 @@
 import {describe, it, expect} from 'vitest';
-import {
-  PARITY_HOOK_GAS_OVERHEAD,
-  parityHookGasAdjustment,
-} from './parityHookGasCalibration';
+import {zlcaHookGasAdjustment} from './zlcaHookGasCalibration';
 import {ChainId} from '../../lib/config';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
@@ -10,7 +7,12 @@ import {Address} from '../../models/address/Address';
 import {
   LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
   LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+  DUALPOOL_HOOK_ON_MAINNET,
 } from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+
+// Registry values asserted explicitly so a registry edit shows up here.
+const LITEPSM_OVERHEAD = 500_000n;
+const DUALPOOL_OVERHEAD = 3_000_000n;
 
 const UNREGISTERED_HOOK_ADDR = '0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 const NO_HOOK_ADDR = '0x0000000000000000000000000000000000000000';
@@ -45,27 +47,27 @@ function makeV2Pool(): V2Pool {
   );
 }
 
-describe('parityHookGasAdjustment', () => {
+describe('zlcaHookGasAdjustment', () => {
   it('returns 0n for empty path', () => {
-    expect(parityHookGasAdjustment([], ChainId.MAINNET)).toBe(0n);
+    expect(zlcaHookGasAdjustment([], ChainId.MAINNET)).toBe(0n);
   });
 
   it('returns 0n for V2-only route', () => {
-    expect(parityHookGasAdjustment([makeV2Pool()], ChainId.MAINNET)).toBe(0n);
+    expect(zlcaHookGasAdjustment([makeV2Pool()], ChainId.MAINNET)).toBe(0n);
   });
 
   it('returns 0n for V4 pool with no hooks (zero address)', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
         [makeV4Pool(NO_HOOK_ADDR, FAKE_POOL_ID_A)],
         ChainId.MAINNET
       )
     ).toBe(0n);
   });
 
-  it('returns 0n for V4 pool with a non-parity hook', () => {
+  it('returns 0n for V4 pool with a non-ZLCA hook', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
         [makeV4Pool(UNREGISTERED_HOOK_ADDR, FAKE_POOL_ID_A)],
         ChainId.MAINNET
       )
@@ -74,46 +76,67 @@ describe('parityHookGasAdjustment', () => {
 
   it('returns the overhead for a LitePSM USDS hook leg on mainnet', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
         [makeV4Pool(LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET, FAKE_POOL_ID_A)],
         ChainId.MAINNET
       )
-    ).toBe(PARITY_HOOK_GAS_OVERHEAD);
+    ).toBe(LITEPSM_OVERHEAD);
   });
 
   it('returns the overhead for a LitePSM DAI hook leg on mainnet', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
         [makeV4Pool(LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET, FAKE_POOL_ID_A)],
         ChainId.MAINNET
       )
-    ).toBe(PARITY_HOOK_GAS_OVERHEAD);
+    ).toBe(LITEPSM_OVERHEAD);
   });
 
-  it('returns 0n when a registered mainnet hook appears on a chain with no parity hooks', () => {
+  it('returns the dualpool overhead for a dualpool hook leg on mainnet', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
+        [makeV4Pool(DUALPOOL_HOOK_ON_MAINNET, FAKE_POOL_ID_A)],
+        ChainId.MAINNET
+      )
+    ).toBe(DUALPOOL_OVERHEAD);
+  });
+
+  it('returns 0n when a registered mainnet hook appears on a chain with no ZLCA hooks', () => {
+    expect(
+      zlcaHookGasAdjustment(
         [makeV4Pool(LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET, FAKE_POOL_ID_A)],
         ChainId.ARBITRUM
       )
     ).toBe(0n);
   });
 
-  it('sums per-leg overhead across a route with two parity-hook legs', () => {
+  it('sums per-leg overhead across a route with two ZLCA-hook legs', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
         [
           makeV4Pool(LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET, FAKE_POOL_ID_A),
           makeV4Pool(LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET, FAKE_POOL_ID_B),
         ],
         ChainId.MAINNET
       )
-    ).toBe(2n * PARITY_HOOK_GAS_OVERHEAD);
+    ).toBe(2n * LITEPSM_OVERHEAD);
   });
 
-  it('only counts parity legs in a mixed route (V2 + parity hook + non-parity hook)', () => {
+  it('sums distinct per-hook overheads across a LitePSM leg and a dualpool leg', () => {
     expect(
-      parityHookGasAdjustment(
+      zlcaHookGasAdjustment(
+        [
+          makeV4Pool(LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET, FAKE_POOL_ID_A),
+          makeV4Pool(DUALPOOL_HOOK_ON_MAINNET, FAKE_POOL_ID_B),
+        ],
+        ChainId.MAINNET
+      )
+    ).toBe(LITEPSM_OVERHEAD + DUALPOOL_OVERHEAD);
+  });
+
+  it('only counts ZLCA legs in a mixed route (V2 + ZLCA hook + non-ZLCA hook)', () => {
+    expect(
+      zlcaHookGasAdjustment(
         [
           makeV2Pool(),
           makeV4Pool(LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET, FAKE_POOL_ID_A),
@@ -121,11 +144,11 @@ describe('parityHookGasAdjustment', () => {
         ],
         ChainId.MAINNET
       )
-    ).toBe(PARITY_HOOK_GAS_OVERHEAD);
+    ).toBe(LITEPSM_OVERHEAD);
   });
 
   it('matches lookup regardless of hook-address case', () => {
-    const checksummed = parityHookGasAdjustment(
+    const checksummed = zlcaHookGasAdjustment(
       [
         makeV4Pool(
           '0x958A0904940f744f8c6b72c043CeeE3EA34AE888',
@@ -134,6 +157,6 @@ describe('parityHookGasAdjustment', () => {
       ],
       ChainId.MAINNET
     );
-    expect(checksummed).toBe(PARITY_HOOK_GAS_OVERHEAD);
+    expect(checksummed).toBe(LITEPSM_OVERHEAD);
   });
 });
