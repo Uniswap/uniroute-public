@@ -119,6 +119,18 @@ export async function fetchAggHookQuotes(
     return contract;
   }
 
+  try {
+    void Promise.resolve(
+      ctx.metrics.count(
+        buildMetricKey('AggHookQuoter.RouteQuoteCalls'),
+        routes.length,
+        {tags: [`chain:${ChainId[chain.chainId as ChainId]}`]}
+      )
+    ).catch(() => {});
+  } catch {
+    // Instrumentation must not affect quote execution.
+  }
+
   const results = await Promise.allSettled(
     routes.map(async route => {
       const pool = route.path[0] as V4Pool;

@@ -157,8 +157,35 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       otherRoutes: otherRoutes.length,
     });
 
+    const safeLogElapsedTime = (title: string, startTime: number) => {
+      try {
+        void logElapsedTime(title, startTime, ctx, metricTags).catch(() => {});
+      } catch {
+        // Instrumentation must not affect quote execution.
+      }
+    };
+    const recordArmLatency = <T>(
+      promise: Promise<T>,
+      title: string,
+      shouldEmit: boolean,
+      startTime: number
+    ): Promise<T> => {
+      if (!shouldEmit) return promise;
+      return promise.then(
+        result => {
+          safeLogElapsedTime(title, startTime);
+          return result;
+        },
+        error => {
+          safeLogElapsedTime(title, startTime);
+          throw error;
+        }
+      );
+    };
+
     // Fetch quotes in parallel: hook.quote() for agg hooks, standard quoter for the rest
-    const [aggHookQuotes, standardQuotes] = await Promise.all([
+    const aggHookQuotesStartTime = Date.now();
+    const aggHookQuotesPromise =
       aggHookRoutes.length > 0
         ? fetchAggHookQuotes(
             chain,
@@ -170,7 +197,9 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
             ctx,
             metricTags
           )
-        : Promise.resolve([] as QuoteBasic[]),
+        : Promise.resolve([] as QuoteBasic[]);
+    const standardQuotesStartTime = Date.now();
+    const standardQuotesPromise =
       otherRoutes.length > 0
         ? this.quoteFetcher.fetchQuotes(
             chain,
@@ -184,7 +213,20 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
             blockNumber,
             tokensInfo
           )
-        : Promise.resolve([] as QuoteBasic[]),
+        : Promise.resolve([] as QuoteBasic[]);
+    const [aggHookQuotes, standardQuotes] = await Promise.all([
+      recordArmLatency(
+        aggHookQuotesPromise,
+        'FetchQuotes.AggHook',
+        aggHookRoutes.length > 0,
+        aggHookQuotesStartTime
+      ),
+      recordArmLatency(
+        standardQuotesPromise,
+        'FetchQuotes.Standard',
+        otherRoutes.length > 0,
+        standardQuotesStartTime
+      ),
     ]);
 
     const quotes = [...aggHookQuotes, ...standardQuotes];

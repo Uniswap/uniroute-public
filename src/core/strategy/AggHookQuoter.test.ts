@@ -270,6 +270,36 @@ describe('fetchAggHookQuotes', () => {
     expect(quotes[0].v3QuoterResponseDetails).toBeUndefined();
   });
 
+  it('still returns quotes when the RouteQuoteCalls metric rejects', async () => {
+    const rejectingCtx = buildTestContext();
+    // Reject only the new instrumentation metric — other count emissions in
+    // this path have pre-existing unguarded behavior outside this test.
+    rejectingCtx.metrics.count = vi
+      .fn()
+      .mockImplementation(async (metricName: string) => {
+        if (metricName.includes('RouteQuoteCalls')) {
+          throw new Error('metrics pipeline down');
+        }
+      });
+    const quoteFn = vi.fn().mockResolvedValue(ethers.BigNumber.from('999900'));
+    const route = new RouteBasic(Protocol.V4, [makeTempoAggPool()], 100);
+
+    const quotes = await fetchAggHookQuotes(
+      chain,
+      [route],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(false, PATH_USD),
+      makeProviderMap(),
+      rejectingCtx,
+      ['chain:TEMPO'],
+      makeMockContractFactory(quoteFn)
+    );
+
+    expect(quotes).toHaveLength(1);
+    expect(rejectingCtx.metrics.count).toHaveBeenCalled();
+  });
+
   it('applies percentage allocation to amount', async () => {
     const quoteFn = vi.fn().mockResolvedValue(ethers.BigNumber.from('499950'));
     const route = new RouteBasic(Protocol.V4, [makeTempoAggPool()], 50);

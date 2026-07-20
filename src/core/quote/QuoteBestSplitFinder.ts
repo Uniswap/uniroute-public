@@ -2113,6 +2113,44 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // findBestSplits returns.
     const combinationFirstSeenLevel = new Map<string, number>();
     const startTime = Date.now();
+    const chainLatencyTags = [`chain:${ChainId[chainId]}`];
+    const levelLatenciesMs = new Map<number, number>();
+    const filterSortLatenciesMs = new Map<number, number>();
+    const safeEmitLatencyDist = (
+      title: string,
+      value: number,
+      tags: string[]
+    ) => {
+      try {
+        void Promise.resolve(
+          ctx.metrics.dist(buildMetricKey(`${title}.Latency.dist`), value, {
+            tags,
+          })
+        ).catch(() => {});
+      } catch {
+        // Instrumentation must not affect split search.
+      }
+    };
+    const recordLevelLatency = (level: number, levelStartTime: number) => {
+      if (!levelLatenciesMs.has(level)) {
+        levelLatenciesMs.set(level, Date.now() - levelStartTime);
+      }
+    };
+    const emitFindBestSplitsLatencyMetrics = (elapsedMs: number) => {
+      safeEmitLatencyDist(
+        'FindBestSplits.Overrun',
+        Math.max(0, elapsedMs - timeoutMs),
+        chainLatencyTags
+      );
+      for (const [level, latencyMs] of levelLatenciesMs) {
+        const tags = [...chainLatencyTags, `level:${level}`];
+        safeEmitLatencyDist('FindBestSplits.Level', latencyMs, tags);
+      }
+      for (const [level, latencyMs] of filterSortLatenciesMs) {
+        const tags = [...chainLatencyTags, `level:${level}`];
+        safeEmitLatencyDist('FindBestSplits.FilterSort', latencyMs, tags);
+      }
+    };
     let timedOut = false;
     // Whether any per-level filterAndSortResults ran (levels can all be
     // skipped as infeasible, leaving `result` unsorted).
@@ -2416,6 +2454,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     };
 
     // First, add all 100% routes from the best quotes
+    const levelOneStartTime = Date.now();
     const fullQuotes = percentageToSortedQuotes.get(100) || [];
     // Try all 100% routes since they're the most efficient
     for (let i = 0; i < fullQuotes.length; i++) {
@@ -2424,11 +2463,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
 
     // If we only want single routes, return early
     if (maxSplits === 1) {
+      recordLevelLatency(1, levelOneStartTime);
+      emitFindBestSplitsLatencyMetrics(Date.now() - startTime);
       return result;
     }
 
     // Set previous level best amount after processing level 1
     previousLevelBestAmount = currentLevelBestAmount;
+    recordLevelLatency(1, levelOneStartTime);
 
     ctx.logger.debug(
       `QuoteBestSplitFinder: after level 1 we got ${result.length} route combinations`
@@ -2567,6 +2609,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         );
         continue;
       }
+      const levelStartTime = Date.now();
       currentSearchLevel = level;
       await ctx.metrics.count(
         buildMetricKey(`QuoteBestSplitFinder.Level.Invocations.${level}`),
@@ -2619,12 +2662,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       // the case it's meant to size, undercounting the bug shape.
       lastUnfilteredResult = result.slice();
       // Filter and sort results after each level to keep array size manageable
+      const filterSortStartTime = Date.now();
       result = this.filterAndSortResults(
         result,
         maxSplitRoutes,
         quoteMap,
         tradeType
       );
+      filterSortLatenciesMs.set(level, Date.now() - filterSortStartTime);
       resultSorted = true;
 
       // Exit early if no new routes were added (check before filtering) —
@@ -2639,6 +2684,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           `QuoteBestSplitFinder: No new routes added at level ${level}, exiting early`
         );
         earlyExitReason = 'no_new_routes';
+        recordLevelLatency(level, levelStartTime);
         break;
       }
 
@@ -2673,11 +2719,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
             `QuoteBestSplitFinder: Improvement less than 0.01% at level ${level}, exiting early`
           );
           earlyExitReason = 'low_improvement';
+          recordLevelLatency(level, levelStartTime);
           break;
         }
       }
 
       previousLevelBestAmount = currentLevelBestAmount;
+      recordLevelLatency(level, levelStartTime);
     }
 
     // Every level can be skipped as infeasible (e.g. only the 100% bucket has
@@ -2737,13 +2785,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       topResultsDiscoveryLevels,
     });
 
+    const elapsedMs = Date.now() - startTime;
+    emitFindBestSplitsLatencyMetrics(elapsedMs);
+
     ctx.logger.debug('QuoteBestSplitFinder observability', {
       chainId,
       percentageStep,
       maxSplits,
       maxSplitRoutes,
       timeoutMs,
-      elapsedMs: Date.now() - startTime,
+      elapsedMs,
       timedOut,
       earlyExitReason,
       combinationsFound: result.length,

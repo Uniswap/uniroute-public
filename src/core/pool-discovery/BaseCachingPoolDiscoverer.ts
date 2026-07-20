@@ -259,7 +259,13 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     await ctx.metrics.count(
       buildMetricKey('PoolDiscoverer.SnapshotParse.Cache'),
       1,
-      {tags: [`chain:${chainId}`, `protocol:${protocol}`, `result:${result}`]}
+      {
+        tags: [
+          `chain:${ChainId[chainId]}`,
+          `protocol:${protocol}`,
+          `result:${result}`,
+        ],
+      }
     );
     return parsed;
   }

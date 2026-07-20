@@ -1,4 +1,4 @@
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {DeepQuoteStrategy} from './DeepQuoteStrategy';
 import {IQuoteFetcher} from '../../stores/quote/IQuoteFetcher';
@@ -18,6 +18,7 @@ import {JsonRpcProvider} from '@ethersproject/providers';
 import {RouteQuoteAllocator} from '../route/RouteQuoteAllocator';
 import {IGasConverter} from '../gas/converter/IGasConverter';
 import {V3Pool} from '../../models/pool/V3Pool';
+import {V4Pool} from '../../models/pool/V4Pool';
 import {NativeCurrency} from '../../models/chain/NativeCurrency';
 import {getUniRouteTestConfig} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
@@ -34,6 +35,7 @@ import {
 } from '../gas/gas-data-provider';
 import {BaseProvider} from '@ethersproject/providers';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
+import {UNISWAP_AGG_HOOK_ON_TEMPO} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
 
 // Create a test gas converter that properly sets gasCostInQuoteToken
 class TestGasConverter implements IGasConverter {
@@ -236,6 +238,18 @@ function runStrategyTests(
     '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
   ); // USDC
   const amount = BigInt('1000000000000000000'); // 1 ETH
+  const makeTempoAggPool = (): V4Pool =>
+    new V4Pool(
+      new Address('0x20C0000000000000000000000000000000000000'),
+      new Address('0x20C000000000000000000000b9537d11c60E8b50'),
+      500,
+      10,
+      UNISWAP_AGG_HOOK_ON_TEMPO,
+      0n,
+      '0xdb82e743b9d5986a72b2c3ed5ce8ea89bc24caa0c8c73cf6cbbfe8f817ed7b8a',
+      79228162514264337593543950336n,
+      0n
+    );
 
   describe(strategyClass.name, () => {
     it('should find best quote for EXACT_IN', async () => {
@@ -416,6 +430,131 @@ function runStrategyTests(
       expect(
         bestQuoteCandidates[0].quotes[0].route.path[1].address.toString()
       ).equals('0x5777d92f208679DB4b9778590Fa3CAB3aC9e2168');
+    });
+
+    describe('FetchQuotes latency instrumentation', () => {
+      const metricTags = ['chain:MAINNET', 'tradeType:EXACT_IN'];
+      const standardPool = () =>
+        new V2Pool(
+          tokenInAddress,
+          tokenOutAddress,
+          new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+          BigInt('1000000000000'),
+          BigInt('1000000000000')
+        );
+
+      it('emits agg-hook and standard arm latency when both arms run', async () => {
+        const pool = standardPool();
+        const standardQuote = new QuoteBasic(
+          new RouteBasic(Protocol.V2, [pool], 100),
+          BigInt('1234567890'),
+          undefined
+        );
+        const strategy = createStrategy(strategyClass, [standardQuote]);
+        const testCtx = buildTestContext();
+
+        await strategy.findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2, Protocol.V4],
+          serviceConfig,
+          [
+            new RouteBasic(Protocol.V4, [makeTempoAggPool()]),
+            new RouteBasic(Protocol.V2, [pool]),
+          ],
+          new Map(),
+          metricTags
+        );
+
+        const aggHookCall = testCtx.metrics.distStore.find(call =>
+          call.metric_name.includes('FetchQuotes.AggHook.Latency.dist')
+        );
+        const standardCall = testCtx.metrics.distStore.find(call =>
+          call.metric_name.includes('FetchQuotes.Standard.Latency.dist')
+        );
+        expect(aggHookCall?.opts?.tags).toEqual(metricTags);
+        expect(standardCall?.opts?.tags).toEqual(metricTags);
+      });
+
+      it('does not emit agg-hook arm latency when no agg-hook routes run', async () => {
+        const pool = standardPool();
+        const standardQuote = new QuoteBasic(
+          new RouteBasic(Protocol.V2, [pool], 100),
+          BigInt('1234567890'),
+          undefined
+        );
+        const strategy = createStrategy(strategyClass, [standardQuote]);
+        const testCtx = buildTestContext();
+
+        await strategy.findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          serviceConfig,
+          [new RouteBasic(Protocol.V2, [pool])],
+          new Map(),
+          metricTags
+        );
+
+        expect(
+          testCtx.metrics.distStore.some(call =>
+            call.metric_name.includes('FetchQuotes.AggHook.Latency.dist')
+          )
+        ).toBe(false);
+        expect(
+          testCtx.metrics.distStore.some(call =>
+            call.metric_name.includes('FetchQuotes.Standard.Latency.dist')
+          )
+        ).toBe(true);
+      });
+
+      it('does not fail quote flow when arm latency metric emission rejects', async () => {
+        const pool = standardPool();
+        const standardQuote = new QuoteBasic(
+          new RouteBasic(Protocol.V2, [pool], 100),
+          BigInt('1234567890'),
+          undefined
+        );
+        const strategy = createStrategy(strategyClass, [standardQuote]);
+        const testCtx = buildTestContext();
+        const dist = testCtx.metrics.dist.bind(testCtx.metrics);
+        testCtx.metrics.dist = vi.fn((metricName, val, opts) => {
+          if (
+            metricName.includes('FetchQuotes.AggHook.Latency.dist') ||
+            metricName.includes('FetchQuotes.Standard.Latency.dist')
+          ) {
+            return Promise.reject(new Error('metric failed'));
+          }
+          return dist(metricName, val, opts);
+        });
+
+        const bestQuoteCandidates = await strategy.findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2, Protocol.V4],
+          serviceConfig,
+          [
+            new RouteBasic(Protocol.V4, [makeTempoAggPool()]),
+            new RouteBasic(Protocol.V2, [pool]),
+          ],
+          new Map(),
+          metricTags
+        );
+
+        expect(bestQuoteCandidates.length).toBeGreaterThan(0);
+      });
     });
 
     describe('Quote-level dedupe', () => {

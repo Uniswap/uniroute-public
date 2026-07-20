@@ -215,6 +215,119 @@ describe('QuoteBestSplitFinder', () => {
       expect(result.some(routes => routes.length === 2)).toBe(true);
     });
 
+    it('emits level, filter-sort, and zero-overrun latency dists once per invocation', async () => {
+      const pool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x3333333333333333333333333333333333333333'
+      );
+      const pool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x4444444444444444444444444444444444444444'
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [createMockQuote(createMockRoute([pool1], 100), 1000n)]],
+        [
+          50,
+          [
+            createMockQuote(createMockRoute([pool1], 50), 500n),
+            createMockQuote(createMockRoute([pool2], 50), 500n),
+          ],
+        ],
+      ]);
+
+      await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        50,
+        2,
+        10,
+        10000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      const distCalls = vi.mocked(mockContext.metrics.dist).mock.calls;
+      const overrunCalls = distCalls.filter(call =>
+        String(call[0]).includes('FindBestSplits.Overrun.Latency.dist')
+      );
+      const levelCalls = distCalls.filter(call =>
+        String(call[0]).includes('FindBestSplits.Level.Latency.dist')
+      );
+      const filterSortCalls = distCalls.filter(call =>
+        String(call[0]).includes('FindBestSplits.FilterSort.Latency.dist')
+      );
+
+      expect(overrunCalls).toHaveLength(1);
+      expect(overrunCalls[0][1]).toBe(0);
+      expect((overrunCalls[0][2] as {tags: string[]}).tags).toEqual([
+        'chain:MAINNET',
+      ]);
+      expect(levelCalls).toHaveLength(2);
+      expect(
+        levelCalls.map(call => (call[2] as {tags: string[]}).tags).flat()
+      ).toEqual(
+        expect.arrayContaining(['chain:MAINNET', 'level:1', 'level:2'])
+      );
+      expect(filterSortCalls).toHaveLength(1);
+      expect((filterSortCalls[0][2] as {tags: string[]}).tags).toEqual([
+        'chain:MAINNET',
+        'level:2',
+      ]);
+    });
+
+    it('emits positive overrun when elapsed time exceeds timeoutMs', async () => {
+      const pool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x3333333333333333333333333333333333333333'
+      );
+      const pool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x4444444444444444444444444444444444444444'
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [createMockQuote(createMockRoute([pool1], 100), 1000n)]],
+        [
+          50,
+          [
+            createMockQuote(createMockRoute([pool1], 50), 500n),
+            createMockQuote(createMockRoute([pool2], 50), 500n),
+          ],
+        ],
+      ]);
+      let now = 1000;
+      const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+        now += 10;
+        return now;
+      });
+
+      await finder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        50,
+        2,
+        10,
+        1,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      const overrunCalls = vi
+        .mocked(mockContext.metrics.dist)
+        .mock.calls.filter(call =>
+          String(call[0]).includes('FindBestSplits.Overrun.Latency.dist')
+        );
+      expect(overrunCalls).toHaveLength(1);
+      expect(overrunCalls[0][1]).toBeGreaterThan(0);
+
+      dateNowSpy.mockRestore();
+    });
+
     it('should handle native and wrapped token conflicts', async () => {
       const nativePool = createMockPool(
         mockToken0,
