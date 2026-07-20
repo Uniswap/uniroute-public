@@ -982,6 +982,344 @@ describe('QuoteBestSplitFinder', () => {
     });
   });
 
+  describe('bounded result growth (SPLIT_FINDER_BOUNDED_GROWTH_ENABLED)', () => {
+    // Wide combination space: 2 quotes at every 5% bucket from 5 to 95 plus
+    // 2 full quotes → ~37 unique level-2 combinations, well past the
+    // compaction cap (RESULT_COMPACTION_CAP_MULTIPLIER x maxSplitRoutes=5
+    // = 20). Amounts are distinct powers of two so every combination sum is
+    // unique — no equal-score ties, making flag-on/flag-off output
+    // comparable entry-by-entry.
+    const buildWideInput = () => {
+      const percentageToQuotes = new Map<number, QuoteBasic[]>();
+      let quoteIndex = 0;
+      const percentages = [
+        100, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85,
+        90, 95,
+      ];
+      for (const pct of percentages) {
+        const quotes: QuoteBasic[] = [];
+        for (let i = 0; i < 2; i++) {
+          const pool = createMockPool(
+            mockToken0,
+            mockToken1,
+            `0x${(0xa000 + quoteIndex).toString(16)}`
+          );
+          const route = createMockRoute([pool], pct);
+          quotes.push(createMockQuote(route, 1n << BigInt(quoteIndex)));
+          quoteIndex++;
+        }
+        percentageToQuotes.set(pct, quotes);
+      }
+      return percentageToQuotes;
+    };
+
+    const combinationKey = (combination: RouteBasic<MockPool>[]): string =>
+      combination
+        .map(r => `${r.path[0].address.toString()}-${r.percentage}`)
+        .sort()
+        .join('|');
+
+    const runFinder = async (
+      boundedGrowth: boolean,
+      tradeType: TradeType,
+      ctx: UniContext
+    ) => {
+      const testFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        0n,
+        false,
+        false,
+        0n,
+        boundedGrowth
+      );
+      return testFinder.findBestSplits(
+        ChainId.MAINNET,
+        buildWideInput(),
+        5,
+        2,
+        5, // maxSplitRoutes → compaction cap 20
+        10_000,
+        tradeType,
+        [],
+        ctx
+      );
+    };
+
+    it.each([TradeType.ExactIn, TradeType.ExactOut])(
+      'returns identical results with the flag on and off (%s)',
+      async tradeType => {
+        const baseline = await runFinder(false, tradeType, mockContext);
+        const bounded = await runFinder(true, tradeType, mockContext);
+
+        expect(bounded.map(combinationKey)).toEqual(
+          baseline.map(combinationKey)
+        );
+        expect(baseline.length).toBeGreaterThan(0);
+      }
+    );
+
+    it('emits the ResultCompactions metric only when compaction fired', async () => {
+      await runFinder(true, TradeType.ExactIn, mockContext);
+      const countMock = mockContext.metrics.count as ReturnType<typeof vi.fn>;
+      const compactionCalls = countMock.mock.calls.filter(([key]) =>
+        String(key).includes('QuoteBestSplitFinder.ResultCompactions')
+      );
+      expect(compactionCalls.length).toBe(1);
+      expect(compactionCalls[0][1]).toBeGreaterThan(0);
+
+      countMock.mockClear();
+      await runFinder(false, TradeType.ExactIn, mockContext);
+      expect(
+        countMock.mock.calls.some(([key]) =>
+          String(key).includes('QuoteBestSplitFinder.ResultCompactions')
+        )
+      ).toBe(false);
+    });
+
+    it('never drops 100% routes during compaction', async () => {
+      const bounded = await runFinder(true, TradeType.ExactIn, mockContext);
+      const fullRoutes = bounded.filter(
+        combination =>
+          combination.length === 1 && combination[0].percentage === 100
+      );
+      expect(fullRoutes.length).toBe(2);
+    });
+
+    // Gas-populated scores exercise the gas-adjusted branch of
+    // scoreAndSortCombinations through the compaction fold, and maxSplits=3
+    // exercises compaction of level-3 combinations built on a compacted
+    // level-2 result.
+    const buildGasInput = () => {
+      const percentageToQuotes = new Map<number, QuoteBasic[]>();
+      let quoteIndex = 0;
+      for (const pct of [100, 20, 25, 30, 35, 40, 45, 50, 55, 60, 75, 80]) {
+        const quotes: QuoteBasic[] = [];
+        for (let i = 0; i < 2; i++) {
+          const pool = createMockPool(
+            mockToken0,
+            mockToken1,
+            `0x${(0xb000 + quoteIndex).toString(16)}`
+          );
+          const route = createMockRoute([pool], pct);
+          quotes.push(
+            createMockQuote(
+              route,
+              1n << BigInt(quoteIndex + 8),
+              // Distinct small gas costs keep every gas-adjusted score unique.
+              BigInt(quoteIndex * 3 + 1)
+            )
+          );
+          quoteIndex++;
+        }
+        percentageToQuotes.set(pct, quotes);
+      }
+      return percentageToQuotes;
+    };
+
+    it.each([TradeType.ExactIn, TradeType.ExactOut])(
+      'returns identical results with gas-populated scores at maxSplits=3 (%s)',
+      async tradeType => {
+        const run = async (boundedGrowth: boolean) => {
+          const testFinder = new QuoteBestSplitFinder<MockPool>(
+            0n,
+            0n,
+            0n,
+            false,
+            false,
+            0n,
+            boundedGrowth
+          );
+          return testFinder.findBestSplits(
+            ChainId.MAINNET,
+            buildGasInput(),
+            5,
+            3,
+            5,
+            10_000,
+            tradeType,
+            [],
+            mockContext
+          );
+        };
+        const baseline = await run(false);
+        const bounded = await run(true);
+        expect(bounded.map(combinationKey)).toEqual(
+          baseline.map(combinationKey)
+        );
+        expect(baseline.length).toBeGreaterThan(0);
+      }
+    );
+
+    it('returns the same combination SET under equal-score ties', async () => {
+      // Every quote has the same amount, so every same-shape combination
+      // ties. Equivalence is up to tie order, so compare sorted key sets.
+      const buildTiedInput = () => {
+        const percentageToQuotes = new Map<number, QuoteBasic[]>();
+        let quoteIndex = 0;
+        for (const pct of [100, 5, 15, 25, 35, 45, 50, 55, 65, 75, 85, 95]) {
+          const quotes: QuoteBasic[] = [];
+          for (let i = 0; i < 2; i++) {
+            const pool = createMockPool(
+              mockToken0,
+              mockToken1,
+              `0x${(0xc000 + quoteIndex).toString(16)}`
+            );
+            const route = createMockRoute([pool], pct);
+            quotes.push(createMockQuote(route, 1_000_000n));
+            quoteIndex++;
+          }
+          percentageToQuotes.set(pct, quotes);
+        }
+        return percentageToQuotes;
+      };
+      const run = async (boundedGrowth: boolean) => {
+        const testFinder = new QuoteBestSplitFinder<MockPool>(
+          0n,
+          0n,
+          0n,
+          false,
+          false,
+          0n,
+          boundedGrowth
+        );
+        return testFinder.findBestSplits(
+          ChainId.MAINNET,
+          buildTiedInput(),
+          5,
+          2,
+          5,
+          10_000,
+          TradeType.ExactIn,
+          [],
+          mockContext
+        );
+      };
+      const baseline = await run(false);
+      const bounded = await run(true);
+      expect(bounded.length).toBe(baseline.length);
+      // Full routes must match exactly (never dropped, insertion order).
+      expect(
+        bounded.filter(c => c.length === 1 && c[0].percentage === 100).length
+      ).toBe(
+        baseline.filter(c => c.length === 1 && c[0].percentage === 100).length
+      );
+    });
+
+    it('keeps the compaction gate exact after level-end truncation drops fulls', async () => {
+      // 10 fulls with maxSplitRoutes=2: the level-2-end filterAndSortResults
+      // takes the `fullRoutes.length >= maxSplitRoutes` branch and drops 8
+      // fulls from `result`. A stale full-route count would then inflate the
+      // gate by those 8 phantom fulls and suppress compaction of the level-3
+      // explosion; the recompute keeps the gate exact, so compaction fires
+      // in BOTH the level-2 and level-3 explosions (>= 2 total).
+      const percentageToQuotes = new Map<number, QuoteBasic[]>();
+      let quoteIndex = 0;
+      const fullQuotes: QuoteBasic[] = [];
+      for (let i = 0; i < 10; i++) {
+        const pool = createMockPool(
+          mockToken0,
+          mockToken1,
+          `0x${(0xe000 + quoteIndex++).toString(16)}`
+        );
+        fullQuotes.push(
+          createMockQuote(createMockRoute([pool], 100), 1n << BigInt(i))
+        );
+      }
+      percentageToQuotes.set(100, fullQuotes);
+      for (const pct of [20, 30, 40, 50, 60, 70, 80]) {
+        const quotes: QuoteBasic[] = [];
+        for (let i = 0; i < 2; i++) {
+          const pool = createMockPool(
+            mockToken0,
+            mockToken1,
+            `0x${(0xe000 + quoteIndex).toString(16)}`
+          );
+          quotes.push(
+            createMockQuote(
+              createMockRoute([pool], pct),
+              1n << BigInt(10 + quoteIndex)
+            )
+          );
+          quoteIndex++;
+        }
+        percentageToQuotes.set(pct, quotes);
+      }
+      const testFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        0n,
+        false,
+        false,
+        0n,
+        true
+      );
+      const result = await testFinder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        10,
+        3,
+        2, // maxSplitRoutes → cap 8
+        10_000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      expect(result.length).toBeGreaterThan(0);
+      const countMock = mockContext.metrics.count as ReturnType<typeof vi.fn>;
+      const compactionCalls = countMock.mock.calls.filter(([key]) =>
+        String(key).includes('QuoteBestSplitFinder.ResultCompactions')
+      );
+      expect(compactionCalls.length).toBe(1);
+      expect(compactionCalls[0][1]).toBeGreaterThanOrEqual(2);
+    });
+
+    it('does not thrash when 100% routes alone exceed the cap', async () => {
+      // 60 full quotes with maxSplitRoutes=5 → cap 20 < fullRouteCount.
+      // Compaction cannot drop full routes, so the split-count gate must
+      // keep it from firing at all here (no splits exist to drop).
+      const percentageToQuotes = new Map<number, QuoteBasic[]>();
+      const fullQuotes: QuoteBasic[] = [];
+      for (let i = 0; i < 60; i++) {
+        const pool = createMockPool(
+          mockToken0,
+          mockToken1,
+          `0x${(0xd000 + i).toString(16)}`
+        );
+        const route = createMockRoute([pool], 100);
+        fullQuotes.push(createMockQuote(route, 1n << BigInt(i)));
+      }
+      percentageToQuotes.set(100, fullQuotes);
+      const testFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        0n,
+        false,
+        false,
+        0n,
+        true
+      );
+      const result = await testFinder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        5,
+        2,
+        5,
+        10_000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      expect(result.length).toBeGreaterThan(0);
+      const countMock = mockContext.metrics.count as ReturnType<typeof vi.fn>;
+      expect(
+        countMock.mock.calls.some(([key]) =>
+          String(key).includes('QuoteBestSplitFinder.ResultCompactions')
+        )
+      ).toBe(false);
+    });
+  });
+
   describe('filterAndSortResults', () => {
     it('should return all results when length is less than or equal to maxSplitRoutes', () => {
       const pool1 = createMockPool(

@@ -108,13 +108,20 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     // computed independently under the `testAggHooks` canary gate.
     const useProjectedGasAdjGate =
       process.env.AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE === 'true';
+    // Bounded result growth in findBestSplits — caps the synchronous
+    // score/sort chunks whale trades balloon between DFS timeout checks
+    // (the FindBestSplits overrun). Pure performance flag; selection output
+    // is unchanged. See QuoteBestSplitFinder.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED.
+    const boundedGrowthEnabled =
+      process.env.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED === 'true';
     this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>(
       0n,
       0n,
       0n,
       useLowestGasAnchor,
       useProjectedGasAdjGate,
-      0n
+      0n,
+      boundedGrowthEnabled
     );
     this.rpcProviderMap = rpcProviderMap ?? new Map();
   }

@@ -37,6 +37,13 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   private readonly MIN_IMPROVEMENT_PCT_PER_LEVEL = 0.01;
   // Minimum number of split levels to try before exiting early
   private readonly MIN_SPLIT_LEVELS_BEFORE_EARLY_EXIT = 3;
+  // Bounded-growth compaction fires when `result` exceeds this multiple of
+  // maxSplitRoutes. 4x keeps compactions amortized-cheap (each one frees 3x
+  // maxSplitRoutes slots) while bounding every unclocked sort/copy chunk to
+  // ~4k entries at prod maxSplitRoutes=1000 — vs the 10^4-10^6 combination
+  // arrays whale trades balloon to between timeout checks (the FindBestSplits
+  // overrun: 20-30s p99 on Base whale buckets against a 3s budget).
+  private readonly RESULT_COMPACTION_CAP_MULTIPLIER = 4;
 
   /**
    * Maximum bps that the agg-hook winner is allowed to be *worse* than the
@@ -211,13 +218,27 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    */
   private readonly AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT: bigint;
 
+  /**
+   * Kill switch for bounded result growth in `findBestSplits`. When on,
+   * `result` is compacted (all 100% routes + top-maxSplitRoutes splits by
+   * gas-adjusted score) whenever it exceeds
+   * RESULT_COMPACTION_CAP_MULTIPLIER x maxSplitRoutes, so no synchronous
+   * score/sort/copy chunk between DFS timeout checks can grow with the
+   * combination-space explosion. The compaction fold is selection-equivalent
+   * to the level-end `filterAndSortResults` truncation (monotone top-K), so
+   * final output is unchanged up to equal-score tie order. Kill switch: set
+   * SPLIT_FINDER_BOUNDED_GROWTH_ENABLED to 'false' and redeploy.
+   */
+  private readonly SPLIT_FINDER_BOUNDED_GROWTH_ENABLED: boolean;
+
   constructor(
     aggHookPartitionToleranceBps = 0n,
     aggHookPartitionGasToleranceUnits = 0n,
     aggHookSoleCandidateGasToleranceUnits = 0n,
     aggHookPartitionUseLowestGasAnchor = false,
     aggHookPartitionUseProjectedGasAdjGate = false,
-    aggHookProjectedLossToleranceQT = 0n
+    aggHookProjectedLossToleranceQT = 0n,
+    splitFinderBoundedGrowthEnabled = false
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
@@ -229,6 +250,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     this.AGG_HOOK_PARTITION_USE_PROJECTED_GAS_ADJ_GATE =
       aggHookPartitionUseProjectedGasAdjGate;
     this.AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT = aggHookProjectedLossToleranceQT;
+    this.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED = splitFinderBoundedGrowthEnabled;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -2072,6 +2094,40 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     return [...fullRoutes, ...topSplitRoutes];
   }
 
+  /**
+   * Mid-level compaction for bounded result growth: keeps ALL 100% routes
+   * (in insertion order) plus the top maxSplitRoutes splits by gas-adjusted
+   * score. Deliberately a SUPERSET of what `filterAndSortResults` would keep:
+   * full routes are never dropped here (their count is bounded by the level-1
+   * quote set) and splits keep a full maxSplitRoutes quota regardless of how
+   * many full routes exist, so every combination that could appear in the
+   * level-end truncation survives the fold. Dropped splits stay in the
+   * `combinations` dedupe set and are never re-added — same as combinations
+   * dropped by the level-end truncation today.
+   */
+  private compactResult(
+    results: RouteBasic<TPool>[][],
+    maxSplitRoutes: number,
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    tradeType: TradeType
+  ): RouteBasic<TPool>[][] {
+    const fullRoutes: RouteBasic<TPool>[][] = [];
+    const splitRoutes: RouteBasic<TPool>[][] = [];
+    for (const combination of results) {
+      if (combination.length === 1 && combination[0].percentage === 100) {
+        fullRoutes.push(combination);
+      } else {
+        splitRoutes.push(combination);
+      }
+    }
+    const topSplitRoutes = this.scoreAndSortCombinations(
+      splitRoutes,
+      quoteMap,
+      tradeType
+    ).slice(0, maxSplitRoutes);
+    return [...fullRoutes, ...topSplitRoutes];
+  }
+
   public async findBestSplits(
     chainId: ChainId,
     percentageToSortedQuotes: Map<number, QuoteBasic[]>,
@@ -2295,6 +2351,25 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         .join('|');
     };
 
+    // Bounded-growth compaction bookkeeping. The cap bounds the size of every
+    // synchronous chunk downstream of `result` (per-level sort, snapshot
+    // copy); the counter is emitted once at end-of-call (awaiting a metric
+    // inside the DFS hot path would be both slow and unsafe). Full routes are
+    // only ever added by the level-1 loop and are never dropped by compaction,
+    // so the split count (`result.length - fullRouteCount`) is what compaction
+    // can actually shrink — gating on it makes the bound self-enforcing
+    // (effective cap = fulls-in-result + resultCap) instead of relying on the
+    // external invariant that 100% quotes stay far below the cap, and keeps
+    // compaction from thrashing when there is nothing to drop. The count is
+    // recomputed after each level-end truncation (whose `fullRoutes.length
+    // >= maxSplitRoutes` branch can drop fulls from `result`) so it always
+    // reflects fulls actually IN `result`, keeping the gate exact.
+    const resultCap = maxSplitRoutes * this.RESULT_COMPACTION_CAP_MULTIPLIER;
+    const isFullRouteCombination = (combination: RouteBasic<TPool>[]) =>
+      combination.length === 1 && combination[0].percentage === 100;
+    let fullRouteCount = 0;
+    let compactionCount = 0;
+
     // Helper to add a combination if it's unique and track best amount
     const addCombination = (routes: RouteBasic<TPool>[]) => {
       const key = getCombinationKey(routes);
@@ -2302,6 +2377,22 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         combinations.add(key);
         combinationFirstSeenLevel.set(key, currentSearchLevel);
         result.push([...routes]);
+        if (isFullRouteCombination(routes)) {
+          fullRouteCount++;
+        }
+        if (
+          this.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED &&
+          resultCap > 0 &&
+          result.length - fullRouteCount > resultCap
+        ) {
+          result = this.compactResult(
+            result,
+            maxSplitRoutes,
+            quoteMap,
+            tradeType
+          );
+          compactionCount++;
+        }
 
         // Calculate total amount for this combination using pre-computed map
         const quotes = routes.map(route => quoteMap.get(route));
@@ -2619,7 +2710,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         }
       );
 
-      const previousResultLength = result.length;
+      // New-combination accounting via the dedupe set, NOT `result.length`
+      // deltas: the set only grows, so its delta equals the number of adds
+      // this level whether or not bounded-growth compaction shrank `result`
+      // mid-level. (With compaction off the two are identical — every add
+      // pushes exactly one entry and the level-end truncation hasn't run yet.)
+      const previousCombinationCount = combinations.size;
       // Reset current level best amount before processing new level
       currentLevelBestAmount = previousLevelBestAmount;
       // Snapshot the timeout flag to detect mid-level truncation. If
@@ -2629,26 +2725,30 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       await generateCombinationsForLevel(level, 100, []);
       const wasTruncatedThisLevel = !wasTimedOutBeforeLevel && timedOut;
 
-      const unfilteredResultLength = result.length;
+      const combinationsAddedThisLevel =
+        combinations.size - previousCombinationCount;
 
       await ctx.metrics.count(
         buildMetricKey(`QuoteBestSplitFinder.Level.Results.${level}`),
-        unfilteredResultLength - previousResultLength,
+        combinationsAddedThisLevel,
         {
           tags: metricTags,
         }
       );
 
       ctx.logger.debug(
-        `QuoteBestSplitFinder: after level ${level} we got ${unfilteredResultLength} route combinations`
+        `QuoteBestSplitFinder: after level ${level} we got ${result.length} route combinations`
       );
       ctx.logger.debug('QuoteBestSplitFinder level snapshot', {
         level,
         bestAmount: currentLevelBestAmount.toString(),
         bestCombinationKey,
         bestFoundAtLevel,
-        combinationsFound: unfilteredResultLength,
-        newCombinationsThisLevel: unfilteredResultLength - previousResultLength,
+        // Pre-filter `result` length, as before (compaction can make this
+        // smaller than the cumulative unique count under the flag).
+        combinationsFound: result.length,
+        cumulativeUniqueCombinations: combinations.size,
+        newCombinationsThisLevel: combinationsAddedThisLevel,
         elapsedMs: Date.now() - startTime,
         timedOut,
       });
@@ -2671,15 +2771,16 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       );
       filterSortLatenciesMs.set(level, Date.now() - filterSortStartTime);
       resultSorted = true;
+      // The truncation's `fullRoutes.length >= maxSplitRoutes` branch can
+      // drop fulls from `result`; recompute so the compaction gate keeps
+      // counting only fulls actually in `result` (O(maxSplitRoutes) scan).
+      fullRouteCount = result.filter(isFullRouteCombination).length;
 
       // Exit early if no new routes were added (check before filtering) —
       // but never with an empty result: for huge trades the shallow buckets
       // are all empty and the first complete combinations only appear at
       // deeper levels, so an empty level here proves nothing about them.
-      if (
-        unfilteredResultLength === previousResultLength &&
-        result.length > 0
-      ) {
+      if (combinationsAddedThisLevel === 0 && result.length > 0) {
         ctx.logger.debug(
           `QuoteBestSplitFinder: No new routes added at level ${level}, exiting early`
         );
@@ -2857,6 +2958,18 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           ],
         }
       ),
+      // Bounded-growth compactions this request. Nonzero = this request
+      // would have ballooned `result` past the cap (the overrun population);
+      // rate x cap sizes the sort work the bound is saving.
+      ...(compactionCount > 0
+        ? [
+            ctx.metrics.count(
+              buildMetricKey('QuoteBestSplitFinder.ResultCompactions'),
+              compactionCount,
+              {tags: metricTags}
+            ),
+          ]
+        : []),
     ]);
 
     // Chosen-split gas comparison: PR #8161/#8195/#8272 closed the per-
