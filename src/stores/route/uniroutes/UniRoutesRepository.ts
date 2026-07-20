@@ -63,21 +63,59 @@ export class UniRoutesRepository extends BaseRoutesRepository {
   ): Promise<RouteBasic<Pool>[]> {
     // Only fetch pools for requested protocols
     const poolPromises: Promise<UniPoolInfo[]>[] = [];
+    const chainMetricTag = `chain:${ChainId[chain.chainId]}`;
+    // Phase timings are best-effort: a metrics-pipeline failure must never
+    // fail a quote whose pools were fetched successfully.
+    const safeLogElapsedTime = async (
+      title: string,
+      startTime: number,
+      tags: string[]
+    ): Promise<void> => {
+      try {
+        await logElapsedTime(title, startTime, ctx, tags);
+      } catch (error) {
+        ctx.logger.debug(`Failed to emit ${title} latency metric`, {error});
+      }
+    };
+    const fetchPoolsForTokensWithLatency = (
+      protocol: Protocol,
+      protocolMetricValue: string,
+      topPoolSelector: ITopPoolsSelector<UniPoolInfo>,
+      skipCache: boolean
+    ): Promise<UniPoolInfo[]> => {
+      const poolsForTokensStartTime = Date.now();
+      return this.poolDiscoverer
+        .getPoolsForTokens(
+          chain.chainId,
+          protocol,
+          tokenInAddress,
+          tokenOutAddress,
+          topPoolSelector,
+          hooksOptions,
+          skipCache,
+          nsCtx,
+          ctx
+        )
+        .then(async pools => {
+          await safeLogElapsedTime(
+            'GetRoutes.PoolsForTokens',
+            poolsForTokensStartTime,
+            [chainMetricTag, `protocol:${protocolMetricValue}`]
+          );
+          return pools;
+        });
+    };
+
     if (
       protocols.includes(Protocol.V2) &&
       V2_SUPPORTED.includes(chain.chainId)
     ) {
       poolPromises.push(
-        this.poolDiscoverer.getPoolsForTokens(
-          chain.chainId,
+        fetchPoolsForTokensWithLatency(
           Protocol.V2,
-          tokenInAddress,
-          tokenOutAddress,
+          'v2',
           this.topPoolsSelector,
-          hooksOptions,
-          skipPoolsForTokensCache,
-          nsCtx,
-          ctx
+          skipPoolsForTokensCache
         )
       );
     } else {
@@ -86,16 +124,11 @@ export class UniRoutesRepository extends BaseRoutesRepository {
 
     if (protocols.includes(Protocol.V3)) {
       poolPromises.push(
-        this.poolDiscoverer.getPoolsForTokens(
-          chain.chainId,
+        fetchPoolsForTokensWithLatency(
           Protocol.V3,
-          tokenInAddress,
-          tokenOutAddress,
+          'v3',
           this.topPoolsSelector,
-          hooksOptions,
-          skipPoolsForTokensCache,
-          nsCtx,
-          ctx
+          skipPoolsForTokensCache
         )
       );
     } else {
@@ -107,16 +140,11 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       V4_SUPPORTED.includes(chain.chainId)
     ) {
       poolPromises.push(
-        this.poolDiscoverer.getPoolsForTokens(
-          chain.chainId,
+        fetchPoolsForTokensWithLatency(
           Protocol.V4,
-          tokenInAddress,
-          tokenOutAddress,
+          'v4',
           this.topPoolsSelector,
-          hooksOptions,
-          skipPoolsForTokensCache,
-          nsCtx,
-          ctx
+          skipPoolsForTokensCache
         )
       );
     } else {
@@ -137,8 +165,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       // Using the cache would either pollute the regular V4 cache with AGG_HOOKS-only results,
       // or return wrong (full V4) results for external protocol fetches.
       poolPromises.push(
-        this.poolDiscoverer.getPoolsForTokens(
-          chain.chainId,
+        fetchPoolsForTokensWithLatency(
           // we need to fetch V4 pools for external protocols, because
           // 1) S3SubgraphPoolDiscoverer downloads agg hooked pools as V4 pools
           // 2) BaseCachingPoolDiscoverer needs to maintain the cache key cardinality of Protocol.V4 only
@@ -146,21 +173,21 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           // we should serve all the agg hooked pools from non-cached routes repository.
           // The way to do this is to fetch V4 pools for all agg hook protocols from S3SubgraphPoolDiscoverer.
           Protocol.V4,
-          tokenInAddress,
-          tokenOutAddress,
+          'v4_agg_hooks',
           this.topAggHooksPoolsSelector,
-          hooksOptions,
-          true, // always skip per-token-pair cache to avoid polluting Protocol.V4 cache
-          nsCtx,
-          ctx
+          true // always skip per-token-pair cache to avoid polluting Protocol.V4 cache
         )
       );
     } else {
       poolPromises.push(Promise.resolve([]));
     }
 
+    const poolsFetchStartTime = Date.now();
     const [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] =
       await Promise.all(poolPromises);
+    await safeLogElapsedTime('GetRoutes.PoolsFetch', poolsFetchStartTime, [
+      chainMetricTag,
+    ]);
 
     // Deduplicate by pool ID: if both Protocol.V4 and an external protocol are requested,
     // rawPoolsV4 already contains agg hook pools and rawExternalPools is a filtered subset
@@ -204,31 +231,28 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         buildMetricKey('RoutePoolUniverse.SelectedPools'),
         poolsV2.length,
         {
-          tags: [`chain:${ChainId[chain.chainId]}`, 'protocol:v2'],
+          tags: [chainMetricTag, 'protocol:v2'],
         }
       ),
       ctx.metrics.count(
         buildMetricKey('RoutePoolUniverse.SelectedPools'),
         poolsV3.length,
         {
-          tags: [`chain:${ChainId[chain.chainId]}`, 'protocol:v3'],
+          tags: [chainMetricTag, 'protocol:v3'],
         }
       ),
       ctx.metrics.count(
         buildMetricKey('RoutePoolUniverse.SelectedPools'),
         poolsV4.length,
         {
-          tags: [`chain:${ChainId[chain.chainId]}`, 'protocol:v4'],
+          tags: [chainMetricTag, 'protocol:v4'],
         }
       ),
       ctx.metrics.count(
         buildMetricKey('RoutePoolUniverse.SelectedPools'),
         rawExternalPools.length,
         {
-          tags: [
-            `chain:${ChainId[chain.chainId]}`,
-            'protocol:external_agg_hooks',
-          ],
+          tags: [chainMetricTag, 'protocol:external_agg_hooks'],
         }
       ),
     ]);
@@ -267,7 +291,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         'CrossLiquidityPools',
         crossLiquidityStartTime,
         ctx,
-        [`chain:${ChainId[chain.chainId]}`]
+        [chainMetricTag]
       );
 
       // Add cross-liquidity pools to their respective protocol buckets
@@ -324,6 +348,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     // - we could load latest pool info from poolRepository and then use RouteFinder but
     //   this would be slower and more expensive.
     // We only need to load latest pool info for the route we select in the end.
+    const generateRoutesStartTime = Date.now();
     const allRoutes = await this.routeFinder.generateRoutes(
       chain.chainId,
       [
@@ -400,6 +425,11 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       tokenOutAddress,
       generateMixedRoutes,
       ctx
+    );
+    await safeLogElapsedTime(
+      'GetRoutes.GenerateRoutes',
+      generateRoutesStartTime,
+      [chainMetricTag]
     );
     ctx.logger.debug('Generated route universe observability', {
       chainId: chain.chainId,

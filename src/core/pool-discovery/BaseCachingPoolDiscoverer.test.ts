@@ -360,6 +360,11 @@ describe('BaseCachingPoolDiscoverer', () => {
       JSON.stringify(expectedPools),
       expect.any(Object)
     );
+    expect(ctx.metrics.dist).toHaveBeenCalledWith(
+      expect.stringContaining('TopPoolsSelector.filterPools.Latency.dist'),
+      expect.any(Number),
+      {tags: ['chain:MAINNET', `protocol:${protocol}`]}
+    );
     expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
       tags: ['result', 'miss'],
     });

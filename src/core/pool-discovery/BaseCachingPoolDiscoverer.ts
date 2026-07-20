@@ -695,7 +695,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       await ctx.metrics.dist(
         buildMetricKey('TopPoolsSelector.filterPools.Latency.dist'),
         filterPoolsElapsed,
-        {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+        {tags: [`chain:${ChainId[chainId]}`, `protocol:${protocol}`]}
       );
 
       const retrievedPoolsStr = JSON.stringify(retrievedPools);

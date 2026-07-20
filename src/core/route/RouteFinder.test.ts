@@ -730,17 +730,17 @@ describe('RouteFinder', () => {
       expect(mockCtx.metrics.count).toHaveBeenCalledWith(
         'UniRouteService.Metric.RouteFinder.NormalRoutesCount',
         0, // No routes found with normal MaxHops
-        {tags: ['chainId:1']}
+        {tags: ['chain:MAINNET']}
       );
       expect(mockCtx.metrics.count).toHaveBeenCalledWith(
         'UniRouteService.Metric.RouteFinder.ExtendedSearchTriggered',
         1, // Extended search was triggered
-        {tags: ['chainId:1']}
+        {tags: ['chain:MAINNET']}
       );
       expect(mockCtx.metrics.count).toHaveBeenCalledWith(
         'UniRouteService.Metric.RouteFinder.ExtendedRoutesCount',
         1, // 1 extended route found
-        {tags: ['chainId:1']}
+        {tags: ['chain:MAINNET']}
       );
     });
 
@@ -785,12 +785,12 @@ describe('RouteFinder', () => {
       expect(mockCtx.metrics.count).toHaveBeenCalledWith(
         'UniRouteService.Metric.RouteFinder.NormalRoutesCount',
         1, // 1 route found with normal MaxHops
-        {tags: ['chainId:1']}
+        {tags: ['chain:MAINNET']}
       );
       expect(mockCtx.metrics.count).toHaveBeenCalledWith(
         'UniRouteService.Metric.RouteFinder.ExtendedSearchTriggered',
         0, // Extended search NOT triggered
-        {tags: ['chainId:1']}
+        {tags: ['chain:MAINNET']}
       );
       // ExtendedRoutesCount should NOT be called since extension wasn't triggered
       expect(mockCtx.metrics.count).not.toHaveBeenCalledWith(

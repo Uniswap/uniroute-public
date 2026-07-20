@@ -98,7 +98,7 @@ export class RouteFinder<TPool extends Pool> implements IRouteFinder<TPool> {
 
     // Emit metrics if context is available
     if (ctx) {
-      const metricTags = [`chainId:${chainId}`];
+      const metricTags = [`chain:${ChainId[chainId]}`];
       const findAllPathsElapsed = Date.now() - findAllPathsStartTime;
       ctx.logger.debug(
         `[Latency] RouteFinder.findAllPaths took ${findAllPathsElapsed}ms`
