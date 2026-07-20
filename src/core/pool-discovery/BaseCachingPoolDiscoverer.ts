@@ -95,6 +95,55 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     return this.serviceConfig.PoolDiscovery?.SnapshotSwrEnabled ?? false;
   }
 
+  protected get snapshotSkipReparseEnabled(): boolean {
+    return (
+      this.serviceConfig.PoolDiscovery?.SnapshotSkipReparseEnabled ?? false
+    );
+  }
+
+  // Makes a plain parsed/literal object graph identical to its JSON
+  // round-trip without re-parsing: the only divergences for such data are
+  // undefined-valued keys (kept in memory, dropped by JSON — and
+  // `'key' in pool` checks downstream are sensitive to that) and undefined
+  // array elements (null after JSON). O(keys) vs a multi-MB JSON.parse.
+  //
+  // PRECONDITIONS (unguarded — hold for every _getPools implementer):
+  // 1. JSON-plain data only. For NaN/Infinity, Date/toJSON, or frozen
+  //    objects this is NOT round-trip-equivalent (stringify would coerce
+  //    those; the strip preserves them / delete throws on frozen), and a
+  //    cyclic graph recurses forever. All current implementers return
+  //    freshly JSON.parsed + literal-constructed graphs.
+  // 2. No aliasing: the strip mutates in place, so implementers must not
+  //    retain or share the returned array or any nested object.
+  // Converters should avoid materializing undefined-valued keys in the
+  // first place (see V4 isExternalLiquidity conditional spread) — mass
+  // `delete` degrades V8 object shapes on the served pools; this strip is
+  // defense-in-depth and should be a no-op walk in practice.
+  private static stripUndefinedValuedKeysInPlace(value: unknown): void {
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        if (value[i] === undefined) {
+          value[i] = null;
+        } else {
+          BaseCachingPoolDiscoverer.stripUndefinedValuedKeysInPlace(value[i]);
+        }
+      }
+      return;
+    }
+    if (value !== null && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      for (const key of Object.keys(record)) {
+        if (record[key] === undefined) {
+          delete record[key];
+        } else {
+          BaseCachingPoolDiscoverer.stripUndefinedValuedKeysInPlace(
+            record[key]
+          );
+        }
+      }
+    }
+  }
+
   private get snapshotMaxStaleMs(): number {
     return (
       (this.serviceConfig.PoolDiscovery?.SnapshotMaxStaleSeconds ?? 2700) * 1000
@@ -228,15 +277,34 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       const {globalSet} =
         await this.featureGatedTokensRepository.getSnapshot(ctx);
       memoGlobalSet = globalSet;
-      retrievedPoolsStr = JSON.stringify(
-        BaseCachingPoolDiscoverer.filterByDenySet(retrievedPools, globalSet)
+      const filtered = BaseCachingPoolDiscoverer.filterByDenySet(
+        retrievedPools,
+        globalSet
       );
-      // Round-trip through JSON before memoizing so flag-on serves the
-      // exact objects flag-off would (a cache read always JSON.parses):
-      // e.g. a property explicitly set to undefined keeps its key on the
-      // in-memory graph but is dropped by JSON — and `'tvlUSD' in pool`
-      // checks are sensitive to that difference.
-      retrievedPools = JSON.parse(retrievedPoolsStr) as TPool[];
+      if (this.snapshotSkipReparseEnabled) {
+        // Same normalization as the round-trip below, without re-parsing
+        // the just-stringified snapshot: strip undefined-valued keys in
+        // place (a no-op walk when converters already omit them — see the
+        // helper's preconditions) and memoize the filtered array directly.
+        // In-place mutation is safe — _getPools builds fresh arrays AND
+        // fresh objects per call, and deleting an undefined-valued key is
+        // invisible to `=== undefined` reads.
+        // Kill switch: POOL_DISCOVERY_SNAPSHOT_SKIP_REPARSE_ENABLED.
+        BaseCachingPoolDiscoverer.stripUndefinedValuedKeysInPlace(filtered);
+      }
+      // The cache string is identical in both flag states (the strip
+      // reproduces exactly the normalization JSON.stringify applies).
+      retrievedPoolsStr = JSON.stringify(filtered);
+      if (this.snapshotSkipReparseEnabled) {
+        retrievedPools = filtered;
+      } else {
+        // Round-trip through JSON before memoizing so flag-on serves the
+        // exact objects flag-off would (a cache read always JSON.parses):
+        // e.g. a property explicitly set to undefined keeps its key on the
+        // in-memory graph but is dropped by JSON — and `'tvlUSD' in pool`
+        // checks are sensitive to that difference.
+        retrievedPools = JSON.parse(retrievedPoolsStr) as TPool[];
+      }
     } else {
       retrievedPools = await this.filterUnsupportedTokenPools(
         retrievedPools,

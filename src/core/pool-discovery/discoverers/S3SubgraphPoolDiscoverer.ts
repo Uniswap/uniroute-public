@@ -413,7 +413,12 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       },
       tvlETH: tvlETH,
       tvlUSD: tvlUSD,
-      isExternalLiquidity,
+      // Conditional spread: don't materialize an undefined-valued key. Most
+      // pools lack this S3 field, and an always-present undefined key would
+      // force the memo-path normalization in BaseCachingPoolDiscoverer to
+      // mass-delete it across the snapshot (delete also degrades V8 object
+      // shapes on the served, memoized pools).
+      ...(isExternalLiquidity !== undefined && {isExternalLiquidity}),
     };
   }
 }

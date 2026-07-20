@@ -225,6 +225,30 @@ describe('S3SubgraphPoolDiscoverer', () => {
       expect(pools[0]).toHaveProperty('tvlUSD');
     });
 
+    it('does not materialize an undefined-valued isExternalLiquidity key', async () => {
+      // The base-layer memo normalization mass-deletes undefined-valued keys
+      // across the snapshot (and `delete` degrades V8 object shapes on the
+      // served pools), so the converter must omit the key when the S3 field
+      // is absent rather than emit `isExternalLiquidity: undefined`.
+      const gzippedData = readTestData('v4-pools.json.gz');
+      vi.mocked(s3Client.send).mockResolvedValue(
+        createMockResponse(gzippedData) as never
+      );
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore - protected method access for testing
+      const pools = await discoverer._getPools(
+        ChainId.MAINNET,
+        Protocol.V4,
+        mockContext
+      );
+
+      for (const pool of pools) {
+        if ('isExternalLiquidity' in pool) {
+          expect(pool.isExternalLiquidity).not.toBeUndefined();
+        }
+      }
+    });
+
     it('should force select ZLCA Hook pools despite zero liquidity and zero TVL', () => {
       const zlcaPool = {
         id: '1',

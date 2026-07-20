@@ -46,6 +46,12 @@ const getPoolDiscoverySnapshotMemoEnabled = () =>
 const getPoolDiscoverySnapshotSwrEnabled = () =>
   parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_SWR_ENABLED', false);
 
+const getPoolDiscoverySnapshotSkipReparseEnabled = () =>
+  parseBooleanEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_SKIP_REPARSE_ENABLED',
+    false
+  );
+
 const getPoolDiscoverySnapshotMaxStaleSeconds = () =>
   parsePositiveIntEnvOrDefault(
     'POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS',
@@ -118,6 +124,15 @@ export interface IUniRouteServiceConfig {
     // Enables single-flight snapshot loading and stale-while-revalidate
     // serving when SnapshotMemoEnabled is also on.
     SnapshotSwrEnabled: boolean;
+    // Skips the memo-path JSON round-trip in loadAndCachePools: instead of
+    // re-parsing the just-stringified snapshot to normalize undefined-valued
+    // keys, strip those keys in place and memoize the filtered array
+    // directly. Output is JSON-round-trip-equivalent; saves one full
+    // JSON.parse of a multi-MB snapshot per background refresh on the
+    // event loop. Only active when SnapshotMemoEnabled is also on.
+    // Kill switch: set POOL_DISCOVERY_SNAPSHOT_SKIP_REPARSE_ENABLED to
+    // 'false' and redeploy.
+    SnapshotSkipReparseEnabled: boolean;
     // Upper bound for serving stale parsed snapshots after the in-memory
     // snapshot cache expires, measured from when THIS process parsed the
     // snapshot — which can already be near the entry's TTL, so worst-case
@@ -255,6 +270,7 @@ export const getUniRouteSyncConfig = (
     PoolDiscovery: {
       SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
       SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
+      SnapshotSkipReparseEnabled: getPoolDiscoverySnapshotSkipReparseEnabled(),
       SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
     },
     CachedRoutes: {
@@ -356,6 +372,7 @@ export const getQuickRouteSyncConfig = (
     PoolDiscovery: {
       SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
       SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
+      SnapshotSkipReparseEnabled: getPoolDiscoverySnapshotSkipReparseEnabled(),
       SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
     },
     CachedRoutes: {

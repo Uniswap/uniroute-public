@@ -771,6 +771,146 @@ describe('BaseCachingPoolDiscoverer', () => {
       expect(second).toBe(first);
     });
 
+    describe('memo re-parse skip', () => {
+      const skipReparseConfig: IUniRouteServiceConfig = {
+        ...serviceConfig,
+        PoolDiscovery: {
+          ...serviceConfig.PoolDiscovery,
+          SnapshotMemoEnabled: true,
+          SnapshotSkipReparseEnabled: true,
+        },
+      };
+
+      // Explicit undefined-valued keys (top-level AND nested): visible via
+      // `in` on the in-memory object but dropped by a JSON round-trip — the
+      // exact difference the memo re-parse exists to normalize.
+      const makePoolsWithUndefinedValuedKeys = (): UniPoolInfo[] => [
+        {
+          id: 'pool-with-undefined-keys',
+          feeTier: '3000',
+          tickSpacing: '1',
+          hooks: '0x1111111111111111111111111111111111111111',
+          liquidity: '1000',
+          token0: {
+            id: '0x1111111111111111111111111111111111111111',
+            symbol: undefined,
+          },
+          token1: {id: '0x2222222222222222222222222222222222222222'},
+          tvlETH: 1000,
+          tvlUSD: undefined,
+          isExternalLiquidity: undefined,
+        } as unknown as UniPoolInfo,
+      ];
+
+      it('serves the loaded objects without a JSON round-trip on the miss path', async () => {
+        const sourcePools = makePoolsWithUndefinedValuedKeys();
+        const discoverer = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          async () => sourcePools
+        );
+
+        const result = await discoverer.getPools(chainId, protocol, ctx);
+
+        // No re-parse: the served objects ARE the loaded objects.
+        expect(result[0]).toBe(sourcePools[0]);
+      });
+
+      it('normalizes undefined-valued keys so served objects match a JSON round-trip', async () => {
+        const discoverer = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          async () => makePoolsWithUndefinedValuedKeys()
+        );
+
+        const result = await discoverer.getPools(chainId, protocol, ctx);
+        const pool = result[0] as unknown as Record<string, unknown>;
+
+        expect('tvlUSD' in pool).toBe(false);
+        expect('isExternalLiquidity' in pool).toBe(false);
+        expect('symbol' in (pool.token0 as Record<string, unknown>)).toBe(
+          false
+        );
+        // Full-fidelity check: nothing else diverges from the round-trip.
+        // toStrictEqual, NOT toEqual — toEqual treats {a: undefined} as
+        // equal to {}, i.e. it is blind to exactly the present-but-
+        // undefined-key divergence this normalization exists to remove.
+        expect(result).toStrictEqual(JSON.parse(JSON.stringify(result)));
+      });
+
+      it('rewrites undefined array elements to null (round-trip parity)', async () => {
+        // No UniPoolInfo field is an array today, but the helper walks the
+        // whole graph generically — pin the array branch so a regression
+        // (e.g. leaving undefined in place, which JSON.stringify would
+        // serialize as null while the memoized object diverges) is caught.
+        const poolWithArray = {
+          ...makePoolsWithUndefinedValuedKeys()[0],
+          tags: ['stable', undefined, 'v4'],
+        } as unknown as UniPoolInfo;
+        const discoverer = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          async () => [poolWithArray]
+        );
+
+        const result = await discoverer.getPools(chainId, protocol, ctx);
+        const pool = result[0] as unknown as Record<string, unknown>;
+
+        expect(pool.tags).toStrictEqual(['stable', null, 'v4']);
+        expect(result).toStrictEqual(JSON.parse(JSON.stringify(result)));
+      });
+
+      it('writes the same cache string as the flag-off memo path', async () => {
+        const stored: string[] = [];
+        const captureCache = () =>
+          ({
+            get: vi.fn().mockResolvedValue(undefined),
+            set: vi.fn().mockImplementation(async (_k: string, v: string) => {
+              stored.push(v);
+            }),
+          }) as unknown as IRedisCache<string, string>;
+
+        const flagOn = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          captureCache(),
+          getPoolsForTokensCache,
+          async () => makePoolsWithUndefinedValuedKeys()
+        );
+        const flagOff = new ClosurePoolDiscoverer(
+          memoConfig,
+          captureCache(),
+          getPoolsForTokensCache,
+          async () => makePoolsWithUndefinedValuedKeys()
+        );
+
+        await flagOn.getPools(chainId, protocol, ctx);
+        await flagOff.getPools(chainId, protocol, ctx);
+
+        expect(stored).toHaveLength(2);
+        expect(stored[0]).toBe(stored[1]);
+      });
+
+      it('flag off keeps the round-trip (fresh objects served)', async () => {
+        const sourcePools = makePoolsWithUndefinedValuedKeys();
+        const discoverer = new ClosurePoolDiscoverer(
+          memoConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          async () => sourcePools
+        );
+
+        const result = await discoverer.getPools(chainId, protocol, ctx);
+
+        expect(result[0]).not.toBe(sourcePools[0]);
+        expect(
+          'tvlUSD' in (result[0] as unknown as Record<string, unknown>)
+        ).toBe(false);
+      });
+    });
+
     it('does not mark per-request _getPoolsForTokens arrays as memo-stable', async () => {
       // Direct/Static discoverers return fresh arrays per pair; stability
       // must not leak onto them via the compliance-filter self-seed, or the
