@@ -163,6 +163,13 @@ export async function trackPoolsForTokensCacheSkip(
 }
 
 export interface ITopPoolsSelector<TPool extends UniPoolInfo> {
+  // True for selectors that restrict the result to AGG_HOOKS pools
+  // (AggHooksTopPoolsSelector). Post-selector additive merges (CCA scheduled
+  // pools) must skip such fetches — appending a hookless V4 pool would leak
+  // a plain V4 route into a request whose protocol filter excluded V4.
+  // A property (not instanceof) because PoolDiscoverer wraps selectors in
+  // anonymous adapters; adapters must forward it.
+  readonly aggHooksOnly?: boolean;
   filterPools(
     pools: TPool[],
     chainId: ChainId,

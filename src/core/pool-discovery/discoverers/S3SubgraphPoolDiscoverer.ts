@@ -12,6 +12,11 @@ import * as zlib from 'zlib';
 import {promisify} from 'node:util';
 import _ from 'lodash';
 import {getTvlBypassHookAddresses} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {CcaScheduledPoolsRepository} from '../CcaScheduledPoolsRepository';
+import {HooksOptions} from '../../../models/hooks/HooksOptions';
+import {ITopPoolsSelector} from '../interface';
+import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
+import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
 // Async inflate is unconditional (not behind the snapshot SWR flag): it keeps
 // the decompressed output identical to inflateSync while moving the work off
@@ -358,8 +363,203 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
   V4PoolInfo,
   V4PoolData
 > {
+  constructor(
+    serviceConfig: IUniRouteServiceConfig,
+    getPoolsCache: IRedisCache<string, string>,
+    getPoolsForTokensCache: IRedisCache<string, string>,
+    featureGatedTokensRepository: FeatureGatedTokensRepository,
+    s3: S3Client,
+    // Optional: CCA launch pools pre-registered at a known migrationBlock
+    // (ROUTE-1134). Merged AFTER the caching layers so activation isn't
+    // delayed by the pool-cache TTLs.
+    private readonly ccaScheduledPoolsRepository?: CcaScheduledPoolsRepository
+  ) {
+    super(
+      serviceConfig,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      featureGatedTokensRepository,
+      s3
+    );
+  }
+
   protected override getDiscovererName(): string {
     return 'S3SubgraphPoolDiscovererV4';
+  }
+
+  public override async getPoolsForTokens(
+    chainId: ChainId,
+    protocol: Protocol,
+    tokenIn: Address,
+    tokenOut: Address,
+    topPoolSelector: ITopPoolsSelector<V4PoolInfo>,
+    hooksOptions: HooksOptions | undefined,
+    skipPoolsForTokensCache: boolean,
+    nsCtx: RouteNamespaceContext,
+    ctx: Context
+  ): Promise<V4PoolInfo[]> {
+    const pools = await super.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      hooksOptions,
+      skipPoolsForTokensCache,
+      nsCtx,
+      ctx
+    );
+    // The agg-hooks fetch (UniRoutesRepository's external-protocol path)
+    // deliberately restricts its result to AGG_HOOKS pools; appending the
+    // hookless CCA pool there would leak a plain V4 route into a request
+    // whose protocol filter excluded V4. Property check, NOT instanceof:
+    // PoolDiscoverer passes selectors through an anonymous adapter object.
+    if (topPoolSelector.aggHooksOnly === true) {
+      return pools;
+    }
+    return this.mergeCcaScheduledPools(pools, chainId, ctx, {
+      tokenIn,
+      tokenOut,
+      hooksOptions,
+    });
+  }
+
+  /**
+   * Append active CCA scheduled pools (registry entries whose migrationBlock
+   * has been reached) to the pair result. Runs AFTER the pair-level cache
+   * (and never feeds either cache), so activation latency is bounded by the
+   * registry's own short cache TTL, not the 900s pool-cache TTLs — and a
+   * retired entry disappears with the next request instead of lingering in
+   * Redis. Dedup prefers the real subgraph entry once it exists (it carries
+   * true liquidity/TVL); on-chain quoting remains ground truth either way.
+   *
+   * Scope guards:
+   * - Matching is on the LAUNCHED token only (tokenIn or tokenOut must be the
+   *   auctioned token). The paired currency — usually native ETH — must not
+   *   drag every active launch pool into every quote touching that currency;
+   *   this merge sits after the TopN selector, outside all candidate caps.
+   * - Hookless entries only. Hooked pools go through selector trust
+   *   boundaries (agg-hook segregation, permissioned-hook namespaces) that
+   *   this post-selector merge bypasses; CCA launches are hookless today, so
+   *   a future hooked launch needs explicit support, not a silent bypass.
+   */
+  private async mergeCcaScheduledPools(
+    pools: V4PoolInfo[],
+    chainId: ChainId,
+    ctx: Context,
+    pairFilter: {
+      tokenIn: Address;
+      tokenOut: Address;
+      hooksOptions: HooksOptions | undefined;
+    }
+  ): Promise<V4PoolInfo[]> {
+    // The merge is strictly additive: no failure in it may degrade the base
+    // result, so the whole body is fail-open.
+    try {
+      if (!this.ccaScheduledPoolsRepository?.isEnabled(ctx)) {
+        return pools;
+      }
+      // Hookless-only merge: nothing to add on a hooks-only fetch.
+      if (pairFilter.hooksOptions === HooksOptions.HOOKS_ONLY) {
+        return pools;
+      }
+      // An empty base result is PoolDiscovererWithFallback's signal to
+      // consult the Direct/Static fallbacks (e.g. during an S3 pool-cache
+      // outage) — appending here would mask that and serve ONLY the
+      // synthesized pool. In the legitimate launch case the base is never
+      // empty (the selector returns top native-side pools).
+      if (pools.length === 0) {
+        return pools;
+      }
+      const scheduled = await this.ccaScheduledPoolsRepository.getActivePools(
+        chainId,
+        ctx
+      );
+      if (scheduled.length === 0) {
+        return pools;
+      }
+
+      const targets = new Set([
+        pairFilter.tokenIn.lowerCased,
+        pairFilter.tokenOut.lowerCased,
+      ]);
+      const existingIds = new Set(pools.map(pool => pool.id.toLowerCase()));
+      let hookedSkipped = 0;
+      const merged = scheduled
+        .filter(({pool, launchedToken}) => {
+          if (!targets.has(launchedToken)) {
+            return false;
+          }
+          if (existingIds.has(pool.id.toLowerCase())) {
+            return false;
+          }
+          // Defense in depth — the writer already refuses hooked entries.
+          // Counted (not logged): this runs per quote request.
+          if (pool.hooks !== ADDRESS_ZERO) {
+            hookedSkipped++;
+            return false;
+          }
+          return true;
+        })
+        .map(({pool}) => pool);
+
+      if (hookedSkipped > 0) {
+        await ctx.metrics.count(
+          buildMetricKey('CcaScheduledPools.hookedEntrySkipped'),
+          hookedSkipped,
+          {
+            tags: [
+              `chain:${ChainId[chainId]}`,
+              'status:failure',
+              'reason:hooked_entry',
+            ],
+          }
+        );
+      }
+      if (merged.length === 0) {
+        return pools;
+      }
+      // Merged entries must clear the same restricted-token (globalSet)
+      // filter every cached/selector-path pool passes through — a launched
+      // token later added to the compliance list must not stay quotable via
+      // the registry.
+      const compliantMerged = await this.filterUnsupportedTokenPools(
+        merged,
+        ctx
+      );
+      if (compliantMerged.length === 0) {
+        return pools;
+      }
+      ctx.logger.debug('Merged CCA scheduled pools into V4 pool set', {
+        chainId,
+        merged: compliantMerged.map(pool => pool.id),
+      });
+      await ctx.metrics.count(
+        buildMetricKey('CcaScheduledPools.merged'),
+        compliantMerged.length,
+        {
+          tags: [`chain:${ChainId[chainId]}`, 'status:success'],
+        }
+      );
+      return [...pools, ...compliantMerged];
+    } catch (error) {
+      ctx.logger.warn('CCA scheduled pools merge failed; serving base pools', {
+        chainId,
+        error,
+      });
+      await ctx.metrics.count(
+        buildMetricKey('CcaScheduledPools.mergeError'),
+        1,
+        {
+          tags: [
+            `chain:${ChainId[chainId]}`,
+            'status:failure',
+            'reason:merge_failed',
+          ],
+        }
+      );
+      return pools;
+    }
   }
 
   /**

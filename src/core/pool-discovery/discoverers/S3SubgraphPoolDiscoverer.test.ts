@@ -16,13 +16,54 @@ import {Context} from '@uniswap/lib-uni/context';
 import {readFileSync} from 'fs';
 import {join} from 'path';
 import {beforeEach, describe, expect, it, vi} from 'vitest';
-import {V2PoolInfo, V4PoolInfo} from '../interface';
+import {
+  ITopPoolsSelector,
+  PoolsForTokensCacheDirective,
+  V2PoolInfo,
+  V4PoolInfo,
+} from '../interface';
 import {sdkStreamMixin} from '@smithy/util-stream';
 import {Readable} from 'stream';
 import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
+import {
+  CcaScheduledActivePool,
+  CcaScheduledPoolsRepository,
+} from '../CcaScheduledPoolsRepository';
+import {Address} from '../../../models/address/Address';
+import {HooksOptions} from '../../../models/hooks/HooksOptions';
+import {
+  EMPTY_NAMESPACE_CONTEXT,
+  RouteNamespaceContext,
+} from '../../../models/hooks/namespaces';
+import {AggHooksTopPoolsSelector} from '../TopPoolsSelector';
+import {aggHooksPoolSelectionPerChainConfig} from '../../../lib/config';
 
 const mockConfig: IUniRouteServiceConfig = getUniRouteTestConfig();
 const mockContext: Context = buildTestContext();
+
+class PassthroughTopPoolsSelector implements ITopPoolsSelector<V4PoolInfo> {
+  async filterPools(
+    pools: V4PoolInfo[],
+
+    _chainId: ChainId,
+
+    _tokenIn: Address,
+
+    _tokenOut: Address,
+
+    _protocol: Protocol,
+
+    _hooksOptions: HooksOptions | undefined,
+
+    _nsCtx: RouteNamespaceContext,
+
+    _ctx: Context,
+
+    _cacheDirective: PoolsForTokensCacheDirective
+  ): Promise<V4PoolInfo[]> {
+    return pools;
+  }
+}
 
 // Helper to read test data
 const readTestData = (filename: string): Buffer => {
@@ -391,5 +432,254 @@ describe('S3SubgraphPoolDiscoverer', () => {
         ).rejects.toThrow('Unsupported protocol');
       }
     );
+  });
+});
+
+describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
+  const ZERO = '0x0000000000000000000000000000000000000000';
+  const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+  const NEW_TOKEN = '0x1f9840a85d5af5bf1d1762f925bdaddc4201f984';
+  const OTHER_TOKEN = '0x2222222222222222222222222222222222222222';
+
+  const scheduledPool = (overrides: Partial<V4PoolInfo> = {}): V4PoolInfo => ({
+    id: '0xccapool',
+    feeTier: '10000',
+    liquidity: '1',
+    tickSpacing: '200',
+    hooks: ZERO,
+    token0: {id: ZERO},
+    token1: {id: NEW_TOKEN},
+    tvlETH: 0,
+    tvlUSD: 0,
+    ...overrides,
+  });
+
+  const activePool = (
+    poolOverrides: Partial<V4PoolInfo> = {},
+    launchedToken: string = NEW_TOKEN
+  ): CcaScheduledActivePool => ({
+    pool: scheduledPool(poolOverrides),
+    launchedToken,
+  });
+
+  // Unrelated base pool: the merge only runs when the base result is
+  // non-empty (an empty primary result must keep triggering the
+  // Direct/Static fallback chain).
+  const basePool: V4PoolInfo = {
+    id: '0xbasepool',
+    feeTier: '500',
+    liquidity: '1000',
+    tickSpacing: '10',
+    hooks: ZERO,
+    token0: {id: ZERO},
+    token1: {id: WETH.toLowerCase()},
+    tvlETH: 100,
+    tvlUSD: 100,
+  };
+
+  let s3Client: S3Client;
+  let repository: CcaScheduledPoolsRepository;
+  let pairCache: IRedisCache<string, string>;
+  let discoverer: S3SubgraphPoolDiscovererV4;
+
+  const makeCache = (): IRedisCache<string, string> =>
+    ({
+      get: vi.fn().mockResolvedValue(undefined),
+      set: vi.fn().mockResolvedValue(undefined),
+    }) as unknown as IRedisCache<string, string>;
+
+  const getPoolsForTokens = (
+    hooksOptions?: HooksOptions
+  ): Promise<V4PoolInfo[]> =>
+    discoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V4,
+      new Address(WETH),
+      new Address(NEW_TOKEN),
+      new PassthroughTopPoolsSelector(),
+      hooksOptions,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      mockContext
+    );
+
+  beforeEach(() => {
+    s3Client = {
+      send: vi.fn().mockResolvedValue(createMockResponse()),
+    } as unknown as S3Client;
+    repository = {
+      isEnabled: vi.fn().mockReturnValue(true),
+      getActivePools: vi.fn().mockResolvedValue([activePool()]),
+    } as unknown as CcaScheduledPoolsRepository;
+    pairCache = makeCache();
+    vi.mocked(pairCache.get).mockResolvedValue(JSON.stringify([basePool]));
+    discoverer = new S3SubgraphPoolDiscovererV4(
+      mockConfig,
+      makeCache(),
+      pairCache,
+      FeatureGatedTokensRepository.empty(),
+      s3Client,
+      repository
+    );
+  });
+
+  it('appends active pair-relevant scheduled pools after the pair cache, without caching them', async () => {
+    // Cache miss with real S3 pool data: exercises the miss path so the
+    // no-cache-write assertion below is meaningful.
+    vi.mocked(pairCache.get).mockResolvedValue(undefined as unknown as string);
+    vi.mocked(s3Client.send).mockResolvedValue(
+      createMockResponse(readTestData('v4-pools.json.gz')) as never
+    );
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).toContain('0xccapool');
+    // The scheduled pool must not be written into the pair cache — retiring
+    // an entry has to take effect on the next request, not a TTL later.
+    const cachedWrites = vi
+      .mocked(pairCache.set)
+      .mock.calls.map(call => call[1] as string);
+    expect(cachedWrites.length).toBeGreaterThan(0);
+    for (const written of cachedWrites) {
+      expect(written).not.toContain('0xccapool');
+    }
+  });
+
+  it('does not merge into an empty base result (preserves the fallback-discoverer trigger)', async () => {
+    vi.mocked(pairCache.get).mockResolvedValue(undefined as unknown as string);
+    // S3 returns nothing → base result is empty → fallback semantics apply.
+    const pools = await getPoolsForTokens();
+
+    expect(pools).toEqual([]);
+    expect(repository.getActivePools).not.toHaveBeenCalled();
+  });
+
+  it('fails open when the repository throws (merge is strictly additive)', async () => {
+    vi.mocked(repository.getActivePools).mockRejectedValue(
+      new Error('malformed registry')
+    );
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).toEqual(['0xbasepool']);
+  });
+
+  it('matches on the launched token only — the paired currency must not drag pools into unrelated quotes', async () => {
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      // Launched token IS the quote's tokenOut: merged.
+      activePool(),
+      // Shares the quote's native/WETH side (token0 = 0x0) but its launched
+      // token is unrelated: must NOT be merged.
+      activePool({id: '0xothereth', token1: {id: OTHER_TOKEN}}, OTHER_TOKEN),
+    ]);
+
+    const ids = (await getPoolsForTokens()).map(pool => pool.id);
+
+    expect(ids).toContain('0xccapool');
+    expect(ids).not.toContain('0xothereth');
+  });
+
+  it('skips hooked scheduled pools (hooked launches need selector-path support)', async () => {
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({hooks: '0x9999999999999999999999999999999999999999'}),
+    ]);
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('drops merged scheduled pools whose token is on the restricted list', async () => {
+    const restrictedRepo = new FeatureGatedTokensRepository(
+      {
+        fetchAll: async () => ({
+          tokens: [{chainId: ChainId.MAINNET, address: NEW_TOKEN}],
+          skippedUnsupportedChains: 0,
+        }),
+      },
+      {fetch: async () => []}
+    );
+    discoverer = new S3SubgraphPoolDiscovererV4(
+      mockConfig,
+      makeCache(),
+      pairCache,
+      restrictedRepo,
+      s3Client,
+      repository
+    );
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('prefers the real (cached) subgraph entry over a scheduled duplicate', async () => {
+    const realPool = scheduledPool({liquidity: '123456789'});
+    vi.mocked(pairCache.get).mockResolvedValue(JSON.stringify([realPool]));
+
+    const pools = await getPoolsForTokens();
+
+    const matches = pools.filter(pool => pool.id === '0xccapool');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].liquidity).toBe('123456789');
+  });
+
+  it('dedups against cached subgraph ids case-insensitively', async () => {
+    const realPool = scheduledPool({liquidity: '123456789'});
+    vi.mocked(pairCache.get).mockResolvedValue(JSON.stringify([realPool]));
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({id: '0xCCAPOOL'}),
+    ]);
+
+    const pools = await getPoolsForTokens();
+
+    const matches = pools.filter(pool => pool.id.toLowerCase() === '0xccapool');
+    expect(matches).toHaveLength(1);
+    expect(matches[0].liquidity).toBe('123456789');
+  });
+
+  it('is a no-op when the repository is disabled', async () => {
+    vi.mocked(repository.isEnabled).mockReturnValue(false);
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+    expect(repository.getActivePools).not.toHaveBeenCalled();
+  });
+
+  it('skips hookless scheduled pools when hooksOptions is HOOKS_ONLY', async () => {
+    const pools = await getPoolsForTokens(HooksOptions.HOOKS_ONLY);
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('never merges into an agg-hooks selector fetch (would leak a V4 route into an agg-hooks-only request)', async () => {
+    const aggSelector = new AggHooksTopPoolsSelector(
+      aggHooksPoolSelectionPerChainConfig,
+      FeatureGatedTokensRepository.empty()
+    );
+    // Replicate PoolDiscoverer's anonymous adapter: the gate must read the
+    // aggHooksOnly marker THROUGH the wrapper — an instanceof check is
+    // defeated by exactly this production call path.
+    const wrappedLikePoolDiscoverer: ITopPoolsSelector<V4PoolInfo> = {
+      aggHooksOnly: aggSelector.aggHooksOnly,
+      filterPools: async (...args) =>
+        (await aggSelector.filterPools(...args)) as V4PoolInfo[],
+    };
+
+    const pools = await discoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V4,
+      new Address(WETH),
+      new Address(NEW_TOKEN),
+      wrappedLikePoolDiscoverer,
+      HooksOptions.HOOKS_INCLUSIVE,
+      true,
+      EMPTY_NAMESPACE_CONTEXT,
+      mockContext
+    );
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+    expect(repository.getActivePools).not.toHaveBeenCalled();
   });
 });

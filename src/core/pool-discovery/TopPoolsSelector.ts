@@ -1194,6 +1194,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 export class AggHooksTopPoolsSelector
   implements ITopPoolsSelector<UniPoolInfo>
 {
+  public readonly aggHooksOnly = true;
+
   // The agg-hook result is always uncacheable (see the cache-skip below), so
   // without memoization the O(all pools) agg-subset scan runs on every
   // request. Keyed by snapshot array identity (stable via Layer-1 memo in

@@ -135,6 +135,9 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
       }
       case Protocol.V4: {
         const v4Selector: ITopPoolsSelector<V4PoolInfo> = {
+          // Forward the marker — S3SubgraphPoolDiscovererV4's CCA merge gate
+          // reads it through this adapter.
+          aggHooksOnly: topPoolsSelector.aggHooksOnly,
           filterPools: async (
             pools: V4PoolInfo[],
             chainId: ChainId,
