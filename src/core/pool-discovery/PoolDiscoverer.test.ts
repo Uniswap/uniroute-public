@@ -489,4 +489,163 @@ describe('PoolDiscoverer', () => {
       ).rejects.toThrow(`Unsupported protocol ${protocol}`);
     });
   });
+
+  describe('parallel direct discovery (POOL_DISCOVERY_PARALLEL_DIRECT_ENABLED)', () => {
+    // The flag is read at construction, so each test constructs its own
+    // instance after setting the env var.
+    const buildDiscoverer = (parallel: boolean) => {
+      if (parallel) {
+        vi.stubEnv('POOL_DISCOVERY_PARALLEL_DIRECT_ENABLED', 'true');
+      } else {
+        vi.stubEnv('POOL_DISCOVERY_PARALLEL_DIRECT_ENABLED', 'false');
+      }
+      const discoverer = new PoolDiscoverer(
+        v2PoolDiscoverer,
+        v3PoolDiscoverer,
+        v4PoolDiscoverer,
+        v2DirectPoolDiscoverer,
+        v3DirectPoolDiscoverer,
+        v4DirectPoolDiscoverer
+      );
+      vi.unstubAllEnvs();
+      return discoverer;
+    };
+
+    it.each([Protocol.V2, Protocol.V3, Protocol.V4])(
+      'returns identical merged pools with the flag on and off (%s)',
+      async protocol => {
+        v2PoolDiscoverer = makeDiscoverer<V2PoolInfo>(
+          [],
+          [{id: 'v2-primary'} as V2PoolInfo]
+        );
+        v3PoolDiscoverer = makeDiscoverer<V3PoolInfo>(
+          [],
+          [{id: 'v3-primary'} as V3PoolInfo]
+        );
+        v4PoolDiscoverer = makeDiscoverer<V4PoolInfo>(
+          [],
+          [{id: 'v4-primary'} as V4PoolInfo]
+        );
+        v2DirectPoolDiscoverer = makeDiscoverer<V2PoolInfo>(
+          [],
+          [{id: 'v2-direct'} as V2PoolInfo]
+        );
+        v3DirectPoolDiscoverer = makeDiscoverer<V3PoolInfo>(
+          [],
+          [{id: 'v3-direct'} as V3PoolInfo]
+        );
+        v4DirectPoolDiscoverer = makeDiscoverer<V4PoolInfo>(
+          [],
+          [{id: 'v4-direct'} as V4PoolInfo]
+        );
+        const run = (parallel: boolean) =>
+          buildDiscoverer(parallel).getPoolsForTokens(
+            ChainId.MAINNET,
+            protocol,
+            TOKEN_IN,
+            TOKEN_OUT,
+            makeSelector(),
+            undefined,
+            false,
+            EMPTY_NAMESPACE_CONTEXT,
+            ctx
+          );
+        const sequential = await run(false);
+        const parallel = await run(true);
+        expect(parallel).toEqual(sequential);
+        expect(parallel).toHaveLength(2);
+      }
+    );
+
+    it('direct pools still override primary pools on id collision', async () => {
+      const primaryPool = {id: 'shared', tvlUSD: 1} as unknown as V4PoolInfo;
+      const directPool = {id: 'shared', tvlUSD: 2} as unknown as V4PoolInfo;
+      v4PoolDiscoverer = makeDiscoverer<V4PoolInfo>([], [primaryPool]);
+      v4DirectPoolDiscoverer = makeDiscoverer<V4PoolInfo>([], [directPool]);
+
+      const result = await buildDiscoverer(true).getPoolsForTokens(
+        ChainId.MAINNET,
+        Protocol.V4,
+        TOKEN_IN,
+        TOKEN_OUT,
+        makeSelector(),
+        undefined,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+
+      expect(result).toHaveLength(1);
+      expect((result[0] as V4PoolInfo).tvlUSD).toBe(2);
+    });
+
+    it('still skips the V4 direct probe for HOOKS_ONLY under the flag', async () => {
+      await buildDiscoverer(true).getPoolsForTokens(
+        ChainId.MAINNET,
+        Protocol.V4,
+        TOKEN_IN,
+        TOKEN_OUT,
+        makeSelector(),
+        HooksOptions.HOOKS_ONLY,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+      expect(v4DirectPoolDiscoverer.getPoolsForTokens).not.toHaveBeenCalled();
+    });
+
+    it('rethrows the primary error without an unhandled rejection when the pre-started direct probe also fails', async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        v4PoolDiscoverer.getPoolsForTokens = vi
+          .fn()
+          .mockRejectedValue(new Error('primary boom'));
+        v4DirectPoolDiscoverer.getPoolsForTokens = vi
+          .fn()
+          .mockRejectedValue(new Error('direct boom'));
+
+        await expect(
+          buildDiscoverer(true).getPoolsForTokens(
+            ChainId.MAINNET,
+            Protocol.V4,
+            TOKEN_IN,
+            TOKEN_OUT,
+            makeSelector(),
+            undefined,
+            false,
+            EMPTY_NAMESPACE_CONTEXT,
+            ctx
+          )
+        ).rejects.toThrow('primary boom');
+
+        // Give the loop a tick so a leaked rejection would surface.
+        await new Promise(resolve => setImmediate(resolve));
+        expect(unhandled).toHaveLength(0);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('rethrows the direct probe error when the primary succeeds', async () => {
+      v4DirectPoolDiscoverer.getPoolsForTokens = vi
+        .fn()
+        .mockRejectedValue(new Error('direct boom'));
+
+      await expect(
+        buildDiscoverer(true).getPoolsForTokens(
+          ChainId.MAINNET,
+          Protocol.V4,
+          TOKEN_IN,
+          TOKEN_OUT,
+          makeSelector(),
+          undefined,
+          false,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        )
+      ).rejects.toThrow('direct boom');
+    });
+  });
 });

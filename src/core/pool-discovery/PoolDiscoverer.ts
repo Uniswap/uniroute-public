@@ -17,6 +17,18 @@ import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 // Main class that delegates pool discovery to the appropriate pool discoverer based on the protocol.
 // Different implementations can be plugged in during init and passed down to BL.
 export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
+  /**
+   * Run the direct exact-pair probe concurrently with the primary
+   * (S3/cached) discovery instead of after it. The two are independent —
+   * separate cache namespaces, and the merge in `getPoolsForTokens` is
+   * order-preserving either way — but sequential execution puts the direct
+   * probe's on-chain RPC wall (V4: 2 StateView calls x 4 fee tiers on a
+   * cold pair) on top of the primary path for every call. Kill switch:
+   * set POOL_DISCOVERY_PARALLEL_DIRECT_ENABLED to 'false' and redeploy.
+   */
+  private readonly parallelDirectDiscoveryEnabled =
+    process.env.POOL_DISCOVERY_PARALLEL_DIRECT_ENABLED === 'true';
+
   constructor(
     private readonly v2PoolDiscoverer: IPoolDiscoverer<V2PoolInfo>,
     private readonly v3PoolDiscoverer: IPoolDiscoverer<V3PoolInfo>,
@@ -54,6 +66,27 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     nsCtx: RouteNamespaceContext,
     ctx: Context
   ): Promise<UniPoolInfo[]> {
+    // Start the direct exact-pair probe concurrently with the primary
+    // discovery when enabled (see parallelDirectDiscoveryEnabled). The
+    // no-op catch prevents an unhandled rejection if the primary path
+    // throws before this promise is awaited; the await below still
+    // rethrows the original error.
+    let directPoolsPromise: Promise<UniPoolInfo[]> | undefined;
+    if (this.parallelDirectDiscoveryEnabled) {
+      directPoolsPromise = this.fetchDirectPools(
+        chainId,
+        protocol,
+        tokenIn,
+        tokenOut,
+        topPoolsSelector,
+        hooksOptions,
+        skipPoolsForTokensCache,
+        nsCtx,
+        ctx
+      );
+      directPoolsPromise.catch(() => {});
+    }
+
     // Get protocol-specific pools
     let protocolPools: UniPoolInfo[] = [];
     switch (protocol) {
@@ -179,37 +212,10 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     }
 
     // Always add direct pools for each protocol
-    let directPools: UniPoolInfo[] = [];
-    switch (protocol) {
-      case Protocol.V2:
-        directPools = await this.v2DirectPoolDiscoverer.getPoolsForTokens(
-          chainId,
-          protocol,
-          tokenIn,
-          tokenOut,
-          topPoolsSelector,
-          hooksOptions,
-          skipPoolsForTokensCache,
-          nsCtx,
-          ctx
-        );
-        break;
-      case Protocol.V3:
-        directPools = await this.v3DirectPoolDiscoverer.getPoolsForTokens(
-          chainId,
-          protocol,
-          tokenIn,
-          tokenOut,
-          topPoolsSelector,
-          hooksOptions,
-          skipPoolsForTokensCache,
-          nsCtx,
-          ctx
-        );
-        break;
-      case Protocol.V4:
-        if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
-          directPools = await this.v4DirectPoolDiscoverer.getPoolsForTokens(
+    const directPools =
+      directPoolsPromise !== undefined
+        ? await directPoolsPromise
+        : await this.fetchDirectPools(
             chainId,
             protocol,
             tokenIn,
@@ -220,9 +226,6 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
             nsCtx,
             ctx
           );
-        }
-        break;
-    }
 
     // Combine/Dedup protocol-specific pools with direct pools
     const uniquePools = new Map<string, UniPoolInfo>();
@@ -234,5 +237,61 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     }
 
     return Array.from(uniquePools.values());
+  }
+
+  private async fetchDirectPools(
+    chainId: ChainId,
+    protocol: Protocol,
+    tokenIn: Address,
+    tokenOut: Address,
+    topPoolsSelector: ITopPoolsSelector<UniPoolInfo>,
+    hooksOptions: HooksOptions | undefined,
+    skipPoolsForTokensCache: boolean,
+    nsCtx: RouteNamespaceContext,
+    ctx: Context
+  ): Promise<UniPoolInfo[]> {
+    switch (protocol) {
+      case Protocol.V2:
+        return this.v2DirectPoolDiscoverer.getPoolsForTokens(
+          chainId,
+          protocol,
+          tokenIn,
+          tokenOut,
+          topPoolsSelector,
+          hooksOptions,
+          skipPoolsForTokensCache,
+          nsCtx,
+          ctx
+        );
+      case Protocol.V3:
+        return this.v3DirectPoolDiscoverer.getPoolsForTokens(
+          chainId,
+          protocol,
+          tokenIn,
+          tokenOut,
+          topPoolsSelector,
+          hooksOptions,
+          skipPoolsForTokensCache,
+          nsCtx,
+          ctx
+        );
+      case Protocol.V4:
+        if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
+          return this.v4DirectPoolDiscoverer.getPoolsForTokens(
+            chainId,
+            protocol,
+            tokenIn,
+            tokenOut,
+            topPoolsSelector,
+            hooksOptions,
+            skipPoolsForTokensCache,
+            nsCtx,
+            ctx
+          );
+        }
+        return [];
+      default:
+        return [];
+    }
   }
 }
