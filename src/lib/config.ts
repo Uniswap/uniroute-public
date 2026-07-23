@@ -214,6 +214,14 @@ export interface IUniRouteServiceConfig {
     maxRetries: number;
     // Minimum batch size to use when retrying (never go below this value)
     minBatchSize: number;
+    // Per-chain multicall batch-size override (JSON record env
+    // MULTICALL_BATCH_SIZE_BY_CHAIN, e.g. '{"__PLACEHOLDER__":__PLACEHOLDER__}'). Overlays the
+    // in-code override map in dependencies.ts; unset chains keep their
+    // hardcoded/chain-default batch size. Smaller batches shorten the
+    // serial EVM execution inside each eth_call (batches run in
+    // parallel, so wall time ≈ slowest batch) at the cost of more
+    // concurrent RPC calls — tune per chain with provider telemetry.
+    multicallBatchSizeByChain: Record<number, number>;
   };
   L1L2GasCostFetcher: {
     // Enable L1 gas cost fetching for Optimism Stack chains (careful, will cause latency increase)
@@ -318,6 +326,9 @@ export const getUniRouteSyncConfig = (
     OnChainQuoteFetcher: {
       maxRetries: __PLACEHOLDER__,
       minBatchSize: __PLACEHOLDER__,
+      multicallBatchSizeByChain: parsePositiveIntRecordEnvOrEmpty(
+        'MULTICALL_BATCH_SIZE_BY_CHAIN'
+      ),
     },
     L1L2GasCostFetcher: {
       // Note: Enabling this will increase latency, use caution. We need some better mechanism for calldata generation - it's too costly (rpc calls, fresh pool details per candidate).
@@ -416,6 +427,9 @@ export const getQuickRouteSyncConfig = (
     OnChainQuoteFetcher: {
       maxRetries: __PLACEHOLDER__,
       minBatchSize: __PLACEHOLDER__,
+      multicallBatchSizeByChain: parsePositiveIntRecordEnvOrEmpty(
+        'MULTICALL_BATCH_SIZE_BY_CHAIN'
+      ),
     },
     L1L2GasCostFetcher: {
       // Note: Enabling this will increase latency, use caution. We need some better mechanism for calldata generation - it's too costly (rpc calls, fresh pool details per candidate).
