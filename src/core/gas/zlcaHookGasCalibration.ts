@@ -2,6 +2,7 @@ import {ChainId} from '../../lib/config';
 import {Pool} from '../../models/pool/Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
 import {ZLCA_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {getDynamicZlcaHooks} from '../../lib/poolCaching/util/dynamicZlcaHooks';
 
 /**
  * Returns the total gas-unit adjustment for a route, adding each ZLCA
@@ -22,7 +23,11 @@ import {ZLCA_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAll
  */
 export function zlcaHookGasAdjustment(path: Pool[], chainId: ChainId): bigint {
   const zlcaHooks = ZLCA_HOOKS_PER_CHAIN[chainId];
-  if (!zlcaHooks) return 0n;
+  // getDynamicZlcaHooks returns undefined until factory enumeration has
+  // discovered hooks on this chain, so chains with neither a static registry
+  // nor factory-discovered hooks exit here.
+  const dynamicZlcaHooks = getDynamicZlcaHooks(chainId);
+  if (!zlcaHooks && !dynamicZlcaHooks) return 0n;
 
   let total = 0n;
   for (const pool of path) {
@@ -30,7 +35,10 @@ export function zlcaHookGasAdjustment(path: Pool[], chainId: ChainId): bigint {
     const hooks = pool.hooks;
     if (typeof hooks !== 'string') continue;
     // Registry keys are lowercase (enforced by hooksAddressesAllowlist.test.ts)
-    total += zlcaHooks[hooks.toLowerCase()] ?? 0n;
+    const hookLower = hooks.toLowerCase();
+    // Static registry wins; factory-discovered dynamic ZLCA hooks
+    // (dynamicZlcaHooks.ts) fall back to their factory's per-hop overhead.
+    total += zlcaHooks?.[hookLower] ?? dynamicZlcaHooks?.get(hookLower) ?? 0n;
   }
   return total;
 }

@@ -1564,3 +1564,102 @@ describe('permissioned-hook pools (Superstate PA↔PA)', () => {
     );
   });
 });
+
+describe('v4HooksPoolsFiltering dynamic ZLCA hooks', () => {
+  // Custom-accounting flags (BeforeSwapReturnsDelta) — never routable and
+  // never auto-allowlisted, so admission requires (dynamic) allowlisting.
+  const customAccountingHook = '0x0000000000000000000000000000000000000008';
+
+  const majorPairPool = () =>
+    createPool({
+      hooks: customAccountingHook,
+      tvlETH: 100,
+      token0: {
+        id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+        symbol: 'WETH',
+        name: 'Wrapped Ether',
+        decimals: '18',
+      },
+      token1: {
+        id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+        symbol: 'USDC',
+        name: 'USD Coin',
+        decimals: '6',
+      },
+    });
+
+  it('drops a custom-accounting hooked pool when no dynamic set is passed (regression)', () => {
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [majorPairPool()],
+      mockLogger,
+      mockMetric
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('admits the pool when its hook is in the dynamic ZLCA set', () => {
+    const pool = majorPairPool();
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [pool],
+      mockLogger,
+      mockMetric,
+      new Set([customAccountingHook])
+    );
+    expect(result.map(p => p.id)).toContain(pool.id);
+  });
+
+  it('denylist wins over the dynamic ZLCA set', () => {
+    const denylist = HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET]!;
+    denylist.push(customAccountingHook);
+    try {
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [majorPairPool()],
+        mockLogger,
+        mockMetric,
+        new Set([customAccountingHook])
+      );
+      expect(result).toEqual([]);
+    } finally {
+      denylist.pop();
+    }
+  });
+});
+
+describe('v4HooksPoolsFiltering dynamic ZLCA per-hook pool cap', () => {
+  const dynamicHook = '0x0000000000000000000000000000000000000008';
+
+  it('caps pools per dynamic-only hook at 50, keeping highest tvlETH', () => {
+    const pools = Array.from({length: 60}, (_, i) =>
+      createPool({
+        id: '0x' + (i + 1).toString(16).padStart(64, '0'),
+        hooks: dynamicHook,
+        tvlETH: i, // ascending so the cap must keep the top 50 (tvlETH 10..59)
+        token0: {
+          id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+          symbol: 'WETH',
+          name: 'Wrapped Ether',
+          decimals: '18',
+        },
+        token1: {
+          id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+      })
+    );
+
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      pools,
+      mockLogger,
+      mockMetric,
+      new Set([dynamicHook])
+    );
+    expect(result.length).toBe(50);
+    expect(Math.min(...result.map(p => p.tvlETH))).toBe(10);
+  });
+});

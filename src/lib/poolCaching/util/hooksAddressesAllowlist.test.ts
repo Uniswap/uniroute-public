@@ -1,4 +1,9 @@
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, afterEach} from 'vitest';
+import {
+  setDynamicZlcaHooks,
+  resetDynamicZlcaHooksForTest,
+} from './dynamicZlcaHooks';
+import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {
   AGG_HOOKS_PER_CHAIN,
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST,
@@ -203,5 +208,71 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
       expect(robinhood?.has(hook.toLowerCase())).toBe(true);
     }
     expect(getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)).toBeUndefined();
+  });
+});
+
+describe('getTvlBypassHookAddresses dynamic ZLCA overlay', () => {
+  const DYNAMIC_HOOK = '0x00000000000000000000000000000000000000d1';
+
+  afterEach(() => {
+    resetDynamicZlcaHooksForTest();
+  });
+
+  it('unions dynamic hooks with the static registries', () => {
+    setDynamicZlcaHooks(MAINNET, new Map([[DYNAMIC_HOOK, 500_000n]]));
+    const hooks = getTvlBypassHookAddresses(MAINNET);
+    expect(hooks?.has(DYNAMIC_HOOK)).toBe(true);
+    // Static entries are still present.
+    for (const hook of Object.keys(ZLCA_HOOKS_PER_CHAIN[MAINNET] ?? {})) {
+      expect(hooks?.has(hook)).toBe(true);
+    }
+  });
+
+  it('returns dynamic-only hooks on chains with no static registry entries', () => {
+    expect(getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)).toBeUndefined();
+    setDynamicZlcaHooks(
+      ChainId.ARBITRUM_ONE,
+      new Map([[DYNAMIC_HOOK, 500_000n]])
+    );
+    expect(
+      getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)?.has(DYNAMIC_HOOK)
+    ).toBe(true);
+  });
+});
+
+describe('getTvlBypassHookAddresses denylist + memoization', () => {
+  const DYNAMIC_HOOK = '0x00000000000000000000000000000000000000d2';
+
+  afterEach(() => {
+    resetDynamicZlcaHooksForTest();
+  });
+
+  it('excludes denylisted dynamic hooks from the admission union', () => {
+    const denylist = HOOKS_ADDRESSES_DENYLIST[MAINNET]!;
+    denylist.push(DYNAMIC_HOOK);
+    try {
+      setDynamicZlcaHooks(MAINNET, new Map([[DYNAMIC_HOOK, 500_000n]]));
+      expect(getTvlBypassHookAddresses(MAINNET)?.has(DYNAMIC_HOOK)).toBe(false);
+      // Static entries unaffected.
+      for (const hook of Object.keys(ZLCA_HOOKS_PER_CHAIN[MAINNET] ?? {})) {
+        expect(getTvlBypassHookAddresses(MAINNET)?.has(hook)).toBe(true);
+      }
+    } finally {
+      denylist.pop();
+    }
+  });
+
+  it('memoizes the union per store version (no per-call allocation)', () => {
+    setDynamicZlcaHooks(MAINNET, new Map([[DYNAMIC_HOOK, 500_000n]]));
+    const first = getTvlBypassHookAddresses(MAINNET);
+    expect(getTvlBypassHookAddresses(MAINNET)).toBe(first);
+    // Store mutation invalidates the memo.
+    setDynamicZlcaHooks(
+      MAINNET,
+      new Map([['0x00000000000000000000000000000000000000d3', 500_000n]])
+    );
+    const second = getTvlBypassHookAddresses(MAINNET);
+    expect(second).not.toBe(first);
+    expect(second?.has(DYNAMIC_HOOK)).toBe(false);
   });
 });

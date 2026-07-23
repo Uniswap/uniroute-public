@@ -5,6 +5,11 @@
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {
+  getDynamicZlcaHooks,
+  getDynamicZlcaHooksVersion,
+} from './dynamicZlcaHooks';
+import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
+import {
   AGG_HOOKS_ON_TEMPO,
   FLUID_DEX_1,
   FLUID_DEX_LITE,
@@ -725,16 +730,45 @@ const TVL_BYPASS_HOOKS_BY_CHAIN = new Map<number, Set<string>>();
 }
 
 /**
- * TVL-bypass hook addresses for a chain (ZLCA ∪ zero-measured-TVL,
- * lowercased), or undefined when neither registry has entries — callers
- * use the undefined to skip bypass handling entirely. Single source of
- * truth for the routing-admission consumers (subgraph fetch + sanitize
- * exemption, top-pool force-selection, cache-read force-select).
+ * TVL-bypass hook addresses for a chain (ZLCA ∪ zero-measured-TVL ∪
+ * factory-discovered dynamic ZLCA, lowercased), or undefined when no
+ * registry has entries — callers use the undefined to skip bypass handling
+ * entirely. Single source of truth for the routing-admission consumers
+ * (subgraph fetch + sanitize exemption, top-pool force-selection,
+ * cache-read force-select).
+ *
+ * This is an ADMISSION accessor, so denylisted dynamic hooks are excluded
+ * here (the store keeps them for gas calibration — see dynamicZlcaHooks.ts).
+ * The union is memoized per store version: this runs per-pool in the
+ * snapshot cache-read filter, so a fresh Set per call would be thousands of
+ * allocations per read.
  */
+const tvlBypassUnionMemo = new Map<
+  number,
+  {version: number; result: ReadonlySet<string> | undefined}
+>();
+
 export function getTvlBypassHookAddresses(
   chainId: number
 ): ReadonlySet<string> | undefined {
-  return TVL_BYPASS_HOOKS_BY_CHAIN.get(chainId);
+  const staticHooks = TVL_BYPASS_HOOKS_BY_CHAIN.get(chainId);
+  const dynamicHooks = getDynamicZlcaHooks(chainId);
+  if (!dynamicHooks) return staticHooks;
+
+  const version = getDynamicZlcaHooksVersion();
+  const memo = tvlBypassUnionMemo.get(chainId);
+  if (memo && memo.version === version) return memo.result;
+
+  const denylisted = new Set(
+    (HOOKS_ADDRESSES_DENYLIST[chainId] ?? []).map(hook => hook.toLowerCase())
+  );
+  const union = new Set(staticHooks ?? []);
+  for (const hook of dynamicHooks.keys()) {
+    if (!denylisted.has(hook)) union.add(hook);
+  }
+  const result = union.size > 0 ? union : undefined;
+  tvlBypassUnionMemo.set(chainId, {version, result});
+  return result;
 }
 
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<

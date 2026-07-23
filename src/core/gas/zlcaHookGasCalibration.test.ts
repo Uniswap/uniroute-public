@@ -1,5 +1,9 @@
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, afterEach} from 'vitest';
 import {zlcaHookGasAdjustment} from './zlcaHookGasCalibration';
+import {
+  setDynamicZlcaHooks,
+  resetDynamicZlcaHooksForTest,
+} from '../../lib/poolCaching/util/dynamicZlcaHooks';
 import {ChainId} from '../../lib/config';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
@@ -158,5 +162,91 @@ describe('zlcaHookGasAdjustment', () => {
       ChainId.MAINNET
     );
     expect(checksummed).toBe(LITEPSM_OVERHEAD);
+  });
+});
+
+describe('zlcaHookGasAdjustment dynamic ZLCA fallback', () => {
+  const DYNAMIC_HOOK = '0x00000000000000000000000000000000000000d1';
+  const DYNAMIC_OVERHEAD = 750_000n;
+
+  afterEach(() => {
+    resetDynamicZlcaHooksForTest();
+  });
+
+  it('falls back to the dynamic store when the static registry misses', () => {
+    setDynamicZlcaHooks(
+      ChainId.MAINNET,
+      new Map([[DYNAMIC_HOOK, DYNAMIC_OVERHEAD]])
+    );
+    expect(
+      zlcaHookGasAdjustment(
+        [makeV4Pool(DYNAMIC_HOOK, FAKE_POOL_ID_A)],
+        ChainId.MAINNET
+      )
+    ).toBe(DYNAMIC_OVERHEAD);
+  });
+
+  it('static registry wins over a dynamic entry for the same hook', () => {
+    setDynamicZlcaHooks(
+      ChainId.MAINNET,
+      new Map([[DUALPOOL_HOOK_ON_MAINNET, 1n]])
+    );
+    expect(
+      zlcaHookGasAdjustment(
+        [makeV4Pool(DUALPOOL_HOOK_ON_MAINNET, FAKE_POOL_ID_A)],
+        ChainId.MAINNET
+      )
+    ).toBe(DUALPOOL_OVERHEAD);
+  });
+
+  it('works on chains with no static ZLCA registry at all', () => {
+    setDynamicZlcaHooks(
+      ChainId.BASE,
+      new Map([[DYNAMIC_HOOK, DYNAMIC_OVERHEAD]])
+    );
+    expect(
+      zlcaHookGasAdjustment(
+        [makeV4Pool(DYNAMIC_HOOK, FAKE_POOL_ID_A)],
+        ChainId.BASE
+      )
+    ).toBe(DYNAMIC_OVERHEAD);
+  });
+
+  it('still returns 0n for unregistered hooks', () => {
+    expect(
+      zlcaHookGasAdjustment(
+        [makeV4Pool(UNREGISTERED_HOOK_ADDR, FAKE_POOL_ID_A)],
+        ChainId.MAINNET
+      )
+    ).toBe(0n);
+  });
+});
+
+describe('zlcaHookGasAdjustment for denylisted dynamic hooks', () => {
+  const DENYLISTED_HOOK = '0x00000000000000000000000000000000000000d9';
+
+  afterEach(() => {
+    resetDynamicZlcaHooksForTest();
+  });
+
+  it('keeps the overhead for a denylisted hook (denylist gates admission, not gas)', async () => {
+    // Routes through a freshly denylisted hook keep serving from caches until
+    // TTL — their gas must stay calibrated or those swaps under-gas and revert.
+    const {HOOKS_ADDRESSES_DENYLIST} = await import(
+      '../../lib/poolCaching/util/hooksAddressesDenylist'
+    );
+    const denylist = HOOKS_ADDRESSES_DENYLIST[1]!;
+    denylist.push(DENYLISTED_HOOK);
+    try {
+      setDynamicZlcaHooks(1, new Map([[DENYLISTED_HOOK, 750_000n]]));
+      expect(
+        zlcaHookGasAdjustment(
+          [makeV4Pool(DENYLISTED_HOOK, FAKE_POOL_ID_A)],
+          ChainId.MAINNET
+        )
+      ).toBe(750_000n);
+    } finally {
+      denylist.pop();
+    }
   });
 });

@@ -34,6 +34,11 @@ import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET} from './util/hooksAddressesAllowlist';
+import {getDynamicZlcaHooks} from './util/dynamicZlcaHooks';
+import {
+  createDynamicZlcaHooksRefresherFromEnv,
+  DynamicZlcaHooksRefresher,
+} from './util/DynamicZlcaHooksRefresher';
 
 export interface CachePoolsConfig {
   s3Bucket: string;
@@ -496,11 +501,14 @@ async function cachePoolsForChainProtocol(
       }
 
       manuallyIncludedV4Pools.forEach(pool => pools.push(pool));
+      // Populated only when FACTORY_ZLCA_HOOKS_ENABLED ran the refresh above.
+      const dynamicZlcaHookMap = getDynamicZlcaHooks(chainId);
       pools = v4HooksPoolsFiltering(
         chainId,
         pools as Array<V4SubgraphPool>,
         logger,
-        metricInstance
+        metricInstance,
+        dynamicZlcaHookMap ? new Set(dynamicZlcaHookMap.keys()) : undefined
       );
 
       const guideStarStableStablePools = pools.filter(
@@ -720,6 +728,36 @@ export interface CacheAllPoolsResult {
  * Per-job failures are tolerated (logged + counted); callers decide from the
  * returned counts whether the run as a whole is healthy.
  */
+// Module-level so the enumeration cursor survives across runs in the
+// long-lived cronService process (a run-once ECS task simply does one full
+// read). FACTORY_ZLCA_HOOKS_ENABLED gates the whole feature: this refresh,
+// the filter admission below, and the serve-side refresher.
+let zlcaHooksRefresher: DynamicZlcaHooksRefresher | undefined;
+const ZLCA_HOOKS_REFRESH_TIMEOUT_MS = 20000;
+
+async function refreshDynamicZlcaHooks(
+  logger: Logger,
+  metricInstance: IMetric
+): Promise<void> {
+  if (process.env.FACTORY_ZLCA_HOOKS_ENABLED !== 'true') return;
+  zlcaHooksRefresher ??= createDynamicZlcaHooksRefresherFromEnv(
+    logger,
+    metricInstance
+  );
+  if (!zlcaHooksRefresher) return;
+  try {
+    // refreshOnce is fail-open per chain; the timeout guards a hung RPC so
+    // a bad gateway can't eat the run's budget.
+    await withTimeout(
+      zlcaHooksRefresher.refreshOnce(),
+      ZLCA_HOOKS_REFRESH_TIMEOUT_MS,
+      'zlcaFactoryHooksRefresh'
+    );
+  } catch (error) {
+    logger.warn(`Dynamic ZLCA hooks refresh skipped: ${error}`);
+  }
+}
+
 export async function cacheAllPools(
   logger: Logger,
   metricInstance: IMetric,
@@ -730,6 +768,9 @@ export async function cacheAllPools(
 ): Promise<CacheAllPoolsResult> {
   const s3 = new S3Client({region: process.env.AWS_REGION || 'us-east-2'});
   const cronLogger = prefixedLogger(logger, '[SubgraphCron]');
+  // Refresh factory-discovered ZLCA hooks before fetching so this run's
+  // tvl-bypass subgraph query and V4 filtering see them (fail-open).
+  await refreshDynamicZlcaHooks(cronLogger, metricInstance);
   let chainProtocols = createChainProtocols(cronLogger, metricInstance);
   if (only !== undefined && only.length > 0) {
     chainProtocols = chainProtocols.filter(cp =>

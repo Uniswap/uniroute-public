@@ -5,7 +5,7 @@ import {RouteBasic} from '../../../models/route/RouteBasic';
 import {SimpleQuoteSelector} from './SimpleQuoteSelector';
 import {MockedQuoteFetcher} from '../../../stores/quote/MockedQuoteFetcher';
 import {USDC, WETH, ZeroAddress} from 'tests/constants/Mainnet';
-import {beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it, vi} from 'vitest';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {Protocol} from '../../../models/pool/Protocol';
@@ -806,5 +806,223 @@ describe('SimpleQuoteSelector', () => {
         expect(result).toEqual([quote2, quote1]); // quote2 has lower gas cost
       });
     });
+  });
+});
+
+describe('gas-guard rules (legacy vs v2 min-ratio conversion probe)', () => {
+  const ctx = buildTestContext();
+  const pool = () =>
+    new V3Pool(
+      WETH,
+      USDC,
+      100,
+      ZeroAddress,
+      BigInt(10_000),
+      BigInt(0),
+      BigInt(0)
+    );
+  const split = (amount: bigint, gasCostInQuoteToken: bigint): QuoteSplit =>
+    new QuoteSplit([
+      {
+        route: new RouteBasic<V3Pool>(Protocol.V3, [pool()]),
+        amount,
+        gasDetails: {
+          gasPriceInWei: BigInt(10),
+          gasCostInWei: gasCostInQuoteToken, // proportional is fine for tests
+          gasCostInEth: 0,
+          gasUse: BigInt(100),
+          gasCostInQuoteToken,
+        },
+      },
+    ]);
+
+  // Mirrors the production incident: a cheap-gas candidate with slightly
+  // lower raw output (net-best), an accurately-expensive ZLCA-style
+  // candidate with the best raw output (net-worst of the viable pair), and
+  // a dust-output candidate whose gas exceeds its output.
+  const cheap = () => split(BigInt(1000), BigInt(10)); // net 990
+  const gassy = () => split(BigInt(1010), BigInt(400)); // net 610, best raw
+  const dust = () => split(BigInt(3), BigInt(400)); // gas ≫ output
+
+  it('legacy (default): dust candidate disables gas sorting and the gassy quote wins on raw output', async () => {
+    const selector = new SimpleQuoteSelector();
+    const [winner] = await selector.getBestQuotes(
+      [cheap(), gassy(), dust()],
+      TradeType.ExactIn,
+      1,
+      [],
+      ctx
+    );
+    expect(winner!.quotes[0]!.amount).toBe(BigInt(1010)); // raw-sorted
+  });
+
+  it('v2: dust candidate does NOT disable gas sorting — the net-best quote wins', async () => {
+    const selector = new SimpleQuoteSelector(true);
+    const [winner] = await selector.getBestQuotes(
+      [cheap(), gassy(), dust()],
+      TradeType.ExactIn,
+      1,
+      [],
+      ctx
+    );
+    expect(winner!.quotes[0]!.amount).toBe(BigInt(1000)); // gas-adjusted
+  });
+
+  it('v2: falls back to raw sorting when no candidate has a plausible adjustment (broken conversion)', async () => {
+    const selector = new SimpleQuoteSelector(true);
+    // Shared conversion rate gone bad: even the cheapest-gas candidate's
+    // adjustment moves its amount by 40%.
+    const brokenCheap = split(BigInt(1000), BigInt(400));
+    const brokenGassy = split(BigInt(1010), BigInt(800));
+    const [winner] = await selector.getBestQuotes(
+      [brokenCheap, brokenGassy],
+      TradeType.ExactIn,
+      1,
+      [],
+      ctx
+    );
+    expect(winner!.quotes[0]!.amount).toBe(BigInt(1010)); // raw fallback preserved
+  });
+
+  it('v2: all-zero-amount candidate sets fall back to raw sorting', async () => {
+    const selector = new SimpleQuoteSelector(true);
+    const zero = split(BigInt(0), BigInt(0));
+    const result = await selector.getBestQuotes(
+      [zero],
+      TradeType.ExactIn,
+      1,
+      [],
+      ctx
+    );
+    expect(result.length).toBe(1);
+  });
+
+  it('v2: a cheap-gas dust candidate does not spuriously revert to raw (probe is min ratio, not min gas)', async () => {
+    const selector = new SimpleQuoteSelector(true);
+    // Dust candidate has the LOWEST gasCostInWei in the set but trips the
+    // threshold on its own economics (tiny output). The rate is fine — the
+    // viable candidates prove it — so v2 must keep gas-adjusted sorting.
+    const cheapGasDust = split(BigInt(3), BigInt(5)); // gasWei 5 (set minimum)
+    const [winner] = await selector.getBestQuotes(
+      [cheap(), gassy(), cheapGasDust],
+      TradeType.ExactIn,
+      1,
+      [],
+      ctx
+    );
+    expect(winner!.quotes[0]!.amount).toBe(BigInt(1000)); // still gas-adjusted
+  });
+
+  describe('divergence magnitude tags', () => {
+    const divergenceCall = (spy: {mock: {calls: unknown[][]}}) =>
+      spy.mock.calls.find((call: unknown[]) =>
+        String(call[0]).includes('GasGuardRuleDivergence')
+      );
+
+    it('tags winnerChanged:true with a bucketed improvement when the sort mode flips the winner', async () => {
+      const spy = vi.spyOn(ctx.metrics, 'count');
+      const selector = new SimpleQuoteSelector(true);
+      // cheap: raw 1000 / net 990; gassy: raw 1010 / net 610; dust trips
+      // legacy only. Raw winner = gassy, gas winner = cheap; improvement
+      // 990 − 610 = 380 over denominator 1010 → 3762bps → gt1000.
+      await selector.getBestQuotes(
+        [cheap(), gassy(), dust()],
+        TradeType.ExactIn,
+        1,
+        [],
+        ctx
+      );
+      const call = divergenceCall(spy);
+      expect(call).toBeDefined();
+      const tags = (call![2] as {tags: string[]}).tags;
+      expect(tags).toContain('winnerChanged:true');
+      expect(tags).toContain('improvementBps:gt1000');
+      spy.mockRestore();
+    });
+
+    it('tags winnerChanged:false / improvementBps:0 when both sorts crown the same quote', async () => {
+      const spy = vi.spyOn(ctx.metrics, 'count');
+      const selector = new SimpleQuoteSelector(true);
+      // cheap wins under BOTH raw (1000 > 900) and gas-adjusted (990 > 850);
+      // dust still forces the rule verdicts apart.
+      const weak = split(BigInt(900), BigInt(50));
+      await selector.getBestQuotes(
+        [cheap(), weak, dust()],
+        TradeType.ExactIn,
+        1,
+        [],
+        ctx
+      );
+      const call = divergenceCall(spy);
+      expect(call).toBeDefined();
+      const tags = (call![2] as {tags: string[]}).tags;
+      expect(tags).toContain('winnerChanged:false');
+      expect(tags).toContain('improvementBps:0');
+      spy.mockRestore();
+    });
+
+    it('emits no divergence metric when the rules agree', async () => {
+      const spy = vi.spyOn(ctx.metrics, 'count');
+      const selector = new SimpleQuoteSelector(true);
+      await selector.getBestQuotes(
+        [cheap(), split(BigInt(1005), BigInt(100))],
+        TradeType.ExactIn,
+        1,
+        [],
+        ctx
+      );
+      expect(divergenceCall(spy)).toBeUndefined();
+      spy.mockRestore();
+    });
+  });
+
+  describe('ExactOut adjustment sign', () => {
+    // A needs less input and less gas (true total 1010); B needs more of
+    // both (true total 1220). Both are within the 30% threshold, so BOTH
+    // rules trust the adjustments — the winner difference is purely the
+    // adjustment sign.
+    const cheapTotal = () => split(BigInt(1000), BigInt(10)); // total 1010
+    const gassyTotal = () => split(BigInt(1020), BigInt(200)); // total 1220
+
+    it('legacy (default) pins the existing inversion: subtract-for-both rewards the gassier route', async () => {
+      // input − gas with lower-wins: A → 990, B → 820 ⇒ B "wins" despite
+      // costing the user 210 more in total. Deliberately pinned so any
+      // future change to flag-off behavior is loud.
+      const selector = new SimpleQuoteSelector();
+      const [winner] = await selector.getBestQuotes(
+        [cheapTotal(), gassyTotal()],
+        TradeType.ExactOut,
+        1,
+        [],
+        ctx
+      );
+      expect(winner!.quotes[0]!.amount).toBe(BigInt(1020));
+    });
+
+    it('v2 ranks ExactOut by total cost (input + gas): the truly cheaper route wins', async () => {
+      const selector = new SimpleQuoteSelector(true);
+      const [winner] = await selector.getBestQuotes(
+        [cheapTotal(), gassyTotal()],
+        TradeType.ExactOut,
+        1,
+        [],
+        ctx
+      );
+      expect(winner!.quotes[0]!.amount).toBe(BigInt(1000));
+    });
+  });
+
+  it('legacy and v2 agree when every candidate is within threshold', async () => {
+    for (const enabled of [false, true]) {
+      const selector = new SimpleQuoteSelector(enabled);
+      const [winner] = await selector.getBestQuotes(
+        [cheap(), split(BigInt(1005), BigInt(100))], // net 905 < 990
+        TradeType.ExactIn,
+        1,
+        [],
+        ctx
+      );
+      expect(winner!.quotes[0]!.amount).toBe(BigInt(1000));
+    }
   });
 });

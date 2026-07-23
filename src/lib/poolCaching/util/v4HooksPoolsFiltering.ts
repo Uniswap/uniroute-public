@@ -22,6 +22,11 @@ import {getMajorTokens, isMajorPair} from './majorTokens';
 
 type V4PoolGroupingKey = string;
 const TOP_GROUPED_V4_POOLS = 10;
+// Per-hook bound on the factory-discovered (dynamic ZLCA) admission path.
+// DualPool-family bytecode owner-gates pool creation so this should never
+// bind in practice; it exists so a future factory whose bytecode does NOT
+// gate initialization cannot bloat the snapshot with permissionless pools.
+const MAX_POOLS_PER_DYNAMIC_ZLCA_HOOK = 50;
 
 // Canonical V4 feeTier → tickSpacing pairs (mirrors models V4FeeAmounts/
 // V4TickSpacing and what quickRoute probes). Used to bound permissioned-pool
@@ -148,7 +153,11 @@ export function v4HooksPoolsFiltering(
   chainId: ChainId,
   pools: Array<V4SubgraphPool>,
   logger: Logger,
-  metric: IMetric
+  metric: IMetric,
+  // Factory-discovered ZLCA hooks (dynamicZlcaHooks.ts), admitted exactly
+  // like explicit allowlist entries. Denylist still wins — both via the
+  // per-pool early return and the explicit-allowlist append's guard.
+  dynamicZlcaHooks?: ReadonlySet<string>
 ): Array<V4SubgraphPool> {
   const v4PoolsByTokenPairsAndFees: Record<
     V4PoolGroupingKey,
@@ -157,6 +166,21 @@ export function v4HooksPoolsFiltering(
   const allowlistedHooksAddresses = new Set(
     (HOOKS_ADDRESSES_ALLOWLIST[chainId] ?? []).map(hook => hook.toLowerCase())
   );
+  // Hooks admitted ONLY via factory discovery (not also statically listed).
+  // Their pools get a per-hook cap below: static entries are vetted per-hook
+  // by PR, but dynamic admission is automatic, so bound it in case a future
+  // factory's pinned bytecode doesn't owner-gate pool initialization the way
+  // DualPool's does (beforeInitialize → DirectInitializeBlocked).
+  const dynamicOnlyHooks = new Set<string>();
+  if (dynamicZlcaHooks) {
+    for (const hook of dynamicZlcaHooks) {
+      const hookLower = hook.toLowerCase();
+      if (!allowlistedHooksAddresses.has(hookLower)) {
+        dynamicOnlyHooks.add(hookLower);
+      }
+      allowlistedHooksAddresses.add(hookLower);
+    }
+  }
   const denylistedHooksAddresses = new Set(
     (HOOKS_ADDRESSES_DENYLIST[chainId] ?? []).map(hook => hook.toLowerCase())
   );
@@ -352,19 +376,52 @@ export function v4HooksPoolsFiltering(
   );
 
   // Append explicitly allowlisted hooks not already selected by either queue.
-  const explicitlyAllowlistedHooksPools = pools.filter(
-    (pool: V4SubgraphPool) => {
+  let explicitlyAllowlistedHooksPools = pools.filter((pool: V4SubgraphPool) => {
+    const hookAddress = pool.hooks.toLowerCase();
+    return (
+      allowlistedHooksAddresses.has(hookAddress) &&
+      // Permissioned hooks take the dedicated ownership-gated append below;
+      // exclude them here so a hook accidentally in both lists isn't doubled.
+      !permissionedHookAddresses.has(hookAddress) &&
+      !denylistedHooksAddresses.has(hookAddress) &&
+      !selectedPoolIds.has(pool.id.toLowerCase())
+    );
+  });
+
+  // Bound the auto-admission path: cap pools per dynamic-only hook, keeping
+  // the highest-TVL pools. Static allowlist entries are exempt (vetted by PR).
+  if (dynamicOnlyHooks.size > 0) {
+    const poolsByDynamicHook = new Map<string, V4SubgraphPool[]>();
+    const staticallyAdmittedPools: V4SubgraphPool[] = [];
+    for (const pool of explicitlyAllowlistedHooksPools) {
       const hookAddress = pool.hooks.toLowerCase();
-      return (
-        allowlistedHooksAddresses.has(hookAddress) &&
-        // Permissioned hooks take the dedicated ownership-gated append below;
-        // exclude them here so a hook accidentally in both lists isn't doubled.
-        !permissionedHookAddresses.has(hookAddress) &&
-        !denylistedHooksAddresses.has(hookAddress) &&
-        !selectedPoolIds.has(pool.id.toLowerCase())
+      if (dynamicOnlyHooks.has(hookAddress)) {
+        const group = poolsByDynamicHook.get(hookAddress) ?? [];
+        group.push(pool);
+        poolsByDynamicHook.set(hookAddress, group);
+      } else {
+        staticallyAdmittedPools.push(pool);
+      }
+    }
+    explicitlyAllowlistedHooksPools = staticallyAdmittedPools;
+    for (const [hookAddress, group] of poolsByDynamicHook) {
+      if (group.length > MAX_POOLS_PER_DYNAMIC_ZLCA_HOOK) {
+        group.sort((a, b) => b.tvlETH - a.tvlETH);
+        logger?.warn(
+          `v4HooksPoolsFiltering: dynamic ZLCA hook ${hookAddress} on chain ${chainId} has ${group.length} pools, capping at ${MAX_POOLS_PER_DYNAMIC_ZLCA_HOOK} by tvlETH`
+        );
+        metric?.putMetric(
+          'v4HooksPoolsFiltering.dynamicZlcaHookPoolsCapped',
+          group.length - MAX_POOLS_PER_DYNAMIC_ZLCA_HOOK,
+          MetricLoggerUnit.Count,
+          {chainId: chainId.toString(), status: 'failure'}
+        );
+      }
+      explicitlyAllowlistedHooksPools.push(
+        ...group.slice(0, MAX_POOLS_PER_DYNAMIC_ZLCA_HOOK)
       );
     }
-  );
+  }
 
   // Append permissioned-hook pools that pass the adapter-ownership check, and
   // count the ones rejected for ownership so unowned pools under a permissioned
