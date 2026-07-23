@@ -918,17 +918,23 @@ export class UniRouteBL implements IUniRoutedBL {
     // count without adding signal for a single RPC call.
     const rpcMetricTags = [`chain:${ChainId[chain.chainId]}`];
     const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
-      this.tokenHandler.getTokens(
-        chain,
-        [
-          tokenInCurrencyInfo.wrappedAddress,
-          tokenOutCurrencyInfo.wrappedAddress,
-          new Address(getGasToken(chain.chainId).address),
-          ...(usdGasTokensByChain[chain.chainId] ?? []).map(
-            t => new Address(t.address)
-          ),
-        ],
-        ctx
+      // Timed separately from the sibling RPC arms so the composite
+      // GetTokensAndBlockNumber tail splits into the token branch vs
+      // block/gas branch (the token arm is a Redis → GraphQL → on-chain
+      // cascade with very different tail behavior than one eth_ RPC).
+      withLatencyMetric('GetTokens', ctx, rpcMetricTags, () =>
+        this.tokenHandler.getTokens(
+          chain,
+          [
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            new Address(getGasToken(chain.chainId).address),
+            ...(usdGasTokensByChain[chain.chainId] ?? []).map(
+              t => new Address(t.address)
+            ),
+          ],
+          ctx
+        )
       ),
       requestBlockNumber !== undefined
         ? Promise.resolve(requestBlockNumber)
