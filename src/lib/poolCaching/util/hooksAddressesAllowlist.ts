@@ -124,6 +124,10 @@ export const FLAUNCH_ANYPOSM_V1_ON_BASE =
 
 export const FLAUNCH_POSM_ON_ROBINHOOD =
   '0x5cf8e499c7c466c7e2cf127bdf129f57151e65dc';
+// Second Flaunch PositionManager deployment on Robinhood (ROUTE-1526 / ROUTE-1512
+// SplitArrow — same shared launchpad hook, different instance).
+export const FLAUNCH_POSM_ON_ROBINHOOD_2 =
+  '0x07f7850aa55ffb4a6f2693d493c4477747ec6fdc';
 
 export const GRADUATION_HOOKS_ADDRESS_ON_BASE =
   '0xc5a48b447f01e9ce3ede71e4c1c2038c38bd9000';
@@ -666,12 +670,12 @@ export const LITTLE_JOHN_BONDING_HOOK_ON_ROBINHOOD =
   '0xa8a5c4932ba4cc71347dcab30329c2816ba028cc';
 export const LITTLE_JOHN_HOOK_ON_ROBINHOOD =
   '0x23739445e76d83a40f87fe2fd6a53e73badf60cc';
-// Rivers LaunchHook — additional Robinhood deployments (V2 / V3) of the
-// verified LaunchHook contract, separate from RIVERS_LAUNCH_HOOK_ON_ROBINHOOD.
 export const RIVERS_LAUNCH_HOOK_V2_ON_ROBINHOOD =
   '0xcd87186fc4f809241f3e7ff3ca557bb7cc962acc';
 export const RIVERS_LAUNCH_HOOK_V3_ON_ROBINHOOD =
   '0x59e2cea84bf858b66d46b22742bef4304ee0aacc';
+export const RIVERS_LAUNCH_HOOK_V4_ON_ROBINHOOD =
+  '0x7a8e7ef7cdeeddef23735689639becba9cfeaacc';
 // StrategyHook — two Robinhood deployments of the same verified contract.
 export const STRATEGY_HOOK_ON_ROBINHOOD =
   '0x4a00b5f169eadee5524e819bf418dfd797336544';
@@ -681,6 +685,12 @@ export const BACKED_FEE_HOOK_ON_ROBINHOOD =
   '0xced7aa50727f3cd251985b09a2080db056a8c0cc';
 export const KLIK_HOOK_ON_ROBINHOOD =
   '0x745d717620052a97a22deee2e5eba59583f3e0cc';
+export const WICK_HOOK_ON_ROBINHOOD =
+  '0x3d1bfb1e3634c9d278359143ee7bb0e12cf690c4';
+export const LENDS_PROTOCOL_HOOK_ON_ROBINHOOD =
+  '0x78f535390f5c3ac2ac67d11abb9f6e48043340cc';
+export const LAUNCHLY_HOOK_ON_ROBINHOOD =
+  '0xe2c944acf511ac71a613ae057479a1cdfe93c0cc';
 
 export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
@@ -1070,6 +1080,11 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BACKED_FEE_HOOK_ON_ROBINHOOD,
     KLIK_HOOK_ON_ROBINHOOD,
     FLAUNCH_POSM_ON_ROBINHOOD,
+    FLAUNCH_POSM_ON_ROBINHOOD_2,
+    RIVERS_LAUNCH_HOOK_V4_ON_ROBINHOOD,
+    WICK_HOOK_ON_ROBINHOOD,
+    LENDS_PROTOCOL_HOOK_ON_ROBINHOOD,
+    LAUNCHLY_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
