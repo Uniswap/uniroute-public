@@ -30,6 +30,7 @@ import {
   CcaScheduledPoolsRepository,
 } from '../CcaScheduledPoolsRepository';
 import {Address} from '../../../models/address/Address';
+import {HOOKS_ADDRESSES_DENYLIST} from '../../../lib/poolCaching/util/hooksAddressesDenylist';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {
   EMPTY_NAMESPACE_CONTEXT,
@@ -579,7 +580,7 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     expect(ids).not.toContain('0xothereth');
   });
 
-  it('skips hooked scheduled pools (hooked launches need selector-path support)', async () => {
+  it('skips scheduled pools with non-inert hooks (swap/accounting bits need selector-path support)', async () => {
     vi.mocked(repository.getActivePools).mockResolvedValue([
       activePool({hooks: '0x9999999999999999999999999999999999999999'}),
     ]);
@@ -587,6 +588,63 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     const pools = await getPoolsForTokens();
 
     expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('merges scheduled pools with routing-inert hooks (LBP strategy-as-hook fallback)', async () => {
+    // beforeInitialize-only permission bits (low 14 bits = 0x2000): the shape
+    // migrate()'s front-run fallback rewrites key.hooks to.
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({hooks: '0xb98766a35cdc28415be0767d4ea41e39fba3e000'}),
+    ]);
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).toContain('0xccapool');
+  });
+
+  it('skips inert-hooked entries whose hook is denylisted (kill switch binds this path)', async () => {
+    const inertHook = '0xb98766a35cdc28415be0767d4ea41e39fba3e000';
+    HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET]!.push(inertHook);
+    try {
+      vi.mocked(repository.getActivePools).mockResolvedValue([
+        activePool({hooks: inertHook}),
+      ]);
+
+      const pools = await getPoolsForTokens();
+
+      expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+    } finally {
+      HOOKS_ADDRESSES_DENYLIST[ChainId.MAINNET]!.pop();
+    }
+  });
+
+  it('skips inert-hooked entries with a dynamic fee (hook controls the LP fee)', async () => {
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({
+        hooks: '0xb98766a35cdc28415be0767d4ea41e39fba3e000',
+        feeTier: '8388608', // DYNAMIC_FEE_FLAG
+      }),
+    ]);
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('keeps NO_HOOKS fetches strictly hookless (inert-hooked entries excluded)', async () => {
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({hooks: '0xb98766a35cdc28415be0767d4ea41e39fba3e000'}),
+    ]);
+
+    const pools = await getPoolsForTokens(HooksOptions.NO_HOOKS);
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('still merges hookless entries on NO_HOOKS fetches', async () => {
+    const pools = await getPoolsForTokens(HooksOptions.NO_HOOKS);
+
+    expect(pools.map(pool => pool.id)).toContain('0xccapool');
   });
 
   it('drops merged scheduled pools whose token is on the restricted list', async () => {

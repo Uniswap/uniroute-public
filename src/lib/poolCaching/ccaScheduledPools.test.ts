@@ -3,6 +3,7 @@ import {GetObjectCommand, PutObjectCommand, S3Client} from '@aws-sdk/client-s3';
 import {
   buildCcaScheduledPools,
   computeCcaPoolId,
+  isRoutingInertHook,
   CcaScheduledPoolEntry,
   CcaScheduledPoolsWriterConfig,
   CcaScheduledPoolsWriterDeps,
@@ -12,11 +13,18 @@ import {
 } from './ccaScheduledPools';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const UNI = '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984';
 const AUCTION = '0xaaaa00000000000000000000000000000000aaaa';
 const STRATEGY = '0xbbbb00000000000000000000000000000000bbbb';
+// Low 14 bits 0x2000 = beforeInitialize-only, the shape LBPStrategy addresses
+// are mined to (migrate()'s front-run fallback rewrites key.hooks to this).
+const INERT_STRATEGY = '0xb98766A35cdc28415be0767D4EA41e39fBA3e000';
+const INERT_HOOK = '0x1111111111111111111111111111111111112000';
+// Low bits 0x0080 = beforeSwap: swap-time behavior, never auto-approved.
+const SWAP_HOOK = '0x2222222222222222222222222222222222220080';
 
 const testLogger: Logger = {
   info: () => {},
@@ -43,6 +51,59 @@ class TestMetric extends IMetric {
     this.metrics.push({key, value, tags});
   }
 }
+
+describe('isRoutingInertHook', () => {
+  it('approves hookless', () => {
+    expect(isRoutingInertHook(ZERO)).toBe(true);
+  });
+
+  it('approves initialize-only permission bits (LBP strategy-as-hook shape)', () => {
+    expect(isRoutingInertHook(INERT_STRATEGY)).toBe(true);
+    expect(isRoutingInertHook(INERT_HOOK)).toBe(true);
+    // before+afterInitialize (0x3000) is still creation-phase-only.
+    expect(
+      isRoutingInertHook('0x1111111111111111111111111111111111113000')
+    ).toBe(true);
+  });
+
+  it('rejects swap-time and custom-accounting permission bits', () => {
+    expect(isRoutingInertHook(SWAP_HOOK)).toBe(false);
+    // afterSwap (0x0040).
+    expect(
+      isRoutingInertHook('0x2222222222222222222222222222222222220040')
+    ).toBe(false);
+    // beforeSwapReturnsDelta (0x0008): custom accounting.
+    expect(
+      isRoutingInertHook('0x2222222222222222222222222222222222220008')
+    ).toBe(false);
+    // beforeAddLiquidity (0x0800).
+    expect(
+      isRoutingInertHook('0x2222222222222222222222222222222222220800')
+    ).toBe(false);
+    // Initialize bit alongside a swap bit is still rejected.
+    expect(
+      isRoutingInertHook('0x2222222222222222222222222222222222222080')
+    ).toBe(false);
+  });
+
+  it('fails closed on a malformed address', () => {
+    expect(isRoutingInertHook('not-an-address')).toBe(false);
+    expect(isRoutingInertHook('0x1234')).toBe(false);
+  });
+
+  it('rejects a non-zero hook on a dynamic-fee pool (updateDynamicLPFee needs no permission bit)', () => {
+    const DYNAMIC_FEE_FLAG = 0x800000;
+    expect(isRoutingInertHook(INERT_HOOK, DYNAMIC_FEE_FLAG)).toBe(false);
+    expect(isRoutingInertHook(INERT_STRATEGY, String(DYNAMIC_FEE_FLAG))).toBe(
+      false
+    );
+    // Static fee: unaffected.
+    expect(isRoutingInertHook(INERT_HOOK, 10000)).toBe(true);
+    // Hookless: nothing can call updateDynamicLPFee (and the combo is
+    // uninitializable on-chain anyway).
+    expect(isRoutingInertHook(ZERO, DYNAMIC_FEE_FLAG)).toBe(true);
+  });
+});
 
 describe('computeCcaPoolId', () => {
   it('matches PoolKey.toId (keccak of sorted currencies + fee + tickSpacing + hook)', () => {
@@ -355,6 +416,147 @@ describe('buildCcaScheduledPools', () => {
     ).toBeDefined();
   });
 
+  it('rewrites the bridge entry when the migration landed on the strategy-as-hook fallback key', async () => {
+    const registeredId = computeCcaPoolId(ZERO, UNI, 10000, 200, ZERO);
+    const migratedId = computeCcaPoolId(
+      ZERO,
+      UNI,
+      10000,
+      200,
+      INERT_STRATEGY
+    ).toLowerCase();
+    pendingAuctions = [
+      {
+        ...pendingAuctions[0],
+        lbpStrategyAddress: INERT_STRATEGY,
+        hasMigrated: true,
+        migratedPoolId: migratedId,
+      },
+    ];
+    initializerInfo = {...initializerInfo, migrationBlock: 0n};
+    const bridgeEntry: CcaScheduledPoolEntry = {
+      id: registeredId,
+      token0: {id: ZERO},
+      token1: {id: UNI.toLowerCase()},
+      feeTier: '10000',
+      tickSpacing: '200',
+      hooks: ZERO,
+      liquidity: '1',
+      tvlETH: 0,
+      tvlUSD: 0,
+      migrationBlock: '900',
+      activateAtMs: NOW - 10_000,
+      expiresAtMs: NOW + 1_000_000,
+      auctionAddress: AUCTION,
+      strategyAddress: INERT_STRATEGY,
+      launchedToken: UNI.toLowerCase(),
+    };
+    previousObjects.set(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1), [
+      bridgeEntry,
+    ]);
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const written = writtenEntries(1);
+    expect(written).toHaveLength(1);
+    expect(written[0].id).toBe(migratedId);
+    expect(written[0].hooks).toBe(INERT_STRATEGY.toLowerCase());
+    // Everything else carries over from the registration.
+    expect(written[0].launchedToken).toBe(UNI.toLowerCase());
+    expect(written[0].expiresAtMs).toBe(bridgeEntry.expiresAtMs);
+    expect(
+      metric.metrics.find(
+        m =>
+          m.key === 'CcaScheduledPools.fallbackHookBridge' &&
+          m.tags?.status === 'success'
+      )
+    ).toBeDefined();
+    expect(
+      metric.metrics.find(m => m.key === 'CcaScheduledPools.poolKeyMismatch')
+    ).toBeUndefined();
+  });
+
+  it('still prunes a mismatch that is not the strategy-as-hook fallback key', async () => {
+    // Inert strategy, but the migrated id matches neither the registration
+    // nor the hooks=strategy rewrite — a genuinely different PoolKey.
+    const registeredId = computeCcaPoolId(ZERO, UNI, 10000, 200, ZERO);
+    const migratedId = `0x${'b'.repeat(64)}`;
+    pendingAuctions = [
+      {
+        ...pendingAuctions[0],
+        lbpStrategyAddress: INERT_STRATEGY,
+        hasMigrated: true,
+        migratedPoolId: migratedId,
+      },
+    ];
+    initializerInfo = {...initializerInfo, migrationBlock: 0n};
+    const bridgeEntry: CcaScheduledPoolEntry = {
+      id: registeredId,
+      token0: {id: ZERO},
+      token1: {id: UNI.toLowerCase()},
+      feeTier: '10000',
+      tickSpacing: '200',
+      hooks: ZERO,
+      liquidity: '1',
+      tvlETH: 0,
+      tvlUSD: 0,
+      migrationBlock: '900',
+      activateAtMs: NOW - 10_000,
+      expiresAtMs: NOW + 1_000_000,
+      auctionAddress: AUCTION,
+      strategyAddress: INERT_STRATEGY,
+      launchedToken: UNI.toLowerCase(),
+    };
+    previousObjects.set(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1), [
+      bridgeEntry,
+    ]);
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    expect(writtenEntries(1)).toHaveLength(0);
+    expect(
+      metric.metrics.find(m => m.key === 'CcaScheduledPools.poolKeyMismatch')
+    ).toBeDefined();
+  });
+
+  it('rewrites a first-sight fresh entry when the migration already landed on the fallback key', async () => {
+    // No previous registry object: the writer's first observation of this
+    // auction races a lagging RPC read (still returns the pre-migration
+    // hookless registration) against data-api's recorded fallback key. The
+    // rebuilt entry must be published under the real poolId and counted as a
+    // fallback incident.
+    const migratedId = computeCcaPoolId(
+      ZERO,
+      UNI,
+      10000,
+      200,
+      INERT_STRATEGY
+    ).toLowerCase();
+    pendingAuctions = [
+      {
+        ...pendingAuctions[0],
+        lbpStrategyAddress: INERT_STRATEGY,
+        hasMigrated: true,
+        migratedPoolId: migratedId,
+      },
+    ];
+    // Lagging read: migrationBlock still non-zero, hookless params.
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const entries = writtenEntries(1);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].id).toBe(migratedId);
+    expect(entries[0].hooks).toBe(INERT_STRATEGY.toLowerCase());
+    expect(
+      metric.metrics.filter(
+        m =>
+          m.key === 'CcaScheduledPools.fallbackHookBridge' &&
+          m.tags?.status === 'success'
+      )
+    ).toHaveLength(1);
+  });
+
   it('keeps a bridge entry whose migrated pool key matches the registration', async () => {
     const poolId = `0x${'c'.repeat(64)}`;
     pendingAuctions = [
@@ -387,6 +589,70 @@ describe('buildCcaScheduledPools', () => {
     // Entry survived unchanged → redundant PUT skipped.
     expect(putBodies.has(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1))).toBe(
       false
+    );
+  });
+
+  it('treats an uppercase-hex migratedPoolId as a match, and stores strategyAddress lowercased', async () => {
+    // Case-normalization hardening: entry.id is always lowercase, so an
+    // upstream fetcher emitting uppercase hex must not misread a matched
+    // migration as a mismatch (which would prune the bridge entry).
+    const poolId = `0x${'c'.repeat(64)}`;
+    const mixedCaseStrategy = '0xBbBb00000000000000000000000000000000bBbB';
+    pendingAuctions = [
+      {
+        ...pendingAuctions[0],
+        lbpStrategyAddress: mixedCaseStrategy,
+        hasMigrated: true,
+        migratedPoolId: poolId.toUpperCase().replace('0X', '0x'),
+      },
+    ];
+    initializerInfo = {...initializerInfo, migrationBlock: 0n};
+    const bridgeEntry: CcaScheduledPoolEntry = {
+      id: poolId,
+      token0: {id: ZERO},
+      token1: {id: UNI.toLowerCase()},
+      feeTier: '10000',
+      tickSpacing: '200',
+      hooks: ZERO,
+      liquidity: '1',
+      tvlETH: 0,
+      tvlUSD: 0,
+      migrationBlock: '900',
+      activateAtMs: NOW - 10_000,
+      expiresAtMs: NOW + 1_000_000,
+      auctionAddress: AUCTION,
+      strategyAddress: STRATEGY,
+      launchedToken: UNI.toLowerCase(),
+    };
+    previousObjects.set(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1), [
+      bridgeEntry,
+    ]);
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    // Matched (not pruned) → entry survives unchanged → redundant PUT
+    // skipped, and no mismatch metric fired.
+    expect(putBodies.has(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1))).toBe(
+      false
+    );
+    expect(
+      metric.metrics.find(m => m.key === 'CcaScheduledPools.poolKeyMismatch')
+    ).toBeUndefined();
+
+    // And a freshly-built entry stores strategyAddress lowercased.
+    pendingAuctions = [
+      {
+        ...pendingAuctions[0],
+        lbpStrategyAddress: mixedCaseStrategy,
+        hasMigrated: false,
+        migratedPoolId: undefined,
+      },
+    ];
+    initializerInfo = {...initializerInfo, migrationBlock: 2_000n};
+    previousObjects.clear();
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+    expect(writtenEntries(1)[0].strategyAddress).toBe(
+      mixedCaseStrategy.toLowerCase()
     );
   });
 
@@ -503,7 +769,7 @@ describe('buildCcaScheduledPools', () => {
     expect(entries[0].expiresAtMs).toBeGreaterThan(NOW);
   });
 
-  it('skips hooked launches at write time (serve merge is hookless-only)', async () => {
+  it('skips launches registered with a non-inert hook (swap/accounting permission bits)', async () => {
     initializerInfo = {
       ...initializerInfo,
       hook: '0x9999999999999999999999999999999999999999',
@@ -520,6 +786,92 @@ describe('buildCcaScheduledPools', () => {
           m.tags?.reason === 'hooked_launch'
       )
     ).toHaveLength(1);
+  });
+
+  it('publishes a launch registered with a routing-inert hook (poolId computed with the hook)', async () => {
+    initializerInfo = {...initializerInfo, hook: INERT_HOOK};
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const entries = writtenEntries(1);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].id).toBe(
+      computeCcaPoolId(ZERO, UNI, 10000, 200, INERT_HOOK)
+    );
+    expect(entries[0].hooks).toBe(INERT_HOOK.toLowerCase());
+    expect(
+      metric.metrics.filter(
+        m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'
+      )
+    ).toHaveLength(0);
+  });
+
+  it('skips a bit-inert hook registered with a dynamic fee (hook controls the LP fee)', async () => {
+    initializerInfo = {...initializerInfo, hook: INERT_HOOK, fee: 0x800000};
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    expect(writtenEntries(1)).toHaveLength(0);
+    expect(
+      metric.metrics.filter(
+        m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'
+      )
+    ).toHaveLength(1);
+  });
+
+  it('skips an inert hook that is on the per-chain denylist (operational kill switch)', async () => {
+    HOOKS_ADDRESSES_DENYLIST[1]!.push(INERT_HOOK.toLowerCase());
+    try {
+      initializerInfo = {...initializerInfo, hook: INERT_HOOK};
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(writtenEntries(1)).toHaveLength(0);
+      expect(
+        metric.metrics.filter(
+          m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'
+        )
+      ).toHaveLength(1);
+    } finally {
+      HOOKS_ADDRESSES_DENYLIST[1]!.pop();
+    }
+  });
+
+  it('rebuilds an orphan whose registration changed to a routing-inert hook', async () => {
+    // Orphan: absent from data-api's response, but its on-chain registration
+    // is live and now carries an inert hook — rebuilt under the hook-derived
+    // poolId rather than dropped or kept stale.
+    pendingAuctions = [];
+    initializerInfo = {...initializerInfo, hook: INERT_HOOK};
+    const orphan: CcaScheduledPoolEntry = {
+      id: computeCcaPoolId(ZERO, UNI, 10000, 200, ZERO),
+      token0: {id: ZERO},
+      token1: {id: UNI.toLowerCase()},
+      feeTier: '10000',
+      tickSpacing: '200',
+      hooks: ZERO,
+      liquidity: '1',
+      tvlETH: 0,
+      tvlUSD: 0,
+      migrationBlock: '2000',
+      activateAtMs: NOW + 500_000,
+      expiresAtMs: NOW + 1_000_000,
+      auctionAddress: AUCTION,
+      strategyAddress: STRATEGY,
+      launchedToken: UNI.toLowerCase(),
+    };
+    previousObjects.set(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1), [
+      orphan,
+    ]);
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const entries = writtenEntries(1);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].id).toBe(
+      computeCcaPoolId(ZERO, UNI, 10000, 200, INERT_HOOK)
+    );
+    expect(entries[0].hooks).toBe(INERT_HOOK.toLowerCase());
   });
 
   it('prunes the previous hookless entry of an auction re-registered with a hook', async () => {

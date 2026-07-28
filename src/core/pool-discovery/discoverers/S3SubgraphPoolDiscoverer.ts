@@ -12,6 +12,10 @@ import * as zlib from 'zlib';
 import {promisify} from 'node:util';
 import _ from 'lodash';
 import {getTvlBypassHookAddresses} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {
+  isDenylistedCcaHook,
+  isRoutingInertHook,
+} from '../../../lib/poolCaching/ccaScheduledPools';
 import {CcaScheduledPoolsRepository} from '../CcaScheduledPoolsRepository';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {ITopPoolsSelector} from '../interface';
@@ -438,10 +442,14 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
    *   auctioned token). The paired currency — usually native ETH — must not
    *   drag every active launch pool into every quote touching that currency;
    *   this merge sits after the TopN selector, outside all candidate caps.
-   * - Hookless entries only. Hooked pools go through selector trust
+   * - Routing-inert hooks only (hookless, or initialize-only permission
+   *   bits — e.g. the LBP strategy-as-hook front-run fallback). Hooks with
+   *   swap-time or custom-accounting bits go through selector trust
    *   boundaries (agg-hook segregation, permissioned-hook namespaces) that
-   *   this post-selector merge bypasses; CCA launches are hookless today, so
-   *   a future hooked launch needs explicit support, not a silent bypass.
+   *   this post-selector merge bypasses — those need explicit support, not
+   *   a silent bypass. Initialize-only bits have provably zero behavior
+   *   after pool creation, so admitting them here is safe by construction.
+   *   NO_HOOKS fetches still merge only hookless entries.
    */
   private async mergeCcaScheduledPools(
     pools: V4PoolInfo[],
@@ -459,7 +467,9 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       if (!this.ccaScheduledPoolsRepository?.isEnabled(ctx)) {
         return pools;
       }
-      // Hookless-only merge: nothing to add on a hooks-only fetch.
+      // HOOKS_ONLY fetches are specialized namespace paths (agg hooks,
+      // permissioned hooks) — CCA entries, even inert-hooked ones, don't
+      // belong there.
       if (pairFilter.hooksOptions === HooksOptions.HOOKS_ONLY) {
         return pools;
       }
@@ -493,9 +503,21 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
           if (existingIds.has(pool.id.toLowerCase())) {
             return false;
           }
-          // Defense in depth — the writer already refuses hooked entries.
-          // Counted (not logged): this runs per quote request.
-          if (pool.hooks !== ADDRESS_ZERO) {
+          // Defense in depth — the writer already refuses non-inert /
+          // denylisted hooks; re-verify here (bits + dynamic fee + the
+          // HOOKS_ADDRESSES_DENYLIST kill switch) so a hand-edited or stale
+          // registry entry can't smuggle a behavioral hook past the
+          // selector trust boundaries, and a denylisted hook dies on the
+          // next deploy instead of surviving until registry expiry. A
+          // NO_HOOKS fetch stays strictly hookless. Counted (not logged):
+          // this runs per quote request.
+          const hookless = pool.hooks.toLowerCase() === ADDRESS_ZERO;
+          if (
+            pairFilter.hooksOptions === HooksOptions.NO_HOOKS
+              ? !hookless
+              : !isRoutingInertHook(pool.hooks, pool.feeTier) ||
+                (!hookless && isDenylistedCcaHook(chainId, pool.hooks))
+          ) {
             hookedSkipped++;
             return false;
           }

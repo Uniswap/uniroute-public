@@ -12,6 +12,7 @@
  */
 
 import {S3Client, PutObjectCommand, GetObjectCommand} from '@aws-sdk/client-s3';
+import {DYNAMIC_FEE_FLAG, Hook} from '@uniswap/v4-sdk';
 import axios from 'axios';
 import {ethers} from 'ethers';
 import pLimit from 'p-limit';
@@ -19,6 +20,7 @@ import {V4Pool} from '../../models/pool/V4Pool';
 import {Address} from '../../models/address/Address';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
 import {ChainId} from '../config';
 
 export const DEFAULT_CCA_SCHEDULED_POOLS_BASE_KEY = 'ccaScheduledPools.json';
@@ -200,6 +202,80 @@ const DEFAULT_BLOCK_TIME_SECONDS = 2;
 
 const ADDRESS_ZERO_LOWER = '0x0000000000000000000000000000000000000000';
 
+/**
+ * A hook whose v4 permission bits (low 14 bits of the address — behavior a
+ * hook cannot have without declaring, enforced by PoolManager at initialize)
+ * prove it cannot affect routing: no swap, no liquidity, no donate, and no
+ * returns-delta (custom accounting) behavior. Initialize-phase bits are
+ * allowed — they only gate pool CREATION and are inert for every
+ * post-creation operation.
+ *
+ * Why this exists (Eric Sanchirico, 2026-07-28): CCA launches will fall back
+ * to the LBP strategy-as-hook when the canonical hookless pool key was
+ * front-run (LBPStrategy.migrate() rewrites key.hooks to the strategy
+ * address, mined beforeInitialize-only). Rather than allowlisting specific
+ * addresses — per-deployment, changes on redeploy — approve by analyzing the
+ * permission bits. Anything with swap-time or accounting behavior still
+ * requires explicit allowlisting through the normal hooks trust boundaries.
+ *
+ * The permission bits are NOT the complete authority model: on a
+ * dynamic-fee pool (fee == DYNAMIC_FEE_FLAG), PoolManager lets key.hooks
+ * call updateDynamicLPFee with NO callback bit required — live LP-fee
+ * control (up to 100%) for an otherwise bit-inert hook. So a non-zero hook
+ * is only inert when the PoolKey fee is static; pass the fee whenever the
+ * caller has it. (The strategy-as-hook fallback is structurally immune —
+ * the launcher rejects dynamic fee with a zero registered hook, and the
+ * fallback only fires for zero-hook registrations — but third-party
+ * registered hooks are not.)
+ */
+export function isRoutingInertHook(
+  hook: string,
+  fee?: number | string
+): boolean {
+  if (hook.toLowerCase() === ADDRESS_ZERO_LOWER) {
+    return true;
+  }
+  if (fee !== undefined && Number(fee) === DYNAMIC_FEE_FLAG) {
+    return false;
+  }
+  try {
+    const p = Hook.permissions(hook);
+    return !(
+      p.beforeSwap ||
+      p.afterSwap ||
+      p.beforeSwapReturnsDelta ||
+      p.afterSwapReturnsDelta ||
+      p.beforeAddLiquidity ||
+      p.afterAddLiquidity ||
+      p.afterAddLiquidityReturnsDelta ||
+      p.beforeRemoveLiquidity ||
+      p.afterRemoveLiquidity ||
+      p.afterRemoveLiquidityReturnsDelta ||
+      p.beforeDonate ||
+      p.afterDonate
+    );
+  } catch {
+    // Hook.permissions throws on a malformed address — fail closed.
+    return false;
+  }
+}
+
+/**
+ * Operational kill switch: the per-chain HOOKS_ADDRESSES_DENYLIST ("hooks
+ * that should never be routed through") must bind this auto-approval path
+ * exactly like the normal pool-caching filter (v4HooksPoolsFiltering) — an
+ * operator denylisting a misbehaving hook expects it dead EVERYWHERE, not
+ * still routable through the scheduled-pools registry until expiry.
+ */
+export function isDenylistedCcaHook(chainId: number, hook: string): boolean {
+  const denylist = HOOKS_ADDRESSES_DENYLIST[chainId];
+  if (!denylist || denylist.length === 0) {
+    return false;
+  }
+  const lowered = hook.toLowerCase();
+  return denylist.some(address => address.toLowerCase() === lowered);
+}
+
 // A zeroed initializers() read is ambiguous: the strategy consumes the struct
 // on migrate(), and both the data-api snapshot (read-replica + pubsub
 // ingestion lag) and the on-chain read race the actual migration. Since
@@ -244,6 +320,50 @@ export function computeCcaPoolId(
     tickSpacing,
     hook
   );
+}
+
+/**
+ * When data-api's recorded migrated pool key differs from what we
+ * pre-registered, check whether the difference is EXACTLY migrate()'s
+ * front-run fallback — key.hooks rewritten to the strategy address, every
+ * other PoolKey field unchanged. If recomputing the entry's key with
+ * hooks=strategyAddress reproduces the migrated poolId (and the strategy
+ * hook is routing-inert), return the corrected bridge entry; any other
+ * mismatch returns undefined and the caller prunes as before.
+ */
+function rebuildEntryForFallbackHook(
+  chainId: number,
+  entry: CcaScheduledPoolEntry,
+  migratedPoolId: string
+): CcaScheduledPoolEntry | undefined {
+  if (
+    !entry.strategyAddress ||
+    !isRoutingInertHook(entry.strategyAddress, entry.feeTier) ||
+    isDenylistedCcaHook(chainId, entry.strategyAddress)
+  ) {
+    return undefined;
+  }
+  try {
+    const fallbackId = computeCcaPoolId(
+      entry.token0.id,
+      entry.token1.id,
+      Number(entry.feeTier),
+      Number(entry.tickSpacing),
+      entry.strategyAddress
+    );
+    if (fallbackId.toLowerCase() !== migratedPoolId.toLowerCase()) {
+      return undefined;
+    }
+    return {
+      ...entry,
+      id: fallbackId.toLowerCase(),
+      hooks: entry.strategyAddress.toLowerCase(),
+    };
+  } catch {
+    // Malformed stored fields (bad address / non-numeric params) — treat as
+    // a genuine mismatch rather than aborting the chain's merge.
+    return undefined;
+  }
 }
 
 export function makeDataApiPendingAuctionsFetcher(
@@ -514,7 +634,11 @@ export async function buildCcaScheduledPools(
               Math.max(activateAtMs, nowMs()) +
               config.entryTtlAfterActivationMs,
             auctionAddress,
-            strategyAddress,
+            // Normalized on store: comparisons downstream are lowercase, and
+            // a mixed-case value with a broken checksum would make the
+            // fallback rebuild's isRoutingInertHook fail closed (prune
+            // instead of rewrite).
+            strategyAddress: strategyAddress.toLowerCase(),
             launchedToken: info.token.toLowerCase(),
           };
         };
@@ -531,12 +655,15 @@ export async function buildCcaScheduledPools(
         const clearedAuctions = new Set<string>();
         const hookedAuctions = new Set<string>();
         // Actual migrated poolId per auction, for the mismatch prune below.
+        // Lowercased on construction: entry.id is always lowercase, and the
+        // strict !== checks against it must never misread a correctly-matched
+        // migration as a mismatch if the fetcher ever emits uppercase hex.
         const migratedPoolIdByAuction = new Map<string, string>();
         for (const auction of auctions) {
           if (auction.migratedPoolId !== undefined) {
             migratedPoolIdByAuction.set(
               auction.address.toLowerCase(),
-              auction.migratedPoolId
+              auction.migratedPoolId.toLowerCase()
             );
           }
         }
@@ -555,17 +682,23 @@ export async function buildCcaScheduledPools(
                   }
                   return;
                 }
-                // The serve-time merge is hookless-only (hooked pools would
-                // bypass selector trust boundaries), so publishing a hooked
-                // entry is pure registry noise — skip at the source. Also
-                // prune a previously-published hookless entry for this
-                // auction (re-registered with a hook): its poolId will never
-                // exist on-chain, and unlike the cleared read this is an
-                // affirmative registration read — no safety margin needed.
-                if (info.hook.toLowerCase() !== ADDRESS_ZERO_LOWER) {
+                // Routing-inert hooks (hookless, or initialize-only bits —
+                // e.g. the LBP strategy-as-hook fallback) are auto-approved
+                // by permission-bit analysis; dynamic-fee registrations and
+                // denylisted hooks are not. Anything else bypasses selector
+                // trust boundaries the serve merge cannot honor, so skip at
+                // the source. Also prune a previously-published entry for
+                // this auction (re-registered with a non-inert hook): its
+                // poolId will never exist on-chain, and unlike the cleared
+                // read this is an affirmative registration read — no safety
+                // margin needed.
+                if (
+                  !isRoutingInertHook(info.hook, info.fee) ||
+                  isDenylistedCcaHook(chainId, info.hook)
+                ) {
                   hookedAuctions.add(auction.address.toLowerCase());
                   logger.warn(
-                    'Skipping CCA pool with hook (hooked launches unsupported)',
+                    'Skipping CCA pool with non-inert hook (swap-time or custom-accounting permission bits)',
                     {chainId, auction: auction.address, hook: info.hook}
                   );
                   metric.putMetric(
@@ -675,11 +808,14 @@ export async function buildCcaScheduledPools(
                           : 'keep',
                       ];
                     }
-                    // Same hookless invariant as the fresh loop: params
-                    // changed to a hooked pool means the old hookless pool
-                    // won't exist and the new one is unsupported by the
-                    // serve merge.
-                    if (info.hook.toLowerCase() !== ADDRESS_ZERO_LOWER) {
+                    // Same inert-hook invariant as the fresh loop: params
+                    // changed to a non-inert hook means the old pool won't
+                    // exist and the new one is unsupported by the serve
+                    // merge.
+                    if (
+                      !isRoutingInertHook(info.hook, info.fee) ||
+                      isDenylistedCcaHook(chainId, info.hook)
+                    ) {
                       return [entry.id, 'drop'];
                     }
                     return [
@@ -729,22 +865,53 @@ export async function buildCcaScheduledPools(
           ) {
             continue;
           }
-          // Re-registered WITH a hook this run: the previously-published
-          // hookless entry's poolId will never exist on-chain — prune it
-          // (mirrors the orphan path's hooked 'drop').
+          // Re-registered with a NON-INERT hook this run: the
+          // previously-published entry's poolId will never exist on-chain —
+          // prune it (mirrors the orphan path's 'drop'). Inert-hook
+          // re-registrations produce a fresh entry instead, and the
+          // supersede-prune below retires the old-id duplicate.
           if (hookedAuctions.has(auctionKey)) {
             continue;
           }
           // The auction migrated into a DIFFERENT pool than pre-registered —
           // LBPStrategy.migrate() rewrites key.hooks to the strategy address
           // when the canonical hookless pool already exists (front-runnable),
-          // so even our own hookless launches can land hooked. The bridge
-          // entry points at the wrong pool; serving it until expiry would
-          // mask that the fast pickup silently failed for this launch. No
-          // safety margin needed: a present pool_key_hash is affirmative
-          // evidence of the migrated key, unlike the ambiguous cleared read.
+          // so even our own hookless launches can land hooked. When the
+          // recorded key is EXACTLY that fallback (same PoolKey with
+          // hooks=strategy, a routing-inert beforeInitialize-only hook),
+          // rewrite the bridge entry to point at the real pool — this is the
+          // launch working as designed, not a failure. Any other mismatch
+          // still prunes: serving a wrong-id bridge until expiry would mask
+          // that the fast pickup silently failed for this launch. No safety
+          // margin needed: a present pool_key_hash is affirmative evidence
+          // of the migrated key, unlike the ambiguous cleared read.
           const migratedPoolId = migratedPoolIdByAuction.get(auctionKey);
           if (migratedPoolId !== undefined && migratedPoolId !== entry.id) {
+            const fallback = rebuildEntryForFallbackHook(
+              chainId,
+              entry,
+              migratedPoolId
+            );
+            if (fallback !== undefined) {
+              logger.info(
+                'CCA scheduled entry rebuilt for strategy-as-hook fallback migration',
+                {
+                  chainId,
+                  auction: entry.auctionAddress,
+                  registeredPoolId: entry.id,
+                  migratedPoolId,
+                  hook: fallback.hooks,
+                }
+              );
+              metric.putMetric(
+                'CcaScheduledPools.fallbackHookBridge',
+                1,
+                MetricLoggerUnit.Count,
+                {...tags, status: 'success'}
+              );
+              merged.set(fallback.id, fallback);
+              continue;
+            }
             logger.warn(
               'CCA scheduled entry mismatches migrated pool key; pruning',
               {
@@ -773,7 +940,10 @@ export async function buildCcaScheduledPools(
         for (const entry of freshEntries) {
           // The mismatch prune above only filters `previous`: a lagging RPC
           // read racing data-api's recorded migration would re-publish the
-          // pruned wrong-id entry here — filter fresh entries the same way.
+          // pruned wrong-id entry here — filter fresh entries the same way,
+          // including the fallback-hook rewrite (a first-sight auction whose
+          // migration already landed on the strategy-as-hook key must be
+          // served under the real poolId, not dropped).
           const freshMigratedPoolId = migratedPoolIdByAuction.get(
             entry.auctionAddress.toLowerCase()
           );
@@ -781,6 +951,37 @@ export async function buildCcaScheduledPools(
             freshMigratedPoolId !== undefined &&
             freshMigratedPoolId !== entry.id
           ) {
+            const fallback = rebuildEntryForFallbackHook(
+              chainId,
+              entry,
+              freshMigratedPoolId
+            );
+            if (fallback !== undefined) {
+              // Same observability as the previous-entry rewrite above — a
+              // first-sight auction whose migration already landed on the
+              // fallback key is still a fallback incident worth counting.
+              // Skip the emit when the previous-entry loop already rewrote
+              // this id (one incident, not two).
+              if (!merged.has(fallback.id)) {
+                logger.info(
+                  'CCA scheduled entry rebuilt for strategy-as-hook fallback migration',
+                  {
+                    chainId,
+                    auction: entry.auctionAddress,
+                    registeredPoolId: entry.id,
+                    migratedPoolId: freshMigratedPoolId,
+                    hook: fallback.hooks,
+                  }
+                );
+                metric.putMetric(
+                  'CcaScheduledPools.fallbackHookBridge',
+                  1,
+                  MetricLoggerUnit.Count,
+                  {...tags, status: 'success'}
+                );
+              }
+              merged.set(fallback.id, fallback);
+            }
             continue;
           }
           merged.set(entry.id, entry);
