@@ -285,7 +285,17 @@ export function makeOnChainLbpInitializerReader(uniRpcEndpoint: string): {
     let provider = providers.get(chainId);
     if (!provider) {
       provider = new ethers.providers.StaticJsonRpcProvider(
-        `${uniRpcEndpoint}/rpc/${chainId}`,
+        // skipFetchSetup + timeout + service-id header mirror
+        // dependencies.ts / DynamicZlcaHooksRefresher — a bare
+        // StaticJsonRpcProvider(url) fails against the UniRPC gateway from
+        // ECS containers (ethers v5's fetch path is unreliable there), and a
+        // hung socket must not outlive the run's withTimeout.
+        {
+          url: `${uniRpcEndpoint}/rpc/${chainId}`,
+          skipFetchSetup: true,
+          timeout: 10_000,
+          headers: {['x-uni-service-id']: 'uniroute-pool-caching'},
+        },
         chainId
       );
       providers.set(chainId, provider);
