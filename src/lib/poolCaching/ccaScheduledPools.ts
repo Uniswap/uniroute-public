@@ -14,6 +14,7 @@
 import {S3Client, PutObjectCommand, GetObjectCommand} from '@aws-sdk/client-s3';
 import axios from 'axios';
 import {ethers} from 'ethers';
+import pLimit from 'p-limit';
 import {V4Pool} from '../../models/pool/V4Pool';
 import {Address} from '../../models/address/Address';
 import {Logger} from './sor-providers/util/log';
@@ -207,6 +208,15 @@ const ADDRESS_ZERO_LOWER = '0x0000000000000000000000000000000000000000';
 // in the future — inside this margin, keep the entry (it may be the
 // post-migration bridge) and let the expiry backstop bound a wrong keep.
 const CLEARED_DROP_SAFETY_MARGIN_MS = 60 * 60 * 1000;
+
+// Caps concurrent initializers() eth_calls across the ENTIRE run (all chains
+// combined, fresh + orphan reads share one limiter). An unbounded fan-out here
+// competes with the pool-caching cron's own on-chain reads for Node's default
+// DNS resolution capacity (UV_THREADPOOL_SIZE=4) in the same cron-worker
+// container; a burst of 100+ simultaneous getaddrinfo calls has been observed
+// to saturate it and fail with ENOTFOUND even though the RPC endpoint itself
+// is reachable (see ROUTE-1134 outage RCA, 2026-07-23).
+const MAX_CONCURRENT_ONCHAIN_READS = 10;
 
 // Struct layout mirrors liquidity-launcher LbpStrategies.initializers
 // (MigratorParameters); same read as liquidity's AuctionRpcClient.
@@ -435,6 +445,10 @@ export async function buildCcaScheduledPools(
     auctionsByChain.set(auction.chainId, list);
   }
 
+  // Shared across every chain's fresh + orphan reads below, so the whole run
+  // (not just one chain) stays under MAX_CONCURRENT_ONCHAIN_READS.
+  const onchainReadLimit = pLimit(MAX_CONCURRENT_ONCHAIN_READS);
+
   let failedChains = 0;
   await Promise.all(
     config.chainIds.map(async chainId => {
@@ -527,64 +541,70 @@ export async function buildCcaScheduledPools(
           }
         }
         await Promise.all(
-          auctions.map(async auction => {
-            try {
-              const info = await deps.readLbpInitializer(
-                chainId,
-                auction.lbpStrategyAddress,
-                auction.address
-              );
-              if (info.migrationBlock === 0n) {
-                if (!auction.hasMigrated) {
-                  clearedAuctions.add(auction.address.toLowerCase());
-                }
-                return;
-              }
-              // The serve-time merge is hookless-only (hooked pools would
-              // bypass selector trust boundaries), so publishing a hooked
-              // entry is pure registry noise — skip at the source. Also
-              // prune a previously-published hookless entry for this
-              // auction (re-registered with a hook): its poolId will never
-              // exist on-chain, and unlike the cleared read this is an
-              // affirmative registration read — no safety margin needed.
-              if (info.hook.toLowerCase() !== ADDRESS_ZERO_LOWER) {
-                hookedAuctions.add(auction.address.toLowerCase());
-                logger.warn(
-                  'Skipping CCA pool with hook (hooked launches unsupported)',
-                  {chainId, auction: auction.address, hook: info.hook}
+          auctions.map(auction =>
+            onchainReadLimit(async () => {
+              try {
+                const info = await deps.readLbpInitializer(
+                  chainId,
+                  auction.lbpStrategyAddress,
+                  auction.address
                 );
+                if (info.migrationBlock === 0n) {
+                  if (!auction.hasMigrated) {
+                    clearedAuctions.add(auction.address.toLowerCase());
+                  }
+                  return;
+                }
+                // The serve-time merge is hookless-only (hooked pools would
+                // bypass selector trust boundaries), so publishing a hooked
+                // entry is pure registry noise — skip at the source. Also
+                // prune a previously-published hookless entry for this
+                // auction (re-registered with a hook): its poolId will never
+                // exist on-chain, and unlike the cleared read this is an
+                // affirmative registration read — no safety margin needed.
+                if (info.hook.toLowerCase() !== ADDRESS_ZERO_LOWER) {
+                  hookedAuctions.add(auction.address.toLowerCase());
+                  logger.warn(
+                    'Skipping CCA pool with hook (hooked launches unsupported)',
+                    {chainId, auction: auction.address, hook: info.hook}
+                  );
+                  metric.putMetric(
+                    'CcaScheduledPools.hookedLaunchSkipped',
+                    1,
+                    MetricLoggerUnit.Count,
+                    {...tags, status: 'failure', reason: 'hooked_launch'}
+                  );
+                  return;
+                }
+                freshEntries.push(
+                  buildEntry(
+                    auction.address,
+                    auction.lbpStrategyAddress,
+                    info,
+                    await getCurrentBlock()
+                  )
+                );
+              } catch (error) {
+                // Skip this auction; retried on the next run (hours of
+                // headroom before migration).
+                logger.warn('Failed to read LBP initializer for auction', {
+                  chainId,
+                  auction: auction.address,
+                  error,
+                });
                 metric.putMetric(
-                  'CcaScheduledPools.hookedLaunchSkipped',
+                  'CcaScheduledPools.auctionReadError',
                   1,
                   MetricLoggerUnit.Count,
-                  {...tags, status: 'failure', reason: 'hooked_launch'}
+                  {
+                    ...tags,
+                    status: 'failure',
+                    reason: 'initializers_read_failed',
+                  }
                 );
-                return;
               }
-              freshEntries.push(
-                buildEntry(
-                  auction.address,
-                  auction.lbpStrategyAddress,
-                  info,
-                  await getCurrentBlock()
-                )
-              );
-            } catch (error) {
-              // Skip this auction; retried on the next run (hours of
-              // headroom before migration).
-              logger.warn('Failed to read LBP initializer for auction', {
-                chainId,
-                auction: auction.address,
-                error,
-              });
-              metric.putMetric(
-                'CcaScheduledPools.auctionReadError',
-                1,
-                MetricLoggerUnit.Count,
-                {...tags, status: 'failure', reason: 'initializers_read_failed'}
-              );
-            }
-          })
+            })
+          )
         );
 
         // Merge previous entries:
@@ -632,53 +652,56 @@ export async function buildCcaScheduledPools(
           CcaScheduledPoolEntry | 'drop' | 'keep'
         >(
           await Promise.all(
-            orphans.map(
-              async (
-                entry
-              ): Promise<[string, CcaScheduledPoolEntry | 'drop' | 'keep']> => {
-                try {
-                  const info = await deps.readLbpInitializer(
-                    chainId,
-                    entry.strategyAddress,
-                    entry.auctionAddress
-                  );
-                  if (info.migrationBlock === 0n) {
-                    // Zero is ambiguous and this orphan has no data-api row
-                    // to disambiguate with — same margin rule as the
-                    // cleared-prune above.
+            orphans.map(entry =>
+              onchainReadLimit(
+                async (): Promise<
+                  [string, CcaScheduledPoolEntry | 'drop' | 'keep']
+                > => {
+                  try {
+                    const info = await deps.readLbpInitializer(
+                      chainId,
+                      entry.strategyAddress,
+                      entry.auctionAddress
+                    );
+                    if (info.migrationBlock === 0n) {
+                      // Zero is ambiguous and this orphan has no data-api row
+                      // to disambiguate with — same margin rule as the
+                      // cleared-prune above.
+                      return [
+                        entry.id,
+                        entry.activateAtMs - nowMs() >
+                        CLEARED_DROP_SAFETY_MARGIN_MS
+                          ? 'drop'
+                          : 'keep',
+                      ];
+                    }
+                    // Same hookless invariant as the fresh loop: params
+                    // changed to a hooked pool means the old hookless pool
+                    // won't exist and the new one is unsupported by the
+                    // serve merge.
+                    if (info.hook.toLowerCase() !== ADDRESS_ZERO_LOWER) {
+                      return [entry.id, 'drop'];
+                    }
                     return [
                       entry.id,
-                      entry.activateAtMs - nowMs() >
-                      CLEARED_DROP_SAFETY_MARGIN_MS
-                        ? 'drop'
-                        : 'keep',
+                      buildEntry(
+                        entry.auctionAddress,
+                        entry.strategyAddress,
+                        info,
+                        await getCurrentBlock()
+                      ),
                     ];
+                  } catch (error) {
+                    // Fail-safe: keep the entry as-is on a transient RPC
+                    // failure; the expiry backstop bounds a wrong keep.
+                    logger.warn(
+                      'CCA orphan re-verification failed; keeping entry',
+                      {chainId, auction: entry.auctionAddress, error}
+                    );
+                    return [entry.id, 'keep'];
                   }
-                  // Same hookless invariant as the fresh loop: params changed
-                  // to a hooked pool means the old hookless pool won't exist
-                  // and the new one is unsupported by the serve merge.
-                  if (info.hook.toLowerCase() !== ADDRESS_ZERO_LOWER) {
-                    return [entry.id, 'drop'];
-                  }
-                  return [
-                    entry.id,
-                    buildEntry(
-                      entry.auctionAddress,
-                      entry.strategyAddress,
-                      info,
-                      await getCurrentBlock()
-                    ),
-                  ];
-                } catch (error) {
-                  // Fail-safe: keep the entry as-is on a transient RPC
-                  // failure; the expiry backstop bounds a wrong keep.
-                  logger.warn(
-                    'CCA orphan re-verification failed; keeping entry',
-                    {chainId, auction: entry.auctionAddress, error}
-                  );
-                  return [entry.id, 'keep'];
                 }
-              }
+              )
             )
           )
         );
