@@ -16,12 +16,27 @@ import Timeout from 'await-timeout';
 import {ethers} from 'ethers';
 import {gql, GraphQLClient} from 'graphql-request';
 import _ from 'lodash';
+import pLimit from 'p-limit';
 
 import {ProviderConfig} from '../provider';
 import {PAGE_SIZE} from '../subgraphProvider';
 import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
 import {SUBGRAPH_URL_BY_CHAIN, V4SubgraphPool} from './subgraphProvider';
+
+// Module-scoped (not per-instance): one AggHooksSubgraphProvider is
+// constructed per chain, and their getPools() calls can run concurrently
+// across chains in the same cron-worker process. The constrained resource
+// (Node's default DNS resolution capacity, UV_THREADPOOL_SIZE=4) is
+// process-wide, so the cap must be shared across every instance, not scoped
+// per chain. Without this, a burst of 100+ simultaneous
+// pseudoTotalValueLocked eth_calls has been observed to saturate DNS
+// resolution and fail with ENOTFOUND even though the RPC endpoint itself is
+// reachable and working (see ROUTE-1134 CCA scheduled-pools outage RCA,
+// 2026-07-23, which hit the identical failure mode from a different caller
+// sharing this container).
+const PSEUDO_TVL_CONCURRENCY = 10;
+const pseudoTvlLimit = pLimit(PSEUDO_TVL_CONCURRENCY);
 
 const PSEUDO_TVL_ABI = [
   {
@@ -295,87 +310,89 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
       ? rawPools.filter(rawPool => rawPool.isExternalLiquidity)
       : rawPools;
     const pools = await Promise.all(
-      filteredPools.map(async rawPool => {
-        const pool: V4SubgraphPool = {
-          id: rawPool.id,
-          feeTier: rawPool.feeTier,
-          tickSpacing: rawPool.tickSpacing,
-          hooks: rawPool.hooks,
-          liquidity: rawPool.liquidity,
-          token0: {
-            symbol: rawPool.token0.symbol,
-            id: rawPool.token0.id,
-            name: rawPool.token0.name,
-            decimals: rawPool.token0.decimals,
-          },
-          token1: {
-            symbol: rawPool.token1.symbol,
-            id: rawPool.token1.id,
-            name: rawPool.token1.name,
-            decimals: rawPool.token1.decimals,
-          },
-          // Start from subgraph values; will be overwritten below if contract call succeeds.
-          tvlETH: parseFloat(rawPool.totalValueLockedETH),
-          tvlUSD: parseFloat(rawPool.totalValueLockedUSD),
-          isExternalLiquidity: rawPool.isExternalLiquidity ?? false,
-        };
+      filteredPools.map(rawPool =>
+        pseudoTvlLimit(async () => {
+          const pool: V4SubgraphPool = {
+            id: rawPool.id,
+            feeTier: rawPool.feeTier,
+            tickSpacing: rawPool.tickSpacing,
+            hooks: rawPool.hooks,
+            liquidity: rawPool.liquidity,
+            token0: {
+              symbol: rawPool.token0.symbol,
+              id: rawPool.token0.id,
+              name: rawPool.token0.name,
+              decimals: rawPool.token0.decimals,
+            },
+            token1: {
+              symbol: rawPool.token1.symbol,
+              id: rawPool.token1.id,
+              name: rawPool.token1.name,
+              decimals: rawPool.token1.decimals,
+            },
+            // Start from subgraph values; will be overwritten below if contract call succeeds.
+            tvlETH: parseFloat(rawPool.totalValueLockedETH),
+            tvlUSD: parseFloat(rawPool.totalValueLockedUSD),
+            isExternalLiquidity: rawPool.isExternalLiquidity ?? false,
+          };
 
-        try {
-          const hookContract = new ethers.Contract(
-            rawPool.hooks,
-            PSEUDO_TVL_ABI,
-            this.ethersProvider
-          );
+          try {
+            const hookContract = new ethers.Contract(
+              rawPool.hooks,
+              PSEUDO_TVL_ABI,
+              this.ethersProvider
+            );
 
-          const [amount0, amount1]: [ethers.BigNumber, ethers.BigNumber] =
-            await hookContract.pseudoTotalValueLocked(rawPool.id);
+            const [amount0, amount1]: [ethers.BigNumber, ethers.BigNumber] =
+              await hookContract.pseudoTotalValueLocked(rawPool.id);
 
-          const decimals0 = parseInt(rawPool.token0.decimals);
-          const decimals1 = parseInt(rawPool.token1.decimals);
-          const derivedETH0 = parseFloat(rawPool.token0.derivedETH);
-          const derivedETH1 = parseFloat(rawPool.token1.derivedETH);
+            const decimals0 = parseInt(rawPool.token0.decimals);
+            const decimals1 = parseInt(rawPool.token1.decimals);
+            const derivedETH0 = parseFloat(rawPool.token0.derivedETH);
+            const derivedETH1 = parseFloat(rawPool.token1.derivedETH);
 
-          const tvl0ETH =
-            parseFloat(ethers.utils.formatUnits(amount0, decimals0)) *
-            derivedETH0;
-          const tvl1ETH =
-            parseFloat(ethers.utils.formatUnits(amount1, decimals1)) *
-            derivedETH1;
+            const tvl0ETH =
+              parseFloat(ethers.utils.formatUnits(amount0, decimals0)) *
+              derivedETH0;
+            const tvl1ETH =
+              parseFloat(ethers.utils.formatUnits(amount1, decimals1)) *
+              derivedETH1;
 
-          pool.tvlETH = tvl0ETH + tvl1ETH;
-          pool.tvlUSD = pool.tvlETH * ethPriceUSD;
-          // Repurpose liquidity as a TVL proxy so these pools pass the
-          // `parseInt(pool.liquidity) > 0` filter in S3SubgraphPoolDiscoverer.
-          // These pools hold liquidity externally via the hook contract, so on-chain
-          // liquidity is always 0. Do NOT use this value for slippage math.
-          pool.liquidity = Math.floor(pool.tvlUSD).toString();
+            pool.tvlETH = tvl0ETH + tvl1ETH;
+            pool.tvlUSD = pool.tvlETH * ethPriceUSD;
+            // Repurpose liquidity as a TVL proxy so these pools pass the
+            // `parseInt(pool.liquidity) > 0` filter in S3SubgraphPoolDiscoverer.
+            // These pools hold liquidity externally via the hook contract, so on-chain
+            // liquidity is always 0. Do NOT use this value for slippage math.
+            pool.liquidity = Math.floor(pool.tvlUSD).toString();
 
-          this.logger?.info(
-            `AGG hooks pool ${rawPool.id} pseudoTVL: ${pool.tvlETH} ETH / ${pool.tvlUSD} USD`,
-            {amount0: amount0.toString(), amount1: amount1.toString()}
-          );
-          this.metric?.putMetric(
-            'SubgraphProvider.getAggHooksPools.pseudoTVL.success',
-            1,
-            undefined,
-            this.metricTags
-          );
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } catch (err: any) {
-          this.logger?.warn(
-            `Failed pseudoTotalValueLocked for pool ${rawPool.id} hook ${rawPool.hooks}; keeping subgraph TVL`,
-            {err}
-          );
-          this.metric?.putMetric(
-            'SubgraphProvider.getAggHooksPools.pseudoTVL.error',
-            1,
-            undefined,
-            this.metricTags
-          );
-        }
+            this.logger?.info(
+              `AGG hooks pool ${rawPool.id} pseudoTVL: ${pool.tvlETH} ETH / ${pool.tvlUSD} USD`,
+              {amount0: amount0.toString(), amount1: amount1.toString()}
+            );
+            this.metric?.putMetric(
+              'SubgraphProvider.getAggHooksPools.pseudoTVL.success',
+              1,
+              undefined,
+              this.metricTags
+            );
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } catch (err: any) {
+            this.logger?.warn(
+              `Failed pseudoTotalValueLocked for pool ${rawPool.id} hook ${rawPool.hooks}; keeping subgraph TVL`,
+              {err}
+            );
+            this.metric?.putMetric(
+              'SubgraphProvider.getAggHooksPools.pseudoTVL.error',
+              1,
+              undefined,
+              this.metricTags
+            );
+          }
 
-        return pool;
-      })
+          return pool;
+        })
+      )
     );
 
     this.metric?.putMetric(
