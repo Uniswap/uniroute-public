@@ -22,12 +22,14 @@ import {
 
 import {
   createChainProtocols,
+  trackedEthThresholdFor,
   v2SubgraphUrlOverride,
   v2TrackedEthThreshold,
   v3SubgraphUrlOverride,
   v3TrackedEthThreshold,
   ChainProtocol,
 } from './cacheConfig';
+import {applyAuroraPoolSources} from './auroraPoolsSource';
 import {S3_POOL_CACHE_KEY} from './util/poolCacheKey';
 import {withTimeout} from './util/withTimeout';
 import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
@@ -785,6 +787,15 @@ export async function cacheAllPools(
       );
     }
   }
+
+  // Swap targeted combos onto the Aurora pool source (shadow or primary,
+  // POOL_CACHING_AURORA_*_TARGETS). No-op when the flags are unset.
+  applyAuroraPoolSources(
+    chainProtocols,
+    {trackedEthThresholdFor},
+    cronLogger,
+    metricInstance
+  );
 
   cronLogger.info(
     `Starting pool caching for ${chainProtocols.length} chain+protocol combinations${

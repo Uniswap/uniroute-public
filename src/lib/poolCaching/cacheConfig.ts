@@ -22,6 +22,10 @@ import {
   V4SubgraphProvider,
   EulerSwapHooksSubgraphProvider,
   AggHooksSubgraphProvider,
+  type ISubgraphProvider,
+  type V2SubgraphPool,
+  type V3SubgraphPool,
+  type V4SubgraphPool,
 } from './sor-providers';
 
 import {Logger} from './sor-providers/util/log';
@@ -188,8 +192,8 @@ export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
 
 // --- Threshold constants ---
 
-const v4TrackedEthThreshold = 0.01;
-const v4BaseTrackedEthThreshold = 0.1;
+export const v4TrackedEthThreshold = 0.01;
+export const v4BaseTrackedEthThreshold = 0.1;
 const v4UntrackedUsdThreshold = 0;
 
 export const v3TrackedEthThreshold = 0.01;
@@ -202,11 +206,34 @@ const v2UntrackedUsdThreshold = Number.MAX_VALUE;
 
 // --- Chain protocol definitions ---
 
+// Per-(protocol, chain) TVL floor in native-token units, matching what the
+// matrix below passes into each subgraph provider. The Aurora pool source
+// (auroraPoolsSource.ts) uses this as the tracked-ETH threshold in its
+// TS-replicated admission union — it deliberately fetches unfloored from SQL,
+// since a SQL floor would drop the high-liquidity band and bypass-hook pools.
+export function trackedEthThresholdFor(
+  protocol: Protocol,
+  chainId: number
+): number {
+  const isBase = chainId === ChainId.BASE;
+  switch (protocol) {
+    case Protocol.V2:
+      return isBase ? v2BaseTrackedEthThreshold : v2TrackedEthThreshold;
+    case Protocol.V3:
+      return isBase ? v3BaseTrackedEthThreshold : v3TrackedEthThreshold;
+    default:
+      return isBase ? v4BaseTrackedEthThreshold : v4TrackedEthThreshold;
+  }
+}
+
 export interface ChainProtocol {
   protocol: Protocol;
   chainId: ChainId;
   timeout: number;
-  provider: V2SubgraphProvider | V3SubgraphProvider | V4SubgraphProvider;
+  provider:
+    | ISubgraphProvider<V2SubgraphPool>
+    | ISubgraphProvider<V3SubgraphPool>
+    | ISubgraphProvider<V4SubgraphPool>;
   eulerHooksProvider?: EulerSwapHooksSubgraphProvider;
   aggHooksProvider?: AggHooksSubgraphProvider;
 }
