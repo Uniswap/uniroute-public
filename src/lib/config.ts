@@ -40,6 +40,13 @@ const getPoolDiscoveryCacheTtls = () => ({
   ),
 });
 
+// Per-chain override applied on top of whichever route-cache TTL
+// (RouteCacheEntryTtlSeconds or ShortRouteCacheEntryTtlSeconds) was
+
+// fast-churn chains force full route reconvergence on a tight cadence.
+const getRouteCacheEntryTtlSecondsByChain = (): Record<number, number> =>
+  parsePositiveIntRecordEnvOrEmpty('ROUTE_CACHE_ENTRY_TTL_SECONDS_BY_CHAIN');
+
 const getPoolDiscoverySnapshotMemoEnabled = () =>
   parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_MEMO_ENABLED', false);
 
@@ -157,6 +164,12 @@ export interface IUniRouteServiceConfig {
     // more volatile: partial-external (Uniswap + some-but-not-all
     // external protocols) and any experimental-hooks route.
     ShortRouteCacheEntryTtlSeconds: number;
+    // Per-chain override applied on top of whichever base TTL above was
+    // selected (default or short). Lets fast-churn chains (Robinhood
+    // launchpad) force full route reconvergence on a tight cadence instead
+    // of relying solely on RouteCacheEntryRefreshSeconds's traffic-based
+    // refresh, which only fires on already-cached, already-trafficked keys.
+    RouteCacheEntryTtlSecondsByChain?: Record<number, number>;
     // Cached routes to retrieve
     CachedRoutesToRetrieve: number;
     // Cached routes to keep after scoring
@@ -288,6 +301,7 @@ export const getUniRouteSyncConfig = (
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
+      RouteCacheEntryTtlSecondsByChain: getRouteCacheEntryTtlSecondsByChain(),
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
@@ -393,6 +407,7 @@ export const getQuickRouteSyncConfig = (
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
+      RouteCacheEntryTtlSecondsByChain: getRouteCacheEntryTtlSecondsByChain(),
       CachedRoutesToRetrieve: __PLACEHOLDER__,
       CachedRoutesToKeepAfterScoring: __PLACEHOLDER__,
       SkipAsyncCacheUpdateCall: false, // always false in prod
