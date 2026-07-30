@@ -124,8 +124,8 @@ export const FLAUNCH_ANYPOSM_V1_ON_BASE =
 
 export const FLAUNCH_POSM_ON_ROBINHOOD =
   '0x5cf8e499c7c466c7e2cf127bdf129f57151e65dc';
-// Second Flaunch PositionManager deployment on Robinhood (ROUTE-1526 / ROUTE-1512
-// SplitArrow — same shared launchpad hook, different instance).
+// Second Flaunch PositionManager deployment on Robinhood
+// (SplitArrow — same shared launchpad hook, different instance).
 export const FLAUNCH_POSM_ON_ROBINHOOD_2 =
   '0x07f7850aa55ffb4a6f2693d493c4477747ec6fdc';
 
@@ -174,7 +174,6 @@ export const WETH_HOOKS_ADDRESS_ON_MONAD =
 export const WETH_HOOKS_ADDRESS_ON_ARBITRUM =
   '0x2a4adf825bd96598487dbb6b2d8d882a4eb86888';
 
-// TODO(megaeth): temporary — AGNTTEST/USDm test pool hook; remove once real pools are seeded.
 export const TEST_HOOK_ON_MEGAETH =
   '0x14faad03bbbc089f694bdfad9826d36f30ce80c4';
 
@@ -490,8 +489,6 @@ export const SUPER_STRATEGY_V2_ON_BASE =
 export const SUPER_STRATEGY_V3_ON_BASE =
   '0x6646b048fba0a70a692f7690ae6dad83bcacb0c8';
 
-// BackGeoOracle — per-chain CREATE2 deployments with different address per
-// chain (permission-flag vanity ending in ...ac4), so no shared constant.
 export const BACKGEOORACLE_ON_MAINNET =
   '0xb13250f0dc8ec6de297e81cda8142db51860bac4';
 export const BACKGEOORACLE_ON_BASE =
@@ -713,6 +710,12 @@ export const MIKO_FEE_HOOK_ON_ROBINHOOD =
   '0x0a790b185f5f3f4bf6ecae95bf3f275ea5ff60cc';
 export const LAUNCHLY_HOOK_2_ON_ROBINHOOD =
   '0xbe096e555e3c82d3ddd8ee8f464ffab70df480cc';
+export const PONS_V2_MEME_HOOK_ON_ROBINHOOD =
+  '0x8e99d2009d60a917e9b1c00c04c077b8c0c3a044';
+export const SLVR_HOOK_ON_ROBINHOOD =
+  '0x64c6103255ccc638febe3619aeb52d2b59d6a0cc';
+export const ARENA_FEE_HOOK_ON_ROBINHOOD =
+  '0x99d4c5cf21d8f00b627afe2bf1ee2840f886e044';
 
 export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
@@ -720,6 +723,8 @@ export const NFTX_V4_HOOK_ON_MAINNET =
   '0xd2094b5cdb1a12b6274e4a4d3a252cd94c51efcc';
 export const PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET =
   '0x025a386eaa79f6067d29848fd05ccc71beab20cc';
+export const PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET =
+  '0x90c67c1e866f86526f0e338459cd435e1f23a0cc';
 
 /**
  * Allowlisted V4 hooks whose pools hold real liquidity but whose
@@ -873,6 +878,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     NFTX_V4_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET_2,
     PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET,
+    PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -1121,6 +1127,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     URU_LAUNCH_HOOK_ON_ROBINHOOD,
     MIKO_FEE_HOOK_ON_ROBINHOOD,
     LAUNCHLY_HOOK_2_ON_ROBINHOOD,
+    PONS_V2_MEME_HOOK_ON_ROBINHOOD,
+    SLVR_HOOK_ON_ROBINHOOD,
+    ARENA_FEE_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
