@@ -65,6 +65,11 @@ const getPoolDiscoverySnapshotMaxStaleSeconds = () =>
     DEFAULT_POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS
   );
 
+// __PLACEHOLDER__ (the default for unset/invalid/non-positive values) disables negative
+// token caching.
+const getTokenNotFoundCacheTtlSeconds = () =>
+  parsePositiveIntEnvOrDefault('TOKEN_NOT_FOUND_CACHE_TTL_SECONDS', __PLACEHOLDER__);
+
 // TODO: use this ChainId enum for now
 // Once all monorepo projects switch to PartialChainIdMap<T> from @uniswap/lib-sharedconfig/chainConfig
 // we can switch to using ChainId from there.
@@ -114,6 +119,13 @@ export interface IUniRouteServiceConfig {
     RedisTimeoutInMilliseconds: number;
     // The TTL for the token cache entry.
     TokenCacheEntryTtlSeconds: number;
+    // TTL for negative token cache entries ("this address is definitively
+    // not an ERC-__PLACEHOLDER__"), written only when BOTH the GQL and on-chain sources
+    // assert nonexistence — never on transient errors. Kept short so a
+    // just-deployed token is not blackholed. __PLACEHOLDER__ disables negative caching
+    // entirely (status quo). Kill switch: set
+    // TOKEN_NOT_FOUND_CACHE_TTL_SECONDS to '__PLACEHOLDER__' and redeploy.
+    TokenNotFoundCacheTtlSeconds: number;
     // All pools/Chain/Protocol Ttl (uniRoutes)
     AllPoolsCacheEntryTtlSeconds: number;
     // TokenIn/TokenOut/Chain/Protocol pools Ttl (uniRoutes)
@@ -284,6 +296,7 @@ export const getUniRouteSyncConfig = (
       Namespace: undefined,
       RedisTimeoutInMilliseconds: __PLACEHOLDER__,
       TokenCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      TokenNotFoundCacheTtlSeconds: getTokenNotFoundCacheTtlSeconds(),
       AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
@@ -390,6 +403,7 @@ export const getQuickRouteSyncConfig = (
       Namespace: 'quickroute-',
       RedisTimeoutInMilliseconds: __PLACEHOLDER__,
       TokenCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      TokenNotFoundCacheTtlSeconds: getTokenNotFoundCacheTtlSeconds(),
       AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
