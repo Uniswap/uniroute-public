@@ -70,6 +70,17 @@ const getPoolDiscoverySnapshotMaxStaleSeconds = () =>
 const getTokenNotFoundCacheTtlSeconds = () =>
   parsePositiveIntEnvOrDefault('TOKEN_NOT_FOUND_CACHE_TTL_SECONDS', __PLACEHOLDER__);
 
+// __PLACEHOLDER__ (the default for unset/invalid/non-positive values) disables the cache.
+const getBlockNumberCacheTtlMs = () =>
+  parsePositiveIntEnvOrDefault('BLOCK_NUMBER_CACHE_TTL_MS', __PLACEHOLDER__);
+
+// Per-chain TTL override (JSON record of POSITIVE ms values, e.g.
+// '{"__PLACEHOLDER__":__PLACEHOLDER__}'). QuoteResponse.blockNumber feeds trading's GuideStar
+// block-staleness gate and comparison, so fast-block chains need a TTL
+// well under one block time (Arbitrum ~250ms) — or an effectively-off __PLACEHOLDER__.
+const getBlockNumberCacheTtlMsByChain = () =>
+  parsePositiveIntRecordEnvOrEmpty('BLOCK_NUMBER_CACHE_TTL_MS_BY_CHAIN');
+
 // TODO: use this ChainId enum for now
 // Once all monorepo projects switch to PartialChainIdMap<T> from @uniswap/lib-sharedconfig/chainConfig
 // we can switch to using ChainId from there.
@@ -267,6 +278,20 @@ export interface IUniRouteServiceConfig {
     // Whether the quote response needs up to date pool info for routes picked
     NeedsUpToDatePoolsInfo: boolean;
   };
+  BlockNumberCache: {
+    // TTL for the in-process per-chain eth_blockNumber cache on the quote
+    // path, in milliseconds. Bounds staleness of the served block number;
+    // requestBlockNumber-pinned quotes bypass the cache. __PLACEHOLDER__ disables it —
+    // every quote issues its own eth_blockNumber RPC (status quo). Kill
+    // switch: set BLOCK_NUMBER_CACHE_TTL_MS to '__PLACEHOLDER__' and redeploy.
+    TtlMs: number;
+    // Per-chain TTL override in ms (positive entries only; absent chains
+    // use TtlMs). The served value becomes QuoteResponse.blockNumber,
+    // which trading's GuideStar staleness gate and comparison consume —
+    // keep fast-block chains (Arbitrum ~250ms blocks) well under one
+    // block time here before any prod rollout.
+    TtlMsByChain: Record<number, number>;
+  };
   FeeOnTransfer: {
     // Whether to adjust V2 quote amounts for fee-on-transfer tokens (buyFeeBps/sellFeeBps)
     V2AdjustmentEnabled: boolean;
@@ -374,6 +399,10 @@ export const getUniRouteSyncConfig = (
       NeedsBlockNumber: true,
       NeedsUpToDatePoolsInfo: true,
     },
+    BlockNumberCache: {
+      TtlMs: getBlockNumberCacheTtlMs(),
+      TtlMsByChain: getBlockNumberCacheTtlMsByChain(),
+    },
     FeeOnTransfer: {
       V2AdjustmentEnabled: true,
     },
@@ -476,6 +505,10 @@ export const getQuickRouteSyncConfig = (
     ResponseRequirements: {
       NeedsBlockNumber: false,
       NeedsUpToDatePoolsInfo: true,
+    },
+    BlockNumberCache: {
+      TtlMs: getBlockNumberCacheTtlMs(),
+      TtlMsByChain: getBlockNumberCacheTtlMsByChain(),
     },
     FeeOnTransfer: {
       V2AdjustmentEnabled: true,

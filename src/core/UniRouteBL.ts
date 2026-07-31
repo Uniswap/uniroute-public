@@ -28,11 +28,13 @@ import {
   ChainId,
   IUniRouteServiceConfig,
   LambdaType,
+  MetricFailureReason,
   QuoteService,
   needsGasPriceFetching,
   getUniRouteSyncCacheMissRouteFinderOverrides,
 } from '../lib/config';
 import {Address} from '../models/address/Address';
+import {BlockNumberCache} from '../lib/blockNumberCache';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {TradeType} from '../models/quote/TradeType';
 import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
@@ -212,6 +214,10 @@ function totalQuoteAmountForQuoteSplit(quoteSplit: QuoteSplit): bigint {
 }
 
 export class UniRouteBL implements IUniRoutedBL {
+  // Config-derived internal state (same pattern as QuoteBestSplitFinder's
+  // bounded-growth flag), not an injected dependency.
+  private readonly blockNumberCache: BlockNumberCache;
+
   constructor(
     private readonly serviceConfig: IUniRouteServiceConfig,
     private readonly redisCache: IRedisCache<string, string>,
@@ -233,7 +239,12 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly tokenProvider: ITokenProvider,
     private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
     private readonly stateOverrideResolver: StateOverrideResolver
-  ) {}
+  ) {
+    this.blockNumberCache = new BlockNumberCache(
+      serviceConfig.BlockNumberCache.TtlMs,
+      serviceConfig.BlockNumberCache.TtlMsByChain
+    );
+  }
 
   /**
    * Token Pair Journey Through UniRoute System
@@ -883,6 +894,61 @@ export class UniRouteBL implements IUniRoutedBL {
     };
   }
 
+  // eth_blockNumber for the quote, via the in-process TTL cache when the
+  // chain's TTL > 0. The GetBlockNumber latency dist wraps the cache
+  // lookup (hits fold in as ~0ms samples), while GetBlockNumber.Refresh
+  // wraps only the real RPCs so provider latency stays observable once
+  // hits dominate. The BlockNumberCache counter attributes hit/joined/miss
+  // shares and, per house metric rules, counts failures with a reason tag
+  // so a failing cohort is never invisible.
+  private async getBlockNumber(
+    chain: Chain,
+    ctx: Context,
+    rpcMetricTags: string[]
+  ): Promise<number> {
+    // Refresh-dist wrapping only when the cache is enabled for this chain:
+    // passthrough mode must emit exactly the pre-cache metric set (a new
+    // dist name emitting fleet-wide before its datadog-cloud allowlist
+    // seeding is the #10501 gotcha).
+    const rawFetch = () =>
+      this.rpcProviderMap.get(chain.chainId)!.getBlockNumber();
+    const fetch =
+      this.blockNumberCache.ttlMsFor(chain.chainId) > 0
+        ? () =>
+            withLatencyMetric(
+              'GetBlockNumber.Refresh',
+              ctx,
+              rpcMetricTags,
+              rawFetch
+            )
+        : rawFetch;
+    try {
+      const {value, status} = await withLatencyMetric(
+        'GetBlockNumber',
+        ctx,
+        rpcMetricTags,
+        () => this.blockNumberCache.get(chain.chainId, fetch)
+      );
+      if (this.blockNumberCache.enabled) {
+        await ctx.metrics.count(buildMetricKey('BlockNumberCache'), 1, {
+          tags: [...rpcMetricTags, `status:${status}`],
+        });
+      }
+      return value;
+    } catch (error) {
+      if (this.blockNumberCache.enabled) {
+        await ctx.metrics.count(buildMetricKey('BlockNumberCache'), 1, {
+          tags: [
+            ...rpcMetricTags,
+            'status:failure',
+            `reason:${MetricFailureReason.RPC_ERROR}`,
+          ],
+        });
+      }
+      throw error;
+    }
+  }
+
   /**
    * Fetches the per-request data needed before route discovery: token
    * currency info (parallel), token metadata + block number + gas price
@@ -939,9 +1005,7 @@ export class UniRouteBL implements IUniRoutedBL {
       requestBlockNumber !== undefined
         ? Promise.resolve(requestBlockNumber)
         : this.serviceConfig.ResponseRequirements.NeedsBlockNumber
-          ? withLatencyMetric('GetBlockNumber', ctx, rpcMetricTags, () =>
-              this.rpcProviderMap.get(chain.chainId)!.getBlockNumber()
-            )
+          ? this.getBlockNumber(chain, ctx, rpcMetricTags)
           : Promise.resolve<number>(0),
       needToFetchGasPrice
         ? withLatencyMetric('GetGasPrice', ctx, rpcMetricTags, () =>
