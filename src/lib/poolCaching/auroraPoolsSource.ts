@@ -32,6 +32,7 @@ import {
   type CurrentTokenPricesService,
   type DataIngestionAuroraDB,
   type RoutablePoolsService,
+  type V4RoutablePool,
 } from '@uniswap/lib-data-ingestion-aurora';
 
 import {
@@ -42,8 +43,28 @@ import {
 } from './sor-providers';
 import {V4_MIN_TVL_ETH} from './sor-providers/subgraphProvider';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
+import {getDynamicZlcaHooks} from './util/dynamicZlcaHooks';
+import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
+import {ChainId as SdkChainId} from '@uniswap/sdk-core';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+
+// Observability sinks for the servable-parity re-run of the serving filter:
+// the REAL filter run (cachePools) owns the filter's metrics/logs; the parity
+// re-run must not double-emit them.
+const NOOP_LOGGER: Logger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  debug: () => {},
+  fatal: () => {},
+};
+class NoopMetric extends IMetric {
+  putDimensions(): void {}
+  putMetric(): void {}
+  setProperty(): void {}
+}
+const NOOP_METRIC = new NoopMetric();
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -55,6 +76,39 @@ const CHAIN_ID_ROBINHOOD = 4663;
 const WRAPPED_NATIVE_BY_CHAIN: {[chainId: number]: string} = {
   [CHAIN_ID_ROBINHOOD]: '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
 };
+
+// USDG (Global Dollar) on Robinhood — the chain's dominant stable quote asset.
+const USDG_ON_ROBINHOOD = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
+
+// Quote assets whose fresh USD price may be propagated one hop through a
+// pool's own spot price to value the OTHER side when it has no price row
+// (implied in-pool pricing — the analog of the subgraph's derivedETH, which
+// is what admits fresh launchpad pools the pricing pipeline hasn't covered
+// yet). Restricting the propagation SOURCE to these chain quote assets
+// mirrors the subgraph's whitelist concept: a meme priced off another meme's
+// pool must not mint implied TVL. Lowercased; grows with
+// AURORA_SUPPORTED_TARGETS.
+const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
+  [chainId: number]: ReadonlySet<string>;
+} = {
+  [CHAIN_ID_ROBINHOOD]: new Set([
+    // Native ETH: V4 pools quote against currency 0x0 directly, and this is
+    // the LARGEST quoted cohort (~81k one-side-priced pools). Only useful
+    // because data-ingestion writes a fresh current_token_prices row for the
+    // zero address itself (verified in dev: sub-minute freshness) — if that
+    // row ever went stale, native-quoted pools would silently lose implied
+    // pricing (both sides null → no top-up).
+    ZERO_ADDRESS,
+    WRAPPED_NATIVE_BY_CHAIN[CHAIN_ID_ROBINHOOD],
+    USDG_ON_ROBINHOOD,
+  ]),
+};
+
+// Per-pool ceiling (in native units) on the implied top-up. 1 ETH is 100×
+// the tracked-ETH admission threshold (0.01) — far more than admission needs
+// — while keeping spot-derived phantom TVL from out-ranking genuinely liquid
+// pools in TopPools selection (council review finding on #11463).
+const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
 // The only chain×protocol combos the Aurora source may serve. Deliberately
 // Robinhood-V4-only for the pilot; expanding a rollout wave means adding the
@@ -344,12 +398,42 @@ export class AuroraV4PoolsProvider
       return bypassHooks?.has(hooks) ?? false;
     };
 
+    const impliedSourceTokens =
+      IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
     const result: V4SubgraphPool[] = [];
     let droppedNullDecimals = 0;
+    // The implied top-up is spot-derived and therefore attacker-influenced:
+    // anyone can initialize a pool at an arbitrary price and donate token
+    // reserve, minting phantom TVL. The cap keeps that useful for ADMISSION
+    // (1 ETH ≫ the 0.001/0.01 ETH floors) while bounding its RANKING power —
+    // tvlUSD feeds TopPools selection, and a ~1-ETH ceiling cannot displace
+    // genuinely liquid pools. Genuinely valuable pools carry real priced-side
+    // TVL, which is never capped.
+    const impliedTopUpCapUsd = IMPLIED_TVL_TOPUP_CAP_ETH * nativePrice;
+    let impliedPriced = 0;
+    let impliedCapped = 0;
     for (const pool of pools) {
       const hooks = (pool.hooksAddress ?? ZERO_ADDRESS).toLowerCase();
-      const tvlEth = pool.tvlUsd / nativePrice;
+      // SQL tvlUsd counts only sides with a fresh price row. Fresh launchpad
+      // tokens have none, so their pools (whole token supply vs a near-empty
+      // quote side) would compute ≈$0 and fail admission even though the
+      // subgraph admits them via derivedETH — top the TVL up with the
+      // in-pool implied value of the unpriced side.
+      const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
+      if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
+      const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
+      const tvlUsd = pool.tvlUsd + impliedUsd;
+      const tvlEth = tvlUsd / nativePrice;
       if (!admitted(tvlEth, pool.liquidity, hooks)) continue;
+      // Count only admission FLIPS — pools rescued by the top-up, not every
+      // pool where the code path fired. This is the number the shadow
+      // readout compares against the missing-pool gap.
+      if (
+        impliedUsd > 0 &&
+        !admitted(pool.tvlUsd / nativePrice, pool.liquidity, hooks)
+      ) {
+        impliedPriced++;
+      }
       // V4 snapshot consumers require token decimals; canonical_tokens rows
       // may not have them (yet). Drop with a metric rather than emit garbage.
       if (pool.token0Decimals === null || pool.token1Decimals === null) {
@@ -375,7 +459,7 @@ export class AuroraV4PoolsProvider
           decimals: String(pool.token1Decimals),
         },
         tvlETH: tvlEth,
-        tvlUSD: pool.tvlUsd,
+        tvlUSD: tvlUsd,
       });
     }
     if (droppedNullDecimals > 0) {
@@ -386,8 +470,81 @@ export class AuroraV4PoolsProvider
         {chainId: String(this.chainId), protocol: String(Protocol.V4)}
       );
     }
+    if (impliedPriced > 0) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.implied_priced',
+        impliedPriced,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V4)}
+      );
+    }
+    if (impliedCapped > 0) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.implied_capped',
+        impliedCapped,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V4)}
+      );
+    }
     return result;
   }
+}
+
+/**
+ * USD value of a pool's UNPRICED side, derived one hop through the pool's own
+ * spot price from the priced side — the analog of the subgraph's derivedETH
+ * for tokens `current_token_prices` doesn't cover (fresh launchpad tokens).
+ *
+ * Returns 0 (no contribution) unless ALL of:
+ *   - exactly one side has a fresh price (both priced → SQL already counted
+ *     everything; neither priced → nothing to propagate from);
+ *   - the priced side is one of the chain's designated quote assets
+ *     (`IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN`) — propagation from arbitrary
+ *     priced tokens (the pricing pipeline covers ~58k, memes included) mints
+ *     implied TVL from junk pairings, which the subgraph's whitelist forbids;
+ *   - decimals for both sides and a positive finite spot price are present.
+ *
+ * "Unpriced" includes a side whose price row exists but is STALE (>24h) —
+ * deliberate: the pool's own spot state is fresher than a day-old pipeline
+ * row, so spot-repricing a stale side beats counting it as zero.
+ *
+ * Returns the UNCAPPED value; the caller caps the top-up (see
+ * IMPLIED_TVL_TOPUP_CAP_ETH) before it touches admission/ranking TVL.
+ *
+ * Float math is deliberate: values feed TVL floor comparisons and snapshot
+ * ranking, not amounts — the ~15 significant digits of a double are plenty.
+ */
+export function impliedOneHopTvlUsd(
+  pool: V4RoutablePool,
+  impliedSourceTokens: ReadonlySet<string> | undefined
+): number {
+  if (!impliedSourceTokens) return 0;
+  const p0 = pool.token0PriceUsd;
+  const p1 = pool.token1PriceUsd;
+  if ((p0 === null) === (p1 === null)) return 0;
+  if (pool.token0Decimals === null || pool.token1Decimals === null) return 0;
+  const pricedToken = (
+    p0 !== null ? pool.token0Address : pool.token1Address
+  ).toLowerCase();
+  if (!impliedSourceTokens.has(pricedToken)) return 0;
+  const sqrtP = Number(pool.sqrtPriceX96);
+  if (!Number.isFinite(sqrtP) || sqrtP <= 0) return 0;
+  // Raw token1 per raw token0, then adjusted to human units.
+  const rawPrice = (sqrtP / 2 ** 96) ** 2;
+  const humanPrice =
+    rawPrice * 10 ** (pool.token0Decimals - pool.token1Decimals);
+  if (!Number.isFinite(humanPrice) || humanPrice <= 0) return 0;
+  let implied: number;
+  if (p0 !== null) {
+    // token1 unpriced: 1 human token1 = p0 / humanPrice USD.
+    const reserve1 = Number(pool.tvlToken1) / 10 ** pool.token1Decimals;
+    implied = reserve1 * (p0 / humanPrice);
+  } else {
+    // token0 unpriced: 1 human token0 = p1 × humanPrice USD.
+    const reserve0 = Number(pool.tvlToken0) / 10 ** pool.token0Decimals;
+    implied = reserve0 * (p1! * humanPrice);
+  }
+  return Number.isFinite(implied) && implied > 0 ? implied : 0;
 }
 
 // Mirrors the subgraph's `liquidity_gt: "0"` condition; malformed values
@@ -413,8 +570,15 @@ export interface PoolParity {
   auroraCount: number;
   jaccardBps: number;
   missingTop100: number;
+  missingInAurora: number;
   extraInAurora: number;
   tvlDriftBpsP50: number;
+  // Diagnostic samples so a parity gap is classifiable from logs alone:
+  // top-TVL pool ids the subgraph has but Aurora lacks / vice versa, and
+  // median-drift matched pools with both TVLs (id:subgraphTvl:auroraTvl).
+  missingSample: string[];
+  extraSample: string[];
+  driftSample: string[];
 }
 
 export function computePoolParity(
@@ -429,7 +593,7 @@ export function computePoolParity(
   );
 
   let intersection = 0;
-  const driftsBps: number[] = [];
+  const driftsBps: Array<{bps: number; id: string; s: number; a: number}> = [];
   for (const [id, subgraphPool] of subgraphById) {
     const auroraPool = auroraById.get(id);
     if (!auroraPool) continue;
@@ -437,7 +601,12 @@ export function computePoolParity(
     const subgraphTvl = poolTvlUsd(subgraphPool);
     const auroraTvl = poolTvlUsd(auroraPool);
     if (subgraphTvl > 0) {
-      driftsBps.push(Math.abs(auroraTvl - subgraphTvl) / subgraphTvl / 0.0001);
+      driftsBps.push({
+        bps: Math.abs(auroraTvl - subgraphTvl) / subgraphTvl / 0.0001,
+        id,
+        s: subgraphTvl,
+        a: auroraTvl,
+      });
     }
   }
   const unionSize = subgraphById.size + auroraById.size - intersection || 1;
@@ -449,19 +618,40 @@ export function computePoolParity(
     pool => !auroraById.has(pool.id.toLowerCase())
   ).length;
 
-  driftsBps.sort((a, b) => a - b);
-  const tvlDriftBpsP50 =
-    driftsBps.length > 0 ? driftsBps[Math.floor(driftsBps.length / 2)] : 0;
+  driftsBps.sort((a, b) => a.bps - b.bps);
+  const medianIdx = Math.floor(driftsBps.length / 2);
+  const tvlDriftBpsP50 = driftsBps.length > 0 ? driftsBps[medianIdx]!.bps : 0;
+
+  const topTvlSample = (
+    pools: Iterable<AnySubgraphPool>,
+    excludeIds: Map<string, AnySubgraphPool>
+  ) =>
+    [...pools]
+      .filter(pool => !excludeIds.has(pool.id.toLowerCase()))
+      .sort((a, b) => poolTvlUsd(b) - poolTvlUsd(a))
+      .slice(0, SAMPLE_SIZE)
+      .map(pool => pool.id.toLowerCase());
+  const driftSample = driftsBps
+    .slice(medianIdx, medianIdx + 3)
+    .map(d => `${d.id}:${d.s.toFixed(2)}:${d.a.toFixed(2)}`);
 
   return {
     subgraphCount: subgraphById.size,
     auroraCount: auroraById.size,
     jaccardBps: Math.round((intersection / unionSize) * 10000),
     missingTop100,
+    missingInAurora: subgraphById.size - intersection,
     extraInAurora: auroraById.size - intersection,
     tvlDriftBpsP50: Math.round(tvlDriftBpsP50),
+    missingSample: topTvlSample(subgraphById.values(), auroraById),
+    extraSample: topTvlSample(auroraById.values(), subgraphById),
+    driftSample,
   };
 }
+
+// Ids per diagnostic sample in the parity result/log — enough to classify a
+// gap against the DB by hand, small enough to keep the log line bounded.
+const SAMPLE_SIZE = 5;
 
 // --- Wrapper provider (the seam installed into ChainProtocol.provider) ---
 
@@ -601,8 +791,73 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
         `Aurora shadow parity ${targetKey(this.chainId, this.protocol)}: ` +
           `subgraph=${parity.subgraphCount} aurora=${parity.auroraCount} ` +
           `jaccardBps=${parity.jaccardBps} missingTop100=${parity.missingTop100} ` +
-          `tvlDriftBpsP50=${parity.tvlDriftBpsP50}`
+          `tvlDriftBpsP50=${parity.tvlDriftBpsP50}`,
+        {
+          missingInAurora: parity.missingInAurora,
+          extraInAurora: parity.extraInAurora,
+          missingSample: parity.missingSample,
+          extraSample: parity.extraSample,
+          driftSample: parity.driftSample,
+        }
       );
+      // Raw getPools parity over-counts: the serving path drops
+      // non-servable pools (non-allowlisted custom-accounting hooks etc.)
+      // in v4HooksPoolsFiltering AFTER this seam, so a subgraph pool that
+      // would never serve inflates missingInAurora. Diff the sets the way
+      // serving would actually see them — same filter, no-op observability
+      // so the genuine cachePools run's filter metrics stay untouched.
+      if (this.protocol === Protocol.V4) {
+        const dynamicZlcaHookMap = getDynamicZlcaHooks(this.chainId);
+        const dynamicHooks = dynamicZlcaHookMap
+          ? new Set(dynamicZlcaHookMap.keys())
+          : undefined;
+        const servableSubgraph = v4HooksPoolsFiltering(
+          this.chainId as SdkChainId,
+          [...(subgraphPools as unknown as V4SubgraphPool[])],
+          NOOP_LOGGER,
+          NOOP_METRIC,
+          dynamicHooks
+        );
+        const servableAurora = v4HooksPoolsFiltering(
+          this.chainId as SdkChainId,
+          [...(auroraPools as unknown as V4SubgraphPool[])],
+          NOOP_LOGGER,
+          NOOP_METRIC,
+          dynamicHooks
+        );
+        const servable = computePoolParity(servableSubgraph, servableAurora);
+        this.metric.putMetric(
+          'CachePools.parity.servable_missing',
+          servable.missingInAurora,
+          MetricLoggerUnit.Count,
+          this.tags
+        );
+        this.metric.putMetric(
+          'CachePools.parity.servable_extra',
+          servable.extraInAurora,
+          MetricLoggerUnit.Count,
+          this.tags
+        );
+        this.metric.putMetric(
+          'CachePools.parity.servable_jaccard_bps',
+          servable.jaccardBps,
+          MetricLoggerUnit.None,
+          this.tags
+        );
+        this.logger.info(
+          `Aurora servable parity ${targetKey(this.chainId, this.protocol)}: ` +
+            `subgraph=${servable.subgraphCount} aurora=${servable.auroraCount} ` +
+            `jaccardBps=${servable.jaccardBps} missingTop100=${servable.missingTop100} ` +
+            `tvlDriftBpsP50=${servable.tvlDriftBpsP50}`,
+          {
+            missingInAurora: servable.missingInAurora,
+            extraInAurora: servable.extraInAurora,
+            missingSample: servable.missingSample,
+            extraSample: servable.extraSample,
+            driftSample: servable.driftSample,
+          }
+        );
+      }
     } catch (err) {
       this.metric.putMetric(
         'CachePools.aurora.shadow_error',

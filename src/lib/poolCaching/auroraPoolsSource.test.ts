@@ -7,6 +7,7 @@ import {
   AuroraV4PoolsProvider,
   auroraPoolsSourceConfigFromEnv,
   computePoolParity,
+  impliedOneHopTvlUsd,
   resetAuroraPoolCountBaselinesForTesting,
   resolveAuroraMode,
   targetKey,
@@ -149,9 +150,15 @@ describe('computePoolParity', () => {
     // intersection {a1, a2} = 2, union = 4
     expect(parity.jaccardBps).toBe(5000);
     expect(parity.missingTop100).toBe(1); // a3
+    expect(parity.missingInAurora).toBe(1); // a3
     expect(parity.extraInAurora).toBe(1); // a4
     // drifts: a1 = 10% = 1000bps, a2 = 0 → p50 = 1000 (upper median)
     expect(parity.tvlDriftBpsP50).toBe(1000);
+    // Diagnostic samples: what's missing/extra by id, and the matched pools
+    // AT the median drift (sample starts at the median, ascending).
+    expect(parity.missingSample).toEqual(['0xa3']);
+    expect(parity.extraSample).toEqual(['0xa4']);
+    expect(parity.driftSample).toEqual(['0xa1:1000.00:1100.00']);
   });
 
   it('handles empty results', () => {
@@ -308,15 +315,22 @@ describe('AuroraV4PoolsProvider', () => {
   function v4Row(
     overrides: Partial<{
       poolId: string;
+      token0Address: string;
       liquidity: string;
       tvlUsd: number;
       hooksAddress: string | null;
       token1Decimals: number | null;
+      sqrtPriceX96: string;
+      tvlToken0: string;
+      tvlToken1: string;
+      token0PriceUsd: number | null;
+      token1PriceUsd: number | null;
     }>
   ) {
     return {
       poolId: overrides.poolId ?? '0xABCD',
-      token0Address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      token0Address:
+        overrides.token0Address ?? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
       token1Address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
       feeBips: 3000,
       tickSpacing: 60,
@@ -324,6 +338,19 @@ describe('AuroraV4PoolsProvider', () => {
         overrides.hooksAddress !== undefined ? overrides.hooksAddress : null,
       liquidity: overrides.liquidity ?? '42',
       tvlUsd: overrides.tvlUsd ?? 4000,
+      // sqrtPrice 0 disables implied one-hop pricing so pre-existing
+      // admission tests exercise the SQL-TVL path unchanged.
+      sqrtPriceX96: overrides.sqrtPriceX96 ?? '0',
+      tvlToken0: overrides.tvlToken0 ?? '0',
+      tvlToken1: overrides.tvlToken1 ?? '0',
+      token0PriceUsd:
+        overrides.token0PriceUsd !== undefined
+          ? overrides.token0PriceUsd
+          : null,
+      token1PriceUsd:
+        overrides.token1PriceUsd !== undefined
+          ? overrides.token1PriceUsd
+          : null,
       token0Decimals: 18,
       token1Decimals:
         overrides.token1Decimals !== undefined ? overrides.token1Decimals : 6,
@@ -391,6 +418,167 @@ describe('AuroraV4PoolsProvider', () => {
     expect(pools.map(p => p.id).sort()).toEqual(['0xa1', '0xa2', '0xa5']);
   });
 
+  it('admits a launchpad-shaped pool via implied one-hop pricing of the unpriced side', async () => {
+    // Robinhood wrapped native (a designated implied-price source) is token0,
+    // priced $2000; token1 is a fresh launchpad token with NO price row.
+    // Quote side holds only $1 (tvlUsd from SQL) — without implied pricing
+    // this pool computes 0.0005 ETH, below the 0.001 floor, and drops (the
+    // 27%-jaccard dev-shadow gap). Spot: 1 token0 = 1e6 token1 (both 18dec)
+    // → sqrtPriceX96 = 1000 × 2^96. Token1 reserve 5000 → implied
+    // 5000 × ($2000/1e6) = $10 → total $11 = 0.0055 ETH → admitted (band b).
+    const metric = new FakeMetric();
+    const launchpadPool = v4Row({
+      poolId: '0xf1',
+      token0Address: '0x0bd7D308f8E1639FAb988DF18a8011F41eACAd73',
+      tvlUsd: 1,
+      liquidity: '1',
+      token0PriceUsd: 2000,
+      token1PriceUsd: null,
+      sqrtPriceX96: '79228162514264337593543950336000',
+      tvlToken1: '5000000000000000000000',
+      token1Decimals: 18,
+    });
+    // Same shape, but the priced side is NOT a designated quote asset
+    // (default mainnet-WETH address) — implied pricing must not apply, so
+    // the pool stays below the floor and drops.
+    const memePricedPool = v4Row({
+      ...launchpadPool,
+      poolId: '0xf2',
+      token0Address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+    });
+    // Already admitted on SQL TVL alone ($4000) AND gets a top-up: kept, but
+    // must NOT count toward implied_priced — the metric counts admission
+    // FLIPS only, so the shadow readout is comparable to the missing-pool gap.
+    const alreadyAdmittedPool = v4Row({
+      ...launchpadPool,
+      poolId: '0xf3',
+      tvlUsd: 4000,
+    });
+    const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {
+        listAllV4RoutablePools: async () => [
+          launchpadPool,
+          memePricedPool,
+          alreadyAdmittedPool,
+        ],
+      },
+      prices: freshPrices(),
+      logger: noopLogger,
+      metric,
+    });
+
+    const pools = await provider.getPools();
+    expect(pools.map(p => p.id).sort()).toEqual(['0xf1', '0xf3']);
+    const rescued = pools.find(p => p.id === '0xf1')!;
+    expect(rescued.tvlUSD).toBeCloseTo(11, 6);
+    expect(rescued.tvlETH).toBeCloseTo(11 / 2000, 9);
+    expect(
+      metric.emitted.find(m => m.key === 'CachePools.aurora.implied_priced')
+        ?.value
+    ).toBe(1); // only 0xf1 flipped; 0xf3's top-up fired without flipping
+  });
+
+  it('caps the implied top-up so spot-derived phantom TVL cannot dominate ranking', async () => {
+    // Junk-shaped pool: allowlisted quote side (wrapped native) holds $1, but
+    // an attacker-chosen spot × a huge donated token reserve implies ~$2B.
+    // Cap = 1 ETH × $2000 = $2000 → pool is ADMITTED (cap ≫ floors) but its
+    // ranking TVL is bounded at base + cap, not the phantom two billion.
+    const metric = new FakeMetric();
+    const junkPool = v4Row({
+      poolId: '0xf9',
+      token0Address: '0x0bd7D308f8E1639FAb988DF18a8011F41eACAd73',
+      tvlUsd: 1,
+      liquidity: '1',
+      token0PriceUsd: 2000,
+      token1PriceUsd: null,
+      // spot: 1 token0 = 1e6 token1 → implied token1 price $0.002
+      sqrtPriceX96: '79228162514264337593543950336000',
+      // 1e12 token1 in reserve → raw implied 1e12 × $0.002 = $2e9
+      tvlToken1: '1000000000000000000000000000000',
+      token1Decimals: 18,
+    });
+    const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {listAllV4RoutablePools: async () => [junkPool]},
+      prices: freshPrices(),
+      logger: noopLogger,
+      metric,
+    });
+
+    const pools = await provider.getPools();
+    expect(pools).toHaveLength(1);
+    // base $1 + capped top-up (1 ETH × $2000) = $2001, not $2,000,000,001
+    expect(pools[0]!.tvlUSD).toBeCloseTo(2001, 3);
+    expect(pools[0]!.tvlETH).toBeCloseTo(2001 / 2000, 6);
+    expect(
+      metric.emitted.find(m => m.key === 'CachePools.aurora.implied_capped')
+        ?.value
+    ).toBe(1);
+  });
+
+  it('impliedOneHopTvlUsd: direction, gating, and guard edge cases', () => {
+    const sources = new Set(['0x0bd7d308f8e1639fab988df18a8011f41eacad73']);
+    const base = v4Row({
+      token0Address: '0x0bd7D308f8E1639FAb988DF18a8011F41eACAd73',
+      token1Decimals: 18,
+    });
+
+    // token0 priced, token1 implied: 1 token0 = 4 token1 → sqrtP = 2×2^96.
+    // 100 token1 in reserve at $2000/4 each → $50,000.
+    const forward = {
+      ...base,
+      token0PriceUsd: 2000,
+      token1PriceUsd: null,
+      sqrtPriceX96: '158456325028528675187087900672',
+      tvlToken1: '100000000000000000000',
+    };
+    expect(impliedOneHopTvlUsd(forward, sources)).toBeCloseTo(50000, 6);
+
+    // token1 priced, token0 implied (reverse direction): same spot, token1
+    // worth $1 → 1 token0 = 4 token1 = $4; 100 token0 in reserve → $400.
+    const reverseSources = new Set([
+      base.token1Address.toLowerCase(), // token1 is the quote asset here
+    ]);
+    const reverse = {
+      ...base,
+      token0PriceUsd: null,
+      token1PriceUsd: 1,
+      sqrtPriceX96: '158456325028528675187087900672',
+      tvlToken0: '100000000000000000000',
+    };
+    expect(impliedOneHopTvlUsd(reverse, reverseSources)).toBeCloseTo(400, 6);
+
+    // Decimals adjustment: token1 has 6 decimals; spot raw token1-per-token0
+    // = 4e-12 (sqrtP = 2e-6×2^96) → human price 1 token0 = 4 token1.
+    // 100 human token1 (1e8 raw) at $2000/4 → $50,000.
+    const mixedDecimals = {
+      ...base,
+      token0PriceUsd: 2000,
+      token1PriceUsd: null,
+      token1Decimals: 6,
+      sqrtPriceX96: '158456325028528675187088',
+      tvlToken1: '100000000',
+    };
+    const mixed = impliedOneHopTvlUsd(mixedDecimals, sources);
+    expect(Math.abs(mixed - 50000) / 50000).toBeLessThan(1e-6);
+
+    // Guards: both sides priced / neither priced / zero spot / non-source
+    // priced side / missing decimals — all contribute nothing.
+    expect(impliedOneHopTvlUsd({...forward, token1PriceUsd: 3}, sources)).toBe(
+      0
+    );
+    expect(
+      impliedOneHopTvlUsd({...forward, token0PriceUsd: null}, sources)
+    ).toBe(0);
+    expect(impliedOneHopTvlUsd({...forward, sqrtPriceX96: '0'}, sources)).toBe(
+      0
+    );
+    expect(impliedOneHopTvlUsd(forward, new Set(['0xother']))).toBe(0);
+    expect(impliedOneHopTvlUsd(forward, undefined)).toBe(0);
+    expect(
+      impliedOneHopTvlUsd({...forward, token1Decimals: null}, sources)
+    ).toBe(0);
+  });
+
   it('rejects a stale native price', async () => {
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {listAllV4RoutablePools: async () => []},
@@ -429,6 +617,11 @@ describe('AuroraV4PoolsProvider', () => {
             hooksAddress: '0xFf00000000000000000000000000000000000123',
             liquidity: '42',
             tvlUsd: 4000,
+            sqrtPriceX96: '0',
+            tvlToken0: '0',
+            tvlToken1: '0',
+            token0PriceUsd: null,
+            token1PriceUsd: null,
             token0Decimals: 18,
             token1Decimals: 6,
             token0Symbol: 'WETH',
@@ -446,6 +639,11 @@ describe('AuroraV4PoolsProvider', () => {
             hooksAddress: null,
             liquidity: '1',
             tvlUsd: 100,
+            sqrtPriceX96: '0',
+            tvlToken0: '0',
+            tvlToken1: '0',
+            token0PriceUsd: null,
+            token1PriceUsd: null,
             token0Decimals: 18,
             token1Decimals: null, // unknown token → dropped
             token0Symbol: null,
