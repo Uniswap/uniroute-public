@@ -38,6 +38,12 @@ import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET} from './util/hooksAddressesAllowlist';
 import {getDynamicZlcaHooks} from './util/dynamicZlcaHooks';
 import {
+  applyV4LpFeeCorrection,
+  makeStateViewPoolKeyFeeReader,
+  v4LpFeeCorrectionChainsFromEnv,
+  V4PoolKeyFeeReader,
+} from './util/v4LpFeeCorrection';
+import {
   createDynamicZlcaHooksRefresherFromEnv,
   DynamicZlcaHooksRefresher,
 } from './util/DynamicZlcaHooksRefresher';
@@ -503,6 +509,39 @@ async function cachePoolsForChainProtocol(
       }
 
       manuallyIncludedV4Pools.forEach(pool => pools.push(pool));
+
+      // The subgraph's feeTier tracks the Swap event's fee param
+      // — the TOTAL swap fee — so it drifts off PoolKey.fee once a pool's
+      // protocol fee is live. Correct it BEFORE filtering, so the real
+      // pool-key fee feeds the token0+token1+feeTier grouping and the
+      // canonical (feeTier, tickSpacing) gate as well as the served value.
+      // Off unless the chain is listed in
+      // POOL_CACHING_V4_LP_FEE_CORRECTION_CHAINS.
+      if (v4LpFeeCorrectionChainsFromEnv().has(chainId)) {
+        const lpFeeReader = getV4LpFeeReader();
+        if (lpFeeReader) {
+          pools = await applyV4LpFeeCorrection(
+            chainId,
+            pools as Array<V4SubgraphPool>,
+            lpFeeReader,
+            logger,
+            metricInstance
+          );
+        } else {
+          // Without a metric here a misconfigured rollout is invisible: the
+          // correction silently no-ops and emits none of its own counters.
+          metricInstance.putMetric(
+            'CachePools.v4LpFeeCorrection.misconfigured',
+            1,
+            MetricLoggerUnit.Count,
+            metricTags
+          );
+          logger.warn(
+            'V4 lpFee correction enabled but no UniRPC endpoint is configured — keeping subgraph fees'
+          );
+        }
+      }
+
       // Populated only when FACTORY_ZLCA_HOOKS_ENABLED ran the refresh above.
       const dynamicZlcaHookMap = getDynamicZlcaHooks(chainId);
       pools = v4HooksPoolsFiltering(
@@ -758,6 +797,20 @@ async function refreshDynamicZlcaHooks(
   } catch (error) {
     logger.warn(`Dynamic ZLCA hooks refresh skipped: ${error}`);
   }
+}
+
+// On-chain lpFee reader for the V4 feeTier correction. Module level and lazy,
+// mirroring zlcaHooksRefresher: one ethers provider pool is shared across
+// every chain and every cron tick rather than rebuilt per run. Prefers the
+// v2-internal endpoint for the same reason DynamicZlcaHooksRefresher does —
+// plain UNI_RPC_ENDPOINT is unreliable from the cron container.
+let v4LpFeeReader: V4PoolKeyFeeReader | undefined;
+
+function getV4LpFeeReader(): V4PoolKeyFeeReader | undefined {
+  const endpoint =
+    process.env.UNI_RPC_V2_INTERNAL_ENDPOINT || process.env.UNI_RPC_ENDPOINT;
+  if (!endpoint) return undefined;
+  return (v4LpFeeReader ??= makeStateViewPoolKeyFeeReader(endpoint));
 }
 
 export async function cacheAllPools(
