@@ -73,6 +73,8 @@ export const v4SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
       return `https://gateway.thegraph.com/api/subgraphs/id/${process.env.GRAPH_XLAYER_V4_ID}`;
     case ChainId.AVALANCHE:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_AVALANCHE_V4_ID}`;
+    case ChainId.CELO:
+      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_CELO_V4_ID}`;
     case ChainId.LINEA:
       return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-linea/prod/gn`;
     case CHAIN_ID_MEGAETH:
@@ -1313,6 +1315,23 @@ export function createChainProtocols(
         v4TrackedEthThreshold,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(ChainId.AVALANCHE),
+        undefined,
+        logger,
+        metric
+      ),
+    },
+    {
+      protocol: Protocol.V4,
+      chainId: ChainId.CELO,
+      timeout: 90000,
+      provider: new V4SubgraphProvider(
+        ChainId.CELO,
+        3,
+        90000,
+        true,
+        v4TrackedEthThreshold,
+        v4UntrackedUsdThreshold,
+        v4SubgraphUrlOverride(ChainId.CELO),
         undefined,
         logger,
         metric

@@ -109,6 +109,7 @@ describe('cacheConfig', () => {
         ChainId.MONAD,
         ChainId.XLAYER,
         ChainId.AVALANCHE,
+        ChainId.CELO,
         ChainId.LINEA,
       ];
       for (const chainId of knownChains) {
