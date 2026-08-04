@@ -581,6 +581,46 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     return retrievedPools;
   }
 
+  // Proactively populates (or refreshes) the in-process snapshot memo for a
+  // (chainId, protocol) pair outside of any live request, so a request that
+  // actually needs this snapshot finds it already within the SWR-servable
+  // window instead of falling through to a blocking cold fetch. Reuses the
+  // exact single-flight/parse/memo path getPools() would take on a miss —
+  // no separate fetch logic. Fail-open: errors are logged, never thrown, so
+  // one bad (chainId, protocol) can never take down a caller's prewarm loop.
+  public async prewarm(
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<void> {
+    this.assertSupportedProtocol(protocol);
+    const cacheKey = this.getPoolsCacheKey(chainId, protocol);
+    // Deliberately a Count, not a .dist: uniroute enforces a strict
+    // per-service .dist allowlist (unallowlisted dists auto-admit
+    // high-cardinality infra tags on first emission), and this only needs
+    // bounded chain/protocol/status tags — see the identical note on
+    // DynamicZlcaHooksRefresher's own refresh counter.
+    const metricTags = [`chain:${ChainId[chainId]}`, `protocol:${protocol}`];
+    try {
+      await this.getOrStartSnapshotRefresh(cacheKey, chainId, protocol, ctx);
+      await ctx.metrics.count(
+        buildMetricKey('PoolDiscoverer.SnapshotPrewarm'),
+        1,
+        {tags: [...metricTags, 'status:success']}
+      );
+    } catch (error) {
+      ctx.logger.warn(
+        `[${this.discovererName}] Snapshot prewarm failed for chainId=${chainId}, protocol=${protocol}`,
+        {cacheKey, chainId, protocol, error}
+      );
+      await ctx.metrics.count(
+        buildMetricKey('PoolDiscoverer.SnapshotPrewarm'),
+        1,
+        {tags: [...metricTags, 'status:failure', 'reason:refresh_error']}
+      );
+    }
+  }
+
   // To be implemented by the sub-classes.
   protected abstract _getPools(
     chainId: ChainId,

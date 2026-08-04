@@ -3,7 +3,12 @@ import {
   parseBooleanEnvOrDefault,
   parsePositiveIntEnvOrDefault,
   parsePositiveIntRecordEnvOrEmpty,
+  parseStringArrayRecordEnvOrEmpty,
 } from './envParsing';
+
+// Only the S3-backed protocols have a BaseCachingPoolDiscoverer instance to
+// prewarm (external-protocol agg-hook pools aren't served from this cache).
+const POOL_SNAPSHOT_PREWARM_ALLOWED_PROTOCOLS = new Set(['v2', 'v3', 'v4']);
 
 export const UniRouteServiceName = 'uniroute';
 
@@ -64,6 +69,23 @@ const getPoolDiscoverySnapshotMaxStaleSeconds = () =>
     'POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS',
     DEFAULT_POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS
   );
+
+// Chain ids (JSON keys) mapped to the protocols to proactively prewarm/keep
+// warm for that chain (e.g. '{"__PLACEHOLDER__":["v3","v4"]}'). Empty by default — dark
+// until a stack config sets it. Unrecognized protocol strings are dropped,
+// not fatal.
+const getPoolSnapshotPrewarmChainsAndProtocols = (): Record<number, string[]> =>
+  parseStringArrayRecordEnvOrEmpty(
+    'POOL_SNAPSHOT_PREWARM_CHAINS',
+    POOL_SNAPSHOT_PREWARM_ALLOWED_PROTOCOLS
+  );
+
+// Interval between proactive prewarm passes. Should stay comfortably under
+// SnapshotMaxStaleSeconds so a target's memo is (almost) always within the
+// SWR-servable window. __PLACEHOLDER__ (default) means the config is unused unless a
+// stack also sets POOL_SNAPSHOT_PREWARM_CHAINS.
+const getPoolSnapshotPrewarmIntervalMs = () =>
+  parsePositiveIntEnvOrDefault('POOL_SNAPSHOT_PREWARM_INTERVAL_MS', 900_000);
 
 // __PLACEHOLDER__ (the default for unset/invalid/non-positive values) disables negative
 // token caching.
@@ -168,6 +190,14 @@ export interface IUniRouteServiceConfig {
     // snapshot — which can already be near the entry's TTL, so worst-case
     // data age is pool-cache TTL + this value.
     SnapshotMaxStaleSeconds: number;
+    // Chain ids mapped to the protocols to proactively prewarm/keep warm in
+    // this process, so a live request is never the first one paying a cold
+    // S3 fetch+parse. Empty = feature inactive (status quo). Kill switch:
+    // clear POOL_SNAPSHOT_PREWARM_CHAINS and redeploy.
+    PrewarmChainsAndProtocols: Record<number, string[]>;
+    // Interval between proactive prewarm passes; should stay comfortably
+    // under SnapshotMaxStaleSeconds.
+    PrewarmIntervalMs: number;
   };
   CachedRoutes: {
     // Whether to enable cached routes.
@@ -331,6 +361,8 @@ export const getUniRouteSyncConfig = (
       SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
       SnapshotSkipReparseEnabled: getPoolDiscoverySnapshotSkipReparseEnabled(),
       SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
+      PrewarmChainsAndProtocols: getPoolSnapshotPrewarmChainsAndProtocols(),
+      PrewarmIntervalMs: getPoolSnapshotPrewarmIntervalMs(),
     },
     CachedRoutes: {
       Enabled: true,
@@ -442,6 +474,8 @@ export const getQuickRouteSyncConfig = (
       SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
       SnapshotSkipReparseEnabled: getPoolDiscoverySnapshotSkipReparseEnabled(),
       SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
+      PrewarmChainsAndProtocols: getPoolSnapshotPrewarmChainsAndProtocols(),
+      PrewarmIntervalMs: getPoolSnapshotPrewarmIntervalMs(),
     },
     CachedRoutes: {
       Enabled: true,

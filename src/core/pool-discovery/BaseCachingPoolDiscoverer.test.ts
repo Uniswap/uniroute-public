@@ -1267,4 +1267,110 @@ describe('BaseCachingPoolDiscoverer', () => {
       }
     });
   });
+
+  describe('prewarm', () => {
+    it('populates the cache for the given (chainId, protocol) via the same load path getPools() would take', async () => {
+      const chainId = ChainId.BASE;
+      const protocol = Protocol.V4;
+      const pools = [
+        {
+          id: 'prewarmed-pool',
+          feeTier: '3000',
+          tickSpacing: '1',
+          hooks: '0x1111111111111111111111111111111111111111',
+          liquidity: '1000',
+          token0: {id: '0x1111111111111111111111111111111111111111'},
+          token1: {id: '0x2222222222222222222222222222222222222222'},
+          tvlETH: 1000,
+          tvlUSD: 1000,
+        },
+      ];
+      const discoverer = new ClosurePoolDiscoverer(
+        serviceConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => pools
+      );
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(getPoolsCache.set).toHaveBeenCalledWith(
+        discoverer.getPoolsCacheKey(chainId, protocol),
+        JSON.stringify(pools),
+        expect.any(Object)
+      );
+    });
+
+    it('is fail-open: logs a warning and never throws when the underlying load fails', async () => {
+      const chainId = ChainId.BASE;
+      const protocol = Protocol.V3;
+      const discoverer = new ClosurePoolDiscoverer(
+        serviceConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => {
+          throw new Error('S3 unavailable');
+        }
+      );
+
+      await expect(
+        discoverer.prewarm(chainId, protocol, ctx)
+      ).resolves.toBeUndefined();
+      expect(ctx.logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Snapshot prewarm failed'),
+        expect.objectContaining({chainId, protocol})
+      );
+      expect(ctx.metrics.count).toHaveBeenCalledWith(
+        expect.stringContaining('SnapshotPrewarm'),
+        1,
+        expect.objectContaining({
+          tags: expect.arrayContaining(['status:failure']),
+        })
+      );
+    });
+
+    it('emits a success status metric on the same (chainId, protocol) tags', async () => {
+      const chainId = ChainId.MAINNET;
+      const protocol = Protocol.V2;
+      const discoverer = new ClosurePoolDiscoverer(
+        serviceConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => []
+      );
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(ctx.metrics.count).toHaveBeenCalledWith(
+        expect.stringContaining('SnapshotPrewarm'),
+        1,
+        expect.objectContaining({
+          tags: expect.arrayContaining([
+            'status:success',
+            `chain:${ChainId[chainId]}`,
+            `protocol:${protocol}`,
+          ]),
+        })
+      );
+    });
+
+    it('rejects an unsupported protocol before attempting any fetch', async () => {
+      const load = vi.fn(async () => []);
+      const discoverer = new ClosurePoolDiscoverer(
+        serviceConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        load
+      );
+
+      await expect(
+        discoverer.prewarm(
+          ChainId.BASE,
+          'unsupported-protocol' as Protocol,
+          ctx
+        )
+      ).rejects.toThrow('Unsupported protocol');
+      expect(load).not.toHaveBeenCalled();
+    });
+  });
 });
