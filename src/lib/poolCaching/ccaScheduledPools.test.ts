@@ -1,7 +1,10 @@
 import {describe, it, expect, beforeEach, vi} from 'vitest';
 import {GetObjectCommand, PutObjectCommand, S3Client} from '@aws-sdk/client-s3';
+import {Hook} from '@uniswap/v4-sdk';
+import {ethers} from 'ethers';
 import {
   buildCcaScheduledPools,
+  clearHookPermissionMemoForTesting,
   computeCcaPoolId,
   isRoutingInertHook,
   CcaScheduledPoolEntry,
@@ -102,6 +105,66 @@ describe('isRoutingInertHook', () => {
     // Hookless: nothing can call updateDynamicLPFee (and the combo is
     // uninitializable on-chain anyway).
     expect(isRoutingInertHook(ZERO, DYNAMIC_FEE_FLAG)).toBe(true);
+  });
+
+  describe('permission-bit memoization', () => {
+    // Inert (0x2000 = beforeInitialize-only) address containing hex letters,
+    // so EIP-55 case semantics are actually exercised.
+    const LOWER = '0xabcdef0123456789abcdef0123456789abcd2000';
+
+    // Flips the case of the first hex letter after '0x' — any single-letter
+    // case change from a string breaks EIP-55 (the valid checksum casing is
+    // unique per address), giving a deterministic bad-checksum variant.
+    const flipFirstLetterCase = (addr: string): string => {
+      const i = addr
+        .split('')
+        .findIndex((c, idx) => idx >= 2 && /[a-f]/i.test(c));
+      const c = addr[i];
+      const flipped = c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase();
+      return addr.slice(0, i) + flipped + addr.slice(i + 1);
+    };
+
+    beforeEach(() => {
+      clearHookPermissionMemoForTesting();
+    });
+
+    it('computes once per exact hook string across repeated calls', () => {
+      const permissionsSpy = vi.spyOn(Hook, 'permissions');
+
+      expect(isRoutingInertHook(LOWER)).toBe(true);
+      expect(isRoutingInertHook(LOWER)).toBe(true);
+      expect(isRoutingInertHook(LOWER, 10000)).toBe(true);
+
+      expect(permissionsSpy).toHaveBeenCalledTimes(1);
+      permissionsSpy.mockRestore();
+    });
+
+    it('keeps case variants as separate entries (EIP-55 casing changes the outcome)', () => {
+      const permissionsSpy = vi.spyOn(Hook, 'permissions');
+      const checksummed = ethers.utils.getAddress(LOWER);
+
+      expect(isRoutingInertHook(LOWER)).toBe(true);
+      expect(isRoutingInertHook(checksummed)).toBe(true);
+      // Repeats of both hit their own memo entries.
+      expect(isRoutingInertHook(LOWER)).toBe(true);
+      expect(isRoutingInertHook(checksummed)).toBe(true);
+
+      expect(permissionsSpy).toHaveBeenCalledTimes(2);
+      permissionsSpy.mockRestore();
+    });
+
+    it('a bad-checksum variant fails closed without poisoning the valid forms', () => {
+      const checksummed = ethers.utils.getAddress(LOWER);
+      const badChecksum = flipFirstLetterCase(checksummed);
+
+      // Malformed variant seen FIRST — the poisoning order.
+      expect(isRoutingInertHook(badChecksum)).toBe(false);
+      // Valid forms are unaffected.
+      expect(isRoutingInertHook(LOWER)).toBe(true);
+      expect(isRoutingInertHook(checksummed)).toBe(true);
+      // And the malformed variant stays fail-closed on repeat (uncached).
+      expect(isRoutingInertHook(badChecksum)).toBe(false);
+    });
   });
 });
 

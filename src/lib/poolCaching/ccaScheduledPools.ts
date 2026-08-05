@@ -202,6 +202,53 @@ const DEFAULT_BLOCK_TIME_SECONDS = 2;
 
 const ADDRESS_ZERO_LOWER = '0x0000000000000000000000000000000000000000';
 
+// Exact-function memo for the permission-bit decode: bits are fixed at
+// deploy time, Hook.permissions checksum-validates (keccak256) before
+// decoding, and cardinality is bounded by distinct hook strings seen. Keyed
+// on the RAW string — getAddress accepts all-lowercase unconditionally but
+// enforces EIP-55 on mixed-case, so case variants of one address can
+// legitimately differ in outcome and must not share a cache entry. Throwing
+// inputs are deliberately NOT cached: caching the fail-closed result would
+// let one malformed variant pin `false` for the process lifetime.
+const hookBehavioralPermissionMemo = new Map<string, boolean>();
+
+// Test-only: the memo is module-level state; tests that assert compute
+// counts need a clean slate.
+export function clearHookPermissionMemoForTesting(): void {
+  hookBehavioralPermissionMemo.clear();
+}
+
+function hasNoBehavioralHookPermissions(hook: string): boolean {
+  const cached = hookBehavioralPermissionMemo.get(hook);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let result: boolean;
+  try {
+    const p = Hook.permissions(hook);
+    result = !(
+      p.beforeSwap ||
+      p.afterSwap ||
+      p.beforeSwapReturnsDelta ||
+      p.afterSwapReturnsDelta ||
+      p.beforeAddLiquidity ||
+      p.afterAddLiquidity ||
+      p.afterAddLiquidityReturnsDelta ||
+      p.beforeRemoveLiquidity ||
+      p.afterRemoveLiquidity ||
+      p.afterRemoveLiquidityReturnsDelta ||
+      p.beforeDonate ||
+      p.afterDonate
+    );
+  } catch {
+    // Hook.permissions throws on a malformed address — fail closed,
+    // uncached (see memo comment).
+    return false;
+  }
+  hookBehavioralPermissionMemo.set(hook, result);
+  return result;
+}
+
 /**
  * A hook whose v4 permission bits (low 14 bits of the address — behavior a
  * hook cannot have without declaring, enforced by PoolManager at initialize)
@@ -227,6 +274,11 @@ const ADDRESS_ZERO_LOWER = '0x0000000000000000000000000000000000000000';
  * the launcher rejects dynamic fee with a zero registered hook, and the
  * fallback only fires for zero-hook registrations — but third-party
  * registered hooks are not.)
+ *
+ * The bit decode is memoized per hook string: it runs on the serving
+ * process (S3SubgraphPoolDiscovererV4's merge filter, once per
+ * launched-token-matching entry after the pair and dedup checks) and in the
+ * cron writer, and the result is a pure function of the string.
  */
 export function isRoutingInertHook(
   hook: string,
@@ -238,26 +290,7 @@ export function isRoutingInertHook(
   if (fee !== undefined && Number(fee) === DYNAMIC_FEE_FLAG) {
     return false;
   }
-  try {
-    const p = Hook.permissions(hook);
-    return !(
-      p.beforeSwap ||
-      p.afterSwap ||
-      p.beforeSwapReturnsDelta ||
-      p.afterSwapReturnsDelta ||
-      p.beforeAddLiquidity ||
-      p.afterAddLiquidity ||
-      p.afterAddLiquidityReturnsDelta ||
-      p.beforeRemoveLiquidity ||
-      p.afterRemoveLiquidity ||
-      p.afterRemoveLiquidityReturnsDelta ||
-      p.beforeDonate ||
-      p.afterDonate
-    );
-  } catch {
-    // Hook.permissions throws on a malformed address — fail closed.
-    return false;
-  }
+  return hasNoBehavioralHookPermissions(hook);
 }
 
 /**
