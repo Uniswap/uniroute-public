@@ -77,9 +77,13 @@ class StaticErc4626RegistrySnapshot implements Erc4626RegistrySnapshot {
     this.byWxStock = new Map(accepted.map(asset => [asset.wxStock, asset]));
     this.byHook = new Map(accepted.map(asset => [asset.hookAddress, asset]));
 
+    // Assets are lowercased above; normalize the incoming map too so callers
+    // (e.g. dynamic registry sources) can't key it with checksummed addresses
+    // and silently lose overrides — a lost override fail-closes the pool.
+    const availableOverrides = normalizeOverrides(hookCodeOverrides);
     const overrides: Record<string, string> = {};
     for (const asset of accepted) {
-      const bytecode = hookCodeOverrides[asset.hookAddress];
+      const bytecode = availableOverrides[asset.hookAddress];
       if (bytecode !== undefined) overrides[asset.hookAddress] = bytecode;
     }
     this.hookCodeOverrides = Object.freeze(overrides);
