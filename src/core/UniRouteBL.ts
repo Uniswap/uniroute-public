@@ -60,7 +60,6 @@ import {Erc20Token} from '../models/token/Erc20Token';
 import {Protocol} from '../models/pool/Protocol';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V2Pool} from '../models/pool/V2Pool';
-import {V4Pool} from '../models/pool/V4Pool';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
 import {IRoutesRepository} from '../stores/route/IRoutesRepository';
 import {IUniRoutedBL, QuoteOptions} from './IUniRouteBL';
@@ -137,8 +136,15 @@ import {
   summarizeRoutesForLogging,
 } from '../lib/observability';
 import {capRoutesByAggHookClass} from '../lib/routeCap';
-import {EMPTY_NAMESPACE_CONTEXT} from '../models/hooks/namespaces';
+import {
+  CacheNamespaceName,
+  EMPTY_NAMESPACE_CONTEXT,
+  isNamespaceActive,
+} from '../models/hooks/namespaces';
 import {RouteNamespaceContext} from '../models/hooks/namespaces/CacheNamespace';
+import {Erc4626WrapperRegistrySource} from './registry/Erc4626WrapperRegistry';
+import {routeViolatesErc4626Invariants} from '../models/hooks/Erc4626WrapperHooks';
+import {V4Pool} from '../models/pool/V4Pool';
 
 /**
  * Inspects the tokensInfo map for the direct-swap pair (tokenIn, tokenOut)
@@ -238,7 +244,8 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly quoteRequestValidator: IQuoteRequestValidator,
     private readonly tokenProvider: ITokenProvider,
     private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
-    private readonly stateOverrideResolver: StateOverrideResolver
+    private readonly stateOverrideResolver: StateOverrideResolver,
+    private readonly erc4626WrapperRegistry?: Erc4626WrapperRegistrySource
   ) {
     this.blockNumberCache = new BlockNumberCache(
       serviceConfig.BlockNumberCache.TtlMs,
@@ -367,6 +374,7 @@ export class UniRouteBL implements IUniRoutedBL {
       protocols,
       experiment,
       nsCtx,
+      erc4626Snapshot,
       namespaceLogFields,
       debugLogs,
       includeRouteCandidates,
@@ -445,6 +453,28 @@ export class UniRouteBL implements IUniRoutedBL {
           error: {
             code: 400,
             message: 'FOT tokens are not supported for EXACT_OUT trade type',
+          },
+          hitsCachedRoutes: false,
+        });
+      }
+
+      if (
+        tradeType === TradeType.ExactOut &&
+        erc4626Snapshot &&
+        (erc4626Snapshot.getByXStock(
+          tokenInCurrencyInfo.wrappedAddress.toString()
+        ) ||
+          erc4626Snapshot.getByXStock(
+            tokenOutCurrencyInfo.wrappedAddress.toString()
+          ))
+      ) {
+        metricTags.push(`status:${QuoteStatus.NoRoute}`);
+        metricTags.push('reason:xstock_exact_out');
+        await emitCallMetrics(metricTags);
+        return new QuoteResponse({
+          error: {
+            code: 400,
+            message: 'xStock tokens are not supported for EXACT_OUT trade type',
           },
           hitsCachedRoutes: false,
         });
@@ -548,7 +578,9 @@ export class UniRouteBL implements IUniRoutedBL {
           (allUniswapAndSomeExternalProtocolsAndMixed(protocols) &&
             this.serviceConfig.CachedRoutes.AggHooksReadEnabled)) &&
         hooksOptions === HooksOptions.HOOKS_INCLUSIVE &&
-        this.serviceConfig.CachedRoutes.Enabled;
+        this.serviceConfig.CachedRoutes.Enabled &&
+        (!isNamespaceActive(nsCtx, CacheNamespaceName.Erc4626WrapperHooks) ||
+          this.serviceConfig.CachedRoutes.Erc4626WrapperHooksReadEnabled);
 
       let routes: RouteBasic<Pool>[] = [];
       let usedCachedRoutes = false;
@@ -610,6 +642,20 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags
       );
 
+      if (erc4626Snapshot?.assets.length) {
+        const before = routes.length;
+        routes = routes.filter(
+          route => !routeViolatesErc4626Invariants(route, erc4626Snapshot)
+        );
+        if (before !== routes.length) {
+          await ctx.metrics.count(
+            buildMetricKey('Erc4626WrapperHooks.routeInvariantDropped'),
+            before - routes.length,
+            {tags: ['status:success']}
+          );
+        }
+      }
+
       if (tradeType === TradeType.ExactOut && routes.length > 0) {
         routes = await this.filterFotIntermediaryRoutes(
           ctx,
@@ -618,6 +664,14 @@ export class UniRouteBL implements IUniRoutedBL {
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
           tokensInfo
+        );
+        routes = routes.filter(
+          route =>
+            !route.path.some(
+              pool =>
+                pool instanceof V4Pool &&
+                erc4626Snapshot?.isWrapperHook(pool.hooks)
+            )
         );
       }
 
@@ -862,6 +916,9 @@ export class UniRouteBL implements IUniRoutedBL {
     const experiment = options?.stableStableHookEnabled
       ? Experiment.GuideStar_Stable_Stable
       : undefined;
+    const erc4626Snapshot = this.erc4626WrapperRegistry
+      ? await this.erc4626WrapperRegistry.getSnapshot(chain.chainId)
+      : undefined;
     const nsCtx = resolveNamespaces({
       protocols,
       hooksOptions,
@@ -869,6 +926,7 @@ export class UniRouteBL implements IUniRoutedBL {
       tokenInAddress: request.tokenInAddress,
       tokenOutAddress: request.tokenOutAddress,
       chainId: chain.chainId,
+      erc4626Snapshot,
     });
     const namespaceLogFields = namespaceFieldsForLogging(
       nsCtx.allowedNamespaces
@@ -883,6 +941,7 @@ export class UniRouteBL implements IUniRoutedBL {
       protocols,
       experiment,
       nsCtx,
+      erc4626Snapshot,
       namespaceLogFields,
       debugLogs: request.debugLogs,
       includeRouteCandidates: request.includeRouteCandidates === true,
@@ -1989,6 +2048,8 @@ export class UniRouteBL implements IUniRoutedBL {
           this.serviceConfig.CachedRoutes.AggHooksWriteEnabled)
       ) ||
       bestQuote?.simulationResult?.status === SimulationStatus.FAILED ||
+      (isNamespaceActive(nsCtx, CacheNamespaceName.Erc4626WrapperHooks) &&
+        !this.serviceConfig.CachedRoutes.Erc4626WrapperHooksWriteEnabled) ||
       !this.serviceConfig.CachedRoutes.Enabled
     ) {
       return;

@@ -4,12 +4,15 @@ import {Experiment} from '../../models/hooks/Experiment';
 import {ChainId} from '../../lib/config';
 import {allUniswapAndSomeExternalProtocolsAndMixed} from '../../lib/helpers';
 import {shouldUsePermissionedHookNamespace} from '../../models/hooks/PermissionedHooks';
+import {shouldUseErc4626Namespace} from '../../models/hooks/Erc4626WrapperHooks';
+import {Erc4626RegistrySnapshot} from '../registry/Erc4626WrapperRegistry';
 import {
   AggHooksNamespace,
   CacheNamespace,
   CacheNamespaceName,
   EMPTY_NAMESPACE_CONTEXT,
   ExperimentalHooksNamespace,
+  Erc4626WrapperHooksNamespace,
   PermissionedHooksNamespace,
   RouteNamespaceContext,
   createNamespaceContext,
@@ -32,6 +35,7 @@ export interface NamespaceResolutionInput {
    * specific experiment (`ExperimentalHooks#<experiment>#`).
    */
   experiment?: Experiment;
+  erc4626Snapshot?: Erc4626RegistrySnapshot;
 }
 
 /**
@@ -50,6 +54,8 @@ export interface NamespaceCacheConfig {
   /** Whether permissioned-hooks cache reads/writes are enabled. */
   permissionedHooksReadEnabled: boolean;
   permissionedHooksWriteEnabled: boolean;
+  erc4626WrapperHooksReadEnabled?: boolean;
+  erc4626WrapperHooksWriteEnabled?: boolean;
   /** Whether experimental-hooks cache reads/writes are enabled. */
   experimentalHooksReadEnabled: boolean;
   experimentalHooksWriteEnabled: boolean;
@@ -92,6 +98,7 @@ export function resolveNamespaces(
     tokenOutAddress,
     chainId,
     experiment,
+    erc4626Snapshot,
   } = input;
 
   // NO_HOOKS forces the base case: no hook pools of any class, so no
@@ -119,12 +126,18 @@ export function resolveNamespaces(
   ) {
     namespaces.push(new PermissionedHooksNamespace());
   }
+  if (
+    erc4626Snapshot &&
+    shouldUseErc4626Namespace(tokenInAddress, tokenOutAddress, erc4626Snapshot)
+  ) {
+    namespaces.push(new Erc4626WrapperHooksNamespace());
+  }
 
   if (experiment !== undefined) {
     namespaces.push(new ExperimentalHooksNamespace(experiment));
   }
 
-  return createNamespaceContext(namespaces);
+  return createNamespaceContext(namespaces, erc4626Snapshot);
 }
 
 /**
@@ -148,6 +161,9 @@ export function isCacheReadAllowed(
         break;
       case CacheNamespaceName.PermissionedHooks:
         if (!config.permissionedHooksReadEnabled) return false;
+        break;
+      case CacheNamespaceName.Erc4626WrapperHooks:
+        if (!config.erc4626WrapperHooksReadEnabled) return false;
         break;
       case CacheNamespaceName.ExperimentalHooks:
         if (!config.experimentalHooksReadEnabled) return false;
@@ -174,6 +190,9 @@ export function isCacheWriteAllowed(
         break;
       case CacheNamespaceName.PermissionedHooks:
         if (!config.permissionedHooksWriteEnabled) return false;
+        break;
+      case CacheNamespaceName.Erc4626WrapperHooks:
+        if (!config.erc4626WrapperHooksWriteEnabled) return false;
         break;
       case CacheNamespaceName.ExperimentalHooks:
         if (!config.experimentalHooksWriteEnabled) return false;

@@ -21,6 +21,11 @@ import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {ITopPoolsSelector} from '../interface';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+import {
+  getErc4626WrapperDiscoveryPairs,
+  shouldUseErc4626Namespace,
+  synthesizeErc4626WrapperPools,
+} from '../../../models/hooks/Erc4626WrapperHooks';
 
 // Async inflate is unconditional (not behind the snapshot SWR flag): it keeps
 // the decompressed output identical to inflateSync while moving the work off
@@ -402,17 +407,39 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
     nsCtx: RouteNamespaceContext,
     ctx: Context
   ): Promise<V4PoolInfo[]> {
-    const pools = await super.getPoolsForTokens(
-      chainId,
-      protocol,
-      tokenIn,
-      tokenOut,
-      topPoolSelector,
-      hooksOptions,
-      skipPoolsForTokensCache,
-      nsCtx,
-      ctx
+    const snapshot = nsCtx.erc4626Snapshot;
+    const discoveryPairs =
+      snapshot &&
+      !nsCtx.erc4626DiscoveryPairsExpanded &&
+      hooksOptions !== HooksOptions.NO_HOOKS &&
+      topPoolSelector.aggHooksOnly !== true &&
+      shouldUseErc4626Namespace(
+        tokenIn.toString(),
+        tokenOut.toString(),
+        snapshot
+      )
+        ? getErc4626WrapperDiscoveryPairs(tokenIn, tokenOut, snapshot)
+        : [[tokenIn, tokenOut] as [Address, Address]];
+    const selectedPools = await Promise.all(
+      discoveryPairs.map(([pairTokenIn, pairTokenOut]) =>
+        super.getPoolsForTokens(
+          chainId,
+          protocol,
+          pairTokenIn,
+          pairTokenOut,
+          topPoolSelector,
+          hooksOptions,
+          skipPoolsForTokensCache,
+          nsCtx,
+          ctx
+        )
+      )
     );
+    const poolsById = new Map<string, V4PoolInfo>();
+    for (const pool of selectedPools.flat()) {
+      poolsById.set(pool.id.toLowerCase(), pool);
+    }
+    const pools = Array.from(poolsById.values());
     // The agg-hooks fetch (UniRoutesRepository's external-protocol path)
     // deliberately restricts its result to AGG_HOOKS pools; appending the
     // hookless CCA pool there would leak a plain V4 route into a request
@@ -421,11 +448,29 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
     if (topPoolSelector.aggHooksOnly === true) {
       return pools;
     }
-    return this.mergeCcaScheduledPools(pools, chainId, ctx, {
+    const withCca = await this.mergeCcaScheduledPools(pools, chainId, ctx, {
       tokenIn,
       tokenOut,
       hooksOptions,
     });
+    if (
+      !snapshot ||
+      hooksOptions === HooksOptions.NO_HOOKS ||
+      !shouldUseErc4626Namespace(
+        tokenIn.toString(),
+        tokenOut.toString(),
+        snapshot
+      )
+    ) {
+      return withCca;
+    }
+    const seen = new Set(withCca.map(pool => pool.id.toLowerCase()));
+    return [
+      ...withCca,
+      ...synthesizeErc4626WrapperPools(snapshot, tokenIn, tokenOut).filter(
+        pool => !seen.has(pool.id.toLowerCase())
+      ),
+    ];
   }
 
   /**

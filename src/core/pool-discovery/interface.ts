@@ -75,6 +75,7 @@ export enum PoolsForTokensCacheSkipReason {
    * request for the same pair. See `canIncludePermissionedPool`.
    */
   PermissionedHookInactiveNamespace = 'permissioned_hook_inactive_namespace',
+  Erc4626WrapperPool = 'erc4626_wrapper_pool',
   /** Serialized cache value exceeds `POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES`. */
   ValueTooLarge = 'value_too_large',
   /**

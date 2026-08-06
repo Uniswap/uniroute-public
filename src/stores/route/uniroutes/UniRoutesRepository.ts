@@ -26,6 +26,12 @@ import {
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
 import {maybeDropPermissionedPools} from '../../../models/hooks/PermissionedHooks';
+import {maybeDropErc4626Pools} from '../../../models/hooks/Erc4626WrapperHooks';
+import {
+  getErc4626WrapperDiscoveryPairs,
+  shouldUseErc4626Namespace,
+  synthesizeErc4626WrapperPools,
+} from '../../../models/hooks/Erc4626WrapperHooks';
 import {
   buildTokenPoolIndex,
   getPoolTVL,
@@ -77,23 +83,41 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         ctx.logger.debug(`Failed to emit ${title} latency metric`, {error});
       }
     };
+    const snapshot = nsCtx.erc4626Snapshot;
+    const discoveryPairs =
+      snapshot &&
+      hooksOptions !== HooksOptions.NO_HOOKS &&
+      shouldUseErc4626Namespace(
+        tokenInAddress.toString(),
+        tokenOutAddress.toString(),
+        snapshot
+      )
+        ? getErc4626WrapperDiscoveryPairs(
+            tokenInAddress,
+            tokenOutAddress,
+            snapshot
+          )
+        : [[tokenInAddress, tokenOutAddress] as [Address, Address]];
     const fetchPoolsForTokensWithLatency = (
       protocol: Protocol,
       protocolMetricValue: string,
       topPoolSelector: ITopPoolsSelector<UniPoolInfo>,
-      skipCache: boolean
+      skipCache: boolean,
+      pair: [Address, Address]
     ): Promise<UniPoolInfo[]> => {
       const poolsForTokensStartTime = Date.now();
       return this.poolDiscoverer
         .getPoolsForTokens(
           chain.chainId,
           protocol,
-          tokenInAddress,
-          tokenOutAddress,
+          pair[0],
+          pair[1],
           topPoolSelector,
           hooksOptions,
           skipCache,
-          nsCtx,
+          discoveryPairs.length > 1
+            ? {...nsCtx, erc4626DiscoveryPairsExpanded: true}
+            : nsCtx,
           ctx
         )
         .then(async pools => {
@@ -105,13 +129,35 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           return pools;
         });
     };
+    const fetchPoolsForDiscoveryPairs = (
+      protocol: Protocol,
+      protocolMetricValue: string,
+      topPoolSelector: ITopPoolsSelector<UniPoolInfo>,
+      skipCache: boolean
+    ): Promise<UniPoolInfo[]> =>
+      Promise.all(
+        discoveryPairs.map(pair =>
+          fetchPoolsForTokensWithLatency(
+            protocol,
+            protocolMetricValue,
+            topPoolSelector,
+            skipCache,
+            pair
+          )
+        )
+      ).then(results => {
+        const poolsById = new Map<string, UniPoolInfo>();
+        for (const pool of results.flat())
+          poolsById.set(pool.id.toLowerCase(), pool);
+        return Array.from(poolsById.values());
+      });
 
     if (
       protocols.includes(Protocol.V2) &&
       V2_SUPPORTED.includes(chain.chainId)
     ) {
       poolPromises.push(
-        fetchPoolsForTokensWithLatency(
+        fetchPoolsForDiscoveryPairs(
           Protocol.V2,
           'v2',
           this.topPoolsSelector,
@@ -124,7 +170,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
 
     if (protocols.includes(Protocol.V3)) {
       poolPromises.push(
-        fetchPoolsForTokensWithLatency(
+        fetchPoolsForDiscoveryPairs(
           Protocol.V3,
           'v3',
           this.topPoolsSelector,
@@ -140,7 +186,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       V4_SUPPORTED.includes(chain.chainId)
     ) {
       poolPromises.push(
-        fetchPoolsForTokensWithLatency(
+        fetchPoolsForDiscoveryPairs(
           Protocol.V4,
           'v4',
           this.topPoolsSelector,
@@ -165,7 +211,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       // Using the cache would either pollute the regular V4 cache with AGG_HOOKS-only results,
       // or return wrong (full V4) results for external protocol fetches.
       poolPromises.push(
-        fetchPoolsForTokensWithLatency(
+        fetchPoolsForDiscoveryPairs(
           // we need to fetch V4 pools for external protocols, because
           // 1) S3SubgraphPoolDiscoverer downloads agg hooked pools as V4 pools
           // 2) BaseCachingPoolDiscoverer needs to maintain the cache key cardinality of Protocol.V4 only
@@ -183,7 +229,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     }
 
     const poolsFetchStartTime = Date.now();
-    const [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] =
+    let [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] =
       await Promise.all(poolPromises);
     await safeLogElapsedTime('GetRoutes.PoolsFetch', poolsFetchStartTime, [
       chainMetricTag,
@@ -192,10 +238,72 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     // Deduplicate by pool ID: if both Protocol.V4 and an external protocol are requested,
     // rawPoolsV4 already contains agg hook pools and rawExternalPools is a filtered subset
     // of those same pools, so a naive spread would produce duplicates.
+    if (nsCtx.erc4626Snapshot) {
+      const snapshot = nsCtx.erc4626Snapshot;
+      const [v2Result, v3Result, v4Result, externalResult] = await Promise.all([
+        maybeDropErc4626Pools(
+          poolsV2,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('UniRoutes.Erc4626WrapperHooks.poolDropped')
+        ),
+        maybeDropErc4626Pools(
+          poolsV3,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('UniRoutes.Erc4626WrapperHooks.poolDropped')
+        ),
+        maybeDropErc4626Pools(
+          rawPoolsV4,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('UniRoutes.Erc4626WrapperHooks.poolDropped')
+        ),
+        maybeDropErc4626Pools(
+          rawExternalPools,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('UniRoutes.Erc4626WrapperHooks.poolDropped')
+        ),
+      ]);
+      poolsV2 = v2Result.filteredPools;
+      poolsV3 = v3Result.filteredPools;
+      rawPoolsV4 = v4Result.filteredPools;
+      rawExternalPools = externalResult.filteredPools;
+    }
+
     const poolsV4Map = new Map<string, UniPoolInfo>();
     for (const pool of rawPoolsV4) poolsV4Map.set(pool.id, pool);
     for (const pool of rawExternalPools) poolsV4Map.set(pool.id, pool);
-    const poolsV4 = Array.from(poolsV4Map.values());
+    let poolsV4 = Array.from(poolsV4Map.values());
+    if (
+      snapshot &&
+      protocols.includes(Protocol.V4) &&
+      hooksOptions !== HooksOptions.NO_HOOKS &&
+      shouldUseErc4626Namespace(
+        tokenInAddress.toString(),
+        tokenOutAddress.toString(),
+        snapshot
+      )
+    ) {
+      const seen = new Set(poolsV4.map(pool => pool.id.toLowerCase()));
+      poolsV4 = [
+        ...poolsV4,
+        ...synthesizeErc4626WrapperPools(
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress
+        ).filter(pool => !seen.has(pool.id.toLowerCase())),
+      ];
+    }
 
     const externalAggHookPoolsByProtocol: Record<string, number> = {};
     for (const pool of rawExternalPools) {
@@ -331,14 +439,26 @@ export class UniRoutesRepository extends BaseRoutesRepository {
           t1 === tokenInLower ||
           t1 === tokenOutLower
         ) {
-          poolsV4.push(hp);
           appendedPools.push(hp);
         }
       }
-      if (appendedPools.length > 0) {
+      const hardcodedPools = snapshot
+        ? (
+            await maybeDropErc4626Pools(
+              appendedPools,
+              snapshot,
+              tokenInAddress,
+              tokenOutAddress,
+              ctx,
+              buildMetricKey('UniRoutes.Erc4626WrapperHooks.poolDropped')
+            )
+          ).filteredPools
+        : appendedPools;
+      poolsV4.push(...hardcodedPools);
+      if (hardcodedPools.length > 0) {
         ctx.logger.debug(
-          `Appended ${appendedPools.length} hardcoded V4 pools`,
-          {chainId: chain.chainId, pools: appendedPools}
+          `Appended ${hardcodedPools.length} hardcoded V4 pools`,
+          {chainId: chain.chainId, pools: hardcodedPools}
         );
       }
     }
@@ -507,8 +627,40 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       allPoolsPromises.push(Promise.resolve([]));
     }
 
-    const [allV2Pools, allV3Pools, rawAllV4Pools] =
+    let [allV2Pools, allV3Pools, rawAllV4Pools] =
       await Promise.all(allPoolsPromises);
+    if (nsCtx.erc4626Snapshot) {
+      const snapshot = nsCtx.erc4626Snapshot;
+      const [v2Result, v3Result, v4Result] = await Promise.all([
+        maybeDropErc4626Pools(
+          allV2Pools,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('CrossLiquidity.Erc4626WrapperHooks.poolDropped')
+        ),
+        maybeDropErc4626Pools(
+          allV3Pools,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('CrossLiquidity.Erc4626WrapperHooks.poolDropped')
+        ),
+        maybeDropErc4626Pools(
+          rawAllV4Pools,
+          snapshot,
+          tokenInAddress,
+          tokenOutAddress,
+          ctx,
+          buildMetricKey('CrossLiquidity.Erc4626WrapperHooks.poolDropped')
+        ),
+      ]);
+      allV2Pools = v2Result.filteredPools;
+      allV3Pools = v3Result.filteredPools;
+      rawAllV4Pools = v4Result.filteredPools;
+    }
 
     // Exclude agg hook pools whose protocol was NOT explicitly requested.
     // If the caller includes an external protocol (e.g. a Curve or Fluid hook),

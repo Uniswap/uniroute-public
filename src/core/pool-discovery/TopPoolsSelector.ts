@@ -38,6 +38,7 @@ import {
   RouteNamespaceContext,
 } from '../../models/hooks/namespaces';
 import {maybeDropPermissionedPools} from '../../models/hooks/PermissionedHooks';
+import {maybeDropErc4626Pools} from '../../models/hooks/Erc4626WrapperHooks';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
 import {
@@ -215,7 +216,10 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       chain !== undefined && (chain.permissionedHookAddresses?.length ?? 0) > 0;
 
     const canUseSelectionView =
-      this.snapshotMemoEnabled && arrayMemoStable && !permissionedChain;
+      this.snapshotMemoEnabled &&
+      arrayMemoStable &&
+      !permissionedChain &&
+      (nsCtx.erc4626Snapshot?.assets.length ?? 0) === 0;
 
     let filteredPools: UniPoolInfo[];
     let tokenPoolIndex: TokenPoolIndex;
@@ -292,7 +296,23 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         permissionedFilteredPools = filteredUnsupportedPools;
       }
 
-      filteredPools = permissionedFilteredPools.filter(pool => {
+      const erc4626DropResult = nsCtx.erc4626Snapshot
+        ? await maybeDropErc4626Pools(
+            permissionedFilteredPools,
+            nsCtx.erc4626Snapshot,
+            tokenIn,
+            tokenOut,
+            ctx,
+            buildMetricKey('TopPoolsSelector.Erc4626WrapperHooks.poolDropped')
+          )
+        : {filteredPools: permissionedFilteredPools, shouldCache: true};
+      if (!erc4626DropResult.shouldCache) {
+        markPoolsForTokensUncacheable(
+          cacheDirective,
+          PoolsForTokensCacheSkipReason.Erc4626WrapperPool
+        );
+      }
+      filteredPools = erc4626DropResult.filteredPools.filter(pool => {
         if (
           BasicTopPoolsSelector.isExcludedAggHookPool(
             pool,

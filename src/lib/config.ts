@@ -206,6 +206,9 @@ export interface IUniRouteServiceConfig {
     AggHooksReadEnabled: boolean;
     // Whether to enable writing agg-hook (external protocol) cached routes.
     AggHooksWriteEnabled: boolean;
+    /** Cached route gates for xStock ERC-__PLACEHOLDER__ wrapper routes. */
+    Erc4626WrapperHooksReadEnabled: boolean;
+    Erc4626WrapperHooksWriteEnabled: boolean;
     // The TTL for the route cache entry refresh.
     RouteCacheEntryRefreshSeconds: number;
     // The default TTL for cached routes. Applies to pure-Uniswap routes
@@ -368,6 +371,8 @@ export const getUniRouteSyncConfig = (
       Enabled: true,
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: true,
+      Erc4626WrapperHooksReadEnabled: true,
+      Erc4626WrapperHooksWriteEnabled: true,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
@@ -481,6 +486,8 @@ export const getQuickRouteSyncConfig = (
       Enabled: true,
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: false,
+      Erc4626WrapperHooksReadEnabled: true,
+      Erc4626WrapperHooksWriteEnabled: false,
       RouteCacheEntryRefreshSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       RouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__, // __PLACEHOLDER__ days
       ShortRouteCacheEntryTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__,
