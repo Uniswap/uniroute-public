@@ -16,6 +16,7 @@ import {V4Pool} from '../../../models/pool/V4Pool';
 import {Address} from '../../../models/address/Address';
 import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
 import {Protocol} from '../../../models/pool/Protocol';
+import {ERC4626_WRAPPER_GAS_PER_CHAIN} from '../erc4626WrapperHookGasCalibration';
 
 describe('GasEstimators', () => {
   const mockProvider = new Map<ChainId, JsonRpcProvider>();
@@ -289,6 +290,62 @@ describe('GasEstimators', () => {
         // Quoter base already includes the hook callback; no fake-token
         // TOKEN_OVERHEAD applies, so gasUse is exactly the quoter return.
         expect(gasDetails.gasUse).toBe(quoterGas);
+      });
+
+      it('composes wrapper-hook overhead only on the heuristic path', async () => {
+        const wrapperOverhead = 17_000n;
+        ERC4626_WRAPPER_GAS_PER_CHAIN[ChainId.MAINNET] = {
+          [LITEPSM_USDS_HOOK]: wrapperOverhead,
+        };
+        try {
+          const heuristicEstimator = new V4GasEstimator(
+            mockProvider,
+            {} as IFreshPoolDetailsWrapper
+          );
+          const route = new RouteBasic(Protocol.V4, [v4PoolWithZlcaHook]);
+          const heuristicQuote = new QuoteBasic(
+            route,
+            BigInt(1000),
+            undefined,
+            undefined
+          );
+
+          const heuristicGas = await heuristicEstimator.estimateRouteGas(
+            heuristicQuote,
+            ChainId.MAINNET,
+            1000
+          );
+
+          expect(heuristicGas.gasUse).toBe(
+            97_000n + 500_000n + wrapperOverhead
+          );
+
+          const quoterEstimator = new V4GasEstimator(
+            mockProvider,
+            {} as IFreshPoolDetailsWrapper,
+            false,
+            true
+          );
+          const quoterGas = 275_000n;
+          const quoterQuote = new QuoteBasic(
+            route,
+            BigInt(1000),
+            new V3QuoterResponseDetails(undefined, undefined, quoterGas),
+            undefined
+          );
+
+          expect(
+            (
+              await quoterEstimator.estimateRouteGas(
+                quoterQuote,
+                ChainId.MAINNET,
+                1000
+              )
+            ).gasUse
+          ).toBe(quoterGas);
+        } finally {
+          delete ERC4626_WRAPPER_GAS_PER_CHAIN[ChainId.MAINNET];
+        }
       });
 
       it('leaves no-hook V4 routes unchanged', async () => {

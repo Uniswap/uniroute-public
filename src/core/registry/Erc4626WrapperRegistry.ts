@@ -66,12 +66,12 @@ class StaticErc4626RegistrySnapshot implements Erc4626RegistrySnapshot {
   private readonly byHook: ReadonlyMap<string, Erc4626WrapperAsset>;
 
   constructor(
-    assets: readonly Erc4626WrapperAsset[],
+    acceptedAssets: readonly Erc4626WrapperAsset[],
+    excludedAssetCount: number,
     hookCodeOverrides: Record<string, string>
   ) {
-    const filtered = filterValidErc4626Assets(assets);
-    const accepted = filtered.accepted.map(asset => Object.freeze(asset));
-    this.excludedAssetCount = filtered.excludedCount;
+    const accepted = acceptedAssets.map(asset => Object.freeze(asset));
+    this.excludedAssetCount = excludedAssetCount;
     this.assets = Object.freeze(accepted);
     this.byXStock = new Map(accepted.map(asset => [asset.xStock, asset]));
     this.byWxStock = new Map(accepted.map(asset => [asset.wxStock, asset]));
@@ -116,7 +116,7 @@ function increment(counts: Map<string, number>, key: string): void {
 }
 
 export const EMPTY_ERC4626_SNAPSHOT: Erc4626RegistrySnapshot =
-  new StaticErc4626RegistrySnapshot([], {});
+  new StaticErc4626RegistrySnapshot([], 0, {});
 
 const sharedConfigData: Erc4626WrapperRegistryStaticData = {
   getAssets: getErc4626WrapperAssets,
@@ -163,11 +163,6 @@ export class StaticErc4626WrapperRegistry
   ) {}
 
   async getSnapshot(chainId: number): Promise<Erc4626RegistrySnapshot> {
-    const chainConfig = computeErc4626WrapperChainConfig(
-      chainId,
-      this.config,
-      this.data
-    );
     if (!this.config.enabled || !this.config.chainIds.includes(chainId)) {
       return EMPTY_ERC4626_SNAPSHOT;
     }
@@ -175,9 +170,22 @@ export class StaticErc4626WrapperRegistry
     const cached = this.snapshots.get(chainId);
     if (cached) return cached;
 
+    const filtered = filterValidErc4626Assets(this.data.getAssets(chainId));
+    const availableOverrides = normalizeOverrides(
+      this.data.getHookCodeOverrides(chainId)
+    );
+    const hookCodeOverrides: Record<string, string> = {};
+    for (const asset of filtered.accepted) {
+      const bytecode = availableOverrides[asset.hookAddress];
+      if (bytecode !== undefined) {
+        hookCodeOverrides[asset.hookAddress] = bytecode;
+      }
+    }
+
     const snapshot = new StaticErc4626RegistrySnapshot(
-      this.data.getAssets(chainId),
-      chainConfig.hookCodeOverrides
+      filtered.accepted,
+      filtered.excludedCount,
+      hookCodeOverrides
     );
     this.snapshots.set(chainId, snapshot);
     return snapshot;

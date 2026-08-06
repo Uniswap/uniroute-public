@@ -10,6 +10,7 @@ import {
   aggHookQuoterGasFallback,
 } from '../aggHookGasCalibration';
 import {zlcaHookGasAdjustment} from '../zlcaHookGasCalibration';
+import {erc4626WrapperHookGasAdjustment} from '../erc4626WrapperHookGasCalibration';
 import {getGasToken} from '../../../lib/tokenUtils';
 import {CurrencyAmount} from '@uniswap/sdk-core';
 import {TOKEN_OVERHEAD} from '../gas-costs';
@@ -132,14 +133,16 @@ export class V4GasEstimator extends V3GasEstimator {
       ? aggHookGasCalibrationAdjustment(quote.route.path, chainId)
       : 0n;
 
-    // ZLCA-hook overhead is NOT env-gated: the heuristic knows
-    // nothing about hook execution, and an under-estimate here
-    // becomes a reverting tx gas limit downstream (see
-    // zlcaHookGasCalibration.ts). Only applied on this path — the
-    // quoter base above already includes the hook callback.
+    // Hook overhead is NOT env-gated: the heuristic knows nothing about hook
+    // execution. Only applied on this path — the quoter base above already
+    // includes the hook callback.
     const zlcaAdjustment = zlcaHookGasAdjustment(quote.route.path, chainId);
+    const erc4626Adjustment = erc4626WrapperHookGasAdjustment(
+      quote.route.path,
+      chainId
+    );
 
-    const totalAdjustment = calibration + zlcaAdjustment;
+    const totalAdjustment = calibration + zlcaAdjustment + erc4626Adjustment;
     if (totalAdjustment === 0n) {
       return heuristicGasDetails;
     }

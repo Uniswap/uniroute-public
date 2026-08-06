@@ -63,6 +63,26 @@ describe('StaticErc4626WrapperRegistry', () => {
     });
   });
 
+  it('does not reread static assets for a cached snapshot', async () => {
+    let getAssetsCalls = 0;
+    const countingData: Erc4626WrapperRegistryStaticData = {
+      getAssets: chainId => {
+        getAssetsCalls += 1;
+        return chainId === 1 ? [asset] : [];
+      },
+      getHookCodeOverrides: () => ({[asset.hookAddress]: '0x6000'}),
+    };
+    const registry = new StaticErc4626WrapperRegistry(
+      {enabled: true, chainIds: [1]},
+      countingData
+    );
+
+    await registry.getSnapshot(1);
+    await registry.getSnapshot(1);
+
+    expect(getAssetsCalls).toBe(1);
+  });
+
   it('excludes cross-role identity collisions from the runtime snapshot', async () => {
     const crossRoleData: Erc4626WrapperRegistryStaticData = {
       getAssets: () => [
