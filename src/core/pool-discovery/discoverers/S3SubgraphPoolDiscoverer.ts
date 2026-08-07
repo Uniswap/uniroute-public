@@ -14,7 +14,7 @@ import _ from 'lodash';
 import {getTvlBypassHookAddresses} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {
   isDenylistedCcaHook,
-  isRoutingInertHook,
+  isAutoApprovedCcaHook,
 } from '../../../lib/poolCaching/ccaScheduledPools';
 import {CcaScheduledPoolsRepository} from '../CcaScheduledPoolsRepository';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
@@ -560,7 +560,7 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
           if (
             pairFilter.hooksOptions === HooksOptions.NO_HOOKS
               ? !hookless
-              : !isRoutingInertHook(pool.hooks, pool.feeTier) ||
+              : !isAutoApprovedCcaHook(pool.hooks, pool.feeTier, chainId) ||
                 (!hookless && isDenylistedCcaHook(chainId, pool.hooks))
           ) {
             hookedSkipped++;

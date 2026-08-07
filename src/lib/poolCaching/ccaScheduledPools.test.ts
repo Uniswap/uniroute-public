@@ -6,7 +6,7 @@ import {
   buildCcaScheduledPools,
   clearHookPermissionMemoForTesting,
   computeCcaPoolId,
-  isRoutingInertHook,
+  isAutoApprovedCcaHook,
   CcaScheduledPoolEntry,
   CcaScheduledPoolsWriterConfig,
   CcaScheduledPoolsWriterDeps,
@@ -26,7 +26,9 @@ const STRATEGY = '0xbbbb00000000000000000000000000000000bbbb';
 // are mined to (migrate()'s front-run fallback rewrites key.hooks to this).
 const INERT_STRATEGY = '0xb98766A35cdc28415be0767D4EA41e39fBA3e000';
 const INERT_HOOK = '0x1111111111111111111111111111111111112000';
-// Low bits 0x0080 = beforeSwap: swap-time behavior, never auto-approved.
+// Low bits 0x0080 = beforeSwap: behavioral but settlement-clean —
+// auto-approved when a chainId is given, rejected by the chainless
+// (inert-only) rule.
 const SWAP_HOOK = '0x2222222222222222222222222222222222220080';
 
 const testLogger: Logger = {
@@ -55,56 +57,123 @@ class TestMetric extends IMetric {
   }
 }
 
-describe('isRoutingInertHook', () => {
+describe('isAutoApprovedCcaHook', () => {
   it('approves hookless', () => {
-    expect(isRoutingInertHook(ZERO)).toBe(true);
+    expect(isAutoApprovedCcaHook(ZERO)).toBe(true);
   });
 
   it('approves initialize-only permission bits (LBP strategy-as-hook shape)', () => {
-    expect(isRoutingInertHook(INERT_STRATEGY)).toBe(true);
-    expect(isRoutingInertHook(INERT_HOOK)).toBe(true);
+    expect(isAutoApprovedCcaHook(INERT_STRATEGY)).toBe(true);
+    expect(isAutoApprovedCcaHook(INERT_HOOK)).toBe(true);
     // before+afterInitialize (0x3000) is still creation-phase-only.
     expect(
-      isRoutingInertHook('0x1111111111111111111111111111111111113000')
+      isAutoApprovedCcaHook('0x1111111111111111111111111111111111113000')
     ).toBe(true);
   });
 
   it('rejects swap-time and custom-accounting permission bits', () => {
-    expect(isRoutingInertHook(SWAP_HOOK)).toBe(false);
+    expect(isAutoApprovedCcaHook(SWAP_HOOK)).toBe(false);
     // afterSwap (0x0040).
     expect(
-      isRoutingInertHook('0x2222222222222222222222222222222222220040')
+      isAutoApprovedCcaHook('0x2222222222222222222222222222222222220040')
     ).toBe(false);
     // beforeSwapReturnsDelta (0x0008): custom accounting.
     expect(
-      isRoutingInertHook('0x2222222222222222222222222222222222220008')
+      isAutoApprovedCcaHook('0x2222222222222222222222222222222222220008')
     ).toBe(false);
     // beforeAddLiquidity (0x0800).
     expect(
-      isRoutingInertHook('0x2222222222222222222222222222222222220800')
+      isAutoApprovedCcaHook('0x2222222222222222222222222222222222220800')
     ).toBe(false);
     // Initialize bit alongside a swap bit is still rejected.
     expect(
-      isRoutingInertHook('0x2222222222222222222222222222222222222080')
+      isAutoApprovedCcaHook('0x2222222222222222222222222222222222222080')
     ).toBe(false);
   });
 
   it('fails closed on a malformed address', () => {
-    expect(isRoutingInertHook('not-an-address')).toBe(false);
-    expect(isRoutingInertHook('0x1234')).toBe(false);
+    expect(isAutoApprovedCcaHook('not-an-address')).toBe(false);
+    expect(isAutoApprovedCcaHook('0x1234')).toBe(false);
+  });
+
+  describe('behavioral non-custom-accounting hooks (chainId given)', () => {
+    const ROBINHOOD = 4663;
+    // afterSwapReturnsDelta (0x0004): custom accounting.
+    const DELTA_HOOK = '0x2222222222222222222222222222222222220084';
+
+    it('approves them on any chain by default', () => {
+      expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, ROBINHOOD)).toBe(true);
+      expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, 1)).toBe(true);
+      expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, 8453)).toBe(true);
+      // afterSwap (0x0040) and beforeAddLiquidity (0x0800): behavioral but
+      // settlement-clean — the serving filter's own launch-pair trust test.
+      expect(
+        isAutoApprovedCcaHook(
+          '0x2222222222222222222222222222222222220040',
+          10000,
+          ROBINHOOD
+        )
+      ).toBe(true);
+      expect(
+        isAutoApprovedCcaHook(
+          '0x2222222222222222222222222222222222220800',
+          10000,
+          ROBINHOOD
+        )
+      ).toBe(true);
+    });
+
+    it('still rejects custom-accounting bits', () => {
+      expect(isAutoApprovedCcaHook(DELTA_HOOK, 10000, ROBINHOOD)).toBe(false);
+      // beforeSwapReturnsDelta (0x0008).
+      expect(
+        isAutoApprovedCcaHook(
+          '0x2222222222222222222222222222222222220008',
+          10000,
+          1
+        )
+      ).toBe(false);
+    });
+
+    it('still rejects a dynamic-fee registration', () => {
+      expect(isAutoApprovedCcaHook(SWAP_HOOK, 0x800000, ROBINHOOD)).toBe(false);
+    });
+
+    it('denylist wins over the default trust', () => {
+      const prior = HOOKS_ADDRESSES_DENYLIST[ROBINHOOD];
+      HOOKS_ADDRESSES_DENYLIST[ROBINHOOD] = [
+        ...(prior ?? []),
+        SWAP_HOOK.toLowerCase(),
+      ];
+      try {
+        expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, ROBINHOOD)).toBe(false);
+      } finally {
+        if (prior === undefined) delete HOOKS_ADDRESSES_DENYLIST[ROBINHOOD];
+        else HOOKS_ADDRESSES_DENYLIST[ROBINHOOD] = prior;
+      }
+    });
+
+    it('fails closed on malformed addresses', () => {
+      expect(isAutoApprovedCcaHook('not-an-address', 10000, ROBINHOOD)).toBe(
+        false
+      );
+      // Short hex that would still "decode" permission bits — the checksum
+      // validation must reject it before any bit analysis.
+      expect(isAutoApprovedCcaHook('0x1230', 10000, ROBINHOOD)).toBe(false);
+    });
   });
 
   it('rejects a non-zero hook on a dynamic-fee pool (updateDynamicLPFee needs no permission bit)', () => {
     const DYNAMIC_FEE_FLAG = 0x800000;
-    expect(isRoutingInertHook(INERT_HOOK, DYNAMIC_FEE_FLAG)).toBe(false);
-    expect(isRoutingInertHook(INERT_STRATEGY, String(DYNAMIC_FEE_FLAG))).toBe(
-      false
-    );
+    expect(isAutoApprovedCcaHook(INERT_HOOK, DYNAMIC_FEE_FLAG)).toBe(false);
+    expect(
+      isAutoApprovedCcaHook(INERT_STRATEGY, String(DYNAMIC_FEE_FLAG))
+    ).toBe(false);
     // Static fee: unaffected.
-    expect(isRoutingInertHook(INERT_HOOK, 10000)).toBe(true);
+    expect(isAutoApprovedCcaHook(INERT_HOOK, 10000)).toBe(true);
     // Hookless: nothing can call updateDynamicLPFee (and the combo is
     // uninitializable on-chain anyway).
-    expect(isRoutingInertHook(ZERO, DYNAMIC_FEE_FLAG)).toBe(true);
+    expect(isAutoApprovedCcaHook(ZERO, DYNAMIC_FEE_FLAG)).toBe(true);
   });
 
   describe('permission-bit memoization', () => {
@@ -131,9 +200,9 @@ describe('isRoutingInertHook', () => {
     it('computes once per exact hook string across repeated calls', () => {
       const permissionsSpy = vi.spyOn(Hook, 'permissions');
 
-      expect(isRoutingInertHook(LOWER)).toBe(true);
-      expect(isRoutingInertHook(LOWER)).toBe(true);
-      expect(isRoutingInertHook(LOWER, 10000)).toBe(true);
+      expect(isAutoApprovedCcaHook(LOWER)).toBe(true);
+      expect(isAutoApprovedCcaHook(LOWER)).toBe(true);
+      expect(isAutoApprovedCcaHook(LOWER, 10000)).toBe(true);
 
       expect(permissionsSpy).toHaveBeenCalledTimes(1);
       permissionsSpy.mockRestore();
@@ -143,11 +212,11 @@ describe('isRoutingInertHook', () => {
       const permissionsSpy = vi.spyOn(Hook, 'permissions');
       const checksummed = ethers.utils.getAddress(LOWER);
 
-      expect(isRoutingInertHook(LOWER)).toBe(true);
-      expect(isRoutingInertHook(checksummed)).toBe(true);
+      expect(isAutoApprovedCcaHook(LOWER)).toBe(true);
+      expect(isAutoApprovedCcaHook(checksummed)).toBe(true);
       // Repeats of both hit their own memo entries.
-      expect(isRoutingInertHook(LOWER)).toBe(true);
-      expect(isRoutingInertHook(checksummed)).toBe(true);
+      expect(isAutoApprovedCcaHook(LOWER)).toBe(true);
+      expect(isAutoApprovedCcaHook(checksummed)).toBe(true);
 
       expect(permissionsSpy).toHaveBeenCalledTimes(2);
       permissionsSpy.mockRestore();
@@ -158,12 +227,12 @@ describe('isRoutingInertHook', () => {
       const badChecksum = flipFirstLetterCase(checksummed);
 
       // Malformed variant seen FIRST — the poisoning order.
-      expect(isRoutingInertHook(badChecksum)).toBe(false);
+      expect(isAutoApprovedCcaHook(badChecksum)).toBe(false);
       // Valid forms are unaffected.
-      expect(isRoutingInertHook(LOWER)).toBe(true);
-      expect(isRoutingInertHook(checksummed)).toBe(true);
+      expect(isAutoApprovedCcaHook(LOWER)).toBe(true);
+      expect(isAutoApprovedCcaHook(checksummed)).toBe(true);
       // And the malformed variant stays fail-closed on repeat (uncached).
-      expect(isRoutingInertHook(badChecksum)).toBe(false);
+      expect(isAutoApprovedCcaHook(badChecksum)).toBe(false);
     });
   });
 });
@@ -875,6 +944,44 @@ describe('buildCcaScheduledPools', () => {
     await buildCcaScheduledPools(testLogger, metric, config, deps);
 
     expect(writtenEntries(1)).toHaveLength(0);
+    expect(
+      metric.metrics.filter(
+        m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'
+      )
+    ).toHaveLength(1);
+  });
+
+  it('publishes a Robinhood launch with a behavioral non-custom-accounting hook (widened per-chain rule)', async () => {
+    config = {...config, chainIds: [4663]};
+    pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
+    initializerInfo = {...initializerInfo, hook: SWAP_HOOK};
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const entries = writtenEntries(4663);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].hooks).toBe(SWAP_HOOK.toLowerCase());
+    expect(entries[0].id).toBe(
+      computeCcaPoolId(ZERO, UNI, 10000, 200, SWAP_HOOK)
+    );
+    expect(
+      metric.metrics.filter(
+        m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'
+      )
+    ).toHaveLength(0);
+  });
+
+  it('still skips a custom-accounting hook on Robinhood', async () => {
+    config = {...config, chainIds: [4663]};
+    pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
+    initializerInfo = {
+      ...initializerInfo,
+      hook: '0x2222222222222222222222222222222222220008',
+    };
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    expect(writtenEntries(4663)).toHaveLength(0);
     expect(
       metric.metrics.filter(
         m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'

@@ -21,6 +21,7 @@ import {Address} from '../../models/address/Address';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
+import {hasCustomAccountingPermissions} from './util/v4HooksPoolsFiltering';
 import {ChainId} from '../config';
 
 export const DEFAULT_CCA_SCHEDULED_POOLS_BASE_KEY = 'ccaScheduledPools.json';
@@ -216,6 +217,35 @@ const hookBehavioralPermissionMemo = new Map<string, boolean>();
 // counts need a clean slate.
 export function clearHookPermissionMemoForTesting(): void {
   hookBehavioralPermissionMemo.clear();
+  hookCustomAccountingMemo.clear();
+}
+
+// Escape hatch: chains where hooked-launch auto-approval stays restricted to
+// routing-inert bits, overriding the default non-custom-accounting rule.
+// Empty = the default applies everywhere.
+const CCA_INERT_ONLY_HOOK_CHAINS: ReadonlySet<number> = new Set();
+
+// Same memo rationale as hookBehavioralPermissionMemo (bits fixed at deploy
+// time; keyed on the raw string; throwing inputs uncached → fail closed).
+const hookCustomAccountingMemo = new Map<string, boolean>();
+
+function lacksCustomAccountingPermissions(hook: string): boolean {
+  const cached = hookCustomAccountingMemo.get(hook);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let result: boolean;
+  try {
+    // Hook.permissions checksum-validates the address (Hook.hasPermission
+    // alone would happily decode bits out of short/garbage hex) — run it
+    // first so malformed inputs fail closed exactly like the inert path.
+    Hook.permissions(hook);
+    result = !hasCustomAccountingPermissions(hook);
+  } catch {
+    return false;
+  }
+  hookCustomAccountingMemo.set(hook, result);
+  return result;
 }
 
 function hasNoBehavioralHookPermissions(hook: string): boolean {
@@ -250,20 +280,21 @@ function hasNoBehavioralHookPermissions(hook: string): boolean {
 }
 
 /**
- * A hook whose v4 permission bits (low 14 bits of the address — behavior a
- * hook cannot have without declaring, enforced by PoolManager at initialize)
- * prove it cannot affect routing: no swap, no liquidity, no donate, and no
- * returns-delta (custom accounting) behavior. Initialize-phase bits are
- * allowed — they only gate pool CREATION and are inert for every
- * post-creation operation.
+ * Auto-approval gate for CCA-launch hooks, by permission-bit analysis (low
+ * 14 bits of the address — behavior a hook cannot have without declaring,
+ * enforced by PoolManager at initialize).
  *
- * Why this exists (Eric Sanchirico, 2026-07-28): CCA launches will fall back
- * to the LBP strategy-as-hook when the canonical hookless pool key was
- * front-run (LBPStrategy.migrate() rewrites key.hooks to the strategy
- * address, mined beforeInitialize-only). Rather than allowlisting specific
- * addresses — per-deployment, changes on redeploy — approve by analyzing the
- * permission bits. Anything with swap-time or accounting behavior still
- * requires explicit allowlisting through the normal hooks trust boundaries.
+ * Default rule (needs the chainId arg): any hook WITHOUT custom-accounting
+ * (returns-delta) bits — the same trust test the serving filter's
+ * isAutoAllowlistedHook applies to launch-shaped (non-major-pair) pools, so
+ * a registry entry never grants more than serve-time filtering would.
+ * Behavioral-but-clean hooks can revert or fee-gate swaps (worst case: a
+ * failed quote, routed around), but cannot alter settlement amounts.
+ *
+ * Without a chainId (or on CCA_INERT_ONLY_HOOK_CHAINS) the gate is
+ * stricter: only hooks proven ROUTING-INERT — no swap, liquidity, donate,
+ * or returns-delta behavior; initialize-phase bits are allowed since they
+ * only gate pool CREATION.
  *
  * The permission bits are NOT the complete authority model: on a
  * dynamic-fee pool (fee == DYNAMIC_FEE_FLAG), PoolManager lets key.hooks
@@ -280,17 +311,41 @@ function hasNoBehavioralHookPermissions(hook: string): boolean {
  * launched-token-matching entry after the pair and dedup checks) and in the
  * cron writer, and the result is a pure function of the string.
  */
-export function isRoutingInertHook(
+export function isAutoApprovedCcaHook(
   hook: string,
-  fee?: number | string
+  fee?: number | string,
+  chainId?: number
 ): boolean {
   if (hook.toLowerCase() === ADDRESS_ZERO_LOWER) {
     return true;
   }
+  // Dynamic fee rejects any non-zero hook on EVERY chain, including the
+  // widened branch below: updateDynamicLPFee needs no permission bit, so a
+  // bit-clean hook still gets live LP-fee control (up to 100%) on a
+  // dynamic-fee pool. Loosening this is a separate decision.
   if (fee !== undefined && Number(fee) === DYNAMIC_FEE_FLAG) {
     return false;
   }
-  return hasNoBehavioralHookPermissions(hook);
+  if (hasNoBehavioralHookPermissions(hook)) {
+    return true;
+  }
+  // Default rule for behavioral hooks: approve when there are NO
+  // custom-accounting (returns-delta) bits — the serving filter's own trust
+  // test for launch-shaped pairs (v4HooksPoolsFiltering
+  // isAutoAllowlistedHook), so a registry entry never grants more than
+  // serve-time filtering would. Requires a chainId: the denylist is
+  // chain-scoped, so a chainless call cannot honor the kill switch and
+  // stays inert-only. The denylist re-check here is deliberate
+  // belt-and-suspenders — callers pair this with isDenylistedCcaHook, but
+  // the behavioral-hook trust must not depend on every future caller
+  // remembering to.
+  if (chainId !== undefined && !CCA_INERT_ONLY_HOOK_CHAINS.has(chainId)) {
+    return (
+      lacksCustomAccountingPermissions(hook) &&
+      !isDenylistedCcaHook(chainId, hook)
+    );
+  }
+  return false;
 }
 
 /**
@@ -371,7 +426,7 @@ function rebuildEntryForFallbackHook(
 ): CcaScheduledPoolEntry | undefined {
   if (
     !entry.strategyAddress ||
-    !isRoutingInertHook(entry.strategyAddress, entry.feeTier) ||
+    !isAutoApprovedCcaHook(entry.strategyAddress, entry.feeTier, chainId) ||
     isDenylistedCcaHook(chainId, entry.strategyAddress)
   ) {
     return undefined;
@@ -669,7 +724,7 @@ export async function buildCcaScheduledPools(
             auctionAddress,
             // Normalized on store: comparisons downstream are lowercase, and
             // a mixed-case value with a broken checksum would make the
-            // fallback rebuild's isRoutingInertHook fail closed (prune
+            // fallback rebuild's isAutoApprovedCcaHook fail closed (prune
             // instead of rewrite).
             strategyAddress: strategyAddress.toLowerCase(),
             launchedToken: info.token.toLowerCase(),
@@ -715,23 +770,22 @@ export async function buildCcaScheduledPools(
                   }
                   return;
                 }
-                // Routing-inert hooks (hookless, or initialize-only bits —
-                // e.g. the LBP strategy-as-hook fallback) are auto-approved
-                // by permission-bit analysis; dynamic-fee registrations and
-                // denylisted hooks are not. Anything else bypasses selector
-                // trust boundaries the serve merge cannot honor, so skip at
-                // the source. Also prune a previously-published entry for
-                // this auction (re-registered with a non-inert hook): its
-                // poolId will never exist on-chain, and unlike the cleared
-                // read this is an affirmative registration read — no safety
-                // margin needed.
+                // Hooks are auto-approved by permission-bit analysis (see
+                // isAutoApprovedCcaHook); dynamic-fee registrations and
+                // denylisted hooks never are. Anything rejected bypasses
+                // selector trust boundaries the serve merge cannot honor,
+                // so skip at the source. Also prune a previously-published
+                // entry for this auction (re-registered with a rejected
+                // hook): its poolId will never exist on-chain, and unlike
+                // the cleared read this is an affirmative registration
+                // read — no safety margin needed.
                 if (
-                  !isRoutingInertHook(info.hook, info.fee) ||
+                  !isAutoApprovedCcaHook(info.hook, info.fee, chainId) ||
                   isDenylistedCcaHook(chainId, info.hook)
                 ) {
                   hookedAuctions.add(auction.address.toLowerCase());
                   logger.warn(
-                    'Skipping CCA pool with non-inert hook (swap-time or custom-accounting permission bits)',
+                    'Skipping CCA pool with unapproved hook (custom-accounting bits, dynamic fee, or denylisted)',
                     {chainId, auction: auction.address, hook: info.hook}
                   );
                   metric.putMetric(
@@ -846,7 +900,7 @@ export async function buildCcaScheduledPools(
                     // exist and the new one is unsupported by the serve
                     // merge.
                     if (
-                      !isRoutingInertHook(info.hook, info.fee) ||
+                      !isAutoApprovedCcaHook(info.hook, info.fee, chainId) ||
                       isDenylistedCcaHook(chainId, info.hook)
                     ) {
                       return [entry.id, 'drop'];
