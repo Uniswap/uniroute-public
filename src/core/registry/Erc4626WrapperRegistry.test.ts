@@ -5,6 +5,7 @@ import {
   erc4626WrapperConfigFromEnv,
   Erc4626WrapperRegistryStaticData,
   filterValidErc4626Assets,
+  shouldMergeDynamicErc4626Assets,
   StaticErc4626WrapperRegistry,
 } from './Erc4626WrapperRegistry';
 
@@ -58,6 +59,19 @@ describe('StaticErc4626WrapperRegistry', () => {
     });
     expect(snapshot.getByWxStock(asset.wxStock)).toBeDefined();
     expect(snapshot.isWrapperHook(asset.hookAddress)).toBe(true);
+    for (const identity of [
+      asset.xStock,
+      asset.wxStock,
+      asset.hookAddress,
+      asset.poolId,
+    ]) {
+      expect(snapshot.wasEverKnownIdentity(identity)).toBe(true);
+    }
+    expect(
+      snapshot.wasEverKnownIdentity(
+        '0xdd00000000000000000000000000000000000004'
+      )
+    ).toBe(false);
     expect(snapshot.hookCodeOverrides).toEqual({
       [asset.hookAddress.toLowerCase()]: '0x6000',
     });
@@ -131,6 +145,18 @@ describe('StaticErc4626WrapperRegistry', () => {
 });
 
 describe('erc4626WrapperConfigFromEnv', () => {
+  it('requires the routing and merge flags before dynamic assets are merged', () => {
+    expect(
+      shouldMergeDynamicErc4626Assets({enabled: false, chainIds: [1]}, true)
+    ).toBe(false);
+    expect(
+      shouldMergeDynamicErc4626Assets({enabled: true, chainIds: [1]}, false)
+    ).toBe(false);
+    expect(
+      shouldMergeDynamicErc4626Assets({enabled: true, chainIds: [1]}, true)
+    ).toBe(true);
+  });
+
   it('defaults to disabled and fails closed for invalid chain ids', () => {
     delete process.env.XSTOCKS_ROUTING_ENABLED;
     process.env.XSTOCKS_CHAIN_IDS = '1,nope';

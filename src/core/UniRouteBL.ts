@@ -363,7 +363,7 @@ export class UniRouteBL implements IUniRoutedBL {
       );
     };
 
-    const parsed = await this.parseQuoteRequest(request, options);
+    const parsed = await this.parseQuoteRequest(ctx, request, options);
     const {
       chain,
       tradeType,
@@ -739,7 +739,8 @@ export class UniRouteBL implements IUniRoutedBL {
           metricTags,
           requestBlockNumber,
           gasPrice,
-          resolvedStateOverrides
+          resolvedStateOverrides,
+          erc4626Snapshot?.hookCodeOverrides
         );
 
       let status = QuoteStatus.Pending;
@@ -898,6 +899,7 @@ export class UniRouteBL implements IUniRoutedBL {
    * computes the cache-namespace context once per request.
    */
   private async parseQuoteRequest(
+    ctx: Context,
     request: QuoteRequest,
     options?: QuoteOptions
   ) {
@@ -917,7 +919,7 @@ export class UniRouteBL implements IUniRoutedBL {
       ? Experiment.GuideStar_Stable_Stable
       : undefined;
     const erc4626Snapshot = this.erc4626WrapperRegistry
-      ? await this.erc4626WrapperRegistry.getSnapshot(chain.chainId)
+      ? await this.erc4626WrapperRegistry.getSnapshot(chain.chainId, ctx)
       : undefined;
     const nsCtx = resolveNamespaces({
       protocols,
@@ -1651,7 +1653,8 @@ export class UniRouteBL implements IUniRoutedBL {
     metricTags: string[],
     requestBlockNumber: number | undefined,
     gasPrice: bigint | undefined,
-    resolvedStateOverrides: ResolvedStateOverride[] | undefined
+    resolvedStateOverrides: ResolvedStateOverride[] | undefined,
+    supplementalHookCodeOverrides?: Readonly<Record<string, string>>
   ): Promise<{
     bestQuoteCandidates: QuoteSplit[];
     bestQuote: QuoteSplit | undefined;
@@ -1671,7 +1674,8 @@ export class UniRouteBL implements IUniRoutedBL {
         tokensInfo,
         metricTags,
         requestBlockNumber,
-        options?.testAggHooks
+        options?.testAggHooks,
+        supplementalHookCodeOverrides
       );
 
     ctx.logger.debug(`Best Quote Candidates (${bestQuoteCandidates.length}):`, {

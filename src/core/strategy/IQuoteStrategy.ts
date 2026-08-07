@@ -23,7 +23,8 @@ export interface IQuoteStrategy {
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[],
     blockNumber?: number,
-    testAggHooks?: boolean
+    testAggHooks?: boolean,
+    supplementalHookCodeOverrides?: Readonly<Record<string, string>>
   ): Promise<QuoteSplit[]>;
 
   name(): string;

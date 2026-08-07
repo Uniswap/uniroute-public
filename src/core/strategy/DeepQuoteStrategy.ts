@@ -139,7 +139,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[],
     blockNumber?: number,
-    testAggHooks?: boolean
+    testAggHooks?: boolean,
+    supplementalHookCodeOverrides?: Readonly<Record<string, string>>
   ): Promise<QuoteSplit[]> {
     // Generate all possible partial routes per percentage step
     const pctRoutes: RouteBasic[] = [];
@@ -218,7 +219,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
             ctx,
             metricTags,
             blockNumber,
-            tokensInfo
+            tokensInfo,
+            supplementalHookCodeOverrides
           )
         : Promise.resolve([] as QuoteBasic[]);
     const [aggHookQuotes, standardQuotes] = await Promise.all([

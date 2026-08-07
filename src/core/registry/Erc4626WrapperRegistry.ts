@@ -1,8 +1,10 @@
 import {
   Erc4626WrapperAsset,
   getErc4626HookCodeOverrides,
+  getErc4626RoutingHookBytecode,
   getErc4626WrapperAssets,
 } from '@uniswap/lib-sharedconfig/erc4626WrapperHooks';
+import {Context} from '@uniswap/lib-uni/context';
 
 export interface Erc4626RegistrySnapshot {
   readonly assets: ReadonlyArray<Erc4626WrapperAsset>;
@@ -11,11 +13,16 @@ export interface Erc4626RegistrySnapshot {
   getByWxStock(token: string): Erc4626WrapperAsset | undefined;
   getByHook(hook: string): Erc4626WrapperAsset | undefined;
   isWrapperHook(hook: string): boolean;
+  /**
+   * True for an identity belonging to an active or recently retired asset.
+   * Used only to invalidate stale cached routes; routing admission stays active-only.
+   */
+  wasEverKnownIdentity(value: string): boolean;
   readonly hookCodeOverrides: Readonly<Record<string, string>>;
 }
 
 export interface Erc4626WrapperRegistrySource {
-  getSnapshot(chainId: number): Promise<Erc4626RegistrySnapshot>;
+  getSnapshot(chainId: number, ctx?: Context): Promise<Erc4626RegistrySnapshot>;
 }
 
 export interface Erc4626WrapperRegistryConfig {
@@ -23,9 +30,17 @@ export interface Erc4626WrapperRegistryConfig {
   chainIds: number[];
 }
 
+export function shouldMergeDynamicErc4626Assets(
+  config: Erc4626WrapperRegistryConfig,
+  mergeEnabled: boolean
+): boolean {
+  return config.enabled && mergeEnabled;
+}
+
 export interface Erc4626WrapperRegistryStaticData {
   getAssets(chainId: number): readonly Erc4626WrapperAsset[];
   getHookCodeOverrides(chainId: number): Record<string, string>;
+  getHookBytecode?(chainId: number): string | undefined;
 }
 
 export interface Erc4626WrapperChainConfig {
@@ -43,18 +58,23 @@ export function filterValidErc4626Assets(
     hookAddress: asset.hookAddress.toLowerCase(),
     poolId: asset.poolId.toLowerCase(),
   }));
+  const uniqueAssets = Array.from(
+    new Map(
+      normalizedAssets.map(asset => [assetIdentityKey(asset), asset])
+    ).values()
+  );
   const identityCounts = new Map<string, number>();
 
-  for (const asset of normalizedAssets) {
+  for (const asset of uniqueAssets) {
     for (const identity of assetIdentities(asset)) {
       increment(identityCounts, identity);
     }
   }
 
-  const accepted = normalizedAssets.filter(asset =>
+  const accepted = uniqueAssets.filter(asset =>
     assetIdentities(asset).every(identity => identityCounts.get(identity) === 1)
   );
-  return {accepted, excludedCount: normalizedAssets.length - accepted.length};
+  return {accepted, excludedCount: uniqueAssets.length - accepted.length};
 }
 
 class StaticErc4626RegistrySnapshot implements Erc4626RegistrySnapshot {
@@ -64,11 +84,13 @@ class StaticErc4626RegistrySnapshot implements Erc4626RegistrySnapshot {
   private readonly byXStock: ReadonlyMap<string, Erc4626WrapperAsset>;
   private readonly byWxStock: ReadonlyMap<string, Erc4626WrapperAsset>;
   private readonly byHook: ReadonlyMap<string, Erc4626WrapperAsset>;
+  private readonly knownIdentities: ReadonlySet<string>;
 
   constructor(
     acceptedAssets: readonly Erc4626WrapperAsset[],
     excludedAssetCount: number,
-    hookCodeOverrides: Record<string, string>
+    hookCodeOverrides: Record<string, string>,
+    knownIdentities: ReadonlySet<string> = new Set()
   ) {
     const accepted = acceptedAssets.map(asset => Object.freeze(asset));
     this.excludedAssetCount = excludedAssetCount;
@@ -76,11 +98,22 @@ class StaticErc4626RegistrySnapshot implements Erc4626RegistrySnapshot {
     this.byXStock = new Map(accepted.map(asset => [asset.xStock, asset]));
     this.byWxStock = new Map(accepted.map(asset => [asset.wxStock, asset]));
     this.byHook = new Map(accepted.map(asset => [asset.hookAddress, asset]));
+    this.knownIdentities = new Set(
+      [
+        ...knownIdentities,
+        ...accepted.flatMap(asset => assetIdentities(asset)),
+      ].map(identity => identity.toLowerCase())
+    );
 
     // Assets are lowercased above; normalize the incoming map too so callers
     // (e.g. dynamic registry sources) can't key it with checksummed addresses
     // and silently lose overrides — a lost override fail-closes the pool.
-    const availableOverrides = normalizeOverrides(hookCodeOverrides);
+    const availableOverrides = Object.fromEntries(
+      Object.entries(hookCodeOverrides).map(([hook, bytecode]) => [
+        hook.toLowerCase(),
+        bytecode,
+      ])
+    );
     const overrides: Record<string, string> = {};
     for (const asset of accepted) {
       const bytecode = availableOverrides[asset.hookAddress];
@@ -105,10 +138,18 @@ class StaticErc4626RegistrySnapshot implements Erc4626RegistrySnapshot {
   isWrapperHook(hook: string): boolean {
     return this.byHook.has(hook.toLowerCase());
   }
+
+  wasEverKnownIdentity(value: string): boolean {
+    return this.knownIdentities.has(value.toLowerCase());
+  }
 }
 
 function assetIdentities(asset: Erc4626WrapperAsset): readonly string[] {
   return [asset.xStock, asset.wxStock, asset.hookAddress, asset.poolId];
+}
+
+function assetIdentityKey(asset: Erc4626WrapperAsset): string {
+  return assetIdentities(asset).join(':');
 }
 
 function increment(counts: Map<string, number>, key: string): void {
@@ -118,10 +159,40 @@ function increment(counts: Map<string, number>, key: string): void {
 export const EMPTY_ERC4626_SNAPSHOT: Erc4626RegistrySnapshot =
   new StaticErc4626RegistrySnapshot([], 0, {});
 
+/** Creates an immutable, indexed snapshot shared by static and dynamic sources. */
+export function createErc4626RegistrySnapshot(
+  assets: readonly Erc4626WrapperAsset[],
+  excludedAssetCount: number,
+  hookCodeOverrides: Record<string, string> = {},
+  knownIdentities: ReadonlySet<string> = new Set()
+): Erc4626RegistrySnapshot {
+  return new StaticErc4626RegistrySnapshot(
+    assets,
+    excludedAssetCount,
+    hookCodeOverrides,
+    knownIdentities
+  );
+}
+
 const sharedConfigData: Erc4626WrapperRegistryStaticData = {
   getAssets: getErc4626WrapperAssets,
   getHookCodeOverrides: getErc4626HookCodeOverrides,
+  getHookBytecode: getErc4626RoutingHookBytecode,
 };
+
+export function buildErc4626HookCodeOverrides(
+  chainId: number,
+  assets: readonly Erc4626WrapperAsset[],
+  data: Erc4626WrapperRegistryStaticData = sharedConfigData
+): Record<string, string> {
+  const bytecode =
+    data.getHookBytecode?.(chainId) ??
+    Object.values(data.getHookCodeOverrides(chainId))[0];
+  if (bytecode === undefined) return {};
+  return Object.fromEntries(
+    assets.map(asset => [asset.hookAddress.toLowerCase(), bytecode])
+  );
+}
 
 /** Computes the configured, conflict-free wrapper hooks for one chain. */
 export function computeErc4626WrapperChainConfig(
@@ -134,18 +205,15 @@ export function computeErc4626WrapperChainConfig(
   }
 
   const {accepted} = filterValidErc4626Assets(data.getAssets(chainId));
-  const availableOverrides = normalizeOverrides(
-    data.getHookCodeOverrides(chainId)
+  const hookCodeOverrides = buildErc4626HookCodeOverrides(
+    chainId,
+    accepted,
+    data
   );
-  const hookCodeOverrides: Record<string, string> = {};
   const hookAddresses = new Set<string>();
 
   for (const asset of accepted) {
     hookAddresses.add(asset.hookAddress);
-    const bytecode = availableOverrides[asset.hookAddress];
-    if (bytecode !== undefined) {
-      hookCodeOverrides[asset.hookAddress] = bytecode;
-    }
   }
 
   return {hookCodeOverrides, hookAddresses};
@@ -162,8 +230,11 @@ export class StaticErc4626WrapperRegistry
     private readonly data: Erc4626WrapperRegistryStaticData = sharedConfigData
   ) {}
 
-  async getSnapshot(chainId: number): Promise<Erc4626RegistrySnapshot> {
-    if (!this.config.enabled || !this.config.chainIds.includes(chainId)) {
+  async getSnapshot(
+    chainId: number,
+    _ctx?: Context
+  ): Promise<Erc4626RegistrySnapshot> {
+    if (!this.isChainInScope(chainId)) {
       return EMPTY_ERC4626_SNAPSHOT;
     }
 
@@ -171,18 +242,12 @@ export class StaticErc4626WrapperRegistry
     if (cached) return cached;
 
     const filtered = filterValidErc4626Assets(this.data.getAssets(chainId));
-    const availableOverrides = normalizeOverrides(
-      this.data.getHookCodeOverrides(chainId)
+    const hookCodeOverrides = this.getHookCodeOverridesForAssets(
+      chainId,
+      filtered.accepted
     );
-    const hookCodeOverrides: Record<string, string> = {};
-    for (const asset of filtered.accepted) {
-      const bytecode = availableOverrides[asset.hookAddress];
-      if (bytecode !== undefined) {
-        hookCodeOverrides[asset.hookAddress] = bytecode;
-      }
-    }
 
-    const snapshot = new StaticErc4626RegistrySnapshot(
+    const snapshot = createErc4626RegistrySnapshot(
       filtered.accepted,
       filtered.excludedCount,
       hookCodeOverrides
@@ -190,17 +255,21 @@ export class StaticErc4626WrapperRegistry
     this.snapshots.set(chainId, snapshot);
     return snapshot;
   }
-}
 
-function normalizeOverrides(
-  overrides: Record<string, string>
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(overrides).map(([hook, bytecode]) => [
-      hook.toLowerCase(),
-      bytecode,
-    ])
-  );
+  getHookCodeOverridesForAssets(
+    chainId: number,
+    assets: readonly Erc4626WrapperAsset[]
+  ): Record<string, string> {
+    if (!this.isChainInScope(chainId)) {
+      return {};
+    }
+    return buildErc4626HookCodeOverrides(chainId, assets, this.data);
+  }
+
+  /** True iff routing is enabled and this chain is in the configured scope. */
+  isChainInScope(chainId: number): boolean {
+    return this.config.enabled && this.config.chainIds.includes(chainId);
+  }
 }
 
 export function erc4626WrapperConfigFromEnv(): Erc4626WrapperRegistryConfig {
