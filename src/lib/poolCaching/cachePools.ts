@@ -51,6 +51,13 @@ import {
 export interface CachePoolsConfig {
   s3Bucket: string;
   s3CacheKey: string;
+  /**
+   * Per-job override of the V4 lpFee-correction read cap. Left unset by the
+   * all-chain job, which uses the env cap; set by the 2-minute Robinhood job,
+   * which needs a tighter tranche to fit its own timeout. `0` is a meaningful
+   * value (defer every read), so this is resolved with `??`, never `||`.
+   */
+  v4LpFeeCorrectionMaxReadsPerTick?: number;
 }
 
 // S3 object-metadata key recording when a snapshot's subgraph fetch STARTED.
@@ -525,16 +532,19 @@ async function cachePoolsForChainProtocol(
             pools as Array<V4SubgraphPool>,
             lpFeeReader,
             logger,
-            metricInstance
+            metricInstance,
+            config.v4LpFeeCorrectionMaxReadsPerTick
           );
         } else {
           // Without a metric here a misconfigured rollout is invisible: the
           // correction silently no-ops and emits none of its own counters.
+          // The reason tag separates this from the read-cap misconfiguration
+          // the correction itself reports under the same metric name.
           metricInstance.putMetric(
             'CachePools.v4LpFeeCorrection.misconfigured',
             1,
             MetricLoggerUnit.Count,
-            metricTags
+            {...metricTags, reason: 'no_rpc_endpoint'}
           );
           logger.warn(
             'V4 lpFee correction enabled but no UniRPC endpoint is configured — keeping subgraph fees'

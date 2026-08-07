@@ -31,6 +31,7 @@ import {ethers} from 'ethers';
 import pLimit from 'p-limit';
 import {LRUCache} from 'lru-cache';
 import {Currency, Token} from '@uniswap/sdk-core';
+import {Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
 import {ChainId} from '../../config';
@@ -94,6 +95,23 @@ export interface V4PoolKeyFees {
 }
 
 /**
+ * The pool's two PoolKey currencies.
+ *
+ * Decimals are pinned to 18 rather than parsed: they do not enter the pool id,
+ * and a NaN from the subgraph would fail the `Token` invariant for no reason.
+ */
+function poolKeyCurrencies(
+  chainId: number,
+  pool: V4SubgraphPool
+): [Currency, Currency] {
+  const currency = (address: string): Currency =>
+    address === ADDRESS_ZERO
+      ? nativeOnChain(chainId)
+      : new Token(chainId, address, 18);
+  return [currency(pool.token0.id), currency(pool.token1.id)];
+}
+
+/**
  * True when the pool's `PoolKey.fee` is the dynamic-fee sentinel.
  *
  * `PoolKey.fee` is the very thing this module derives, so it cannot be read
@@ -101,23 +119,17 @@ export interface V4PoolKeyFees {
  * with the sentinel substituted — the id is the only PoolKey field the
  * snapshot already carries verbatim. A hookless pool cannot have a dynamic
  * fee, which short-circuits the keccak for nearly every pool.
- *
- * Decimals are pinned to 18 rather than parsed: they do not enter the pool id,
- * and a NaN from the subgraph would fail the `Token` invariant for no reason.
  */
 export function isDynamicFeeV4Pool(
   chainId: number,
   pool: V4SubgraphPool
 ): boolean {
   if (pool.hooks === ADDRESS_ZERO) return false;
-  const currency = (address: string): Currency =>
-    address === ADDRESS_ZERO
-      ? nativeOnChain(chainId)
-      : new Token(chainId, address, 18);
   try {
+    const [currency0, currency1] = poolKeyCurrencies(chainId, pool);
     return isPoolFeeDynamic(
-      currency(pool.token0.id),
-      currency(pool.token1.id),
+      currency0,
+      currency1,
       Number(pool.tickSpacing),
       pool.hooks,
       pool.id
@@ -129,6 +141,50 @@ export function isDynamicFeeV4Pool(
   }
 }
 
+/**
+ * True when the snapshot's own `feeTier` reproduces the pool id — an offline
+ * proof that `feeTier` already IS `PoolKey.fee`. The id is
+ * `keccak256(PoolKey)` and the snapshot carries it verbatim, so substituting
+ * `feeTier` into the PoolKey and re-deriving the id settles it with no RPC.
+ *
+ * One-directional by construction: a match licenses a SKIP and nothing else.
+ * A mismatch, an unparseable field, or a derivation that throws disproves
+ * nothing — those fall through to `StateView.getSlot0`, which remains the
+ * only thing permitted to change a fee.
+ *
+ * Uses the same v4-sdk derivation `isPoolFeeDynamic` calls one level down.
+ * `V4Pool.computePoolId` produces byte-identical ids but would pull the
+ * serving-path model graph into the cron for no gain.
+ */
+export function isFeeTierProvenByPoolId(
+  chainId: number,
+  pool: V4SubgraphPool
+): boolean {
+  const feeTier = Number(pool.feeTier);
+  const tickSpacing = Number(pool.tickSpacing);
+  if (!Number.isInteger(feeTier) || !Number.isInteger(tickSpacing)) {
+    return false;
+  }
+  try {
+    const [currency0, currency1] = poolKeyCurrencies(chainId, pool);
+    return (
+      V4SDKPool.getPoolId(
+        currency0,
+        currency1,
+        feeTier,
+        tickSpacing,
+        pool.hooks
+      ).toLowerCase() === pool.id.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `prefiltered` and `deferred` are decided before any read and so are never
+ * returned by `resolveFeeTier` — they are outcomes of the pass as a whole.
+ */
 export type FeeTierOutcome =
   /** Snapshot value already equals the pool-key fee (includes protocolFee 0). */
   | 'already_correct'
@@ -136,6 +192,10 @@ export type FeeTierOutcome =
   | 'corrected'
   /** No on-chain read available for this pool. */
   | 'unknown'
+  /** Pool id proved `feeTier === PoolKey.fee` offline; no read was made. */
+  | 'prefiltered'
+  /** Read skipped this pass to stay under the read cap; retried next tick. */
+  | 'deferred'
   /** Dynamic-fee pool — its lpFee is per-swap, not a pool-key fee (ROUTE-607). */
   | 'dynamic'
   /** Snapshot value is explained by neither the lpFee nor the total. */
@@ -214,6 +274,14 @@ const STATE_VIEW_ABI = [
 export const V4_STATE_VIEW_BY_CHAIN: {[chainId: number]: string} = {
   [ChainId.MAINNET]: '0x7ffe42c4a5deea5b0fec41c94c136cf115597227',
   [ChainId.POLYGON]: '0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a',
+  // The five below were verified over PUBLIC RPCs only. The cron reaches
+  // StateView through UniRPC (`/rpc/<chainId>`), a different path — confirm
+  // each on a dev deploy before enabling that chain near prod.
+  [ChainId.OPTIMISM]: '0xc18a3169788f4f75a170290584eca6395c75ecdb',
+  [ChainId.BNB]: '0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4',
+  [ChainId.ROBINHOOD]: '0xf3334192d15450cdd385c8b70e03f9a6bd9e673b',
+  [ChainId.ARBITRUM]: '0x76fd297e2d437cd7f76d50f01afe6160f86e9990',
+  [ChainId.BASE]: '0xa3c0c9b65bad0b08107aa264b0f3db444b867a71',
 };
 
 const MAX_CONCURRENT_ONCHAIN_READS = 10;
@@ -311,8 +379,39 @@ const lpFeeMemo = new LRUCache<string, number>({
   max: LP_FEE_MEMO_MAX_ENTRIES,
 });
 
+/**
+ * How long a pool that was READ and came back with no answer is held out of
+ * the candidate list.
+ *
+ * This exists because the read cap is now filled highest-TVL-first. Ordering
+ * by TVL is what makes a binding cap spend its reads well, but it also makes
+ * the front of the queue stable: a block of high-TVL pools that StateView
+ * cannot answer for would be re-selected every tick, re-occupy the whole
+ * tranche, and starve every lower-TVL pool behind them indefinitely. Skipping
+ * them for a bounded interval bounds that starvation without ever latching a
+ * fee value — nothing is corrected on the strength of this cache, a pool in
+ * cooldown simply keeps its subgraph fee and is still reported `unknown`.
+ *
+ * Short relative to how long a genuinely-broken pool stays broken, but long
+ * enough to cover several ticks of the 2-minute fast job.
+ */
+const UNKNOWN_READ_COOLDOWN_MS = 10 * 60 * 1000;
+
+/**
+ * Bounded like `lpFeeMemo`: the cron process is long-lived. Eviction only
+ * costs one re-read, which is the pre-cooldown behaviour anyway.
+ */
+const UNKNOWN_COOLDOWN_MAX_ENTRIES = 250_000;
+
+const unknownReadCooldown = new LRUCache<string, true>({
+  max: UNKNOWN_COOLDOWN_MAX_ENTRIES,
+  ttl: UNKNOWN_READ_COOLDOWN_MS,
+});
+
+/** Clears both process-lifetime caches: the fee memo and the unknown-read cooldown. */
 export function resetV4LpFeeMemoForTesting(): void {
   lpFeeMemo.clear();
+  unknownReadCooldown.clear();
 }
 
 export interface V4LpFeeCorrectionStats {
@@ -320,9 +419,33 @@ export interface V4LpFeeCorrectionStats {
   corrected: number;
   alreadyCorrect: number;
   unknown: number;
+  prefiltered: number;
+  deferred: number;
   dynamic: number;
   unexplained: number;
   memoHits: number;
+}
+
+const STAT_BY_OUTCOME: {
+  [outcome in FeeTierOutcome]: keyof V4LpFeeCorrectionStats;
+} = {
+  already_correct: 'alreadyCorrect',
+  corrected: 'corrected',
+  unknown: 'unknown',
+  prefiltered: 'prefiltered',
+  deferred: 'deferred',
+  dynamic: 'dynamic',
+  unexplained: 'unexplained',
+};
+
+/**
+ * TVL as a sort key only — never as a threshold. `tvlUSD` is typed `number`
+ * but arrives from the subgraph, so NaN/Infinity are reachable; those sort
+ * last rather than poisoning every comparison and scrambling the order.
+ */
+function tvlUsdForOrdering(pool: V4SubgraphPool): number {
+  const value = Number(pool.tvlUSD);
+  return Number.isFinite(value) ? value : 0;
 }
 
 /**
@@ -338,17 +461,27 @@ export async function applyV4LpFeeCorrection(
   pools: V4SubgraphPool[],
   reader: V4PoolKeyFeeReader,
   logger: Logger,
-  metric: IMetric
+  metric: IMetric,
+  /**
+   * Per-job cap, overriding the env cap for this pass only. Used by the
+   * 2-minute Robinhood job, which needs a tighter tranche than the all-chain
+   * job to stay inside its own timeout. `undefined` (not `0`) means "no
+   * override" — see the `??` below.
+   */
+  maxReadsPerTickOverride?: number
 ): Promise<V4SubgraphPool[]> {
   const stats: V4LpFeeCorrectionStats = {
     read: 0,
     corrected: 0,
     alreadyCorrect: 0,
     unknown: 0,
+    prefiltered: 0,
+    deferred: 0,
     dynamic: 0,
     unexplained: 0,
     memoHits: 0,
   };
+  const tags = {chainId: String(chainId)};
 
   const memoKey = (poolId: string) => `${chainId}:${poolId.toLowerCase()}`;
   // Settled up front so a dynamic-fee pool is excluded from the read and the
@@ -357,9 +490,66 @@ export async function applyV4LpFeeCorrection(
   const isDynamic = new Map(
     pools.map(pool => [pool.id, isDynamicFeeV4Pool(chainId, pool)])
   );
-  const toRead = pools
-    .filter(pool => !isDynamic.get(pool.id) && !lpFeeMemo.has(memoKey(pool.id)))
+
+  // Deliberately NOT memoized: a memo hit rewrites a drifted feeTier without
+  // consulting StateView, so latching this skip-only proof would make it a
+  // rewrite authority. A pool that grows a protocol fee later still reaches
+  // StateView on the tick where it drifts.
+  const provenByPoolId = new Set<string>();
+  const candidatePools: V4SubgraphPool[] = [];
+  for (const pool of pools) {
+    if (isDynamic.get(pool.id) || lpFeeMemo.has(memoKey(pool.id))) continue;
+    if (isFeeTierProvenByPoolId(chainId, pool)) {
+      provenByPoolId.add(pool.id);
+      continue;
+    }
+    // Held out after a read that produced no answer — see
+    // UNKNOWN_READ_COOLDOWN_MS. Such a pool still falls through to the
+    // `unknown` outcome below; it is only excluded from the READ list.
+    if (unknownReadCooldown.has(memoKey(pool.id))) continue;
+    candidatePools.push(pool);
+  }
+  // Highest TVL first, so that when the cap binds the reads are spent on the
+  // pools whose fee is worth the most to get right rather than on whichever
+  // pools the subgraph happened to return first. The id tie-break keeps the
+  // tranche boundary deterministic across ticks (and across processes), which
+  // is what makes "deferred now, read next tick" a stable rotation rather
+  // than a reshuffle. Sorts a copy: `pools` is the caller's array.
+  const candidates = candidatePools
+    .sort(
+      (a, b) =>
+        tvlUsdForOrdering(b) - tvlUsdForOrdering(a) || a.id.localeCompare(b.id)
+    )
     .map(pool => pool.id);
+
+  const readCap = v4LpFeeCorrectionReadCapFromEnv();
+  if (readCap.misconfigured) {
+    metric?.putMetric(
+      'CachePools.v4LpFeeCorrection.misconfigured',
+      1,
+      MetricLoggerUnit.Count,
+      {...tags, reason: 'invalid_max_reads_per_tick'}
+    );
+    logger?.warn(
+      `POOL_CACHING_V4_LP_FEE_CORRECTION_MAX_READS_PER_TICK is not a usable read cap; using ${readCap.maxReads}`
+    );
+  }
+  // `??`, never `||`: an explicit per-job override of 0 is a load-shed
+  // instruction ("defer everything this pass"), and `0 || envCap` would
+  // silently turn it into the full env cap — the exact opposite.
+  const maxReads = maxReadsPerTickOverride ?? readCap.maxReads;
+  const toRead = candidates.slice(0, maxReads);
+  // Read this pass, so an `unknown` below is a real no-answer rather than a
+  // pool that was skipped by the cap or the cooldown.
+  const attempted = new Set(toRead);
+  // Past the cap: keep the subgraph value and retry next tick. Distinct from
+  // `unknown`, which means the read was attempted and did not answer.
+  const deferred = new Set(candidates.slice(maxReads));
+  if (deferred.size > 0) {
+    logger?.warn(
+      `V4 lpFee correction chain ${chainId}: read cap ${maxReads} reached, deferring ${deferred.size} of ${candidates.length} pools`
+    );
+  }
 
   let fetched = new Map<string, V4PoolKeyFees>();
   try {
@@ -370,7 +560,7 @@ export async function applyV4LpFeeCorrection(
       'CachePools.v4LpFeeCorrection.error',
       1,
       MetricLoggerUnit.Count,
-      {chainId: String(chainId)}
+      tags
     );
     logger?.error(
       `V4 lpFee correction read failed on chain ${chainId}; keeping subgraph fees`,
@@ -380,13 +570,20 @@ export async function applyV4LpFeeCorrection(
   }
 
   const bump = (outcome: FeeTierOutcome) => {
-    if (outcome === 'already_correct') stats.alreadyCorrect++;
-    else stats[outcome]++;
+    stats[STAT_BY_OUTCOME[outcome]]++;
   };
 
   const corrected = pools.map(pool => {
     if (isDynamic.get(pool.id)) {
       bump('dynamic');
+      return pool;
+    }
+    if (provenByPoolId.has(pool.id)) {
+      bump('prefiltered');
+      return pool;
+    }
+    if (deferred.has(pool.id)) {
+      bump('deferred');
       return pool;
     }
 
@@ -410,6 +607,14 @@ export async function applyV4LpFeeCorrection(
     const fees = fetched.get(pool.id);
     const {outcome, feeTier} = resolveFeeTier(pool.feeTier, fees);
     bump(outcome);
+    // Spent a read and learned nothing. Hold this pool out of the candidate
+    // list for a while so it cannot re-occupy a binding cap every tick. Only
+    // pools actually read this pass qualify: a pool already in cooldown also
+    // reports `unknown`, and re-arming on that would extend the cooldown
+    // forever instead of letting it expire.
+    if (outcome === 'unknown' && attempted.has(pool.id)) {
+      unknownReadCooldown.set(memoKey(pool.id), true);
+    }
     // Only a validated pool-key fee is memoized; an unexplained or dynamic
     // pool is re-read next tick rather than latching a value we don't trust.
     if (fees && (outcome === 'corrected' || outcome === 'already_correct')) {
@@ -418,7 +623,6 @@ export async function applyV4LpFeeCorrection(
     return outcome === 'corrected' ? {...pool, feeTier} : pool;
   });
 
-  const tags = {chainId: String(chainId)};
   for (const [name, value] of Object.entries(stats)) {
     metric?.putMetric(
       `CachePools.v4LpFeeCorrection.${name}`,
@@ -430,6 +634,7 @@ export async function applyV4LpFeeCorrection(
   logger?.info(
     `V4 lpFee correction chain ${chainId}: corrected=${stats.corrected} ` +
       `alreadyCorrect=${stats.alreadyCorrect} unknown=${stats.unknown} ` +
+      `prefiltered=${stats.prefiltered} deferred=${stats.deferred} ` +
       `dynamic=${stats.dynamic} unexplained=${stats.unexplained} ` +
       `reads=${stats.read} memoHits=${stats.memoHits}`
   );
@@ -457,4 +662,55 @@ export function v4LpFeeCorrectionChainsFromEnv(): ReadonlySet<number> {
       .map(entry => Number.parseInt(entry.trim(), 10))
       .filter(chainId => supported.includes(chainId))
   );
+}
+
+/**
+ * Default read cap, set well above today's demand so it does not bind in
+ * normal operation. It exists for a pathological subgraph regression (a
+ * fee-field change that makes every pool look drifted) that would otherwise
+ * hand StateView the entire V4 universe.
+ */
+export const V4_LP_FEE_CORRECTION_DEFAULT_MAX_READS_PER_TICK = 25_000;
+
+/**
+ * Above this a cap is indistinguishable from no cap, so a larger value is read
+ * as a typo rather than as intent to remove the safety net.
+ */
+const MAX_READS_PER_TICK_CEILING = 1_000_000;
+
+export interface V4LpFeeCorrectionReadCap {
+  maxReads: number;
+  /** A value was set but unusable; the default applies and ops must be told. */
+  misconfigured: boolean;
+}
+
+/**
+ * Cap on `StateView.getSlot0` reads per correction pass (one pass per enabled
+ * chain per cron tick). Pools past the cap keep their subgraph value and are
+ * retried on the next tick.
+ *
+ * `0` is a valid LOAD-SHED setting — defer every read — not an absent one.
+ * That is why this cannot reuse `parsePositiveIntEnvOrDefault` (which rejects
+ * 0) and why nothing here may apply `||` to the parsed number: `0 || DEFAULT`
+ * is 25,000, the exact opposite of what the operator asked for.
+ */
+export function v4LpFeeCorrectionReadCapFromEnv(): V4LpFeeCorrectionReadCap {
+  const raw =
+    process.env.POOL_CACHING_V4_LP_FEE_CORRECTION_MAX_READS_PER_TICK?.trim() ??
+    '';
+  if (raw === '') {
+    return {
+      maxReads: V4_LP_FEE_CORRECTION_DEFAULT_MAX_READS_PER_TICK,
+      misconfigured: false,
+    };
+  }
+  // Digits only: `Number`/`parseInt` would coerce '-1', '1e5', '12.5', '0x10'
+  // and '25 000' into a cap silently different from the configured one.
+  const usable = /^\d+$/.test(raw) && Number(raw) <= MAX_READS_PER_TICK_CEILING;
+  return usable
+    ? {maxReads: Number(raw), misconfigured: false}
+    : {
+        maxReads: V4_LP_FEE_CORRECTION_DEFAULT_MAX_READS_PER_TICK,
+        misconfigured: true,
+      };
 }
