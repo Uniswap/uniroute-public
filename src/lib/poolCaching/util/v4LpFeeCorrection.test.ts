@@ -1177,14 +1177,47 @@ describe('v4LpFeeCorrectionChainsFromEnv', () => {
       expect(infraFallback()![1]).toBe('||');
     });
 
-    it.each(['dev', 'staging', 'prod'])(
+    /**
+     * What each stack actually ships. The value in the YAML is the whole
+     * blast radius of this feature, so it is pinned per-stack and fed through
+     * the parser rather than eyeballed: `"1"` and `"*"` differ by one
+     * character but by every non-mainnet chain in effect.
+     */
+    const stackValue = (stack: string): string | undefined =>
+      read(`infra/Pulumi.${stack}.yaml`).match(
+        /^\s*env:poolCachingV4LpFeeCorrectionChains:\s*"([^"]*)"\s*$/m
+      )?.[1];
+
+    // Staging is enabled first on purpose; prod is a separate change once a
+    // staging sweep is observed clean. Pinning prod as unset here is what
+    // makes an accidental prod enablement fail loudly rather than ride along.
+    it.each(['dev', 'prod'])(
       'leaves the correction unset in the %s stack, so the default is what ships',
       stack => {
-        expect(read(`infra/Pulumi.${stack}.yaml`)).not.toContain(
-          'poolCachingV4LpFeeCorrectionChains'
-        );
+        expect(stackValue(stack)).toBeUndefined();
       }
     );
+
+    it('resolves the staging stack to mainnet only', () => {
+      const configured = stackValue('staging');
+      expect(
+        configured,
+        'staging stack no longer sets poolCachingV4LpFeeCorrectionChains'
+      ).toBe('1');
+      process.env[KEY] = configured;
+      expect([...v4LpFeeCorrectionChainsFromEnv()]).toEqual([1]);
+    });
+
+    // The read path is only reachable for a chain with a StateView address —
+    // a stack could otherwise "enable" a chain that can never be corrected.
+    it('has a StateView entry for every chain a stack enables', () => {
+      for (const stack of ['dev', 'staging', 'prod']) {
+        process.env[KEY] = stackValue(stack);
+        for (const chainId of v4LpFeeCorrectionChainsFromEnv()) {
+          expect(V4_STATE_VIEW_BY_CHAIN[chainId]).toBeDefined();
+        }
+      }
+    });
   });
 });
 
