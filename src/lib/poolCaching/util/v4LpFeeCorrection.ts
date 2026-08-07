@@ -13,9 +13,14 @@
  * data-api already solves this by preferring the pool-key fee recorded from
  * the `Initialize` event by the ingestion pipeline (see
  * `data-api/src/bl/ProtocolFeeResolver.ts`, `StoredV4Fees.staticLpFeePips`).
- * That Aurora path is not enabled for uniroute in prod, so the fee is read
- * from `StateView.getSlot0`, which returns `lpFee` and `protocolFee`
- * directly — no inversion of the swap-fee formula is needed or attempted.
+ * uniroute has that Aurora access in prod as well — the pool source is
+ * enabled there and primary for `4663:V4` — but it is code-capped to that
+ * combo by `AURORA_SUPPORTED_TARGETS`, so every chain this correction covers
+ * still takes its feeTier from the subgraph. Reading `v4_pool_metadata`'s
+ * `fee_bips` instead is a scoping/rollout step, not a missing capability.
+ * Meanwhile the fee comes from `StateView.getSlot0`, which returns `lpFee`
+ * and `protocolFee` directly — no inversion of the swap-fee formula is
+ * needed or attempted.
  *
  * Applied in the pool-caching cron BEFORE `v4HooksPoolsFiltering`, so the
  * corrected fee feeds the `token0+token1+feeTier` grouping and the canonical
