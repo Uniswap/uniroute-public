@@ -9984,4 +9984,174 @@ describe('QuoteBestSplitFinder', () => {
       expect(sorted[1]).toBe(multiLegCombo);
     });
   });
+
+  describe('shadow-budget checkpoint (SPLIT_FINDER_SHADOW_CHECKPOINT_MS)', () => {
+    const shadowMetricCalls = (): unknown[][] =>
+      (mockContext.metrics.count as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([name]) =>
+          typeof name === 'string' && name.includes('ShadowCheckpoint')
+      );
+
+    const buildTwoLevelSearch = (): Map<number, QuoteBasic[]> => {
+      const pool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x3333333333333333333333333333333333333333'
+      );
+      const quote100 = createMockQuote(
+        createMockRoute([pool1], 100),
+        1000n,
+        0n
+      );
+      const pool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x4444444444444444444444444444444444444444'
+      );
+      const quote50a = createMockQuote(createMockRoute([pool2], 50), 450n, 0n);
+      const pool3 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x5555555555555555555555555555555555555555'
+      );
+      const quote50b = createMockQuote(createMockRoute([pool3], 50), 450n, 0n);
+      return new Map<number, QuoteBasic[]>([
+        [100, [quote100]],
+        [50, [quote50a, quote50b]],
+      ]);
+    };
+
+    it('is fully dark by default (no ShadowCheckpoint metric)', async () => {
+      await finder.findBestSplits(
+        ChainId.MAINNET,
+        buildTwoLevelSearch(),
+        50,
+        2,
+        5,
+        1000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      expect(shadowMetricCalls()).toHaveLength(0);
+    });
+
+    it('emits delta:same_winner when the checkpoint winner holds to the end', async () => {
+      // Every call after startTime reads 150ms elapsed: past the 100ms
+      // checkpoint at the first level boundary, far from the 10s timeout.
+      const startTime = 1_000_000;
+      const dateNowSpy = vi
+        .spyOn(Date, 'now')
+        .mockImplementationOnce(() => startTime)
+        .mockImplementation(() => startTime + 150);
+      const checkpointFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        0n,
+        false,
+        false,
+        0n,
+        false,
+        100
+      );
+
+      await checkpointFinder.findBestSplits(
+        ChainId.MAINNET,
+        buildTwoLevelSearch(),
+        50,
+        2,
+        5,
+        10_000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      dateNowSpy.mockRestore();
+
+      const calls = shadowMetricCalls();
+      expect(calls).toHaveLength(1);
+      const tags = (calls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('delta:same_winner');
+    });
+
+    it('buckets the gas-adjusted delta when a later level finds a better winner', async () => {
+      // Level 2 best = the 100% route (1000; 50+50 = 900 loses). Level 3
+      // finds 50+25+25 = 450 + 800 + 800 = 2050, a >100bps improvement over
+      // the checkpoint snapshot taken at the level-2 boundary. Two 50%
+      // routes keep level 2 productive so the search reaches level 3.
+      const pool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x3333333333333333333333333333333333333333'
+      );
+      const quote100 = createMockQuote(
+        createMockRoute([pool1], 100),
+        1000n,
+        0n
+      );
+      const pool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x4444444444444444444444444444444444444444'
+      );
+      const quote50a = createMockQuote(createMockRoute([pool2], 50), 450n, 0n);
+      const pool5 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x7777777777777777777777777777777777777777'
+      );
+      const quote50b = createMockQuote(createMockRoute([pool5], 50), 450n, 0n);
+      const pool3 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x5555555555555555555555555555555555555555'
+      );
+      const quote25a = createMockQuote(createMockRoute([pool3], 25), 800n, 0n);
+      const pool4 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x6666666666666666666666666666666666666666'
+      );
+      const quote25b = createMockQuote(createMockRoute([pool4], 25), 800n, 0n);
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [quote100]],
+        [50, [quote50a, quote50b]],
+        [25, [quote25a, quote25b]],
+      ]);
+
+      const startTime = 1_000_000;
+      const dateNowSpy = vi
+        .spyOn(Date, 'now')
+        .mockImplementationOnce(() => startTime)
+        .mockImplementation(() => startTime + 150);
+      const checkpointFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        0n,
+        false,
+        false,
+        0n,
+        false,
+        100
+      );
+
+      await checkpointFinder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        25,
+        3,
+        10,
+        10_000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      dateNowSpy.mockRestore();
+
+      const calls = shadowMetricCalls();
+      expect(calls).toHaveLength(1);
+      const tags = (calls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('delta:gte_100bps');
+    });
+  });
 });

@@ -231,6 +231,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    */
   private readonly SPLIT_FINDER_BOUNDED_GROWTH_ENABLED: boolean;
 
+  // Shadow-budget checkpoint (dark unless > 0, via
+  // SPLIT_FINDER_SHADOW_CHECKPOINT_MS): findBestSplits snapshots its
+  // would-be winner at the first level boundary past this elapsed time and
+  // emits the gas-adjusted quality delta against the final winner — the
+  // data for deciding whether the sync split budget can be lowered.
+  // Instrumentation only; selection output is unchanged.
+  private readonly SHADOW_CHECKPOINT_MS: number;
+
   constructor(
     aggHookPartitionToleranceBps = 0n,
     aggHookPartitionGasToleranceUnits = 0n,
@@ -238,7 +246,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     aggHookPartitionUseLowestGasAnchor = false,
     aggHookPartitionUseProjectedGasAdjGate = false,
     aggHookProjectedLossToleranceQT = 0n,
-    splitFinderBoundedGrowthEnabled = false
+    splitFinderBoundedGrowthEnabled = false,
+    shadowCheckpointMs = 0
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
@@ -251,6 +260,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       aggHookPartitionUseProjectedGasAdjGate;
     this.AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT = aggHookProjectedLossToleranceQT;
     this.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED = splitFinderBoundedGrowthEnabled;
+    this.SHADOW_CHECKPOINT_MS = shadowCheckpointMs;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -1999,33 +2009,46 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * @returns Sorted array of route combinations
    *   (descending for ExactIn, ascending for ExactOut)
    */
+  // Gas-adjusted combination score — the selection ranking's single source
+  // of truth, shared with the shadow-checkpoint instrumentation so the
+  // shadow's quality-delta read can never disagree with what selection
+  // would actually rank. ExactIn: amount - gas (higher better); ExactOut:
+  // amount + gas (lower better); raw amount when any leg lacks gas details.
+  private gasAdjustedCombinationScore(
+    combination: RouteBasic<TPool>[],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    tradeType: TradeType
+  ): bigint {
+    let totalAmount = 0n;
+    let totalGasCostInQuoteToken = 0n;
+    let allGasPopulated = true;
+    for (const route of combination) {
+      const quote = quoteMap.get(route);
+      if (!quote) continue;
+      totalAmount += quote.amount;
+      const gasCostInQuoteToken = quote.gasDetails?.gasCostInQuoteToken;
+      if (gasCostInQuoteToken === undefined) {
+        allGasPopulated = false;
+      } else {
+        totalGasCostInQuoteToken += gasCostInQuoteToken;
+      }
+    }
+    return allGasPopulated
+      ? tradeType === TradeType.ExactIn
+        ? totalAmount - totalGasCostInQuoteToken
+        : totalAmount + totalGasCostInQuoteToken
+      : totalAmount;
+  }
+
   private scoreAndSortCombinations(
     combinations: RouteBasic<TPool>[][],
     quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
     tradeType: TradeType
   ): RouteBasic<TPool>[][] {
-    const scoredCombinations = combinations.map(combination => {
-      let totalAmount = 0n;
-      let totalGasCostInQuoteToken = 0n;
-      let allGasPopulated = true;
-      for (const route of combination) {
-        const quote = quoteMap.get(route);
-        if (!quote) continue;
-        totalAmount += quote.amount;
-        const gasCostInQuoteToken = quote.gasDetails?.gasCostInQuoteToken;
-        if (gasCostInQuoteToken === undefined) {
-          allGasPopulated = false;
-        } else {
-          totalGasCostInQuoteToken += gasCostInQuoteToken;
-        }
-      }
-      const score = allGasPopulated
-        ? tradeType === TradeType.ExactIn
-          ? totalAmount - totalGasCostInQuoteToken
-          : totalAmount + totalGasCostInQuoteToken
-        : totalAmount;
-      return {combination, score};
-    });
+    const scoredCombinations = combinations.map(combination => ({
+      combination,
+      score: this.gasAdjustedCombinationScore(combination, quoteMap, tradeType),
+    }));
 
     // Sort by score - descending for EXACT_IN, ascending for EXACT_OUT
     scoredCombinations.sort((a, b) => {
@@ -2164,6 +2187,10 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     let bestCombinationKey: string | null = null;
     let bestFoundAtLevel = 0;
     let currentSearchLevel = 1;
+    // Shadow-budget checkpoint winner (see SHADOW_CHECKPOINT_MS): the
+    // gas-adjusted winner as of the first level boundary at/after the
+    // checkpoint — what a smaller split budget would have returned.
+    let shadowCheckpointBest: {key: string; score: bigint} | undefined;
     // (B) discovery-level map — first level at which each unique combination
     // key was added. Used to log the discovery level of the top results when
     // findBestSplits returns.
@@ -2771,6 +2798,27 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       );
       filterSortLatenciesMs.set(level, Date.now() - filterSortStartTime);
       resultSorted = true;
+      // Shadow-budget snapshot at the level boundary (result[0] is the
+      // gas-adjusted winner right after filterAndSortResults). Boundary
+      // granularity — not exact elapsed — keeps this off the hot DFS path;
+      // for the budget question ("what would a ~checkpoint-sized budget
+      // have returned") a boundary-late snapshot only UNDERSTATES the
+      // quality delta, never overstates it.
+      if (
+        this.SHADOW_CHECKPOINT_MS > 0 &&
+        shadowCheckpointBest === undefined &&
+        result.length > 0 &&
+        Date.now() - startTime >= this.SHADOW_CHECKPOINT_MS
+      ) {
+        shadowCheckpointBest = {
+          key: getCombinationKey(result[0]),
+          score: this.gasAdjustedCombinationScore(
+            result[0],
+            quoteMap,
+            tradeType
+          ),
+        };
+      }
       // The truncation's `fullRoutes.length >= maxSplitRoutes` branch can
       // drop fulls from `result`; recompute so the compaction gate keeps
       // counting only fulls actually in `result` (O(maxSplitRoutes) scan).
@@ -2971,6 +3019,59 @@ export class QuoteBestSplitFinder<TPool extends Pool>
           ]
         : []),
     ]);
+
+    // Shadow-budget quality delta: how much worse the checkpoint-time winner
+    // is than the final winner, gas-adjusted and direction-aware, bucketed
+    // to bounded tag values. Emitted ONLY for searches that ran past the
+    // checkpoint (fast searches are unaffected by any budget change).
+    // Instrumentation must never affect the search result.
+    if (shadowCheckpointBest !== undefined && result.length > 0) {
+      try {
+        const finalBest = result[0];
+        let deltaTag: string;
+        if (getCombinationKey(finalBest) === shadowCheckpointBest.key) {
+          deltaTag = 'delta:same_winner';
+        } else {
+          const finalScore = this.gasAdjustedCombinationScore(
+            finalBest,
+            quoteMap,
+            tradeType
+          );
+          // ExactIn: higher score better, checkpoint worse by final - ckpt.
+          // ExactOut: lower better, checkpoint worse by ckpt - final.
+          const checkpointWorseBy =
+            tradeType === TradeType.ExactOut
+              ? shadowCheckpointBest.score - finalScore
+              : finalScore - shadowCheckpointBest.score;
+          if (checkpointWorseBy <= 0n) {
+            // Different combination, equal-or-better score: the extra
+            // budget changed the winner without improving it.
+            deltaTag = 'delta:equal_or_better';
+          } else {
+            const denom = finalScore < 0n ? -finalScore : finalScore;
+            const bps =
+              denom > 0n ? (checkpointWorseBy * 10_000n) / denom : 10_000n;
+            deltaTag =
+              bps < 1n
+                ? 'delta:lt_1bps'
+                : bps < 10n
+                  ? 'delta:lt_10bps'
+                  : bps < 100n
+                    ? 'delta:lt_100bps'
+                    : 'delta:gte_100bps';
+          }
+        }
+        void Promise.resolve(
+          ctx.metrics.count(
+            buildMetricKey('QuoteBestSplitFinder.ShadowCheckpoint'),
+            1,
+            {tags: [...metricTags, deltaTag]}
+          )
+        ).catch(() => {});
+      } catch {
+        // Shadow instrumentation must not affect split search.
+      }
+    }
 
     // Chosen-split gas comparison: PR #8161/#8195/#8272 closed the per-
     // percentage gates. Post-PR-#8272 prod still shows
