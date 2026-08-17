@@ -18,6 +18,10 @@ import _ from 'lodash';
 
 import {Logger} from './util/log';
 import {IMetric} from './util/metric';
+import {
+  emitSalvagedSubgraphMetaBlock,
+  salvageAllowedSubgraphErrorOrRethrow,
+} from './util/allowedSubgraphError';
 import {ProviderConfig} from './provider';
 
 export interface ISubgraphProvider<TSubgraphPool> {
@@ -237,6 +241,7 @@ export abstract class SubgraphProvider<
           query getV4PermissionedHookPools($pageSize: Int!, $id: String, $permissionedHooks: [String!]!, $permissionedAdapters: [String!]!, $knownTokens: [String!]!${endIdVar(shard)}) {
             pools(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -279,6 +284,7 @@ export abstract class SubgraphProvider<
         query getV4TvlBypassHookPools($pageSize: Int!, $id: String, $tvlBypassHooks: [String!]!${endIdVar(shard)}) {
           pools(
             first: $pageSize
+            subgraphError: allow
             ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
             where: {
               id_gt: $id,
@@ -302,6 +308,7 @@ export abstract class SubgraphProvider<
           query getHighTrackedETHPools($pageSize: Int!, $id: String, $threshold: String!${endIdVar(shard)}) {
             pools(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -326,6 +333,7 @@ export abstract class SubgraphProvider<
           query getV4HighLiquidityPools($pageSize: Int!, $id: String, $minTvl: String!${endIdVar(shard)}) {
             pools(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -353,6 +361,7 @@ export abstract class SubgraphProvider<
           query getV3ZeroETHPools($pageSize: Int!, $id: String${endIdVar(shard)}) {
             pools(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -387,6 +396,7 @@ export abstract class SubgraphProvider<
 
     let allPools: TRawSubgraphPool[] = [];
     let retries = 0;
+    let salvagedAnyPage = false;
 
     await retry(
       async () => {
@@ -423,14 +433,35 @@ export abstract class SubgraphProvider<
               `Starting fetching for ${queryConfig.name}${shardLabel} page ${totalPages} with page size ${pageSizeToUse}`
             );
 
-            const poolsResult = await this.client.request<{
-              pools: TRawSubgraphPool[];
-            }>(queryDocument, {
-              pageSize: pageSizeToUse,
-              id: lastId,
-              ...(shard.endId !== undefined ? {endId: shard.endId} : {}),
-              ...queryConfig.variables,
-            });
+            let poolsResult: {pools: TRawSubgraphPool[]};
+            try {
+              poolsResult = await this.client.request<{
+                pools: TRawSubgraphPool[];
+              }>(queryDocument, {
+                pageSize: pageSizeToUse,
+                id: lastId,
+                ...(shard.endId !== undefined ? {endId: shard.endId} : {}),
+                ...queryConfig.variables,
+              });
+            } catch (err) {
+              // The queries pass subgraphError: allow, so a deterministic
+              // indexing error still returns usable (chain-head) data — but
+              // graphql-request throws whenever the response carries errors,
+              // even alongside data. Salvage that case so a non-fatal
+              // subgraph error degrades to flagged-but-fresh pools instead
+              // of zeroing the snapshot; anything else rethrows.
+              poolsResult = salvageAllowedSubgraphErrorOrRethrow<{
+                pools: TRawSubgraphPool[];
+              }>({
+                err,
+                rootField: 'pools',
+                label: `${queryConfig.name}${shardLabel} page ${totalPages}`,
+                logger: this.logger,
+                metric: this.metric,
+                metricTags: shardedMetricTags,
+              });
+              salvagedAnyPage = true;
+            }
 
             poolsPage = poolsResult.pools;
 
@@ -554,6 +585,18 @@ export abstract class SubgraphProvider<
       undefined,
       this.metricTags
     );
+
+    if (salvagedAnyPage) {
+      // Green cron ≠ healthy subgraph: this gauge is what distinguishes
+      // "advancing past a non-fatal error" from "frozen at the failure
+      // block" — see emitSalvagedSubgraphMetaBlock.
+      await emitSalvagedSubgraphMetaBlock({
+        client: this.client,
+        logger: this.logger,
+        metric: this.metric,
+        metricTags: this.metricTags,
+      });
+    }
 
     const beforeFilter = Date.now();
     let poolsSanitized: TSubgraphPool[] = [];

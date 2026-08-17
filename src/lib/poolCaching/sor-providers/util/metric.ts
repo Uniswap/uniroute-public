@@ -44,4 +44,17 @@ export abstract class IMetric {
     unit?: MetricLoggerUnit,
     tags?: Record<string, string>
   ): void;
+
+  /**
+   * Emit a point-in-time level (e.g. a block height) as a Datadog gauge.
+   * putMetric can't express this: the ported MetricLoggerUnit set has no
+   * unit for dimensionless levels, so unit-less values land as `.dist`
+   * distributions, which are allowlist-gated. Default no-op so test fakes
+   * and Noop implementations are unaffected.
+   */
+  putGauge(
+    _key: string,
+    _value: number,
+    _tags?: Record<string, string>
+  ): void {}
 }

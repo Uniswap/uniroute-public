@@ -49,6 +49,70 @@ export function hasCustomAccountingPermissions(hookAddress: string): boolean {
   );
 }
 
+function buildPoolCurrencyPair(
+  pool: V4SubgraphPool,
+  chainId: ChainId,
+  decimalsOverride?: number
+): [Currency, Currency] {
+  const buildCurrency = (token: V4SubgraphPool['token0']): Currency =>
+    token.id === ADDRESS_ZERO
+      ? nativeOnChain(chainId)
+      : new Token(
+          chainId,
+          token.id,
+          decimalsOverride ?? parseInt(token.decimals),
+          token.symbol,
+          token.name
+        );
+  return [buildCurrency(pool.token0), buildCurrency(pool.token1)];
+}
+
+// Both unvetted admission gates — isHooksPoolRoutable (routable queue) and
+// isAutoAllowlistedHook (auto-admit fallback) — must reject dynamic-fee pools:
+// a hook can set its fee from a plain beforeSwap with no custom-accounting
+// permission bits, so permission checks alone cannot catch it. Matches against
+// the pool id (ground truth) rather than the subgraph-reported feeTier string.
+function isDynamicFeePool(
+  pool: V4SubgraphPool,
+  chainId: ChainId,
+  logger: Logger
+): boolean {
+  try {
+    const [tokenA, tokenB] = buildPoolCurrencyPair(pool, chainId);
+    return isPoolFeeDynamic(
+      tokenA,
+      tokenB,
+      Number(pool.tickSpacing),
+      pool.hooks,
+      pool.id
+    );
+  } catch (e) {
+    logger?.error(
+      `Error creating tokens for pool ${pool.id} on chain ${chainId} with token0 decimals ${pool.token0.decimals} token1 decimals ${pool.token1.decimals}: ${e}`
+    );
+
+    try {
+      // hardcode to 18 decimals since we cannot parse and pass the token invariant checks
+      const [tokenA, tokenB] = buildPoolCurrencyPair(pool, chainId, 18);
+      return isPoolFeeDynamic(
+        tokenA,
+        tokenB,
+        Number(pool.tickSpacing),
+        pool.hooks,
+        pool.id
+      );
+    } catch (fallbackError) {
+      // Fail closed: a pool that can't be classified even with the decimals
+      // fallback (e.g. an unparseable token address) is treated as dynamic so
+      // both gates reject it, rather than the throw aborting the whole batch.
+      logger?.error(
+        `Error classifying dynamic fee for pool ${pool.id} on chain ${chainId} after 18-decimal fallback, treating as dynamic: ${fallbackError}`
+      );
+      return true;
+    }
+  }
+}
+
 function isHooksPoolRoutable(
   pool: V4SubgraphPool,
   chainId: ChainId,
@@ -56,27 +120,6 @@ function isHooksPoolRoutable(
   metric: IMetric
 ): boolean {
   try {
-    const tokenA: Currency =
-      pool.token0.id === ADDRESS_ZERO
-        ? nativeOnChain(chainId)
-        : new Token(
-            chainId,
-            pool.token0.id,
-            parseInt(pool.token0.decimals),
-            pool.token0.symbol,
-            pool.token0.name
-          );
-    const tokenB: Currency =
-      pool.token1.id === ADDRESS_ZERO
-        ? nativeOnChain(chainId)
-        : new Token(
-            chainId,
-            pool.token1.id,
-            parseInt(pool.token1.decimals),
-            pool.token1.symbol,
-            pool.token1.name
-          );
-
     metric?.putMetric(
       `Hook.hasSwapPermissions.${Hook.hasSwapPermissions(pool.hooks)}`,
       1,
@@ -87,61 +130,18 @@ function isHooksPoolRoutable(
       1,
       MetricLoggerUnit.Count
     );
-
-    return (
-      pool.hooks === ADDRESS_ZERO ||
-      (!Hook.hasSwapPermissions(pool.hooks) &&
-        !hasCustomAccountingPermissions(pool.hooks) &&
-        Number(pool.feeTier) <= 1000000 &&
-        !isPoolFeeDynamic(
-          tokenA,
-          tokenB,
-          Number(pool.tickSpacing),
-          pool.hooks,
-          pool.id
-        ))
-    );
   } catch (e) {
-    logger?.error(
-      `Error creating tokens for pool ${pool.id} on chain ${chainId} with token0 decimals ${pool.token0.decimals} token1 decimals ${pool.token1.decimals}: ${e}`
-    );
-
-    // hardcode to 18 decimals since we cannot parse and pass the token invariant checks
-    const tokenA: Currency =
-      pool.token0.id === ADDRESS_ZERO
-        ? nativeOnChain(chainId)
-        : new Token(
-            chainId,
-            pool.token0.id,
-            18,
-            pool.token0.symbol,
-            pool.token0.name
-          );
-    const tokenB: Currency =
-      pool.token1.id === ADDRESS_ZERO
-        ? nativeOnChain(chainId)
-        : new Token(
-            chainId,
-            pool.token1.id,
-            18,
-            pool.token1.symbol,
-            pool.token1.name
-          );
-
-    return (
-      pool.hooks === ADDRESS_ZERO ||
-      (!Hook.hasSwapPermissions(pool.hooks) &&
-        !hasCustomAccountingPermissions(pool.hooks) &&
-        Number(pool.feeTier) <= 1000000 &&
-        !isPoolFeeDynamic(
-          tokenA,
-          tokenB,
-          Number(pool.tickSpacing),
-          pool.hooks,
-          pool.id
-        ))
-    );
+    // A metric-emission failure must not abort filtering for the whole batch.
+    logger?.error(`Error emitting hook metrics for pool ${pool.id}: ${e}`);
   }
+
+  return (
+    pool.hooks === ADDRESS_ZERO ||
+    (!Hook.hasSwapPermissions(pool.hooks) &&
+      !hasCustomAccountingPermissions(pool.hooks) &&
+      Number(pool.feeTier) <= 1000000 &&
+      !isDynamicFeePool(pool, chainId, logger))
+  );
 }
 
 // it has to be a min heap in order to preserve the top eth tvl v4 pools
@@ -227,14 +227,15 @@ export function v4HooksPoolsFiltering(
   };
 
   // Auto-allowlisted: non-denylisted, non-zero-address hooks on non-major pairs
-  // without custom accounting. These get their own separate top-N TVL queue
-  // (parallel to routable hooks) to bound pool cache file size.
+  // without custom accounting or a dynamic fee. These get their own separate
+  // top-N TVL queue (parallel to routable hooks) to bound pool cache file size.
   const isAutoAllowlistedHook = (pool: V4SubgraphPool): boolean => {
     const hookAddress = pool.hooks.toLowerCase();
     if (denylistedHooksAddresses.has(hookAddress)) return false;
     if (hookAddress === ADDRESS_ZERO) return false;
     if (hasCustomAccountingPermissions(hookAddress)) return false;
     if (isMajorPair(pool.token0.id, pool.token1.id, majorTokens)) return false;
+    if (isDynamicFeePool(pool, chainId, logger)) return false;
     return true;
   };
 

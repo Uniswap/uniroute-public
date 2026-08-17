@@ -535,6 +535,9 @@ export const LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET =
 export const LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET =
   '0x958942af77dcd973b815b2a16bd88a5134c46888';
 
+// Declared above ZLCA_HOOKS_PER_CHAIN, which references it at module load.
+export const ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET =
+  '0x2494d3d872a99b7b055304692454a226879de888';
 export const DUALPOOL_HOOK_ON_MAINNET =
   '0x00000078bd49d5279a99b5f4011a5c61ee8caac0';
 
@@ -585,7 +588,11 @@ export const DUALPOOL_HOOK_ON_MAINNET =
  * 258-275k for the full hop vs a ~60-97k heuristic base, doubled for
  * headroom since quoter view-calls understate tx-context cost by
  * +67k..+188k in the agg-hook calibration. The dualpool 3M is per the hook
- * team's guidance.
+ * team's guidance. The eToro RFQ 250k was calibrated 2026-08-14: V4Quoter
+ * view-calls through all three live pools measured 85,130-87,495 for the
+ * full hop (both directions), so the callback's excess over the ~60-97k
+ * heuristic base is <=~27k; doubled plus the +188k view-call
+ * understatement bound stays under 250k.
  *
  * Add future zero-liquidity custom-accounting hooks here to pick up the
  * same treatment automatically.
@@ -601,6 +608,7 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET]: 500_000n,
     [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: 500_000n,
     [DUALPOOL_HOOK_ON_MAINNET]: 3_000_000n,
+    [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: 250_000n,
   },
 };
 
@@ -750,6 +758,22 @@ export const ARCHERY_FEE_HOOK_V2_ON_ROBINHOOD =
   '0xd790922706d434f7925b4998a4fe72feb68ae0cc';
 export const PONS_V2_MEME_HOOK_ON_ROBINHOOD_3 =
   '0xe5e702641ea86f4ae6cc3cdaed2b886f976be044';
+export const PR_ADAPTIVE_HOOK_V2_ON_ROBINHOOD =
+  '0xc3c15bde8bfb101bbdb36932b2222791f5f1c0cc';
+export const DIRECTIONAL_FEE_HOOK_ON_ROBINHOOD =
+  '0x62f788a21a26ee3fe5d70ef6ef9942d8b2cb8044';
+export const MULTI_HOOK_HOST_V10_ON_ROBINHOOD =
+  '0x48c22af8ad989fc9d5e82d6055dc0f263076e0c4';
+export const MULTI_HOOK_HOST_V11_ON_ROBINHOOD =
+  '0x83d6fa59bef503112887b16277cf559fdc93e0c4';
+export const STOCK_RIP_TOKEN_HOOK_ON_ROBINHOOD =
+  '0xf295127365a2c3055fdfba01b0596da56dcfa444';
+export const BALLISTIC_FEE_HOOK_V3_ON_MAINNET =
+  '0xffbfa95c07ba855fee037350634aba4a404e20cc';
+export const ALPHA_HOOK_3PCT_ON_BNB =
+  '0x10d46c0ea45c5257a1e29c8dced7ede70125e0c4';
+export const ALPHA_HOOK_2PCT_ON_BNB =
+  '0x9c854853e00bfe5867a86a37fb1030f259a5a0c4';
 
 export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
@@ -912,6 +936,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FWATOKENHOOK_ON_MAINNET_2,
     PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET,
     PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET,
+    BALLISTIC_FEE_HOOK_V3_ON_MAINNET,
+    ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -977,6 +1003,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_BSC_v2,
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_BNB,
     VERSUS_PROTECTED_HOOK_ON_BNB,
+    ALPHA_HOOK_3PCT_ON_BNB,
+    ALPHA_HOOK_2PCT_ON_BNB,
   ],
   [ChainId.AVALANCHE]: [
     ADDRESS_ZERO,
@@ -1179,6 +1207,11 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     QUOTE_ASSET_CREATOR_FEE_HOOK_V1_ON_ROBINHOOD,
     ARCHERY_FEE_HOOK_V2_ON_ROBINHOOD,
     PONS_V2_MEME_HOOK_ON_ROBINHOOD_3,
+    PR_ADAPTIVE_HOOK_V2_ON_ROBINHOOD,
+    DIRECTIONAL_FEE_HOOK_ON_ROBINHOOD,
+    MULTI_HOOK_HOST_V10_ON_ROBINHOOD,
+    MULTI_HOOK_HOST_V11_ON_ROBINHOOD,
+    STOCK_RIP_TOKEN_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],

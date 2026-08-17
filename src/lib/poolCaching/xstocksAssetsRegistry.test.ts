@@ -32,6 +32,7 @@ const metric = {
   setProperty() {},
   putDimensions() {},
   putMetric() {},
+  putGauge() {},
 } as IMetric;
 
 const run = async (

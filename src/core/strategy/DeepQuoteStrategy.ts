@@ -16,6 +16,7 @@ import {
   logElapsedTime,
   updateQuotesWithFreshPoolDetailsUsingPoolsMap,
 } from '../../lib/helpers';
+import {parsePositiveIntEnvOrDefault} from '../../lib/envParsing';
 import {RouteBasic} from '../../models/route/RouteBasic';
 import {Pool} from '../../models/pool/Pool';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
@@ -114,19 +115,15 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     // is unchanged. See QuoteBestSplitFinder.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED.
     const boundedGrowthEnabled =
       process.env.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED === 'true';
-    // Shadow-budget checkpoint for the split search (dark by default): when
-    // > 0, findBestSplits snapshots its would-be winner at the first level
+    // Shadow-budget checkpoint for the split search (dark at 0): when > 0,
+    // findBestSplits snapshots its would-be winner at the first level
     // boundary past this elapsed time and emits the quality delta vs the
-    // final winner (QuoteBestSplitFinder.ShadowCheckpoint) — the data for
-    // the "can the sync split budget be lowered?" decision. Suggested
-    // canary value: 1500 (half the 3s sync budget).
-    const parsedShadowCheckpointMs = Number(
-      process.env.SPLIT_FINDER_SHADOW_CHECKPOINT_MS
+    // final winner (QuoteBestSplitFinder.ShadowCheckpoint). Metric-only;
+    // selection output is unchanged at any value.
+    const shadowCheckpointMs = parsePositiveIntEnvOrDefault(
+      'SPLIT_FINDER_SHADOW_CHECKPOINT_MS',
+      0
     );
-    const shadowCheckpointMs =
-      Number.isFinite(parsedShadowCheckpointMs) && parsedShadowCheckpointMs > 0
-        ? parsedShadowCheckpointMs
-        : 0;
     this.quoteBestSplitFinder = new QuoteBestSplitFinder<Pool>(
       0n,
       0n,

@@ -3,8 +3,9 @@ import {
   v4HooksPoolsFiltering,
   hasCustomAccountingPermissions,
 } from './v4HooksPoolsFiltering';
-import {ChainId} from '@uniswap/sdk-core';
+import {ChainId, Token} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+import {DYNAMIC_FEE_FLAG, Pool} from '@uniswap/v4-sdk';
 import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
 import type {Logger} from '../sor-providers/util/log';
 import {IMetric} from '../sor-providers/util/metric';
@@ -552,8 +553,13 @@ describe('v4HooksPoolsFiltering', () => {
   // --- Error in token creation falling back to 18 decimals ---
   describe('token creation error fallback', () => {
     it('falls back to 18 decimals when token decimals are invalid', () => {
+      // A hookless (ADDRESS_ZERO) pool can never carry a dynamic fee — there's no
+      // hook to set one — so isDynamicFeePool (and its token construction) is now
+      // correctly skipped for it via short-circuit. Use a real, no-swap-permission
+      // hook instead so the dynamic-fee check (and its decimals fallback) actually runs.
+      const hookNoSwap = '0x0000000000000000000000000000000000000100';
       const pool = createPool({
-        hooks: ADDRESS_ZERO,
+        hooks: hookNoSwap,
         tvlETH: 100,
         token0: {
           id: '0x0000000000000000000000000000000000000001',
@@ -1661,5 +1667,197 @@ describe('v4HooksPoolsFiltering dynamic ZLCA per-hook pool cap', () => {
     );
     expect(result.length).toBe(50);
     expect(Math.min(...result.map(p => p.tvlETH))).toBe(10);
+  });
+});
+
+describe('dynamic fee hooks excluded from auto-allowlist', () => {
+  // beforeSwap-only permission bit (no custom-accounting returns-delta bits),
+  // so absent the dynamic-fee check this would auto-allowlist on any non-major pair.
+  const dynamicFeeHook = '0x0000000000000000000000000000000000000080';
+  const tickSpacing = 60;
+
+  const nonMajorToken0 = {
+    id: '0x00000000000000000000000000000000000000a1',
+    symbol: 'TOKEN_A',
+    name: 'Token A',
+    decimals: '18',
+  };
+  const nonMajorToken1 = {
+    id: '0x00000000000000000000000000000000000000a2',
+    symbol: 'TOKEN_B',
+    name: 'Token B',
+    decimals: '18',
+  };
+
+  // Recompute the pool id the same way isDynamicFeePool does, so the pool
+  // genuinely satisfies isPoolFeeDynamic rather than merely carrying the
+  // sentinel feeTier string.
+  const buildDynamicFeePool = (chainId: ChainId): V4SubgraphPool => {
+    const tokenA = new Token(
+      chainId,
+      nonMajorToken0.id,
+      parseInt(nonMajorToken0.decimals),
+      nonMajorToken0.symbol,
+      nonMajorToken0.name
+    );
+    const tokenB = new Token(
+      chainId,
+      nonMajorToken1.id,
+      parseInt(nonMajorToken1.decimals),
+      nonMajorToken1.symbol,
+      nonMajorToken1.name
+    );
+    const poolId = Pool.getPoolId(
+      tokenA,
+      tokenB,
+      DYNAMIC_FEE_FLAG,
+      tickSpacing,
+      dynamicFeeHook
+    );
+    return createPool({
+      id: poolId,
+      hooks: dynamicFeeHook,
+      feeTier: String(DYNAMIC_FEE_FLAG),
+      tickSpacing: String(tickSpacing),
+      token0: nonMajorToken0,
+      token1: nonMajorToken1,
+      tvlETH: 100,
+    });
+  };
+
+  it('rejects a dynamic-fee hook on a non-major pair on mainnet (previously auto-allowlisted)', () => {
+    const pool = buildDynamicFeePool(ChainId.MAINNET);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [pool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('rejects a dynamic-fee hook on a non-major pair on Robinhood chain (no major-token list at all)', () => {
+    const pool = buildDynamicFeePool(ChainId.ROBINHOOD);
+    const result = v4HooksPoolsFiltering(
+      ChainId.ROBINHOOD,
+      [pool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('still auto-allowlists the same hook/pair shape when the pool is not actually dynamic-fee (regression)', () => {
+    const pool = createPool({
+      hooks: dynamicFeeHook,
+      feeTier: '3000',
+      tickSpacing: String(tickSpacing),
+      token0: nonMajorToken0,
+      token1: nonMajorToken1,
+      tvlETH: 100,
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [pool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.length).toBe(1);
+  });
+
+  // Trusted bypasses are deliberately untouched by this fix — only the
+  // unvetted auto-allowlist fallback gained the dynamic-fee check.
+  it('still admits a genuinely dynamic-fee hook when it is in the dynamic ZLCA set (trusted bypass unaffected)', () => {
+    const pool = buildDynamicFeePool(ChainId.MAINNET);
+    const result = v4HooksPoolsFiltering(
+      ChainId.MAINNET,
+      [pool],
+      mockLogger,
+      mockMetric,
+      new Set([dynamicFeeHook])
+    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(
+      pool.id.toLowerCase()
+    );
+  });
+
+  it('still admits a genuinely dynamic-fee hook via the explicit static allowlist (trusted bypass unaffected)', () => {
+    const tokenA = new Token(
+      ChainId.BASE,
+      nonMajorToken0.id,
+      parseInt(nonMajorToken0.decimals),
+      nonMajorToken0.symbol,
+      nonMajorToken0.name
+    );
+    const tokenB = new Token(
+      ChainId.BASE,
+      nonMajorToken1.id,
+      parseInt(nonMajorToken1.decimals),
+      nonMajorToken1.symbol,
+      nonMajorToken1.name
+    );
+    const poolId = Pool.getPoolId(
+      tokenA,
+      tokenB,
+      DYNAMIC_FEE_FLAG,
+      tickSpacing,
+      CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE
+    );
+    const pool = createPool({
+      id: poolId,
+      hooks: CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_BASE,
+      feeTier: String(DYNAMIC_FEE_FLAG),
+      tickSpacing: String(tickSpacing),
+      token0: nonMajorToken0,
+      token1: nonMajorToken1,
+      tvlETH: 100,
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.BASE,
+      [pool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(
+      pool.id.toLowerCase()
+    );
+  });
+
+  it('fails closed on an unclassifiable pool (invalid token address) instead of throwing and aborting the batch', () => {
+    // Token construction throws on the address itself, so the 18-decimal
+    // fallback throws too — isDynamicFeePool must treat the pool as dynamic
+    // (rejected from both gates), not propagate and kill the whole filter run.
+    const unclassifiablePool = createPool({
+      hooks: dynamicFeeHook,
+      feeTier: '3000',
+      tickSpacing: String(tickSpacing),
+      token0: {
+        id: 'not-a-valid-address',
+        symbol: 'BAD',
+        name: 'Bad Token',
+        decimals: '18',
+      },
+      token1: nonMajorToken1,
+      tvlETH: 100,
+    });
+    const healthyPool = createPool({
+      hooks: dynamicFeeHook,
+      feeTier: '3000',
+      tickSpacing: String(tickSpacing),
+      token0: nonMajorToken0,
+      token1: nonMajorToken1,
+      tvlETH: 100,
+    });
+    let result: V4SubgraphPool[] = [];
+    expect(() => {
+      result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [unclassifiablePool, healthyPool],
+        mockLogger,
+        mockMetric
+      );
+    }).not.toThrow();
+    // The malformed pool is dropped; the rest of the batch survives.
+    expect(result.map(p => p.id)).toEqual([healthyPool.id]);
   });
 });

@@ -10072,6 +10072,10 @@ describe('QuoteBestSplitFinder', () => {
       expect(calls).toHaveLength(1);
       const tags = (calls[0][2] as {tags: string[]}).tags;
       expect(tags).toContain('delta:same_winner');
+      // The snapshot boundary (level 2, maxSplits 2) was the last boundary:
+      // same_winner is true by construction and tagged as such.
+      expect(tags).toContain('levelsAfterCheckpoint:0');
+      expect(tags).toContain('budgetMs:10000');
     });
 
     it('buckets the gas-adjusted delta when a later level finds a better winner', async () => {
@@ -10151,6 +10155,92 @@ describe('QuoteBestSplitFinder', () => {
       const calls = shadowMetricCalls();
       expect(calls).toHaveLength(1);
       const tags = (calls[0][2] as {tags: string[]}).tags;
+      expect(tags).toContain('delta:gte_100bps');
+      // Level 3 completed after the level-2 snapshot: a real window.
+      expect(tags).toContain('levelsAfterCheckpoint:1');
+    });
+
+    it('detects a post-checkpoint winner change in the truncation branch (result[0] is a pinned full route)', async () => {
+      // maxSplitRoutes = 2 forces filterAndSortResults into its truncation
+      // branch, where result[0] is the first-inserted 100% route in
+      // insertion order, NOT the score winner. The snapshot/emission must
+      // use the max-score scan or this degenerates to same_winner on
+      // exactly the large searches the budget decision is about.
+      const pool1 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x3333333333333333333333333333333333333333'
+      );
+      const quote100 = createMockQuote(
+        createMockRoute([pool1], 100),
+        1000n,
+        0n
+      );
+      const pool2 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x4444444444444444444444444444444444444444'
+      );
+      const quote50a = createMockQuote(createMockRoute([pool2], 50), 450n, 0n);
+      const pool5 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x7777777777777777777777777777777777777777'
+      );
+      const quote50b = createMockQuote(createMockRoute([pool5], 50), 450n, 0n);
+      const pool3 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x5555555555555555555555555555555555555555'
+      );
+      const quote25a = createMockQuote(createMockRoute([pool3], 25), 800n, 0n);
+      const pool4 = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x6666666666666666666666666666666666666666'
+      );
+      const quote25b = createMockQuote(createMockRoute([pool4], 25), 800n, 0n);
+      const percentageToQuotes = new Map<number, QuoteBasic[]>([
+        [100, [quote100]],
+        [50, [quote50a, quote50b]],
+        [25, [quote25a, quote25b]],
+      ]);
+
+      const startTime = 1_000_000;
+      const dateNowSpy = vi
+        .spyOn(Date, 'now')
+        .mockImplementationOnce(() => startTime)
+        .mockImplementation(() => startTime + 150);
+      const checkpointFinder = new QuoteBestSplitFinder<MockPool>(
+        0n,
+        0n,
+        0n,
+        false,
+        false,
+        0n,
+        false,
+        100
+      );
+
+      await checkpointFinder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        25,
+        3,
+        2, // maxSplitRoutes: forces the truncation branch every level
+        10_000,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      dateNowSpy.mockRestore();
+
+      const calls = shadowMetricCalls();
+      expect(calls).toHaveLength(1);
+      const tags = (calls[0][2] as {tags: string[]}).tags;
+      // Level 3's 50+25+25 = 2050 beats the checkpoint-time winner (the
+      // 100% route at 1000) by >100bps; a result[0]-based comparison
+      // would have reported same_winner here.
       expect(tags).toContain('delta:gte_100bps');
     });
   });

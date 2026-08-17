@@ -18,6 +18,11 @@ import {
 import {Context} from '@uniswap/lib-uni/context';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {
+  IV4PoolKeyRegistry,
+  V4RegistryPoolKey,
+} from '../../stores/pool/V4PoolKeyRegistryStore';
+import {MAX_REGISTRY_ENTRIES_PER_PAIR} from '../../lib/poolCaching/util/v4PoolKeyRegistryFormat';
 import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
@@ -125,12 +130,13 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
 
 // Worst-case pool count returned by manuallyGenerateDirectPairs across all
 // (protocol, chain) combos. V2 → 1, V3 → up to V3FeeAmountsBase.length (BASE
-// has the most fee tiers), V4 → V4FeeAmounts.length. Auto-tracks if any
-// protocol adds a fee tier.
+// has the most fee tiers), V4 → the canonical grid plus up to
+// MAX_REGISTRY_ENTRIES_PER_PAIR PoolKey-registry entries. Auto-tracks if any
+// protocol adds a fee tier or the registry cap moves.
 export const MAX_MANUAL_DIRECT_PAIRS_FALLBACK = Math.max(
   1,
   V3FeeAmountsBase.length,
-  V4FeeAmounts.length
+  V4FeeAmounts.length + MAX_REGISTRY_ENTRIES_PER_PAIR
 );
 
 // Strict upper bound on pools BasicTopPoolsSelector.filterPools can return for
@@ -171,7 +177,10 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     private readonly chainRepository: IChainRepository,
     private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
     protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository,
-    private readonly snapshotMemoEnabled: boolean = false
+    private readonly snapshotMemoEnabled: boolean = false,
+    // Optional so existing construction sites keep working; without it the
+    // manual direct-pair fallback stays on the canonical grid alone.
+    private readonly poolKeyRegistry?: IV4PoolKeyRegistry
   ) {}
 
   public async filterPools(
@@ -1136,9 +1145,34 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       }
       case Protocol.V4: {
         if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
-          forceAddedDirectPools = getApplicableV4FeesTickspacingsHooks(
-            chainId
-          ).map(v4PoolParams => {
+          // Registry PoolKeys extend the "pool exists on chain but the
+          // snapshot missed it" safety net to non-canonical tiers. Accepted
+          // cost, shared with the canonical grid entries: the placeholder
+          // TVL/liquidity below flows into route candidates until fresh
+          // on-chain state replaces it, so a registry entry with no real
+          // liquidity can transiently reach route generation — the quoter's
+          // on-chain read then prices it out. A registry failure must never
+          // fail the fallback: degrade to the canonical grid alone.
+          let registryKeys: V4RegistryPoolKey[] = [];
+          try {
+            registryKeys =
+              (await this.poolKeyRegistry?.getPoolKeysForPair(
+                chainId,
+                tokenInAddress,
+                tokenOutAddress
+              )) ?? [];
+          } catch {
+            // Store contract is never-throw; guard other implementations.
+          }
+          const v4Combos: Array<[number, number, string]> = [
+            ...getApplicableV4FeesTickspacingsHooks(chainId),
+            ...registryKeys.map((key): [number, number, string] => [
+              key.fee,
+              key.tickSpacing,
+              key.hooks,
+            ]),
+          ];
+          forceAddedDirectPools = v4Combos.map(v4PoolParams => {
             const fee = v4PoolParams[0];
             const tickSpacing = v4PoolParams[1];
             const hooks = v4PoolParams[2];

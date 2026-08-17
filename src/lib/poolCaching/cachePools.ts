@@ -30,6 +30,12 @@ import {
   ChainProtocol,
 } from './cacheConfig';
 import {applyAuroraPoolSources} from './auroraPoolsSource';
+import {materializeV4PoolKeyRegistries} from './v4PoolKeyRegistry';
+
+// Bounds the registry step (per run, all chains): Aurora reads take single-
+// digit seconds per chain and the writes are small, so 2 minutes is generous
+// without letting a hung connection stall the run into its outer timeout.
+const V4_POOLKEY_REGISTRY_STEP_TIMEOUT_MS = 120_000;
 import {S3_POOL_CACHE_KEY} from './util/poolCacheKey';
 import {withTimeout} from './util/withTimeout';
 import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
@@ -912,6 +918,29 @@ export async function cacheAllPools(
         succeeded += 1;
       }
     });
+  }
+
+  // All-chains job only: the scoped fast jobs (`only` set) run on a tight
+  // budget. Fail-soft AND time-bounded — a registry failure or a stalled
+  // Aurora read/S3 PUT must neither fail the run nor eat its budget (the
+  // timeout detaches the step; writes stay safe via freshness arbitration).
+  if (only === undefined || only.length === 0) {
+    try {
+      await withTimeout(
+        materializeV4PoolKeyRegistries(
+          s3,
+          {s3Bucket: config.s3Bucket},
+          cronLogger,
+          metricInstance
+        ),
+        V4_POOLKEY_REGISTRY_STEP_TIMEOUT_MS,
+        'v4PoolKeyRegistry'
+      );
+    } catch (err) {
+      cronLogger.error(
+        `V4 PoolKey registry materialization failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
 
   cronLogger.info(

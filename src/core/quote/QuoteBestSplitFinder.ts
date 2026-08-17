@@ -1975,6 +1975,69 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     );
   }
 
+  // Gas-adjusted combination score — the selection ranking's single source
+  // of truth, shared with the shadow-checkpoint instrumentation so the
+  // shadow's quality-delta read can never disagree with what selection
+  // would actually rank. ExactIn: amount - gas (higher better); ExactOut:
+  // amount + gas (lower better); raw amount when any leg lacks gas details.
+  private gasAdjustedCombinationScore(
+    combination: RouteBasic<TPool>[],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    tradeType: TradeType
+  ): bigint {
+    let totalAmount = 0n;
+    let totalGasCostInQuoteToken = 0n;
+    let allGasPopulated = true;
+    for (const route of combination) {
+      const quote = quoteMap.get(route);
+      if (!quote) continue;
+      totalAmount += quote.amount;
+      const gasCostInQuoteToken = quote.gasDetails?.gasCostInQuoteToken;
+      if (gasCostInQuoteToken === undefined) {
+        allGasPopulated = false;
+      } else {
+        totalGasCostInQuoteToken += gasCostInQuoteToken;
+      }
+    }
+    return allGasPopulated
+      ? tradeType === TradeType.ExactIn
+        ? totalAmount - totalGasCostInQuoteToken
+        : totalAmount + totalGasCostInQuoteToken
+      : totalAmount;
+  }
+
+  // Direction-aware best combination of `result` under the selection
+  // scoring. Deliberately NOT result[0]: filterAndSortResults' truncation
+  // branch returns [fullRoutes (unscored, insertion order), ...splits], so
+  // on exactly the large searches the shadow checkpoint targets, result[0]
+  // is a pinned first-inserted full route, not the winner (see the
+  // FilterAndSortFullRouteBias note below). O(result.length), bounded by
+  // maxSplitRoutes.
+  private bestScoredCombination(
+    result: RouteBasic<TPool>[][],
+    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
+    tradeType: TradeType,
+    getKey: (combination: RouteBasic<TPool>[]) => string
+  ): {key: string; score: bigint} | undefined {
+    let best: {key: string; score: bigint} | undefined;
+    for (const combination of result) {
+      const score = this.gasAdjustedCombinationScore(
+        combination,
+        quoteMap,
+        tradeType
+      );
+      const better =
+        best === undefined ||
+        (tradeType === TradeType.ExactOut
+          ? score < best.score
+          : score > best.score);
+      if (better) {
+        best = {key: getKey(combination), score};
+      }
+    }
+    return best;
+  }
+
   /**
    * Scores and sorts route combinations by gas-adjusted total quote
    * amount when `gasCostInQuoteToken` is populated on each leg's
@@ -2009,37 +2072,6 @@ export class QuoteBestSplitFinder<TPool extends Pool>
    * @returns Sorted array of route combinations
    *   (descending for ExactIn, ascending for ExactOut)
    */
-  // Gas-adjusted combination score — the selection ranking's single source
-  // of truth, shared with the shadow-checkpoint instrumentation so the
-  // shadow's quality-delta read can never disagree with what selection
-  // would actually rank. ExactIn: amount - gas (higher better); ExactOut:
-  // amount + gas (lower better); raw amount when any leg lacks gas details.
-  private gasAdjustedCombinationScore(
-    combination: RouteBasic<TPool>[],
-    quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
-    tradeType: TradeType
-  ): bigint {
-    let totalAmount = 0n;
-    let totalGasCostInQuoteToken = 0n;
-    let allGasPopulated = true;
-    for (const route of combination) {
-      const quote = quoteMap.get(route);
-      if (!quote) continue;
-      totalAmount += quote.amount;
-      const gasCostInQuoteToken = quote.gasDetails?.gasCostInQuoteToken;
-      if (gasCostInQuoteToken === undefined) {
-        allGasPopulated = false;
-      } else {
-        totalGasCostInQuoteToken += gasCostInQuoteToken;
-      }
-    }
-    return allGasPopulated
-      ? tradeType === TradeType.ExactIn
-        ? totalAmount - totalGasCostInQuoteToken
-        : totalAmount + totalGasCostInQuoteToken
-      : totalAmount;
-  }
-
   private scoreAndSortCombinations(
     combinations: RouteBasic<TPool>[][],
     quoteMap: Map<RouteBasic<TPool>, QuoteBasic>,
@@ -2191,6 +2223,12 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // gas-adjusted winner as of the first level boundary at/after the
     // checkpoint — what a smaller split budget would have returned.
     let shadowCheckpointBest: {key: string; score: bigint} | undefined;
+    // Levels that COMPLETED after the snapshot. 0 means the snapshot
+    // boundary was also the search's last boundary — the comparison window
+    // is empty and same_winner is true by construction; tagged so the
+    // budget analysis can separate those from genuine "extra budget bought
+    // nothing" observations.
+    let shadowLevelsAfterCheckpoint = 0;
     // (B) discovery-level map — first level at which each unique combination
     // key was added. Used to log the discovery level of the top results when
     // findBestSplits returns.
@@ -2798,26 +2836,30 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       );
       filterSortLatenciesMs.set(level, Date.now() - filterSortStartTime);
       resultSorted = true;
-      // Shadow-budget snapshot at the level boundary (result[0] is the
-      // gas-adjusted winner right after filterAndSortResults). Boundary
-      // granularity — not exact elapsed — keeps this off the hot DFS path;
-      // for the budget question ("what would a ~checkpoint-sized budget
-      // have returned") a boundary-late snapshot only UNDERSTATES the
-      // quality delta, never overstates it.
+      // Shadow-budget snapshot at the level boundary. Boundary granularity
+      // — not exact elapsed — keeps this off the hot DFS path; for the
+      // budget question ("what would a ~checkpoint-sized budget have
+      // returned") a boundary-late snapshot only UNDERSTATES the quality
+      // delta, never overstates it. Uses the direction-aware max-score
+      // scan, NOT result[0]: the truncation branch pins an unscored full
+      // route at index 0 (see bestScoredCombination).
+      if (this.SHADOW_CHECKPOINT_MS > 0 && shadowCheckpointBest !== undefined) {
+        // A level completed after the snapshot: the comparison window is
+        // non-empty (see the levelsAfterCheckpoint emission tag).
+        shadowLevelsAfterCheckpoint++;
+      }
       if (
         this.SHADOW_CHECKPOINT_MS > 0 &&
         shadowCheckpointBest === undefined &&
         result.length > 0 &&
         Date.now() - startTime >= this.SHADOW_CHECKPOINT_MS
       ) {
-        shadowCheckpointBest = {
-          key: getCombinationKey(result[0]),
-          score: this.gasAdjustedCombinationScore(
-            result[0],
-            quoteMap,
-            tradeType
-          ),
-        };
+        shadowCheckpointBest = this.bestScoredCombination(
+          result,
+          quoteMap,
+          tradeType,
+          getCombinationKey
+        );
       }
       // The truncation's `fullRoutes.length >= maxSplitRoutes` branch can
       // drop fulls from `result`; recompute so the compaction gate keeps
@@ -3027,28 +3069,35 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // Instrumentation must never affect the search result.
     if (shadowCheckpointBest !== undefined && result.length > 0) {
       try {
-        const finalBest = result[0];
+        // Same max-score scan as the snapshot — NOT result[0], which the
+        // truncation branch pins to an unscored full route (comparing two
+        // pinned identical entries would emit same_winner on exactly the
+        // large searches the budget decision is about).
+        const finalBest = this.bestScoredCombination(
+          result,
+          quoteMap,
+          tradeType,
+          getCombinationKey
+        );
         let deltaTag: string;
-        if (getCombinationKey(finalBest) === shadowCheckpointBest.key) {
+        if (finalBest === undefined) {
+          deltaTag = 'delta:same_winner';
+        } else if (finalBest.key === shadowCheckpointBest.key) {
           deltaTag = 'delta:same_winner';
         } else {
-          const finalScore = this.gasAdjustedCombinationScore(
-            finalBest,
-            quoteMap,
-            tradeType
-          );
           // ExactIn: higher score better, checkpoint worse by final - ckpt.
           // ExactOut: lower better, checkpoint worse by ckpt - final.
           const checkpointWorseBy =
             tradeType === TradeType.ExactOut
-              ? shadowCheckpointBest.score - finalScore
-              : finalScore - shadowCheckpointBest.score;
+              ? shadowCheckpointBest.score - finalBest.score
+              : finalBest.score - shadowCheckpointBest.score;
           if (checkpointWorseBy <= 0n) {
             // Different combination, equal-or-better score: the extra
             // budget changed the winner without improving it.
             deltaTag = 'delta:equal_or_better';
           } else {
-            const denom = finalScore < 0n ? -finalScore : finalScore;
+            const denom =
+              finalBest.score < 0n ? -finalBest.score : finalBest.score;
             const bps =
               denom > 0n ? (checkpointWorseBy * 10_000n) / denom : 10_000n;
             deltaTag =
@@ -3061,11 +3110,22 @@ export class QuoteBestSplitFinder<TPool extends Pool>
                     : 'delta:gte_100bps';
           }
         }
+        // levelsAfterCheckpoint:0 = the snapshot boundary was the last
+        // boundary — same_winner by construction, filterable. budgetMs
+        // separates the sync search (~3s) from the async worker's ~30s
+        // searches, which share this env flag and would otherwise skew
+        // the sync-budget read pessimistic (bounded: configured budgets).
+        const levelsTag = `levelsAfterCheckpoint:${
+          shadowLevelsAfterCheckpoint >= 3
+            ? '3plus'
+            : shadowLevelsAfterCheckpoint
+        }`;
+        const budgetTag = `budgetMs:${timeoutMs}`;
         void Promise.resolve(
           ctx.metrics.count(
             buildMetricKey('QuoteBestSplitFinder.ShadowCheckpoint'),
             1,
-            {tags: [...metricTags, deltaTag]}
+            {tags: [...metricTags, deltaTag, levelsTag, budgetTag]}
           )
         ).catch(() => {});
       } catch {

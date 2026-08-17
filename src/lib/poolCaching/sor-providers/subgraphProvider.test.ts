@@ -1,5 +1,6 @@
 import {describe, it, expect, vi} from 'vitest';
 import {parse} from 'graphql';
+import {ClientError} from 'graphql-request';
 import {ChainId} from '@uniswap/sdk-core';
 import {V4SubgraphProvider} from './v4/subgraphProvider';
 import {computeIdShards} from './subgraphProvider';
@@ -274,6 +275,158 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
 
     const pools = await provider.getPools();
     expect(pools.some(p => p.id === '0xzlcapool')).toBe(true);
+  });
+});
+
+describe('SubgraphProvider subgraphError: allow', () => {
+  const salvageablePool = {
+    id: '0x50' + 'ab'.repeat(31),
+    feeTier: '3000',
+    tickSpacing: '60',
+    hooks: '0x0000000000000000000000000000000000000000',
+    liquidity: '1000000',
+    token0: {symbol: 'A', id: '0x1111', name: 'A', decimals: '18'},
+    token1: {symbol: 'B', id: '0x2222', name: 'B', decimals: '18'},
+    totalValueLockedUSD: '20000',
+    totalValueLockedETH: '10',
+    totalValueLockedUSDUntracked: '0',
+  };
+
+  class GaugeRecordingMetric extends MockMetric {
+    gauges: {key: string; value: number}[] = [];
+    putGauge(key: string, value: number): void {
+      this.gauges.push({key, value});
+    }
+  }
+
+  function makeProviderWithClient(
+    request: (
+      query: string,
+      variables: Record<string, unknown>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ) => Promise<any>,
+    metric: MockMetric = new MockMetric()
+  ): V4SubgraphProvider {
+    const provider = new V4SubgraphProvider(
+      ChainId.MAINNET,
+      0, // retries — a page failure must surface immediately in these tests
+      5000,
+      true,
+      0.01,
+      Number.MAX_VALUE,
+      'https://example.invalid/subgraph',
+      undefined,
+      mockLogger,
+      metric
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (provider as any).client = {request};
+    return provider;
+  }
+
+  it('passes subgraphError: allow on every pool query', async () => {
+    const {provider, queries} = makeRecordingProvider(ChainId.MAINNET);
+    await provider.getPools();
+
+    expect(queries.length).toBeGreaterThan(0);
+    for (const q of queries) {
+      expect(q).toContain('subgraphError: allow');
+      expect(() => parse(q)).not.toThrow();
+    }
+  });
+
+  it('salvages pools when the subgraph returns data alongside a non-fatal indexing error', async () => {
+    // graphql-request throws ClientError whenever the response carries
+    // errors, even when subgraphError: allow returned usable data with it.
+    const provider = makeProviderWithClient(async (query, variables) => {
+      if (query.includes('getV4HighLiquidityPools') && variables.id === '') {
+        throw new ClientError(
+          {
+            data: {pools: [salvageablePool]},
+            errors: [{message: 'indexing_error'}],
+            status: 200,
+          },
+          {query}
+        );
+      }
+      return {pools: []};
+    });
+
+    const pools = await provider.getPools();
+    expect(pools.some(p => p.id === salvageablePool.id)).toBe(true);
+  });
+
+  it('still fails when the error carries no usable data (fatal subgraph error)', async () => {
+    const provider = makeProviderWithClient(async query => {
+      throw new ClientError(
+        {errors: [{message: 'indexing_error'}], status: 200},
+        {query}
+      );
+    });
+
+    await expect(provider.getPools()).rejects.toThrow();
+  });
+
+  it('rethrows (and cannot spin the paging loop) when a data-carrying response has non-indexing errors', async () => {
+    // A data-carrying non-indexing error may ignore the pagination cursor —
+    // if it were salvaged, the same page would be accepted forever. The
+    // predicate must rethrow it, terminating immediately.
+    const provider = makeProviderWithClient(async query => {
+      throw new ClientError(
+        {
+          data: {pools: [salvageablePool]},
+          errors: [
+            {message: 'indexing_error'},
+            {message: 'some other failure'},
+          ],
+          status: 200,
+        },
+        {query}
+      );
+    });
+
+    await expect(provider.getPools()).rejects.toThrow();
+  });
+
+  it('probes _meta and emits the metaBlock gauge after a salvaged run', async () => {
+    const metric = new GaugeRecordingMetric();
+    const metaQueries: string[] = [];
+    const provider = makeProviderWithClient(async (query, variables) => {
+      if (query.includes('_meta')) {
+        metaQueries.push(query);
+        return {_meta: {block: {number: 25741310}}};
+      }
+      if (query.includes('getV4HighLiquidityPools') && variables.id === '') {
+        throw new ClientError(
+          {
+            data: {pools: [salvageablePool]},
+            errors: [{message: 'indexing_error'}],
+            status: 200,
+          },
+          {query}
+        );
+      }
+      return {pools: []};
+    }, metric);
+
+    await provider.getPools();
+
+    expect(metaQueries.length).toBe(1);
+    expect(metaQueries[0]).toContain('subgraphError: allow');
+    expect(metric.gauges).toEqual([
+      {key: 'SubgraphProvider.subgraphErrorAllowed.metaBlock', value: 25741310},
+    ]);
+  });
+
+  it('does not probe _meta when nothing was salvaged', async () => {
+    const metric = new GaugeRecordingMetric();
+    const provider = makeProviderWithClient(async query => {
+      expect(query).not.toContain('_meta');
+      return {pools: []};
+    }, metric);
+
+    await provider.getPools();
+    expect(metric.gauges).toEqual([]);
   });
 });
 

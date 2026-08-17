@@ -67,6 +67,27 @@ export class DatadogPoolCachingMetric extends IMetric {
     Object.assign(this.dimensions, dimensions);
   }
 
+  private buildOpts(extraTags?: Record<string, string>): {tags?: string[]} {
+    const tags = [
+      ...Object.entries(this.dimensions).map(([k, v]) => `${k}:${v}`),
+      ...Object.entries(this.properties).map(([k, v]) => `${k}:${v}`),
+      ...Object.entries(extraTags ?? {}).map(([k, v]) => `${k}:${v}`),
+    ];
+    return tags.length > 0 ? {tags} : {};
+  }
+
+  putGauge(
+    key: string,
+    value: number,
+    extraTags?: Record<string, string>
+  ): void {
+    void this.metrics.gauge(
+      `pool_caching.${key.replace(/\./g, '_')}`,
+      value,
+      this.buildOpts(extraTags)
+    );
+  }
+
   putMetric(
     key: string,
     value: number,
@@ -77,12 +98,7 @@ export class DatadogPoolCachingMetric extends IMetric {
     // but keep the pool_caching prefix clean
     const metricName = `pool_caching.${key.replace(/\./g, '_')}`;
 
-    const tags = [
-      ...Object.entries(this.dimensions).map(([k, v]) => `${k}:${v}`),
-      ...Object.entries(this.properties).map(([k, v]) => `${k}:${v}`),
-      ...Object.entries(extraTags ?? {}).map(([k, v]) => `${k}:${v}`),
-    ];
-    const opts = tags.length > 0 ? {tags} : {};
+    const opts = this.buildOpts(extraTags);
 
     if (unit && LATENCY_UNITS.has(unit)) {
       // Convert to milliseconds for consistency

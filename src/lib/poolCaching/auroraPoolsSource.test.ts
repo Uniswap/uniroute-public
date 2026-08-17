@@ -403,6 +403,7 @@ describe('AuroraV4PoolsProvider', () => {
     let capturedMinTvlUsd: number | undefined;
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        listAllV4PoolKeys: async () => [],
         listAllV4RoutablePools: async (_ctx, options) => {
           capturedMinTvlUsd = options.minTvlUsd;
           return rows;
@@ -456,6 +457,7 @@ describe('AuroraV4PoolsProvider', () => {
     });
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        listAllV4PoolKeys: async () => [],
         listAllV4RoutablePools: async () => [
           launchpadPool,
           memePricedPool,
@@ -498,7 +500,10 @@ describe('AuroraV4PoolsProvider', () => {
       token1Decimals: 18,
     });
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
-      routablePools: {listAllV4RoutablePools: async () => [junkPool]},
+      routablePools: {
+        listAllV4PoolKeys: async () => [],
+        listAllV4RoutablePools: async () => [junkPool],
+      },
       prices: freshPrices(),
       logger: noopLogger,
       metric,
@@ -581,7 +586,10 @@ describe('AuroraV4PoolsProvider', () => {
 
   it('rejects a stale native price', async () => {
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
-      routablePools: {listAllV4RoutablePools: async () => []},
+      routablePools: {
+        listAllV4PoolKeys: async () => [],
+        listAllV4RoutablePools: async () => [],
+      },
       prices: {
         batchGet: async () =>
           new Map([
@@ -607,6 +615,7 @@ describe('AuroraV4PoolsProvider', () => {
     const metric = new FakeMetric();
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        listAllV4PoolKeys: async () => [],
         listAllV4RoutablePools: async () => [
           {
             poolId: '0xABCD',
@@ -692,6 +701,7 @@ describe('AuroraV4PoolsProvider', () => {
   it('throws when no native price is available (wrapper falls back)', async () => {
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        listAllV4PoolKeys: async () => [],
         listAllV4RoutablePools: async () => [],
       },
       prices: {batchGet: async () => new Map()},
@@ -704,6 +714,7 @@ describe('AuroraV4PoolsProvider', () => {
   it('throws for chains without a known wrapped-native address', async () => {
     const provider = new AuroraV4PoolsProvider(1, 0.01, {
       routablePools: {
+        listAllV4PoolKeys: async () => [],
         listAllV4RoutablePools: async () => [],
       },
       prices: {batchGet: async () => new Map()},

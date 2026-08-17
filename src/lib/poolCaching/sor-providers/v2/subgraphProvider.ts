@@ -11,6 +11,10 @@ import _ from 'lodash';
 
 import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
+import {
+  emitSalvagedSubgraphMetaBlock,
+  salvageAllowedSubgraphErrorOrRethrow,
+} from '../util/allowedSubgraphError';
 import {ProviderConfig} from '../provider';
 
 export interface V2SubgraphPool {
@@ -142,6 +146,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getFEIPoolsToken0($pageSize: Int!, $id: String, $feiToken: String!) {
             pairs(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -166,6 +171,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getFEIPoolsToken1($pageSize: Int!, $id: String, $feiToken: String!) {
             pairs(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -193,6 +199,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             query getVirtualPoolsToken0($pageSize: Int!, $id: String, $virtualToken: String!) {
               pairs(
                 first: $pageSize
+                subgraphError: allow
                 ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
                 where: {
                   id_gt: $id,
@@ -217,6 +224,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             query getVirtualPoolsToken1($pageSize: Int!, $id: String, $virtualToken: String!) {
               pairs(
                 first: $pageSize
+                subgraphError: allow
                 ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
                 where: {
                   id_gt: $id,
@@ -244,6 +252,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getHighTrackedReservePools($pageSize: Int!, $id: String, $threshold: String!) {
             pairs(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -269,6 +278,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
           query getHighUSDReservePools($pageSize: Int!, $id: String, $threshold: String!) {
             pairs(
               first: $pageSize
+              subgraphError: allow
               ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
               where: {
                 id_gt: $id,
@@ -291,6 +301,7 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
 
     let allPools: RawV2SubgraphPool[] = [];
     let outerRetries = 0;
+    let salvagedAnyPage = false;
 
     await retry(
       async () => {
@@ -317,13 +328,31 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
             await retry(
               async () => {
                 const before = Date.now();
-                const poolsResult = await this.client.request<{
-                  pairs: RawV2SubgraphPool[];
-                }>(queryConfig.query, {
-                  pageSize: this.pageSize,
-                  id: lastId,
-                  ...queryConfig.variables,
-                });
+                let poolsResult: {pairs: RawV2SubgraphPool[]};
+                try {
+                  poolsResult = await this.client.request<{
+                    pairs: RawV2SubgraphPool[];
+                  }>(queryConfig.query, {
+                    pageSize: this.pageSize,
+                    id: lastId,
+                    ...queryConfig.variables,
+                  });
+                } catch (err) {
+                  // Same salvage as the V3/V4 base provider: the queries pass
+                  // subgraphError: allow, but graphql-request throws whenever
+                  // the response carries errors, even alongside usable data.
+                  poolsResult = salvageAllowedSubgraphErrorOrRethrow<{
+                    pairs: RawV2SubgraphPool[];
+                  }>({
+                    err,
+                    rootField: 'pairs',
+                    label: `${queryConfig.name} page ${totalPages}`,
+                    logger: this.logger,
+                    metric: this.metric,
+                    metricTags: this.metricTags,
+                  });
+                  salvagedAnyPage = true;
+                }
                 this.metric?.putMetric(
                   `SubgraphProvider.getPools.${queryConfig.name
                     .replace(/\s+/g, '_')
@@ -471,6 +500,16 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
       undefined,
       this.metricTags
     );
+
+    if (salvagedAnyPage) {
+      // Same advancing-vs-frozen gauge as the V3/V4 base provider.
+      await emitSalvagedSubgraphMetaBlock({
+        client: this.client,
+        logger: this.logger,
+        metric: this.metric,
+        metricTags: this.metricTags,
+      });
+    }
 
     // Apply the same filtering logic to ensure consistency
     const beforeFilter = Date.now();

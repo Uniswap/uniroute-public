@@ -22,6 +22,7 @@ import {ProviderConfig} from '../provider';
 import {PAGE_SIZE} from '../subgraphProvider';
 import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
+import {salvageAllowedSubgraphErrorOrRethrow} from '../util/allowedSubgraphError';
 import {SUBGRAPH_URL_BY_CHAIN, V4SubgraphPool} from './subgraphProvider';
 
 // Module-scoped (not per-instance): one AggHooksSubgraphProvider is
@@ -122,6 +123,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
       query getAggHooksPools($pageSize: Int!, $id: String, $hooks: [String!]!) {
         pools(
           first: $pageSize,
+          subgraphError: allow,
           ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
           where: {
             id_gt: $id,
@@ -157,7 +159,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
 
     const bundleQuery = gql`
       query getBundle {
-        bundle(id: "1") {
+        bundle(id: "1", subgraphError: allow) {
           ethPriceUSD
         }
       }
@@ -191,13 +193,30 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
           do {
             totalPages += 1;
 
-            const result = await this.client.request<{
-              pools: AggHooksRawPool[];
-            }>(poolsQuery, {
-              pageSize: PAGE_SIZE,
-              id: lastId,
-              hooks: this.hookAddresses.map(h => h.toLowerCase()),
-            });
+            let result: {pools: AggHooksRawPool[]};
+            try {
+              result = await this.client.request<{
+                pools: AggHooksRawPool[];
+              }>(poolsQuery, {
+                pageSize: PAGE_SIZE,
+                id: lastId,
+                hooks: this.hookAddresses.map(h => h.toLowerCase()),
+              });
+            } catch (err) {
+              // subgraphError: allow returns data alongside a non-fatal
+              // indexing error, but graphql-request throws on any errors —
+              // salvage the data, rethrow everything else.
+              result = salvageAllowedSubgraphErrorOrRethrow<{
+                pools: AggHooksRawPool[];
+              }>({
+                err,
+                rootField: 'pools',
+                label: `AGG hooks pools page ${totalPages}`,
+                logger: this.logger,
+                metric: this.metric,
+                metricTags: this.metricTags,
+              });
+            }
 
             poolsPage = result.pools;
             pools = pools.concat(poolsPage);
@@ -227,9 +246,24 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
             this.metricTags
           );
 
-          const bundleResult = await this.client.request<{
-            bundle: {ethPriceUSD: string} | null;
-          }>(bundleQuery);
+          let bundleResult: {bundle: {ethPriceUSD: string} | null};
+          try {
+            bundleResult = await this.client.request<{
+              bundle: {ethPriceUSD: string} | null;
+            }>(bundleQuery);
+          } catch (err) {
+            bundleResult = salvageAllowedSubgraphErrorOrRethrow<{
+              bundle: {ethPriceUSD: string} | null;
+            }>({
+              err,
+              rootField: 'bundle',
+              expect: 'entity',
+              label: 'AGG hooks bundle',
+              logger: this.logger,
+              metric: this.metric,
+              metricTags: this.metricTags,
+            });
+          }
 
           return {
             pools,

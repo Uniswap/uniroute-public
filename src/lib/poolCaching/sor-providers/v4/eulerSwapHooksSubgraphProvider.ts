@@ -11,6 +11,7 @@ import _ from 'lodash';
 
 import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
+import {salvageAllowedSubgraphErrorOrRethrow} from '../util/allowedSubgraphError';
 import {ProviderConfig} from '../provider';
 import {PAGE_SIZE} from '../subgraphProvider';
 
@@ -66,6 +67,7 @@ export class EulerSwapHooksSubgraphProvider
       query getEulerSwapHooks($pageSize: Int!, $id: String) {
         eulerSwapHooks(
           first: $pageSize,
+          subgraphError: allow,
           ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
           where: { id_gt: $id }
         ) {
@@ -105,18 +107,39 @@ export class EulerSwapHooksSubgraphProvider
           do {
             totalPages += 1;
 
-            const hooksResult = await this.client.request<{
-              eulerSwapHooks: EulerSwapHooks[];
-            }>(query, {
-              pageSize: PAGE_SIZE,
-              id: lastId,
-            });
+            let hooksResult: {eulerSwapHooks: EulerSwapHooks[]};
+            try {
+              hooksResult = await this.client.request<{
+                eulerSwapHooks: EulerSwapHooks[];
+              }>(query, {
+                pageSize: PAGE_SIZE,
+                id: lastId,
+              });
+            } catch (err) {
+              // subgraphError: allow returns data alongside a non-fatal
+              // indexing error, but graphql-request throws on any errors —
+              // salvage the data, rethrow everything else.
+              hooksResult = salvageAllowedSubgraphErrorOrRethrow<{
+                eulerSwapHooks: EulerSwapHooks[];
+              }>({
+                err,
+                rootField: 'eulerSwapHooks',
+                label: 'euler swap hooks',
+                logger: this.logger,
+                metric: this.metric,
+                metricTags: this.metricTags,
+              });
+            }
 
             hooksPage = hooksResult.eulerSwapHooks;
 
             hooks = hooks.concat(hooksPage);
 
-            lastId = hooks[hooks.length - 1]!.id;
+            // An empty first page (possible on a degraded subgraph) would
+            // otherwise crash on hooks[-1] before the loop can terminate.
+            if (hooks.length > 0) {
+              lastId = hooks[hooks.length - 1]!.id;
+            }
             this.metric?.putMetric(
               'SubgraphProvider.getHooks.paginate.pageSize',
               hooksPage.length,
@@ -226,6 +249,7 @@ export class EulerSwapHooksSubgraphProvider
       query getPools($pageSize: Int!, $hooks: String) {
         pools(
           first: $pageSize,
+          subgraphError: allow,
           ${blockNumber ? `block: { number: ${blockNumber} }` : ''}
           where: {hooks: $hooks}
         ) {
@@ -263,12 +287,26 @@ export class EulerSwapHooksSubgraphProvider
       }.`
     );
 
-    const poolResult = await this.client.request<{
-      pools: V4SubgraphPool[];
-    }>(query, {
-      pageSize: PAGE_SIZE,
-      hooks: hook.toLowerCase(),
-    });
+    let poolResult: {pools: V4SubgraphPool[]};
+    try {
+      poolResult = await this.client.request<{
+        pools: V4SubgraphPool[];
+      }>(query, {
+        pageSize: PAGE_SIZE,
+        hooks: hook.toLowerCase(),
+      });
+    } catch (err) {
+      poolResult = salvageAllowedSubgraphErrorOrRethrow<{
+        pools: V4SubgraphPool[];
+      }>({
+        err,
+        rootField: 'pools',
+        label: 'euler pool by hook',
+        logger: this.logger,
+        metric: this.metric,
+        metricTags: this.metricTags,
+      });
+    }
 
     pool = poolResult.pools[0];
 

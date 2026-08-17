@@ -1188,25 +1188,28 @@ describe('v4LpFeeCorrectionChainsFromEnv', () => {
         /^\s*env:poolCachingV4LpFeeCorrectionChains:\s*"([^"]*)"\s*$/m
       )?.[1];
 
-    // Staging is enabled first on purpose; prod is a separate change once a
-    // staging sweep is observed clean. Pinning prod as unset here is what
-    // makes an accidental prod enablement fail loudly rather than ride along.
-    it.each(['dev', 'prod'])(
-      'leaves the correction unset in the %s stack, so the default is what ships',
+    // All stacks at "*" — prod widened after staging's multi-chain sweep was
+    // observed clean per the CLAUDE.md gate. Pinning the exact values keeps
+    // the blast radius an explicit decision: any edit — widening or
+    // narrowing — fails here rather than riding along unnoticed.
+    it.each(['dev', 'staging', 'prod'])(
+      'resolves the %s stack to every StateView-supported chain',
       stack => {
-        expect(stackValue(stack)).toBeUndefined();
+        const configured = stackValue(stack);
+        expect(
+          configured,
+          `${stack} stack no longer sets poolCachingV4LpFeeCorrectionChains`
+        ).toBe('*');
+        process.env[KEY] = configured;
+        expect(
+          [...v4LpFeeCorrectionChainsFromEnv()].sort((a, b) => a - b)
+        ).toEqual(
+          Object.keys(V4_STATE_VIEW_BY_CHAIN)
+            .map(Number)
+            .sort((a, b) => a - b)
+        );
       }
     );
-
-    it('resolves the staging stack to mainnet only', () => {
-      const configured = stackValue('staging');
-      expect(
-        configured,
-        'staging stack no longer sets poolCachingV4LpFeeCorrectionChains'
-      ).toBe('1');
-      process.env[KEY] = configured;
-      expect([...v4LpFeeCorrectionChainsFromEnv()]).toEqual([1]);
-    });
 
     // The read path is only reachable for a chain with a StateView address —
     // a stack could otherwise "enable" a chain that can never be corrected.

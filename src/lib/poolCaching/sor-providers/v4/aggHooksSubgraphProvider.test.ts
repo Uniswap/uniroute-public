@@ -1,6 +1,6 @@
 import {describe, it, expect, vi, beforeEach} from 'vitest';
 import {ChainId} from '@uniswap/sdk-core';
-import {GraphQLClient} from 'graphql-request';
+import {ClientError, GraphQLClient} from 'graphql-request';
 import {AggHooksSubgraphProvider} from './aggHooksSubgraphProvider';
 
 const MOCK_URL = 'https://mock-subgraph.example/graphql';
@@ -8,13 +8,17 @@ const MOCK_HOOK = '0xabcdef0000000000000000000000000000000001';
 
 // ---- mock graphql-request ----
 const mockRequest = vi.fn();
-vi.mock('graphql-request', () => {
+vi.mock('graphql-request', async importOriginal => {
+  const actual = await importOriginal<typeof import('graphql-request')>();
   // Must use regular function (not arrow) so it can be called with `new`
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MockGraphQLClient = vi.fn(function MockGraphQLClient(this: any) {
     this.request = mockRequest;
   });
   return {
+    // Spread the real module so ClientError stays the genuine class — the
+    // subgraphError: allow salvage path checks `instanceof ClientError`.
+    ...actual,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     gql: vi.fn((strings: TemplateStringsArray, ...vals: any[]) =>
       strings.reduce(
@@ -362,6 +366,28 @@ describe('AggHooksSubgraphProvider', () => {
       // tvlETH should still be computed, but tvlUSD = tvlETH * 0
       expect(pools[0]!.tvlETH).toBeCloseTo(1.0);
       expect(pools[0]!.tvlUSD).toBeCloseTo(0);
+    });
+
+    it('salvages pools and bundle when the subgraph answers with data alongside a non-fatal error', async () => {
+      // graphql-request throws ClientError whenever the response carries
+      // errors, even when subgraphError: allow returned usable data with it.
+      const indexingError = (data: unknown) =>
+        new ClientError(
+          {data, errors: [{message: 'indexing_error'}], status: 200},
+          {query: 'q'}
+        );
+      mockRequest
+        .mockRejectedValueOnce(indexingError({pools: [makeRawPool('0xpool1')]}))
+        .mockRejectedValueOnce(indexingError({pools: []}))
+        .mockRejectedValueOnce(indexingError(makeBundleResponse('3000')));
+
+      mockPseudoTVL.mockResolvedValueOnce(['1000000000000000000', '0']);
+
+      const pools = await makeProvider().getPools();
+
+      expect(pools.length).toBe(1);
+      expect(pools[0]!.id).toBe('0xpool1');
+      expect(pools[0]!.tvlUSD).toBeCloseTo(3000);
     });
   });
 });

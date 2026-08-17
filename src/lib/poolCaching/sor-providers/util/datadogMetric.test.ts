@@ -125,4 +125,23 @@ describe('DatadogPoolCachingMetric', () => {
       tags: ['env:prod', 'chainId:1', 'protocol:V3'],
     });
   });
+
+  it('routes putGauge to gauge with normalized name and merged tags', () => {
+    const mock = createMockMetrics();
+    const metric = new DatadogPoolCachingMetric(mock);
+    metric.putDimensions({env: 'prod'});
+    metric.putGauge(
+      'SubgraphProvider.subgraphErrorAllowed.metaBlock',
+      25741310,
+      {chainId: '1', protocol: 'V4'}
+    );
+    expect(mock.calls.gauge).toHaveLength(1);
+    expect(mock.calls.gauge[0]!.name).toBe(
+      'pool_caching.SubgraphProvider_subgraphErrorAllowed_metaBlock'
+    );
+    expect(mock.calls.gauge[0]!.val).toBe(25741310);
+    expect(mock.calls.gauge[0]!.opts).toEqual({
+      tags: ['env:prod', 'chainId:1', 'protocol:V4'],
+    });
+  });
 });
