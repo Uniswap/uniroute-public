@@ -1,6 +1,7 @@
 import {describe, expect, it, beforeEach, vi} from 'vitest';
 import {UniRouteBL} from './UniRouteBL';
 import {
+  buildMetricKey,
   getUniRouteTestConfig,
   getUniRouteSyncCacheMissRouteFinderOverrides,
   IUniRouteServiceConfig,
@@ -870,6 +871,199 @@ describe('UniRouteBL', () => {
       expect(response.error?.code).not.toBe(404);
       expect(response.hitsCachedRoutes).toBe(true);
       expect(headers.get('x-no-route-cache-hit')).toBeUndefined();
+    });
+  });
+
+  // The empty-cache fresh-discovery fallback keys on the PRE-filter route
+  // count, so a cached read whose routes are all structurally invalid for
+  // the request's shape used to skip discovery and then 404 after
+  // filterInvalidRoutes emptied the set, despite routable liquidity
+  // existing (ROUTE-1695: the dual-key read serves a cached WETH-input
+  // wrap route to a native-ETH-input request, and isValidRoute drops
+  // ETH/WETH -> ETH/* paths for native input). These tests pin the
+  // fallback: all-invalid cached routes must re-run fresh discovery,
+  // while surviving cached routes must not.
+  describe('fresh-discovery fallback when cached routes are all invalid', () => {
+    const allProtocols = [
+      Protocol.V2,
+      Protocol.V3,
+      Protocol.V4,
+      Protocol.MIXED,
+    ];
+    const wrappedEth = new Address(
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+    );
+    const usdc = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    const amount = BigInt(baseRequest.amount);
+    const fallbackMetric = buildMetricKey(
+      'CachedRoutes.AllInvalidFreshFallback'
+    );
+
+    // Invalid for a native-ETH input: first pool is ETH/WETH and the
+    // second is ETH/* — the shape isValidRoute rejects, mirroring the
+    // cached wrap route served under the wrapped pair key.
+    const invalidForNativeInputRoute = new RouteBasic(Protocol.V2, [
+      new V2Pool(
+        new Address(ADDRESS_ZERO),
+        wrappedEth,
+        new Address('0x1111111111111111111111111111111111111111'),
+        BigInt('1000000000000'),
+        BigInt('1000000000000')
+      ),
+      new V2Pool(
+        new Address(ADDRESS_ZERO),
+        usdc,
+        new Address('0x2222222222222222222222222222222222222222'),
+        BigInt('1000000000000'),
+        BigInt('1000000000000')
+      ),
+    ]);
+
+    const validCachedRoute = new RouteBasic(Protocol.V2, [
+      new V2Pool(
+        wrappedEth,
+        usdc,
+        new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+        BigInt('1000000000000'),
+        BigInt('1000000000000')
+      ),
+    ]);
+
+    // The cache check inside quote() runs with a USD bucket derived from
+    // the request amount; saving for every bucket covers it. Saved under
+    // the wrapped pair key only — the native key stays empty, matching
+    // the live poisoning shape.
+    const seedCachedRoute = async (route: RouteBasic) => {
+      for (const usdBucket of Object.values(UsdBucket)) {
+        await cachedRoutesRepository.saveCachedRoutes(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          route,
+          ChainId.MAINNET,
+          wrappedEth,
+          usdc,
+          TradeType.ExactIn,
+          amount,
+          usdBucket
+        );
+      }
+    };
+
+    // Unlike MockedQuoteStrategy, produces quotes from the routes it is
+    // handed — empty routes must yield no candidates, so the test can
+    // tell a served-from-fresh-routes quote apart from a fabricated one.
+    class RoutesAwareQuoteStrategy extends BaseQuoteStrategy {
+      constructor() {
+        super(
+          {} as IQuoteFetcher,
+          {} as GasEstimateProvider,
+          {} as IGasConverter,
+          {} as RouteQuoteAllocator<Pool>,
+          {} as SimpleQuoteSelector,
+          {} as ITokenHandler,
+          new Map(),
+          {} as IFreshPoolDetailsWrapper
+        );
+      }
+
+      async findBestQuoteCandidates(
+        _ctx: Context,
+        _chain: Chain,
+        _tokenInCurrencyInfo: CurrencyInfo,
+        _tokenOutCurrencyInfo: CurrencyInfo,
+        _amount: bigint,
+        _tradeType: TradeType,
+        _protocols: Protocol[],
+        _serviceConfig: IUniRouteServiceConfig,
+        routes: RouteBasic<Pool>[]
+      ): Promise<QuoteSplit[]> {
+        if (routes.length === 0) {
+          return [];
+        }
+        return [
+          new QuoteSplit([
+            new QuoteBasic(routes[0], BigInt('1234567890'), undefined, {
+              gasUse: BigInt('150000'),
+              gasPriceInWei: BigInt('30000000000'),
+              gasCostInWei: BigInt('4500000000000000'),
+              gasCostInEth: 0.0045,
+            }),
+          ]),
+        ];
+      }
+
+      name(): string {
+        return 'RoutesAwareQuoteStrategy';
+      }
+    }
+
+    class CountingRoutesRepository extends TestRoutesRepository {
+      public getRoutesCalls = 0;
+
+      public async getRoutes(
+        ...args: Parameters<TestRoutesRepository['getRoutes']>
+      ): Promise<RouteBasic[]> {
+        this.getRoutesCalls++;
+        return super.getRoutes(...args);
+      }
+    }
+
+    const buildBL = (routesRepository: IRoutesRepository<Pool>) =>
+      new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routesRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new RoutesAwareQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+    it('falls back to fresh discovery when every cached route is invalid for the request shape', async () => {
+      await seedCachedRoute(invalidForNativeInputRoute);
+      const countingRepository = new CountingRoutesRepository();
+
+      const testCtx = buildTestContext();
+      const response = await buildBL(countingRepository).quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      // The fallback (not a plain cache miss) fired, invoked fresh
+      // discovery exactly once, and its routes served the quote.
+      expect(testCtx.metrics.countStore[fallbackMetric]).toBe(1);
+      expect(countingRepository.getRoutesCalls).toBe(1);
+      expect(response.error).toBeUndefined();
+      expect(response.hitsCachedRoutes).toBe(false);
+    });
+
+    it('does not re-run discovery when cached routes survive the validity filter', async () => {
+      await seedCachedRoute(validCachedRoute);
+      const countingRepository = new CountingRoutesRepository();
+
+      const testCtx = buildTestContext();
+      const response = await buildBL(countingRepository).quote(
+        testCtx,
+        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+      );
+
+      expect(testCtx.metrics.countStore[fallbackMetric]).toBeUndefined();
+      expect(countingRepository.getRoutesCalls).toBe(0);
+      expect(response.error).toBeUndefined();
+      expect(response.hitsCachedRoutes).toBe(true);
     });
   });
 

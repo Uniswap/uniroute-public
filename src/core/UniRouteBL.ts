@@ -642,6 +642,44 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags
       );
 
+      // The fresh-discovery fallback above keys on the pre-filter route
+      // count, so a cached read whose routes are all invalid for this
+      // request's shape (e.g. the dual-key read serving a wrapped-input
+      // wrap route to a native-input request) skips discovery and then
+      // empties here, 404ing a pair that has routable liquidity
+      // (ROUTE-1695). Re-run discovery through the same validity filter,
+      // and treat the request as a cache miss downstream — the routes in
+      // play are fresh, and (in async mode) the cache-write path must not
+      // skip persisting them as a double-write.
+      if (routes.length === 0 && usedCachedRoutes) {
+        usedCachedRoutes = false;
+        await ctx.metrics.count(
+          buildMetricKey('CachedRoutes.AllInvalidFreshFallback'),
+          1,
+          {tags: metricTags}
+        );
+        routes = await this.filterInvalidRoutes(
+          ctx,
+          await this.fetchFreshRoutes(
+            ctx,
+            chain,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            protocols,
+            tradeType,
+            fotInDirectSwap,
+            hooksOptions,
+            nsCtx,
+            options?.testAggHooks,
+            metricTags
+          ),
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          metricTags
+        );
+      }
+
       if (erc4626Snapshot?.assets.length) {
         const before = routes.length;
         routes = routes.filter(
