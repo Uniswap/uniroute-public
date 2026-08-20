@@ -608,6 +608,11 @@ export const getQuickRouteAsyncConfig = (
   };
 };
 
+/** Floor on the caller-supplied maxRoutingTimeMs budget: anything lower is
+ * ignored, so a misconfigured near-zero value upstream can't collapse the
+ * split search. Mirrors trading's MIN_INTEGRATOR_MAX_ROUTING_TIME_MS. */
+export const MIN_REQUEST_ROUTING_TIME_BUDGET_MS = __PLACEHOLDER__;
+
 /** Effective split-search budget for a chain: the configured timeout, lowered
  * (never raised) by the chain's entry in RouteSplitTimeoutMsCapByChain. */
 export const getRouteSplitTimeoutMs = (

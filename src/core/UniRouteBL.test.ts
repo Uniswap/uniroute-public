@@ -6,6 +6,7 @@ import {
   getUniRouteSyncCacheMissRouteFinderOverrides,
   IUniRouteServiceConfig,
   LambdaType,
+  MIN_REQUEST_ROUTING_TIME_BUDGET_MS,
   QuoteService,
 } from '../lib/config';
 import {HardcodedChainRepository} from '../stores/chain/hardcoded/HardcodedChainRepository';
@@ -6334,6 +6335,132 @@ describe('UniRouteBL', () => {
 
       expect(strategySpy).toHaveBeenCalledTimes(1);
       expectOriginalConfig(strategySpy.mock.calls[0][7], quickRouteConfig);
+    });
+  });
+
+  describe('request maxRoutingTimeMs budget', () => {
+    // Returns the RouteFinder config the strategy was invoked with.
+    async function routeFinderConfigForRequest(
+      requestOverrides: Record<string, unknown>,
+      config: IUniRouteServiceConfig = serviceConfig
+    ): Promise<IUniRouteServiceConfig['RouteFinder']> {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        ...requestOverrides,
+      });
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const strategySpy = vi.spyOn(
+        mockedQuoteStrategy,
+        'findBestQuoteCandidates'
+      );
+
+      const uniRouteBL = new UniRouteBL(
+        config,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      await uniRouteBL.quote(ctx, request);
+      expect(strategySpy).toHaveBeenCalledTimes(1);
+      return strategySpy.mock.calls[0][7].RouteFinder;
+    }
+
+    it('caps the sync split-search budget at the request maxRoutingTimeMs', async () => {
+      const routeFinder = await routeFinderConfigForRequest({
+        maxRoutingTimeMs: 300,
+      });
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(300);
+      // Cap-only: everything else keeps the service config values.
+      expect(routeFinder.MaxRoutes).toBe(serviceConfig.RouteFinder.MaxRoutes);
+      expect(routeFinder.MaxSplits).toBe(serviceConfig.RouteFinder.MaxSplits);
+    });
+
+    it('never raises the budget above the configured timeout', async () => {
+      const routeFinder = await routeFinderConfigForRequest({
+        maxRoutingTimeMs:
+          serviceConfig.RouteFinder.RouteSplitTimeoutMs + 10_000,
+      });
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(
+        serviceConfig.RouteFinder.RouteSplitTimeoutMs
+      );
+    });
+
+    it('leaves the config unchanged when maxRoutingTimeMs is unset', async () => {
+      const routeFinder = await routeFinderConfigForRequest({});
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(
+        serviceConfig.RouteFinder.RouteSplitTimeoutMs
+      );
+    });
+
+    it('caps the reduced sync cache-miss config too', async () => {
+      const cacheMissOverrides = getUniRouteSyncCacheMissRouteFinderOverrides();
+      const routeFinder = await routeFinderConfigForRequest({
+        protocols: 'v2,v3',
+        maxRoutingTimeMs: 300,
+      });
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(300);
+      expect(routeFinder.MaxRoutes).toBe(cacheMissOverrides.MaxRoutes);
+    });
+
+    it('ignores a budget below the floor', async () => {
+      const routeFinder = await routeFinderConfigForRequest({
+        maxRoutingTimeMs: MIN_REQUEST_ROUTING_TIME_BUDGET_MS - 1,
+      });
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(
+        serviceConfig.RouteFinder.RouteSplitTimeoutMs
+      );
+    });
+
+    it('applies a budget at the floor', async () => {
+      const routeFinder = await routeFinderConfigForRequest({
+        maxRoutingTimeMs: MIN_REQUEST_ROUTING_TIME_BUDGET_MS,
+      });
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(
+        MIN_REQUEST_ROUTING_TIME_BUDGET_MS
+      );
+    });
+
+    it('ignores the budget for a quickroute deployment', async () => {
+      // Same gating as selectEffectiveConfig: RouteFinder overrides are
+      // UniRoute-only semantics.
+      const routeFinder = await routeFinderConfigForRequest(
+        {maxRoutingTimeMs: 300},
+        {...serviceConfig, QuoteService: QuoteService.QuickRoute}
+      );
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(
+        serviceConfig.RouteFinder.RouteSplitTimeoutMs
+      );
+    });
+
+    it('ignores the budget on the async deep-search path', async () => {
+      // The async deep search populates the shared route cache, so it keeps
+      // its full budget even if a caller budget reaches it.
+      const routeFinder = await routeFinderConfigForRequest(
+        {maxRoutingTimeMs: 300},
+        serviceConfigAsync
+      );
+      expect(routeFinder.RouteSplitTimeoutMs).toBe(
+        serviceConfigAsync.RouteFinder.RouteSplitTimeoutMs
+      );
     });
   });
 

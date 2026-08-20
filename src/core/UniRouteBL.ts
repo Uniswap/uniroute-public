@@ -32,6 +32,7 @@ import {
   QuoteService,
   needsGasPriceFetching,
   getUniRouteSyncCacheMissRouteFinderOverrides,
+  MIN_REQUEST_ROUTING_TIME_BUDGET_MS,
 } from '../lib/config';
 import {Address} from '../models/address/Address';
 import {BlockNumberCache} from '../lib/blockNumberCache';
@@ -628,10 +629,22 @@ export class UniRouteBL implements IUniRoutedBL {
         `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`
       );
 
-      const effectiveConfig = this.selectEffectiveConfig(
+      const baseEffectiveConfig = this.selectEffectiveConfig(
         usedCachedRoutes,
         protocols
       );
+      const effectiveConfig = this.applyRequestRoutingTimeBudget(
+        baseEffectiveConfig,
+        request.maxRoutingTimeMs
+      );
+      // Budget-capped gets its own tag value so a cache-hit quote with a
+      // caller budget doesn't start reading as `reduced`.
+      const routeFinderConfigTag =
+        effectiveConfig !== baseEffectiveConfig
+          ? 'budget_capped'
+          : baseEffectiveConfig !== this.serviceConfig
+            ? 'reduced'
+            : 'original';
 
       routes = await this.filterInvalidRoutes(
         ctx,
@@ -741,7 +754,8 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes,
         options?.testAggHooks,
         routes,
-        effectiveConfig
+        effectiveConfig,
+        routeFinderConfigTag
       );
 
       // Do some logging
@@ -823,9 +837,7 @@ export class UniRouteBL implements IUniRoutedBL {
       metricTags.push(
         `simulationStatus:${bestQuote?.simulationResult?.status}`
       );
-      metricTags.push(
-        `routeFinderConfig:${effectiveConfig !== this.serviceConfig ? 'reduced' : 'original'}`
-      );
+      metricTags.push(`routeFinderConfig:${routeFinderConfigTag}`);
       await emitCallMetrics(metricTags);
 
       await this.writeCachesIfAsync(
@@ -1323,7 +1335,8 @@ export class UniRouteBL implements IUniRoutedBL {
     usedCachedRoutes: boolean,
     testAggHooks: boolean | undefined,
     routes: RouteBasic<Pool>[],
-    effectiveConfig: IUniRouteServiceConfig
+    effectiveConfig: IUniRouteServiceConfig,
+    routeFinderConfigTag: string
   ): Promise<RouteBasic<Pool>[]> {
     const routesBeforeEffectiveSlice = routes;
     const routeCapResult = capRoutesByAggHookClass(
@@ -1354,8 +1367,7 @@ export class UniRouteBL implements IUniRoutedBL {
         : 'global',
       noAggHookRoutesRetained: routeCapResult.noAggHookRoutesRetained,
       aggHookRoutesRetained: routeCapResult.aggHookRoutesRetained,
-      routeFinderConfig:
-        effectiveConfig !== this.serviceConfig ? 'reduced' : 'original',
+      routeFinderConfig: routeFinderConfigTag,
       beforeSlice: beforeRouteCounts,
       afterSlice: afterRouteCounts,
       droppedRouteSummaries: summarizeRoutesForLogging(
@@ -1542,6 +1554,38 @@ export class UniRouteBL implements IUniRoutedBL {
       };
     }
     return this.serviceConfig;
+  }
+
+  /**
+   * Caps the RouteFinder split-search budget at the caller-supplied
+   * maxRoutingTimeMs. Cap-only, like RouteSplitTimeoutMsCapByChain: it can
+   * lower the budget, never raise it.
+   *
+   * Sync-only (same gating as selectEffectiveConfig) so one caller's budget
+   * can't degrade the shared route cache the async deep search populates.
+   * Budgets below MIN_REQUEST_ROUTING_TIME_BUDGET_MS are ignored, so a
+   * near-zero config entry can't collapse the split search to nothing.
+   */
+  private applyRequestRoutingTimeBudget(
+    config: IUniRouteServiceConfig,
+    maxRoutingTimeMs: number | undefined
+  ): IUniRouteServiceConfig {
+    if (
+      !maxRoutingTimeMs ||
+      maxRoutingTimeMs < MIN_REQUEST_ROUTING_TIME_BUDGET_MS ||
+      this.serviceConfig.Lambda.Type !== LambdaType.Sync ||
+      this.serviceConfig.QuoteService !== QuoteService.UniRoute ||
+      maxRoutingTimeMs >= config.RouteFinder.RouteSplitTimeoutMs
+    ) {
+      return config;
+    }
+    return {
+      ...config,
+      RouteFinder: {
+        ...config.RouteFinder,
+        RouteSplitTimeoutMs: maxRoutingTimeMs,
+      },
+    };
   }
 
   /**
