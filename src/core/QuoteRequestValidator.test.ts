@@ -295,26 +295,12 @@ describe('QuoteRequestValidator', () => {
       );
     });
 
-    it('should return error when slippage tolerance exceeds 20%', async () => {
-      const request = createValidRequest();
-      request.slippageTolerance = 21;
-
-      const result = await validator.validateInputs(request, ctx);
-
-      expect(result).toBeDefined();
-      expect(result?.error).toBeDefined();
-      expect(result?.error?.code).toBe(400);
-      expect(result?.error?.message).toBe(
-        'Slippage tolerance must not exceed 20%'
+    // Resolves both request tokens so validation runs to completion and any
+    // returned error is attributable to the slippage check under test.
+    const mockTokenResolutionSuccess = (request: QuoteRequest): void => {
+      vi.mocked(mockChainRepository.getChain).mockResolvedValue(
+        createMockChain(ChainId.MAINNET)
       );
-    });
-
-    it('should not return error when slippage tolerance is exactly 20%', async () => {
-      const request = createValidRequest();
-      request.slippageTolerance = 20;
-      const mockChain = createMockChain(ChainId.MAINNET);
-
-      vi.mocked(mockChainRepository.getChain).mockResolvedValue(mockChain);
       vi.mocked(mockTokenProvider.searchForToken).mockImplementation(
         async (chain, tokenRaw) => {
           if (tokenRaw === request.tokenInAddress) {
@@ -329,37 +315,46 @@ describe('QuoteRequestValidator', () => {
           );
         }
       );
+    };
 
-      const result = await validator.validateInputs(request, ctx);
+    // There is no upper bound on slippage. 20 and 21 are here specifically to
+    // pin the boundary that used to reject, so a reintroduced cap fails loudly.
+    // 1.7e306 is the top of the representable range: scaled by 100 it is still
+    // finite, so it must be accepted.
+    it.each([0, 5, 20, 21, 50, 100, 1000, 1.7e306])(
+      'should not return error when slippage tolerance is %s%%',
+      async slippageTolerance => {
+        const request = createValidRequest();
+        request.slippageTolerance = slippageTolerance;
+        mockTokenResolutionSuccess(request);
 
-      expect(result).toBeUndefined();
-    });
+        const result = await validator.validateInputs(request, ctx);
 
-    it('should not return error when slippage tolerance is below 20%', async () => {
-      const request = createValidRequest();
-      request.slippageTolerance = 5;
-      const mockChain = createMockChain(ChainId.MAINNET);
+        expect(result).toBeUndefined();
+      }
+    );
 
-      vi.mocked(mockChainRepository.getChain).mockResolvedValue(mockChain);
-      vi.mocked(mockTokenProvider.searchForToken).mockImplementation(
-        async (chain, tokenRaw) => {
-          if (tokenRaw === request.tokenInAddress) {
-            return new CurrencyInfo(
-              false,
-              new Address('0x1111111111111111111111111111111111111111')
-            );
-          }
-          return new CurrencyInfo(
-            false,
-            new Address('0x2222222222222222222222222222222222222222')
-          );
-        }
-      );
+    // Rejected because they break downstream rather than lower the floor:
+    // `Percent` cannot build a BigInt from a non-finite value, and the SDK
+    // asserts slippage >= 0 when computing minimumAmountOut.
+    // 1.8e306 is finite on its own but overflows to Infinity once scaled by
+    // 100, so it must be rejected here rather than 500 downstream.
+    it.each([-0.01, -5, NaN, Infinity, -Infinity, 1.8e306, 1e307])(
+      'should return error when slippage tolerance is %s',
+      async slippageTolerance => {
+        const request = createValidRequest();
+        request.slippageTolerance = slippageTolerance;
+        mockTokenResolutionSuccess(request);
 
-      const result = await validator.validateInputs(request, ctx);
+        const result = await validator.validateInputs(request, ctx);
 
-      expect(result).toBeUndefined();
-    });
+        expect(result).toBeDefined();
+        expect(result?.error?.code).toBe(400);
+        expect(result?.error?.message).toBe(
+          'Slippage tolerance must be a non-negative number within the supported range'
+        );
+      }
+    );
 
     it('should not return error when slippage tolerance is not provided', async () => {
       const request = createValidRequest();

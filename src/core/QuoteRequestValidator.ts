@@ -68,15 +68,30 @@ export class QuoteRequestValidator {
       });
     }
 
-    // Slippage tolerance must not exceed 20%
+    // Deliberately no upper bound: minimumAmountOut is amountOut/(1+slippage),
+    // which only asymptotes toward zero, so a large tolerance lowers the
+    // user's floor rather than removing it. Callers own that tradeoff — FOT
+    // and thin-liquidity tokens routinely need more than the client's "very
+    // high slippage" warning threshold.
+    // Values that break rather than degrade are still rejected: `Percent`
+    // cannot build a BigInt from a non-finite value, and the SDK asserts
+    // slippage >= 0 when computing minimumAmountOut. Both would otherwise
+    // surface as a 500 well downstream of this handler.
+    // The finite check is applied to the *scaled* value because that is what
+    // `parseSlippageTolerance` builds the Percent from. Testing the raw input
+    // would let anything above ~1.8e306 through, which is finite on its own
+    // but overflows to Infinity once multiplied by 100. Scaling first covers
+    // NaN, +/-Infinity, and that overflow in a single test.
     if (
       request.slippageTolerance !== undefined &&
-      request.slippageTolerance > 20
+      (!Number.isFinite(request.slippageTolerance * 100) ||
+        request.slippageTolerance < 0)
     ) {
       return new QuoteResponse({
         error: {
           code: 400,
-          message: 'Slippage tolerance must not exceed 20%',
+          message:
+            'Slippage tolerance must be a non-negative number within the supported range',
         },
       });
     }
