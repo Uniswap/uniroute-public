@@ -115,8 +115,8 @@ describe('SubgraphProvider V4 permissioned-hook query', () => {
     const adapters = (
       permissionedCalls[0]!.variables.permissionedAdapters as string[]
     ).map(t => t.toLowerCase());
-    expect(adapters).toContain('0xef1dc9abd8a7e073cfdda453c775e7ce24e4a4c8'); // PA1
-    expect(knownTokens).toContain('0xef1dc9abd8a7e073cfdda453c775e7ce24e4a4c8'); // PA1
+    expect(adapters).toContain('0xc6f4b10e842d16a35dd49853a9d3f3169442bfd0'); // PA1
+    expect(knownTokens).toContain('0xc6f4b10e842d16a35dd49853a9d3f3169442bfd0'); // PA1
     expect(knownTokens).toContain('0xfff9976782d46cc05630d1f6ebab18b2324d6b14'); // WETH (major)
     expect(knownTokens).not.toContain(
       '0x000000000000000000000000000000000000beef'

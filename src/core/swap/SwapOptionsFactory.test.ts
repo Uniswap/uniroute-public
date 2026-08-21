@@ -633,10 +633,10 @@ describe('SwapOptionsFactory', () => {
     });
 
     it('maps a permissioned adapter input to its underlying sec-token in the permit', () => {
-      // Sepolia PA1 adapter → Superstate TestToken underlying, per the
+      // Sepolia PA1 (mPerm1) adapter → its sec-token underlying, per the
       // shared permissioned-token registry.
-      const PA1_ADAPTER = '0xef1dc9abd8a7e073cfdda453c775e7ce24e4a4c8';
-      const PA1_UNDERLYING = '0xbf56488c857a881ae7e3bed27cf99c10a7ab7e50';
+      const PA1_ADAPTER = '0xc6f4b10e842d16a35dd49853a9d3f3169442bfd0';
+      const PA1_UNDERLYING = '0x3a93b81ab30b45dc2b394144efac142832cc360d';
 
       const result = SwapOptionsFactory.createUniversalRouterOptions_2_2_0({
         ...baseInput,

@@ -1400,16 +1400,20 @@ describe('v4HooksPoolsFiltering', () => {
 // An adapter↔adapter pool (e.g. PA1/PA2) holds no whitelisted base token, so its
 // tvlETH is ~0 and would otherwise be dropped — this guards that it survives.
 describe('permissioned-hook pools (Superstate PA↔PA)', () => {
-  // Sepolia FINAL permissioned hook + its adapters (PA1/PA2), from the shared
+  // Sepolia PermissionedHooks + its adapters (PA1/PA2), from the shared
   // registry @uniswap/lib-sharedconfig/permissionedTokens.
   const SEPOLIA_PERMISSIONED_HOOK =
-    '0xeade493b075cee00e6a832af758b7c76793fe880';
-  const PA1 = '0xef1dc9abd8a7e073cfdda453c775e7ce24e4a4c8';
-  const PA2 = '0x721c18b87340c11cd148624c6c5aad2a95aa6168';
+    '0x51247e2291d290d17c08813a175ac86465ede8c0';
+  const PA1 = '0xc6f4b10e842d16a35dd49853a9d3f3169442bfd0';
+  const PA2 = '0x8308119359f9fb7dea90b1b977276a6d89902818';
+  // Deterministic v4 pool id of the PA2/PA1 3000/60 pool on the current hook
+  // (keccak256 of the PoolKey) — valid whether or not the pool exists yet.
+  const PA_POOL_ID =
+    '0xf686d60e241770ffd7f18a73e82ecaf1b2aae0eb5aac7b66b2bbae4d5067795e';
 
   const createPaPool = (overrides: Partial<V4SubgraphPool> = {}) =>
     createPool({
-      id: '0xcbdf68ff01bf24f535523e274165a1f11ffea6306f383200b49eb222d8bf2521',
+      id: PA_POOL_ID,
       hooks: SEPOLIA_PERMISSIONED_HOOK,
       tvlETH: 0,
       tvlUSD: 0,
@@ -1453,9 +1457,7 @@ describe('permissioned-hook pools (Superstate PA↔PA)', () => {
       mockLogger,
       mockMetric
     );
-    expect(result.map(p => p.id.toLowerCase())).toContain(
-      '0xcbdf68ff01bf24f535523e274165a1f11ffea6306f383200b49eb222d8bf2521'
-    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(PA_POOL_ID);
   });
 
   // Trust-boundary regression: a pool initialized under a permissioned hook but
