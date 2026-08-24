@@ -124,8 +124,6 @@ export const FLAUNCH_ANYPOSM_V1_ON_BASE =
 
 export const FLAUNCH_POSM_ON_ROBINHOOD =
   '0x5cf8e499c7c466c7e2cf127bdf129f57151e65dc';
-// Second Flaunch PositionManager deployment on Robinhood
-// (SplitArrow — same shared launchpad hook, different instance).
 export const FLAUNCH_POSM_ON_ROBINHOOD_2 =
   '0x07f7850aa55ffb4a6f2693d493c4477747ec6fdc';
 
@@ -417,13 +415,12 @@ export const APEX_YIELD_HOOK_ON_BASE =
 export const UPEG_HOOK_ON_MAINNET =
   '0xe54082DfBf044B6a8F584bdDdb90a22d5613C440';
 
-// GuideStar hooks -
-// stable-stable hooks
 export const GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET =
   '0x4509b7eb3f9641226804fea4976963435d1c6080';
 export const ETIM_TAX_HOOK_ON_MAINNET =
   '0x41a9bf2969af822942a553babd6d8dda0dff80cc';
 export const ASH_HOOK_ON_MAINNET = '0xebac1d1a384d3ae1a162fdf30788fcfa228380cc';
+// multiple deployments of the same contract
 export const LIVO_SWAP_HOOK_ON_MAINNET =
   '0x627fa6f76fa96b10bae1b6fba280a3c9264500cc';
 export const LIVO_SWAP_HOOK_V2_ON_MAINNET =
@@ -451,8 +448,8 @@ export const JRNY_HOOK_ON_MAINNET =
 
 export const A51PEG_HOOK_ON_BASE = '0x1c0c00db76140b4e7deb997ccf1246d8d6b80440';
 
-// Aegis DFM — same address across all supported chains
 const AEGIS_DFM_ADDRESS = '0xb4f4949e8d0a177bb6d2fea33e9516bb219610cc';
+// same address across all supported chains
 export const AEGIS_DFM_ON_MAINNET = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_UNICHAIN = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_OPTIMISM = AEGIS_DFM_ADDRESS;
@@ -612,8 +609,8 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
 
 export const ARMSYS_ON_BASE = '0x7fb4846d3987476577319f112731bb04f45880c8';
 
-// MEV-X Homelander — same address across all supported chains
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
+// same address across all supported chains
 export const MEV_X_HOMELANDER_ON_MAINNET = MEV_X_HOMELANDER_ADDRESS;
 export const MEV_X_HOMELANDER_ON_BNB = MEV_X_HOMELANDER_ADDRESS;
 export const MEV_X_HOMELANDER_ON_BASE = MEV_X_HOMELANDER_ADDRESS;
@@ -622,7 +619,6 @@ export const MEV_X_HOMELANDER_ON_ARBITRUM = MEV_X_HOMELANDER_ADDRESS;
 export const MEV_X_HOMELANDER_ON_UNICHAIN = MEV_X_HOMELANDER_ADDRESS;
 export const MEV_X_HOMELANDER_ON_MONAD = MEV_X_HOMELANDER_ADDRESS;
 
-// Latest basedbid deployment; total fee hard-capped 20% (getFeeHardLimits: MAX_TOTAL_FEE_BPS=2000), immutable. Supersedes the prior deployment addresses.
 export const BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_ROBINHOOD =
   '0x037bf303462bb3cde80038a1945cd10af1ebdacc';
 export const BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_BASE =
@@ -647,6 +643,8 @@ export const BONKER_STATIC_FEE_HOOK_ON_BASE =
 
 export const URULAUNCH_HOOK_ON_BASE =
   '0x367bf580a1a6cc784f30a77713e02eca76210044';
+export const STOCKIFY_FEE_HOOK_ON_BASE =
+  '0x47ec48c74f3069e9ae69406197821996d80200cc';
 
 export const DOPPLER_HOOKS_ADDRESS_ON_ROBINHOOD =
   '0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544';
@@ -660,8 +658,6 @@ export const SHARES_HOOK_ON_ROBINHOOD =
   '0x25a1bb2313e4b24307e8259b177431a61bfe04cc';
 export const PLEB_INDEX_FEE_HOOK_ON_ROBINHOOD =
   '0xa507e8c472918338c6c15eb894c9703581b060cc';
-// LivoSwapHook — multiple Robinhood deployments of the same verified contract
-// (different LP fee tiers / versions).
 export const LIVO_SWAP_HOOK_ON_ROBINHOOD =
   '0xbffe76cc9e506285032b2e5d1b74b579e39ac0cc';
 export const LIVO_SWAP_HOOK_ON_ROBINHOOD_2 =
@@ -684,7 +680,7 @@ export const RIVERS_LAUNCH_HOOK_V3_ON_ROBINHOOD =
   '0x59e2cea84bf858b66d46b22742bef4304ee0aacc';
 export const RIVERS_LAUNCH_HOOK_V4_ON_ROBINHOOD =
   '0x7a8e7ef7cdeeddef23735689639becba9cfeaacc';
-// StrategyHook — two Robinhood deployments of the same verified contract.
+// multiple deployments of the same contract
 export const STRATEGY_HOOK_ON_ROBINHOOD =
   '0x4a00b5f169eadee5524e819bf418dfd797336544';
 export const STRATEGY_HOOK_ON_ROBINHOOD_2 =
@@ -719,7 +715,7 @@ export const MIKO_FEE_HOOK_ON_ROBINHOOD =
   '0x0a790b185f5f3f4bf6ecae95bf3f275ea5ff60cc';
 export const LAUNCHLY_HOOK_2_ON_ROBINHOOD =
   '0xbe096e555e3c82d3ddd8ee8f464ffab70df480cc';
-// PonsV2MemeHook — two Robinhood deployments of the same verified contract.
+// multiple deployments of the same contract
 export const PONS_V2_MEME_HOOK_ON_ROBINHOOD =
   '0x8e99d2009d60a917e9b1c00c04c077b8c0c3a044';
 export const PONS_V2_MEME_HOOK_ON_ROBINHOOD_2 =
@@ -734,7 +730,6 @@ export const M1_ADAPTIVE_HOOK_ON_ROBINHOOD =
   '0xe908dd34310da285be504f2ec62189d51d37c0cc';
 export const ETH_CREATOR_FEE_HOOK_V3_ON_ROBINHOOD =
   '0xf804df937d9f84660e4626aadad9358db702e0cc';
-// Exact-output swaps revert (ExactOutputNotSupported); exact-in routes normally.
 export const MOON_FLAME_BURN_TAX_HOOK_ON_ROBINHOOD =
   '0x92657be80f14e339c6ca6ba3d023ecae0a2bc0cc';
 export const GAZZ_FEE_HOOK_ON_ROBINHOOD =
@@ -769,6 +764,20 @@ export const MULTI_HOOK_HOST_V11_ON_ROBINHOOD =
   '0x83d6fa59bef503112887b16277cf559fdc93e0c4';
 export const STOCK_RIP_TOKEN_HOOK_ON_ROBINHOOD =
   '0xf295127365a2c3055fdfba01b0596da56dcfa444';
+export const MIGRATOR_MEME_HOOK_ON_ROBINHOOD =
+  '0x8fecfbffd5f5e430d3a375c0af0fdb5a458f6044';
+export const STONKFI_DAMPER_HOOK_ON_ROBINHOOD =
+  '0x8dbdf613fc5bf103d1718620e15e45a6982d3ac8';
+export const STONK_BIRDS_FEE_HOOK_ON_ROBINHOOD =
+  '0x1cdbdc57b803a5270f76b52468b3d368d124e0cc';
+export const STONK_BIRDS_FEE_HOOK_V2_ON_ROBINHOOD =
+  '0xeb05ff77166f09fe78edcf4e137e001ea1e660cc';
+export const CASH_CAT_HOOK_V2_ON_ROBINHOOD =
+  '0x75a54357d9c78a2db19004a5fdc76c50f9242aec';
+export const CREATOR_FEE_ANTI_SNIPE_HOOK_ON_ROBINHOOD =
+  '0xa527da47273720a1178b7a44ac8907628242e0c4';
+export const MONKEY_HOOK_ON_ROBINHOOD =
+  '0xb1a660b86c85561263de93cb9aa534c46a5d0044';
 export const LEV7_FEE_HOOK_V2_ON_ROBINHOOD =
   '0x423026f3b47b8ee39a96ce1f27a8939ad21340cc';
 export const LEV7_FEE_HOOK_V3_ON_ROBINHOOD =
@@ -779,7 +788,6 @@ export const REFLECTION_HOOK_ON_ROBINHOOD =
   '0x96b65787e57b80116955e3e28a5d8fd86b1bc0cc';
 export const REFLECTION_HOOK_STOCK_PAIRED_ON_ROBINHOOD =
   '0x2dafe4a6348cd003bc3de8267984c4807a5f40cc';
-// Exact-output swaps revert (ExactOutputNotAllowed); exact-in routes normally.
 export const HOOKED_V1_ON_ROBINHOOD =
   '0x46c4455f65da6d0e8bb0274e257f99733dde2544';
 export const MULTI_HOOK_HOST_V12_ON_ROBINHOOD =
@@ -790,7 +798,6 @@ export const PRIMER_ADAPTIVE_BURN_HOOK_ON_ROBINHOOD =
   '0xafc105fb435cb085dc13699882977b02889800cc';
 export const SEAL_DAO_FEE_HOOK_ON_ROBINHOOD =
   '0xeb1e05df4b1e0e7eed94cd06628900868ea3a0cc';
-// Buys gated (FWA) until owner enables external buys; sells route with empty hookData. Exact-output reverts.
 export const FWATOKENHOOK_ON_ROBINHOOD =
   '0xd64961c357327510b8416c8b25aed37b67856444';
 export const BUYBACK_BURN_HOOK_V1_ON_ROBINHOOD =
@@ -807,7 +814,6 @@ export const BALLISTIC_FEE_HOOK_V3_ON_MAINNET =
   '0xffbfa95c07ba855fee037350634aba4a404e20cc';
 export const BALLISTIC_FEE_HOOK_V1_ON_MAINNET =
   '0x47b35474ede2b3ae9b82915e2f57647073a6a0cc';
-// Buys settle only via the SwingRouter; sells route with empty hookData. Exact-input only.
 export const SWING_HOOK_ON_MAINNET =
   '0xad3cc8eb9d34abeb3b0ca9b98cbfd3837b7d40c8';
 export const FORGE_HOOK_ON_MAINNET =
@@ -1151,6 +1157,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BONKER_STATIC_FEE_HOOK_ON_BASE,
     URULAUNCH_HOOK_ON_BASE,
     BURN_ON_SWAP_HOOK_ON_BASE,
+    STOCKIFY_FEE_HOOK_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
@@ -1197,6 +1204,13 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     DOPPLER_HOOKS_ADDRESS_ON_ROBINHOOD,
     INDEX_FEE_HOOK_ON_ROBINHOOD,
     BASEDBID_PROGRAMMABLE_FEE_HOOK_ON_ROBINHOOD,
+    MIGRATOR_MEME_HOOK_ON_ROBINHOOD,
+    STONKFI_DAMPER_HOOK_ON_ROBINHOOD,
+    STONK_BIRDS_FEE_HOOK_ON_ROBINHOOD,
+    STONK_BIRDS_FEE_HOOK_V2_ON_ROBINHOOD,
+    CASH_CAT_HOOK_V2_ON_ROBINHOOD,
+    CREATOR_FEE_ANTI_SNIPE_HOOK_ON_ROBINHOOD,
+    MONKEY_HOOK_ON_ROBINHOOD,
     PENSION_TAX_HOOK_ON_ROBINHOOD,
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
     CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_ROBINHOOD,
