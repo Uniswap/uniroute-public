@@ -653,6 +653,8 @@ export const FEE_HOOK_ON_BASE = '0xc90eddf51569270e06270ea98f7efff828dde0cc';
 export const LAUNCH_HOOK_ON_BASE = '0x3b2b979df21036cee51b8debb13100e2cb8deacc';
 export const LAUNCH_HOOK_2_ON_BASE =
   '0x985c14baa2a18316ffda0aefb3a632fadfca2acc';
+export const VVVEITY_FEE_HOOK_V2_ON_BASE =
+  '0x4951d0e1cfb915f64ab19aed153bd6305a244088';
 
 export const DOPPLER_HOOKS_ADDRESS_ON_ROBINHOOD =
   '0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544';
@@ -1199,6 +1201,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ZNS_HOOK_STATIC_FEE_ON_BASE,
     FEE_HOOK_ON_BASE,
     LAUNCH_HOOK_ON_BASE,
+    VVVEITY_FEE_HOOK_V2_ON_BASE,
     LAUNCH_HOOK_2_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
