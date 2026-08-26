@@ -691,6 +691,108 @@ describe('v4HooksPoolsFiltering', () => {
     });
   });
 
+  // --- Fee-tier sanity ceiling (ROUTE-1690) ---
+  // Confirmed live on mainnet: NVDAx/USDC v4 pools with feeTier 960500 and
+  // 955000 (~96%/95.5%) — scalper-created, near-zero-liquidity pools, not an
+  // isolated misconfiguration (routing team, #apps-feedback) — were the only
+  // CLASSIC candidates, so BEST_PRICE quoted 1000 USDC in for ~1.42 NVDAx out.
+  // ADDRESS_ZERO (hookless) pools previously bypassed the fee-tier check
+  // entirely, which is how a plain, non-hooked pool could carry an absurd fee.
+  describe('fee-tier sanity ceiling', () => {
+    it('keeps a hookless pool at a normal fee tier', () => {
+      const pool = createPool({
+        hooks: ADDRESS_ZERO,
+        feeTier: '3000',
+        tvlETH: 5,
+      });
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result.map(p => p.id)).toContain(pool.id);
+    });
+
+    it('excludes a hookless pool at the reported absurd fee tier (960500, ~96%)', () => {
+      const pool = createPool({
+        hooks: ADDRESS_ZERO,
+        feeTier: '960500',
+        tvlETH: 5,
+      });
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('excludes a hookless pool at the second reported absurd fee tier (955000, ~95.5%)', () => {
+      const pool = createPool({
+        hooks: ADDRESS_ZERO,
+        feeTier: '955000',
+        tvlETH: 5,
+      });
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('still routes a hooked pool at a fee tier within the ceiling', () => {
+      const hookNoSwap = '0x0000000000000000000000000000000000000100';
+      const pool = createPool({
+        hooks: hookNoSwap,
+        feeTier: '50000',
+        tvlETH: 100,
+      });
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result.map(p => p.id)).toContain(pool.id);
+    });
+
+    it('excludes an above-ceiling hookless major-pair pool that would otherwise be a routable candidate', () => {
+      // Major/major pair, so the only admission paths are isHooksPoolRoutable
+      // (blocked by the ceiling) and the explicit allowlist (this hook isn't
+      // on it) — unlike the auto-allowlist path, which only applies to
+      // non-major pairs and is unaffected by this change (see the pre-existing
+      // "auto-allowlists non-major hooks even when feeTier > 1000000" test).
+      const pool = createPool({
+        hooks: ADDRESS_ZERO,
+        feeTier: '960500',
+        tvlETH: 100,
+        token0: {
+          id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+          symbol: 'WETH',
+          name: 'Wrapped Ether',
+          decimals: '18',
+        },
+        token1: {
+          id: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+      });
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    });
+  });
+
   describe('hook denylisting', () => {
     it('excludes non-major hooked pools when hook is denylisted', () => {
       const hookNoSwap = '0x0000000000000000000000000000000000000400';

@@ -2,7 +2,7 @@
  * Ported from routing-api/lib/util/v4HooksPoolsFiltering.ts
  */
 
-import {Hook, HookOptions} from '@uniswap/v4-sdk';
+import {DYNAMIC_FEE_FLAG, Hook, HookOptions} from '@uniswap/v4-sdk';
 import {
   getAdapterHookConfig,
   getPermissionedHookAddresses,
@@ -41,6 +41,24 @@ const CANONICAL_V4_FEE_TICK_SPACINGS: Record<string, string> = {
   '9000': '90',
   '10000': '200',
 };
+
+// V4 permits any static LP fee up to LPFeeLibrary.MAX_LP_FEE (1,000,000 ppm =
+// 100%), with or without a hook, and permissionless pool creation means
+// nothing on-chain stops a fee tier that is orders of magnitude above any
+// real trading fee. v3's highest enabled tier tops out at 10000 (1%,
+// FeeAmount.HIGH). A pool above this ceiling is routable-but-destructive
+// (quotes a user 90%+ of their input) rather than a genuine high-fee market,
+// so it is excluded from candidate routes regardless of hook status.
+const MAX_REASONABLE_V4_FEE_TIER_PPM = 110000; // 11%
+
+function isFeeTierWithinSanityCeiling(pool: V4SubgraphPool): boolean {
+  // DYNAMIC_FEE_FLAG is a sentinel bit marking "fee set by the hook at swap
+  // time", not a fee amount — the real fee isn't knowable from the subgraph
+  // snapshot. Dynamic-fee pools are gated separately via isDynamicFeePool, so
+  // this check only applies to pools reporting an actual static fee.
+  if (Number(pool.feeTier) === DYNAMIC_FEE_FLAG) return true;
+  return Number(pool.feeTier) <= MAX_REASONABLE_V4_FEE_TIER_PPM;
+}
 
 function convertV4PoolToGroupingKey(pool: V4SubgraphPool): V4PoolGroupingKey {
   return pool.token0.id.concat(pool.token1.id).concat(pool.feeTier);
@@ -140,11 +158,11 @@ function isHooksPoolRoutable(
   }
 
   return (
-    pool.hooks === ADDRESS_ZERO ||
-    (!Hook.hasSwapPermissions(pool.hooks) &&
-      !hasCustomAccountingPermissions(pool.hooks) &&
-      Number(pool.feeTier) <= 1000000 &&
-      !isDynamicFeePool(pool, chainId, logger))
+    isFeeTierWithinSanityCeiling(pool) &&
+    (pool.hooks === ADDRESS_ZERO ||
+      (!Hook.hasSwapPermissions(pool.hooks) &&
+        !hasCustomAccountingPermissions(pool.hooks) &&
+        !isDynamicFeePool(pool, chainId, logger)))
   );
 }
 
@@ -381,10 +399,15 @@ export function v4HooksPoolsFiltering(
   );
 
   // Append explicitly allowlisted hooks not already selected by either queue.
+  // The fee-tier ceiling still applies here: hook trust (allowlisting) and fee
+  // sanity are independent axes — ADDRESS_ZERO itself is allowlisted on several
+  // chains, so without this check a hookless pool rejected by
+  // isHooksPoolRoutable for an absurd fee would be silently re-admitted here.
   let explicitlyAllowlistedHooksPools = pools.filter((pool: V4SubgraphPool) => {
     const hookAddress = pool.hooks.toLowerCase();
     return (
       allowlistedHooksAddresses.has(hookAddress) &&
+      isFeeTierWithinSanityCeiling(pool) &&
       // Permissioned hooks take the dedicated ownership-gated append below;
       // exclude them here so a hook accidentally in both lists isn't doubled.
       !permissionedHookAddresses.has(hookAddress) &&
