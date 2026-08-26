@@ -1551,6 +1551,29 @@ describe('permissioned-hook pools (Superstate PA↔PA)', () => {
     );
   });
 
+  it('keeps an owned permissioned pool at an interface-default fee tier (9000/90)', () => {
+    const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14';
+    const newTierPool = createPool({
+      id: '0x' + 'f'.repeat(63) + '6',
+      hooks: SEPOLIA_PERMISSIONED_HOOK,
+      feeTier: '9000',
+      tickSpacing: '90',
+      tvlETH: 0,
+      tvlUSD: 0,
+      token0: {id: PA1, symbol: 'PA1', name: 'Perm Token 1', decimals: '18'},
+      token1: {id: WETH_SEPOLIA, symbol: 'WETH', name: 'WETH', decimals: '18'},
+    });
+    const result = v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      [newTierPool],
+      mockLogger,
+      mockMetric
+    );
+    expect(result.map(p => p.id.toLowerCase())).toContain(
+      newTierPool.id.toLowerCase()
+    );
+  });
+
   it('keeps an owned PA↔WETH permissioned pool (single adapter endpoint)', () => {
     const WETH_SEPOLIA = '0xfff9976782d46cc05630d1f6ebab18b2324d6b14';
     const paWethPool = createPool({

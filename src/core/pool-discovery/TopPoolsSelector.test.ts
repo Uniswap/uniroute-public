@@ -1626,8 +1626,10 @@ describe('BasicTopPoolsSelector', () => {
         FeatureGatedTokensRepository.empty(),
         false,
         {
+          // A key outside the canonical grid — 375/4 became canonical when
+          // the grid learned the interface-default tiers.
           getPoolKeysForPair: async () => [
-            {fee: 375, tickSpacing: 4, hooks: ADDRESS_ZERO},
+            {fee: 1234, tickSpacing: 7, hooks: ADDRESS_ZERO},
           ],
         }
       );
@@ -1641,14 +1643,18 @@ describe('BasicTopPoolsSelector', () => {
       )) as V4PoolInfo[];
 
       expect(result.map(pool => pool.feeTier)).toEqual([
+        '75',
         '100',
-        '500',
-        '3000',
-        '10000',
         '375',
+        '500',
+        '2500',
+        '3000',
+        '9000',
+        '10000',
+        '1234',
       ]);
       const registryPool = result[result.length - 1]!;
-      expect(registryPool.tickSpacing).toBe('4');
+      expect(registryPool.tickSpacing).toBe('7');
       expect(registryPool.hooks).toBe(ADDRESS_ZERO);
       // Every entry must carry a distinct computed pool id.
       expect(new Set(result.map(pool => pool.id)).size).toBe(result.length);
@@ -1663,9 +1669,13 @@ describe('BasicTopPoolsSelector', () => {
         new Set<string>()
       )) as V4PoolInfo[];
       expect(result.map(pool => pool.feeTier)).toEqual([
+        '75',
         '100',
+        '375',
         '500',
+        '2500',
         '3000',
+        '9000',
         '10000',
       ]);
     });
@@ -2370,24 +2380,24 @@ describe('AggHooksTopPoolsSelector', () => {
 // poolSelectionConfig limit or add a fee tier, expect these to fail and update
 // both the formula and these pinned values together.
 describe('getMaxFilteredPoolCount', () => {
-  it('returns 80 for defaultPoolSelectionConfig', () => {
-    // 12 (max(topNDirectPairs=2, MAX_MANUAL_DIRECT_PAIRS_FALLBACK=12))
+  it('returns 84 for defaultPoolSelectionConfig', () => {
+    // 16 (max(topNDirectPairs=2, MAX_MANUAL_DIRECT_PAIRS_FALLBACK=16))
     // + 10 (2 × topNOneHopPairs=5)
     // + 40 (10 intermediaries × (topNSecondHopPairs=2 + WETH + ETH))
     // + 2  (topNPairs)
     // + 12 (2 × topNWithBaseToken=6)
     // + 4  (top WETH/ETH × {tokenIn, tokenOut})
-    // = 80
-    expect(getMaxFilteredPoolCount(defaultPoolSelectionConfig)).toBe(80);
+    // = 84
+    expect(getMaxFilteredPoolCount(defaultPoolSelectionConfig)).toBe(84);
   });
 
   it('MAX_MANUAL_DIRECT_PAIRS_FALLBACK matches the V4 grid + registry cap', () => {
     // V4 is the worst case for manuallyGenerateDirectPairs: the canonical
-    // grid (V4FeeAmounts.length = 4) plus up to MAX_REGISTRY_ENTRIES_PER_PAIR
+    // grid (V4FeeAmounts.length = 8) plus up to MAX_REGISTRY_ENTRIES_PER_PAIR
     // (8) PoolKey-registry entries. If a fee tier is added anywhere or the
     // registry cap moves, this constant should grow and the pinned value
     // above must be updated.
-    expect(MAX_MANUAL_DIRECT_PAIRS_FALLBACK).toBe(12);
+    expect(MAX_MANUAL_DIRECT_PAIRS_FALLBACK).toBe(16);
   });
 });
 

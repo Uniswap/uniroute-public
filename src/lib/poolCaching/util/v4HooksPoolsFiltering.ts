@@ -32,9 +32,13 @@ const MAX_POOLS_PER_DYNAMIC_ZLCA_HOOK = 50;
 // V4TickSpacing and what quickRoute probes). Used to bound permissioned-pool
 // PoolKeys to a finite, routable set.
 const CANONICAL_V4_FEE_TICK_SPACINGS: Record<string, string> = {
+  '75': '1',
   '100': '1',
+  '375': '4',
   '500': '10',
+  '2500': '25',
   '3000': '60',
+  '9000': '90',
   '10000': '200',
 };
 

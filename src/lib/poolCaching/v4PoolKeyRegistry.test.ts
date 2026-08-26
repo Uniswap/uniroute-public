@@ -21,12 +21,11 @@ import {
 import {Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {Token} from '@uniswap/sdk-core';
 import {nativeOnChain} from './util/nativeOnChain';
+import {V4TickSpacing} from '../../models/pool/V4Pool';
 
-// ROUTE-1579's SIERRA/USDC mainnet pool: fee 375, tickSpacing 4, hookless.
+// ROUTE-1579's SIERRA/USDC fixture, re-keyed off the canonical grid.
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
 const SIERRA = '0xbceb5f6877d979ec621ae694da1102cb95691ad3';
-const SIERRA_POOL_ID =
-  '0xb2bc5c469dc818e9d3f34cae42d4229d89fc5e5e35297158e909aae0db238a8f';
 
 const GENERATED_AT = 1_754_000_000_000;
 
@@ -48,11 +47,11 @@ function poolIdFor(
 
 function row(overrides: Partial<V4PoolKey>): V4PoolKey {
   return {
-    poolId: SIERRA_POOL_ID,
+    poolId: poolIdFor(1, USDC, SIERRA, 1234, 7),
     token0Address: USDC,
     token1Address: SIERRA,
-    feeBips: 375,
-    tickSpacing: 4,
+    feeBips: 1234,
+    tickSpacing: 7,
     hooksAddress: null,
     poolCreatedAtBlockTimestamp: new Date('2026-07-01T00:00:00Z'),
     ...overrides,
@@ -63,7 +62,7 @@ describe('buildV4PoolKeyRegistry', () => {
   it('includes a non-canonical hookless pool under its sorted pair key', () => {
     const {file, stats} = buildV4PoolKeyRegistry(1, [row({})], GENERATED_AT);
     expect(stats.included).toBe(1);
-    expect(file.pairs[v4RegistryPairKey(SIERRA, USDC)]).toEqual([[375, 4]]);
+    expect(file.pairs[v4RegistryPairKey(SIERRA, USDC)]).toEqual([[1234, 7]]);
     expect(file.chainId).toBe(1);
     expect(file.generatedAtMs).toBe(GENERATED_AT);
   });
@@ -99,6 +98,22 @@ describe('buildV4PoolKeyRegistry', () => {
     );
     expect(stats.skippedCanonical).toBe(1);
     expect(stats.skippedHooked).toBe(1);
+    expect(Object.keys(file.pairs)).toHaveLength(0);
+  });
+
+  it('skips every tier of the serving-path canonical grid (stays in sync with V4TickSpacing)', () => {
+    // The local CANONICAL_V4_FEE_TICK_SPACINGS map is a hand-maintained
+    // mirror of the serving-path grid; this trips if the copies drift.
+    const rows = Object.entries(V4TickSpacing).map(([fee, tickSpacing]) =>
+      row({
+        feeBips: Number(fee),
+        tickSpacing,
+        poolId: poolIdFor(1, USDC, SIERRA, Number(fee), tickSpacing),
+      })
+    );
+    const {stats, file} = buildV4PoolKeyRegistry(1, rows, GENERATED_AT);
+    expect(rows.length).toBe(8);
+    expect(stats.skippedCanonical).toBe(rows.length);
     expect(Object.keys(file.pairs)).toHaveLength(0);
   });
 

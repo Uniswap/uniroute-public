@@ -45,9 +45,13 @@ export {MAX_REGISTRY_ENTRIES_PER_PAIR};
 // v4HooksPoolsFiltering's CANONICAL_V4_FEE_TICK_SPACINGS) rather than
 // importing the serving-path model graph into the cron.
 const CANONICAL_V4_FEE_TICK_SPACINGS: Record<number, number> = {
+  75: 1,
   100: 1,
+  375: 4,
   500: 10,
+  2500: 25,
   3000: 60,
+  9000: 90,
   10000: 200,
 };
 

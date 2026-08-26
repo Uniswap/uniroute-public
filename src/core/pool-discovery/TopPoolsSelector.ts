@@ -1212,7 +1212,9 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       forceAddedDirectPools,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       pool => true,
-      6, // make sure we add all generated pools (can be up to 6 depending on protocol)
+      // Admit every generated pool — this constant is the worst case across
+      // protocols (v4 canonical grid + registry entries).
+      MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
       selectedPoolIds
     );
 
