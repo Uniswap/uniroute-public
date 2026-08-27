@@ -1,6 +1,11 @@
 import {describe, it, expect, vi, beforeEach} from 'vitest';
+import {
+  buildTestContext,
+  TestContext,
+  TestFetchResponse,
+} from '@uniswap/lib-testhelpers';
+import {FetchLike} from '@uniswap/lib-uni';
 import {cacheTokenLists} from './cacheTokenLists';
-import type {Logger} from './sor-providers/util/log';
 
 const sendMock = vi.fn().mockResolvedValue({});
 
@@ -14,32 +19,44 @@ vi.mock('@aws-sdk/client-s3', () => ({
   },
 }));
 
-vi.mock('axios', () => ({
-  default: {
-    get: vi.fn().mockResolvedValue({data: {tokens: [{name: 'Test Token'}]}}),
-  },
-}));
-
-function createMockLogger(): Logger {
-  return {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    fatal: vi.fn(),
+/**
+ * Closure-based fake for the context fetcher. `results` is consumed one entry
+ * per call, the last entry repeating, so a first-call failure can be followed
+ * by successes.
+ */
+function fakeFetcher(
+  results: Array<{body: string; status?: number} | Error>
+): FetchLike {
+  let index = 0;
+  return async () => {
+    const next = results[Math.min(index++, results.length - 1)];
+    if (next instanceof Error) throw next;
+    const status = next.status ?? 200;
+    return new TestFetchResponse({
+      status,
+      ok: status >= 200 && status < 300,
+      text: () => Promise.resolve(next.body),
+    });
   };
 }
 
+const TOKEN_LIST_BODY = JSON.stringify({tokens: [{name: 'Test Token'}]});
+
+const errorCount = (ctx: TestContext): number =>
+  ctx.logger.outputs.filter(o => o.prefix === 'ERROR:').length;
+
 describe('cacheTokenLists', () => {
-  let mockLogger: Logger;
+  let ctx: TestContext;
 
   beforeEach(() => {
-    mockLogger = createMockLogger();
+    ctx = buildTestContext();
     sendMock.mockClear();
   });
 
   it('fetches token lists and uploads to S3', async () => {
-    await cacheTokenLists(mockLogger, {s3Bucket: 'test-bucket'});
+    ctx.fetcher = fakeFetcher([{body: TOKEN_LIST_BODY}]);
+
+    await cacheTokenLists(ctx, {s3Bucket: 'test-bucket'});
 
     // Should have called send for each of the 3 token list URLs
     expect(sendMock).toHaveBeenCalledTimes(3);
@@ -51,15 +68,33 @@ describe('cacheTokenLists', () => {
   });
 
   it('logs errors for failed fetches but continues', async () => {
-    const axios = await import('axios');
-    vi.mocked(axios.default.get)
-      .mockRejectedValueOnce(new Error('network error'))
-      .mockResolvedValue({data: {tokens: []}});
+    ctx.fetcher = fakeFetcher([
+      new Error('network error'),
+      {body: '{"tokens":[]}'},
+    ]);
 
-    await cacheTokenLists(mockLogger, {s3Bucket: 'test-bucket'});
+    await cacheTokenLists(ctx, {s3Bucket: 'test-bucket'});
 
-    expect(mockLogger.error).toHaveBeenCalledTimes(1);
+    expect(errorCount(ctx)).toBe(1);
     // Still uploads the other 2 successfully
     expect(sendMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a non-2xx response body as a token list', async () => {
+    ctx.fetcher = fakeFetcher([{status: 500, body: 'upstream exploded'}]);
+
+    await cacheTokenLists(ctx, {s3Bucket: 'test-bucket'});
+
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(errorCount(ctx)).toBe(3);
+  });
+
+  it('does not cache a 200 whose body is not JSON', async () => {
+    ctx.fetcher = fakeFetcher([{status: 200, body: '<html>nope</html>'}]);
+
+    await cacheTokenLists(ctx, {s3Bucket: 'test-bucket'});
+
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(errorCount(ctx)).toBe(3);
   });
 });

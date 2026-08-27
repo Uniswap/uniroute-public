@@ -13,7 +13,7 @@
 
 import {S3Client, PutObjectCommand, GetObjectCommand} from '@aws-sdk/client-s3';
 import {DYNAMIC_FEE_FLAG, Hook} from '@uniswap/v4-sdk';
-import axios from 'axios';
+import {Context} from '@uniswap/lib-uni/context';
 import {ethers} from 'ethers';
 import pLimit from 'p-limit';
 import {V4Pool} from '../../models/pool/V4Pool';
@@ -23,6 +23,7 @@ import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
 import {hasCustomAccountingPermissions} from './util/v4HooksPoolsFiltering';
 import {ChainId} from '../config';
+import {unirouteFetch} from '../unirouteFetch';
 
 export const DEFAULT_CCA_SCHEDULED_POOLS_BASE_KEY = 'ccaScheduledPools.json';
 
@@ -454,17 +455,21 @@ function rebuildEntryForFallbackHook(
   }
 }
 
+/**
+ * Built per cron tick so the fetch rides that tick's context (the cron
+ * container has no request context; `ctx` must carry an installed fetcher —
+ * see workerFetcher.ts).
+ */
 export function makeDataApiPendingAuctionsFetcher(
+  ctx: Context,
   dataApiUrl: string
 ): (chainIds: number[]) => Promise<PendingLbpAuction[]> {
   return async (chainIds: number[]) => {
-    // Cron container: no request context, so no ctx.axios (same bare-axios
-    // pattern as the other pool-caching jobs' outbound HTTP). Wire shape
-    // mirrors data.v1.AuctionService/ListAuctionsPendingLbpMigration
+    // Wire shape mirrors data.v1.AuctionService/ListAuctionsPendingLbpMigration
     // (data-api proto/data/v1/auction.proto) — the same local-interface
     // consumption pattern liquidity's DataApiClient uses; there is no
     // published data-api client package.
-    const response = await axios.post<{
+    const response = await unirouteFetch<{
       auctions?: Array<{
         auctionId?: string;
         chainId?: number;
@@ -472,11 +477,21 @@ export function makeDataApiPendingAuctionsFetcher(
         lbpStrategyAddress?: string;
         poolKeyHash?: string;
       }>;
-    }>(
-      `${dataApiUrl}/data.v1.AuctionService/ListAuctionsPendingLbpMigration`,
-      {chainIds},
-      {timeout: 10_000}
-    );
+    }>(ctx, {
+      method: 'POST',
+      url: `${dataApiUrl}/data.v1.AuctionService/ListAuctionsPendingLbpMigration`,
+      body: {chainIds},
+      timeoutMs: 10_000,
+      metricTags: {vendor: 'data-api'},
+    });
+    // axios threw on a non-2xx here (no validateStatus override), and the
+    // caller counts a failed run — so keep throwing rather than silently
+    // pruning the registry against an empty auction list.
+    if (!response.ok || response.data === undefined) {
+      throw new Error(
+        `ListAuctionsPendingLbpMigration failed with HTTP ${response.status}`
+      );
+    }
     return (response.data.auctions ?? [])
       .filter(a => a.address && a.lbpStrategyAddress && a.chainId)
       .map(a => ({

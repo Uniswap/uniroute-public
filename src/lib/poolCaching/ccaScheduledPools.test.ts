@@ -12,8 +12,15 @@ import {
   CcaScheduledPoolsWriterDeps,
   CCA_SCHEDULED_POOLS_S3_KEY,
   LbpInitializerInfo,
+  makeDataApiPendingAuctionsFetcher,
   PendingLbpAuction,
 } from './ccaScheduledPools';
+import {
+  buildTestContext,
+  TestContext,
+  TestFetchResponse,
+} from '@uniswap/lib-testhelpers';
+import {FetchLike} from '@uniswap/lib-uni';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
@@ -1324,5 +1331,105 @@ describe('buildCcaScheduledPools', () => {
 
     expect(writtenEntries(1)).toHaveLength(0);
     expect(deps.getBlockNumber).not.toHaveBeenCalled();
+  });
+});
+
+describe('makeDataApiPendingAuctionsFetcher', () => {
+  let ctx: TestContext;
+
+  /**
+   * Closure-based fake for the context fetcher: records the request and
+   * replays a raw body, so the status check and JSON decode are exercised.
+   */
+  function fakeFetcher(result: {body: string; status?: number}): {
+    fetcher: FetchLike;
+    calls: Array<{url: string; init?: RequestInit}>;
+  } {
+    const calls: Array<{url: string; init?: RequestInit}> = [];
+    return {
+      calls,
+      fetcher: async (_c, input, init) => {
+        calls.push({url: String(input), init});
+        const status = result.status ?? 200;
+        return new TestFetchResponse({
+          status,
+          ok: status >= 200 && status < 300,
+          text: () => Promise.resolve(result.body),
+        });
+      },
+    };
+  }
+
+  beforeEach(() => {
+    ctx = buildTestContext();
+  });
+
+  it('posts the chain ids and maps the auctions it can use', async () => {
+    const {fetcher, calls} = fakeFetcher({
+      body: JSON.stringify({
+        auctions: [
+          {
+            auctionId: 'a1',
+            chainId: 1,
+            address: AUCTION,
+            lbpStrategyAddress: STRATEGY,
+            poolKeyHash: `0x${'1'.repeat(64)}`,
+          },
+          // Dropped: no lbpStrategyAddress.
+          {auctionId: 'a2', chainId: 1, address: AUCTION},
+        ],
+      }),
+    });
+    ctx.fetcher = fetcher;
+
+    const auctions = await makeDataApiPendingAuctionsFetcher(
+      ctx,
+      'https://data-api.internal'
+    )([1]);
+
+    expect(calls[0].url).toBe(
+      'https://data-api.internal/data.v1.AuctionService/ListAuctionsPendingLbpMigration'
+    );
+    expect(calls[0].init?.body).toBe('{"chainIds":[1]}');
+    expect(auctions).toEqual([
+      {
+        auctionId: 'a1',
+        chainId: 1,
+        address: AUCTION,
+        lbpStrategyAddress: STRATEGY,
+        hasMigrated: true,
+        migratedPoolId: `0x${'1'.repeat(64)}`,
+      },
+    ]);
+  });
+
+  it('throws on a non-2xx rather than reporting zero pending auctions', async () => {
+    const {fetcher} = fakeFetcher({
+      status: 503,
+      body: '{"code":"unavailable"}',
+    });
+    ctx.fetcher = fetcher;
+
+    await expect(
+      makeDataApiPendingAuctionsFetcher(ctx, 'https://data-api.internal')([1])
+    ).rejects.toThrow('HTTP 503');
+  });
+
+  it('throws when a 200 body is not JSON', async () => {
+    const {fetcher} = fakeFetcher({body: '<html>edge</html>'});
+    ctx.fetcher = fetcher;
+
+    await expect(
+      makeDataApiPendingAuctionsFetcher(ctx, 'https://data-api.internal')([1])
+    ).rejects.toThrow('HTTP 200');
+  });
+
+  it('treats a missing auctions array as no pending auctions', async () => {
+    const {fetcher} = fakeFetcher({body: '{}'});
+    ctx.fetcher = fetcher;
+
+    await expect(
+      makeDataApiPendingAuctionsFetcher(ctx, 'https://data-api.internal')([1])
+    ).resolves.toEqual([]);
   });
 });

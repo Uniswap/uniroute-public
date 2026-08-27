@@ -36,6 +36,13 @@ import {GasDetails} from 'src/models/gas/GasDetails';
 import {Address} from 'src/models/address/Address';
 import {MethodParameters} from 'src/lib/methodParameters';
 import {EthSimulateV1Simulator} from './eth-simulateV1-provider';
+import {TestFetchResponse, buildTestContext} from '@uniswap/lib-testhelpers';
+import {FetchLike, IMetrics, ILogger} from '@uniswap/lib-uni';
+import {stack} from '@uniswap/lib-uni/middlewarestack';
+import {
+  metricMiddleware,
+  timeoutMiddleware,
+} from '@uniswap/lib-middlewares/client';
 import {Protocol} from '../../../models/pool/Protocol';
 
 // Mock the ERC20 and Permit2 factories
@@ -86,7 +93,7 @@ describe('tenderly-simulation-provider', () => {
       data: unknown,
       config?: {headers?: Record<string, string>; timeout?: number}
     ) => Promise<{data: unknown; status: number}>;
-    let axiosPostMock: Mock<TenderlyPostMock>;
+    let tenderlyPostMock: Mock<TenderlyPostMock>;
 
     const USDC_ADDRESS = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
     const WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
@@ -159,7 +166,7 @@ describe('tenderly-simulation-provider', () => {
         getGasCostInUSDBasedOnGasCostInWei: vi.fn().mockReturnValue(3.88),
       } as unknown as GasConverter;
 
-      axiosPostMock = vi.fn<TenderlyPostMock>();
+      tenderlyPostMock = vi.fn<TenderlyPostMock>();
       ctx = {
         logger: {
           info: vi.fn(),
@@ -170,18 +177,28 @@ describe('tenderly-simulation-provider', () => {
           dist: vi.fn(),
           count: vi.fn(),
         },
-        axios: vi.fn(
-          async (config: {
-            url: string;
-            data: unknown;
-            headers?: Record<string, string>;
-            timeout?: number;
-          }) =>
-            axiosPostMock(config.url, config.data, {
-              headers: config.headers,
-              timeout: config.timeout,
-            })
-        ),
+        // ctx.fetch replaces ctx.axios here: the mock still speaks in
+        // {data, status}, and this shim turns that into the undecoded,
+        // never-throwing response the migrated code has to handle itself.
+        fetch: async (
+          input: string,
+          init?: RequestInit,
+          fetchConfig?: {timeoutMs?: number}
+        ) => {
+          const {data, status} = await tenderlyPostMock(
+            input,
+            JSON.parse(String(init?.body)),
+            {
+              headers: init?.headers as Record<string, string> | undefined,
+              timeout: fetchConfig?.timeoutMs,
+            }
+          );
+          return new TestFetchResponse({
+            status,
+            ok: status >= 200 && status < 300,
+            text: () => Promise.resolve(JSON.stringify(data)),
+          });
+        },
       } as unknown as Context;
     });
 
@@ -341,7 +358,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -387,7 +404,7 @@ describe('tenderly-simulation-provider', () => {
       });
 
       it('should return FAILED when Node API response is invalid', async () => {
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: {id: 1, jsonrpc: '2.0', result: []},
           status: 200,
         });
@@ -422,7 +439,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -436,6 +453,48 @@ describe('tenderly-simulation-provider', () => {
         );
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+      });
+
+      it('should meter a 200 with a non-JSON body as failure and log the snippet', async () => {
+        // A proxy error page: HTTP 200, but the body decodes to no data, so
+        // the caller lands on its `!resp` branch — the metric must not say
+        // vendor success, and the body snippet is the only diagnostic.
+        // Context.fetch is a readonly getter, so route around it for the
+        // raw-body stub.
+        (ctx as unknown as {fetch: unknown}).fetch = async () =>
+          new TestFetchResponse({
+            status: 200,
+            ok: true,
+            text: () => Promise.resolve('<html>proxy error</html>'),
+          });
+
+        const quoteSplit = createQuoteSplit();
+        const result = await simulator.simulateTransaction(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          'Tenderly.Simulation.Request',
+          1,
+          {
+            tags: [
+              'chain:1',
+              'http_status:200',
+              'status:failure',
+              'simType:Node',
+            ],
+          }
+        );
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+          'Failed to invoke Tenderly Node Endpoint for gas estimation bundle.',
+          expect.objectContaining({
+            upstreamBody: '<html>proxy error</html>',
+          })
+        );
       });
 
       it('should throw error for unsupported swap type', async () => {
@@ -491,7 +550,7 @@ describe('tenderly-simulation-provider', () => {
             ],
           };
 
-          axiosPostMock
+          tenderlyPostMock
             .mockResolvedValueOnce({data: nodeApiResponse, status: 200})
             .mockResolvedValueOnce({data: simApiResponse, status: 200});
 
@@ -504,10 +563,10 @@ describe('tenderly-simulation-provider', () => {
           );
 
           // Node sim call + save_if_fails Simulation API call
-          expect(axiosPostMock).toHaveBeenCalledTimes(2);
+          expect(tenderlyPostMock).toHaveBeenCalledTimes(2);
 
           // Second call should be to Simulation API
-          const [secondCallUrl, secondCallBody] = axiosPostMock.mock
+          const [secondCallUrl, secondCallBody] = tenderlyPostMock.mock
             .calls[1] as [string, {simulations: {save_if_fails: boolean}[]}];
           expect(secondCallUrl).toBe(
             'https://api.tenderly.co/api/v1/account/test-user/project/test-project/simulate-batch'
@@ -560,7 +619,7 @@ describe('tenderly-simulation-provider', () => {
 
           const simApiError = new Error('Simulation API unavailable');
 
-          axiosPostMock
+          tenderlyPostMock
             .mockResolvedValueOnce({data: nodeApiResponse, status: 200})
             .mockRejectedValueOnce(simApiError);
 
@@ -572,7 +631,7 @@ describe('tenderly-simulation-provider', () => {
             ctx
           );
 
-          expect(axiosPostMock).toHaveBeenCalledTimes(2);
+          expect(tenderlyPostMock).toHaveBeenCalledTimes(2);
 
           expect(ctx.metrics.count).toHaveBeenCalledWith(
             'Tenderly.Simulation.InsufficientToken',
@@ -612,7 +671,7 @@ describe('tenderly-simulation-provider', () => {
             ],
           };
 
-          axiosPostMock.mockResolvedValueOnce({
+          tenderlyPostMock.mockResolvedValueOnce({
             data: nodeApiResponse,
             status: 200,
           });
@@ -626,7 +685,7 @@ describe('tenderly-simulation-provider', () => {
           );
 
           // Only the node simulation call, no save_if_fails Simulation API call
-          expect(axiosPostMock).toHaveBeenCalledTimes(1);
+          expect(tenderlyPostMock).toHaveBeenCalledTimes(1);
 
           expect(ctx.metrics.count).not.toHaveBeenCalledWith(
             'Tenderly.Simulation.InsufficientToken',
@@ -652,7 +711,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -690,7 +749,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -709,6 +768,124 @@ describe('tenderly-simulation-provider', () => {
         );
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+      });
+    });
+
+    // The node access key is a URL path segment, and metricMiddleware tags
+    // every client.* metric with sanitizePath(pathname) — which only redacts
+    // segments >= 40 chars. Run the real middleware here, not a ctx.fetch
+    // stub, or nothing in this file would notice the key becoming a tag.
+    describe('node access key never reaches observability', () => {
+      // Shaped like a real Tenderly node key: 32 chars, under the 40-char
+      // redaction floor, so an unredacted path would carry it verbatim.
+      const NODE_KEY = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ012345';
+
+      let recordedDimensions: Record<string, string>[];
+      let debugFields: Record<string, unknown>[];
+
+      beforeEach(() => {
+        recordedDimensions = [];
+        debugFields = [];
+
+        const recordDimensions = async (
+          _name: string,
+          _val: number,
+          opts?: {dimensions?: Record<string, string>}
+        ): Promise<void> => {
+          if (opts?.dimensions) recordedDimensions.push(opts.dimensions);
+        };
+
+        // Typed as the base Context so the metrics/logger setters take the
+        // recording fakes; TestContext narrows them to its own classes.
+        const baseCtx: Context = buildTestContext();
+        baseCtx.metrics = {
+          count: recordDimensions,
+          timer: recordDimensions,
+          dist: async () => {},
+        } as unknown as IMetrics;
+        baseCtx.logger = {
+          info: () => {},
+          error: () => {},
+          warn: () => {},
+          debug: (_msg: string, fields?: Record<string, unknown>) => {
+            if (fields) debugFields.push(fields);
+          },
+        } as unknown as ILogger;
+
+        const mStack = stack<FetchLike>([
+          metricMiddleware('uniroute'),
+          timeoutMiddleware({defaultTimeoutMs: 1000}),
+        ]);
+        baseCtx.fetcher = (c, input, init?, fetchConfig?) =>
+          mStack(
+            async () =>
+              new TestFetchResponse({
+                status: 200,
+                ok: true,
+                text: () =>
+                  Promise.resolve(
+                    JSON.stringify({
+                      id: 1,
+                      jsonrpc: '2.0',
+                      result: [
+                        {gas: '50000', gasUsed: '45000'},
+                        {gas: '60000', gasUsed: '55000'},
+                        {gas: '150000', gasUsed: '140000'},
+                      ],
+                    })
+                  ),
+              }),
+            c,
+            input,
+            init,
+            fetchConfig
+          );
+
+        ctx = baseCtx;
+        simulator = new TenderlySimulator(
+          ChainId.MAINNET,
+          NODE_KEY,
+          gasConverter,
+          provider,
+          undefined,
+          2500,
+          'https://api.tenderly.co',
+          'test-user',
+          'test-project',
+          'test-access-key'
+        );
+      });
+
+      it('tags client metrics with a placeholder path, never the key', async () => {
+        const result = await simulator.simulateTransaction(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+        expect(recordedDimensions.length).toBeGreaterThan(0);
+
+        for (const dimensions of recordedDimensions) {
+          expect(dimensions.path).toBe('/{nodeAccessKey}');
+          expect(Object.values(dimensions)).not.toContain(NODE_KEY);
+        }
+      });
+
+      it('keeps the key out of the request debug log', async () => {
+        await simulator.simulateTransaction(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(debugFields.length).toBeGreaterThan(0);
+        expect(JSON.stringify(debugFields)).not.toContain(NODE_KEY);
+        expect(debugFields[0].endpoint).toBe(
+          'https://mainnet.gateway.tenderly.co/{nodeAccessKey}'
+        );
       });
     });
 
@@ -756,7 +933,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -790,14 +967,19 @@ describe('tenderly-simulation-provider', () => {
         );
 
         // Verify the correct endpoint was called (Simulation API, not Node API)
-        expect(axiosPostMock).toHaveBeenCalledWith(
+        expect(tenderlyPostMock).toHaveBeenCalledWith(
           'https://api.tenderly.co/api/v1/account/test-user/project/test-project/simulate-batch',
           expect.objectContaining({
             simulations: expect.any(Array),
             estimate_gas: true,
           }),
           expect.objectContaining({
-            headers: {'X-Access-Key': 'test-access-key'},
+            // Content-Type is now explicit; axios set it implicitly for a JSON
+            // body.
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Access-Key': 'test-access-key',
+            },
           })
         );
       });
@@ -825,7 +1007,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -868,7 +1050,7 @@ describe('tenderly-simulation-provider', () => {
           ],
         };
 
-        axiosPostMock.mockResolvedValue({
+        tenderlyPostMock.mockResolvedValue({
           data: mockResponse,
           status: 200,
         });
@@ -882,6 +1064,72 @@ describe('tenderly-simulation-provider', () => {
         );
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+      });
+
+      it('should return FAILED, not TypeError, when a 200 JSON body has no simulation_results', async () => {
+        // A 200 whose JSON body is an error envelope is a truthy `resp`
+        // without simulation_results — the guard must optional-chain rather
+        // than read `.length` and lose the cause in a generic catch.
+        tenderlyPostMock.mockResolvedValue({
+          data: {error: {message: 'project not found'}},
+          status: 200,
+        });
+
+        const quoteSplit = createQuoteSplit(ChainId.XLAYER);
+        const result = await simulator.simulateTransaction(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+          'Failed to Simulate Via Tenderly Simulation API',
+          expect.objectContaining({chainId: ChainId.XLAYER})
+        );
+      });
+
+      it('should meter a 200 with a non-JSON body as failure and log the snippet', async () => {
+        // A proxy error page: HTTP 200, but the body decodes to no data, so
+        // the caller lands on its failure branch — the metric must not say
+        // vendor success, and the snippet is the only diagnostic.
+        // Context.fetch is a readonly getter, so route around it for the
+        // raw-body stub.
+        (ctx as unknown as {fetch: unknown}).fetch = async () =>
+          new TestFetchResponse({
+            status: 200,
+            ok: true,
+            text: () => Promise.resolve('<html>proxy error</html>'),
+          });
+
+        const quoteSplit = createQuoteSplit(ChainId.XLAYER);
+        const result = await simulator.simulateTransaction(
+          USER_ADDRESS,
+          swapOptions,
+          quoteSplit,
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(ctx.metrics.count).toHaveBeenCalledWith(
+          'Tenderly.Simulation.Request',
+          1,
+          {
+            tags: [
+              'chain:196',
+              'http_status:200',
+              'status:failure',
+              'simType:SimApi',
+            ],
+          }
+        );
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+          'Failed to Simulate Via Tenderly Simulation API',
+          expect.objectContaining({
+            upstreamBody: '<html>proxy error</html>',
+          })
+        );
       });
     });
 

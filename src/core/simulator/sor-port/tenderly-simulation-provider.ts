@@ -2,11 +2,8 @@ import {JsonRpcProvider} from '@ethersproject/providers';
 import {constants} from 'ethers';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
-import http from 'http';
-import https from 'https';
-import axios, {AxiosInstance} from 'axios';
-import {AxiosConfig} from '@uniswap/lib-uni';
-import {unirouteCtxAxios} from '../../../lib/unirouteCtxAxios';
+import {isErrTimeout} from '@uniswap/lib-middlewares/client';
+import {unirouteFetch, UnirouteFetchRequest} from '../../../lib/unirouteFetch';
 
 import {
   ERC20__factory,
@@ -140,6 +137,24 @@ const TENDERLY_BATCH_SIMULATE_API = (
   tenderlyProject: string
 ) =>
   `${tenderlyBaseUrl}/api/v1/account/${tenderlyUser}/project/${tenderlyProject}/simulate-batch`;
+
+/**
+ * The node access key is the endpoint's only path segment, so the raw node URL
+ * is itself a credential. Tenderly's node API takes the key only in the path —
+ * there is no documented header equivalent to the Simulation API's
+ * `X-Access-Key` — so the URL stays as-is and every place that *echoes* it
+ * (metric tags, logs) substitutes this instead. `sanitizePath` is no help: it
+ * only redacts path segments >= 40 chars and the key is shorter.
+ */
+const TENDERLY_NODE_METRIC_PATH = '/{nodeAccessKey}';
+
+function redactTenderlyNodeEndpoint(endpoint: string): string {
+  try {
+    return `${new URL(endpoint).origin}${TENDERLY_NODE_METRIC_PATH}`;
+  } catch {
+    return TENDERLY_NODE_METRIC_PATH;
+  }
+}
 
 const TENDERLY_NODE_API = (chainId: ChainId, tenderlyNodeApiKey: string) => {
   switch (chainId) {
@@ -317,7 +332,14 @@ export class FallbackTenderlySimulator extends Simulator {
         swapSteps: swapOptions.universalRouterSwapsteps === true,
       });
 
-      if (err instanceof Error && err.message.includes('timeout')) {
+      // isErrTimeout, not a message match: the timeout middleware's message
+      // reads "timedout", so the substring check alone would silently stop
+      // counting timeouts. Kept alongside it for timeouts raised elsewhere
+      // (ethers/RPC).
+      if (
+        isErrTimeout(err) ||
+        (err instanceof Error && err.message.includes('timeout'))
+      ) {
         await ctx.metrics.count('Tenderly.Simulation.Timeout', 1, {
           tags: [`chain:${this.chainId}`],
         });
@@ -345,14 +367,6 @@ export class TenderlySimulator extends Simulator {
   private gasConverter: GasConverter;
   private overrideEstimateMultiplier: {[chainId in ChainId]?: number};
   private tenderlyRequestTimeout?: number;
-  // Pooled axios for worker fallback — preserves pre-migration
-  // keep-alive behavior (ctx.axios uses the service-wide pool with keepAlive too).
-  private tenderlyServiceInstance: AxiosInstance = axios.create({
-    httpAgent: new http.Agent({keepAlive: true}),
-    httpsAgent: new https.Agent({keepAlive: true}),
-    // Match ctx.axios: never throw on HTTP status; callers check httpStatus.
-    validateStatus: () => true,
-  });
 
   constructor(
     chainId: ChainId,
@@ -540,8 +554,15 @@ export class TenderlySimulator extends Simulator {
         TENDERLY_SIMULATION_API_ONLY_CHAINS.includes(chainId);
 
       if (useSimulationApi) {
-        const {data: resp, status: httpStatus} =
-          await this.requestSimulationApi(simulationCalls, ctx, stateOverrides);
+        const {
+          data: resp,
+          status: httpStatus,
+          bodySnippet,
+        } = await this.requestSimulationApi(
+          simulationCalls,
+          ctx,
+          stateOverrides
+        );
 
         const simulationLatency = Date.now() - before;
 
@@ -557,14 +578,21 @@ export class TenderlySimulator extends Simulator {
           tags: [
             `chain:${chainId}`,
             `http_status:${httpStatus}`,
-            `status:${httpStatus === 200 ? 'success' : 'failure'}`,
+            // `resp` defined too, not the status alone: a 200 carrying a
+            // non-JSON body (a proxy error page) decodes to no data and fails
+            // the caller, so it must not be metered as a vendor success.
+            `status:${httpStatus === 200 && resp !== undefined ? 'success' : 'failure'}`,
             'simType:SimApi',
             ...swapStepsTags,
           ],
         });
 
         if (
-          !resp ||
+          // Optional-chained: a 200 whose JSON body is an error envelope is a
+          // truthy `resp` without simulation_results, and a bare `!resp`
+          // guard would then TypeError on `.length` and lose the real cause
+          // in FallbackTenderlySimulator's generic catch.
+          !resp?.simulation_results ||
           resp.simulation_results.length < expectedCallCount ||
           !resp.simulation_results[swapCallIndex].transaction ||
           resp.simulation_results[swapCallIndex].transaction.error_message
@@ -575,6 +603,9 @@ export class TenderlySimulator extends Simulator {
             error:
               resp?.simulation_results?.[swapCallIndex]?.transaction
                 ?.error_message,
+            // The raw-body excerpt is the only diagnostic when `resp` is
+            // undefined (a 200 whose body wasn't JSON).
+            upstreamBody: bodySnippet,
             swapSteps: swapOptions.universalRouterSwapsteps === true,
           });
           return {
@@ -627,12 +658,15 @@ export class TenderlySimulator extends Simulator {
           );
         }
       } else {
-        const {data: resp, status: httpStatus} =
-          await this.requestNodeSimulation(
-            simulationCalls,
-            ctx,
-            stateOverrides
-          );
+        const {
+          data: resp,
+          status: httpStatus,
+          bodySnippet,
+        } = await this.requestNodeSimulation(
+          simulationCalls,
+          ctx,
+          stateOverrides
+        );
 
         const simulationLatency = Date.now() - before;
 
@@ -648,7 +682,10 @@ export class TenderlySimulator extends Simulator {
           tags: [
             `chain:${chainId}`,
             `http_status:${httpStatus}`,
-            `status:${httpStatus === 200 ? 'success' : 'failure'}`,
+            // `resp` defined too, not the status alone: a 200 carrying a
+            // non-JSON body (a proxy error page) decodes to no data and fails
+            // the caller, so it must not be metered as a vendor success.
+            `status:${httpStatus === 200 && resp !== undefined ? 'success' : 'failure'}`,
             'simType:Node',
             ...swapStepsTags,
           ],
@@ -683,6 +720,9 @@ export class TenderlySimulator extends Simulator {
                 resp,
                 chainId,
                 body: JSON.stringify(body),
+                // The raw-body excerpt is the only diagnostic when `resp` is
+                // undefined (a 200 whose body wasn't JSON).
+                upstreamBody: bodySnippet,
                 swapSteps: swapOptions.universalRouterSwapsteps === true,
               }
             );
@@ -692,6 +732,7 @@ export class TenderlySimulator extends Simulator {
               {
                 resp,
                 chainId,
+                upstreamBody: bodySnippet,
                 swapSteps: swapOptions.universalRouterSwapsteps === true,
               }
             );
@@ -886,34 +927,45 @@ export class TenderlySimulator extends Simulator {
     ctx: Context,
     url: string,
     body: unknown,
-    headers?: Record<string, string>
-  ): Promise<{data: T; status: number}> {
-    const requestConfig: AxiosConfig = {
+    headers?: Record<string, string>,
+    metricPath?: string
+  ): Promise<{data?: T; status: number; bodySnippet?: string}> {
+    const requestConfig: UnirouteFetchRequest = {
       method: 'POST',
       url,
-      data: body,
+      body,
       headers,
-      // 0 overrides the service bootstrap 5s default when unset (node endpoint).
-      timeout: this.tenderlyRequestTimeout ?? 0,
-      httpAgent: this.tenderlyServiceInstance.defaults.httpAgent,
-      httpsAgent: this.tenderlyServiceInstance.defaults.httpsAgent,
+      // Unset falls back to unirouteFetch's 120s NO_CLIENT_DEADLINE_MS
+      // ceiling — the stand-in for the axios-era "no deadline" (node
+      // endpoint).
+      timeoutMs: this.tenderlyRequestTimeout,
+      metricTags: {vendor: 'tenderly'},
+      metricPath,
     };
-    // ctx.axios (default) uses the service bootstrap pool (keepAlive: true).
-    // Fallback uses the dedicated Tenderly pool above — same as pre-migration.
-    const response = await unirouteCtxAxios(ctx, requestConfig, () =>
-      this.tenderlyServiceInstance.post<T>(url, body, {
-        headers,
-        timeout: this.tenderlyRequestTimeout ?? 0,
-      })
-    );
-    return {data: response.data, status: response.status};
+    // Keep-alive: with the dedicated http/https agents deleted, undici's
+    // global agent default applies — idle connections are kept for only 4s
+    // (keepAliveTimeout) when the server sends no Keep-Alive hint, versus the
+    // longer hold the deleted agents configured. Switching the global
+    // dispatcher (setGlobalDispatcher with a longer keepAliveTimeout) is
+    // deferred until per-simulation latency is measured post-migration
+    // (PI-636).
+    const response = await unirouteFetch<T>(ctx, requestConfig);
+    return {
+      data: response.data,
+      status: response.status,
+      bodySnippet: response.bodySnippet,
+    };
   }
 
   private async requestNodeSimulation(
     simulationCalls: TenderlySimulationRequest[],
     ctx: Context,
     stateOverrides?: ResolvedStateOverride[]
-  ): Promise<{data: TenderlyResponseEstimateGasBundle; status: number}> {
+  ): Promise<{
+    data?: TenderlyResponseEstimateGasBundle;
+    status: number;
+    bodySnippet?: string;
+  }> {
     const nodeEndpoint = TENDERLY_NODE_API(
       this.chainId,
       this.tenderlyNodeApiKey
@@ -946,17 +998,25 @@ export class TenderlySimulator extends Simulator {
 
     try {
       ctx.logger.debug('Tenderly simulation request', {
-        endpoint: nodeEndpoint,
+        endpoint: redactTenderlyNodeEndpoint(nodeEndpoint),
         body: body,
       });
 
-      // For now, we don't timeout tenderly node endpoint, but we should before we live switch to node endpoint
-      const {data: resp, status: httpStatus} =
-        await this.postTenderly<TenderlyResponseEstimateGasBundle>(
-          ctx,
-          nodeEndpoint,
-          body
-        );
+      // The node endpoint call passes timeoutMs: this.tenderlyRequestTimeout
+      // through postTenderly; when that is unset, unirouteFetch's 120s
+      // NO_CLIENT_DEADLINE_MS ceiling applies — so this path is no longer
+      // deadline-free.
+      const {
+        data: resp,
+        status: httpStatus,
+        bodySnippet,
+      } = await this.postTenderly<TenderlyResponseEstimateGasBundle>(
+        ctx,
+        nodeEndpoint,
+        body,
+        undefined,
+        TENDERLY_NODE_METRIC_PATH
+      );
 
       if (httpStatus !== 200) {
         ctx.logger.error(
@@ -965,12 +1025,17 @@ export class TenderlySimulator extends Simulator {
             null,
             2
           )}. HTTP Status: ${httpStatus}`,
-          {resp}
+          // bodySnippet covers the case where the error body isn't JSON, which
+          // leaves resp undefined.
+          {resp, upstreamBody: bodySnippet}
         );
-        return {data: resp, status: httpStatus};
+        return {data: resp, status: httpStatus, bodySnippet};
       }
 
-      return {data: resp, status: httpStatus};
+      // bodySnippet rides along on the 200 path too: a 200 whose body is not
+      // JSON (a proxy error page, say) comes back with `data` undefined, and
+      // the caller's failure branch has nothing else to diagnose it with.
+      return {data: resp, status: httpStatus, bodySnippet};
     } catch (err) {
       ctx.logger.error(
         `Failed to invoke Tenderly Node Endpoint for gas estimation bundle ${JSON.stringify(
@@ -990,7 +1055,11 @@ export class TenderlySimulator extends Simulator {
     simulationCalls: TenderlySimulationRequest[],
     ctx: Context,
     stateOverrides?: ResolvedStateOverride[]
-  ): Promise<{data: TenderlyResponseUniversalRouter; status: number}> {
+  ): Promise<{
+    data?: TenderlyResponseUniversalRouter;
+    status: number;
+    bodySnippet?: string;
+  }> {
     const url = TENDERLY_BATCH_SIMULATE_API(
       this.tenderlyBaseUrl,
       this.tenderlyUser,
@@ -1026,13 +1095,16 @@ export class TenderlySimulator extends Simulator {
         body: body,
       });
 
-      const {data: resp, status: httpStatus} =
-        await this.postTenderly<TenderlyResponseUniversalRouter>(
-          ctx,
-          url,
-          body,
-          {'X-Access-Key': this.tenderlyAccessKey}
-        );
+      const {
+        data: resp,
+        status: httpStatus,
+        bodySnippet,
+      } = await this.postTenderly<TenderlyResponseUniversalRouter>(
+        ctx,
+        url,
+        body,
+        {'X-Access-Key': this.tenderlyAccessKey}
+      );
 
       if (httpStatus !== 200) {
         ctx.logger.error(
@@ -1041,12 +1113,17 @@ export class TenderlySimulator extends Simulator {
             null,
             2
           )}. HTTP Status: ${httpStatus}`,
-          {resp}
+          // bodySnippet covers the case where the error body isn't JSON, which
+          // leaves resp undefined.
+          {resp, upstreamBody: bodySnippet}
         );
-        return {data: resp, status: httpStatus};
+        return {data: resp, status: httpStatus, bodySnippet};
       }
 
-      return {data: resp, status: httpStatus};
+      // bodySnippet rides along on the 200 path too: a 200 whose body is not
+      // JSON (a proxy error page, say) comes back with `data` undefined, and
+      // the caller's failure branch has nothing else to diagnose it with.
+      return {data: resp, status: httpStatus, bodySnippet};
     } catch (err) {
       ctx.logger.error(
         `Failed to invoke Tenderly Simulation API ${JSON.stringify(
