@@ -1,8 +1,15 @@
 import {describe, expect, it} from 'vitest';
 import {S3Client} from '@aws-sdk/client-s3';
 import {
+  buildTestContext,
+  TestContext,
+  TestFetchResponse,
+} from '@uniswap/lib-testhelpers';
+import {FetchLike} from '@uniswap/lib-uni';
+import {
   buildXStocksAssetsRegistry,
   filterLegacyV1Deployments,
+  makeXStocksAssetsApiFetcher,
   parseExpectedHookCodehashByChain,
   XStocksAssetEntry,
 } from './xstocksAssetsRegistry';
@@ -283,6 +290,95 @@ describe('xStocks assets registry writer', () => {
 
   it('writes a confirmed empty registry on the first run', async () => {
     expect(await run([], {firstWrite: true, markerAtMs: now})).toEqual([[]]);
+  });
+});
+
+describe('makeXStocksAssetsApiFetcher', () => {
+  const API_URL = 'https://xstocks.example/assets';
+
+  /**
+   * Closure-based fake for the context fetcher: records the request and
+   * replays a raw body, so the status check and JSON decode are exercised.
+   */
+  function fakeFetcher(result: {body: string; status?: number}): {
+    fetcher: FetchLike;
+    calls: Array<{url: string; init?: RequestInit}>;
+  } {
+    const calls: Array<{url: string; init?: RequestInit}> = [];
+    return {
+      calls,
+      fetcher: async (_c, input, init) => {
+        calls.push({url: String(input), init});
+        const status = result.status ?? 200;
+        return new TestFetchResponse({
+          status,
+          ok: status >= 200 && status < 300,
+          text: () => Promise.resolve(result.body),
+        });
+      },
+    };
+  }
+
+  function contextWith(fetcher: FetchLike): TestContext {
+    const ctx = buildTestContext();
+    ctx.fetcher = fetcher;
+    return ctx;
+  }
+
+  it('GETs the assets API and filters legacy v1 deployments', async () => {
+    const {fetcher, calls} = fakeFetcher({
+      body: JSON.stringify({
+        assets: [
+          {
+            xStockAddress: entry.xStock,
+            tokenDeployments: [
+              {chainId: 1, wrapperAddress: entry.wxStock, version: 'v1'},
+              {chainId: 1, wrapperAddress: entry.wxStock, version: 'v2'},
+            ],
+          },
+        ],
+      }),
+    });
+
+    const assets = await makeXStocksAssetsApiFetcher(
+      contextWith(fetcher),
+      API_URL
+    )();
+
+    expect(calls[0].url).toBe(API_URL);
+    expect(calls[0].init?.method).toBe('GET');
+    expect(assets).toEqual([
+      {
+        xStockAddress: entry.xStock,
+        tokenDeployments: [
+          {chainId: 1, wrapperAddress: entry.wxStock, version: 'v2'},
+        ],
+      },
+    ]);
+  });
+
+  it('throws on a non-2xx rather than reporting an empty asset list', async () => {
+    const {fetcher} = fakeFetcher({status: 503, body: '{"error":"down"}'});
+
+    await expect(
+      makeXStocksAssetsApiFetcher(contextWith(fetcher), API_URL)()
+    ).rejects.toThrow('HTTP 503');
+  });
+
+  it('throws when a 200 body is not JSON', async () => {
+    const {fetcher} = fakeFetcher({body: '<html>edge</html>'});
+
+    await expect(
+      makeXStocksAssetsApiFetcher(contextWith(fetcher), API_URL)()
+    ).rejects.toThrow('HTTP 200');
+  });
+
+  it('treats a missing assets array as an empty registry view', async () => {
+    const {fetcher} = fakeFetcher({body: '{}'});
+
+    await expect(
+      makeXStocksAssetsApiFetcher(contextWith(fetcher), API_URL)()
+    ).resolves.toEqual([]);
   });
 });
 

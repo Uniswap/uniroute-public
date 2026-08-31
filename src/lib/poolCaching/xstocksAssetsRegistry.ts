@@ -1,6 +1,7 @@
 import {GetObjectCommand, PutObjectCommand, S3Client} from '@aws-sdk/client-s3';
-import axios from 'axios';
+import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../config';
+import {unirouteFetch} from '../unirouteFetch';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {
@@ -77,12 +78,26 @@ export interface XStocksApiAsset {
 
 /** Best-effort integration-doc mapping; only this boundary changes with the final API. */
 export function makeXStocksAssetsApiFetcher(
+  ctx: Context,
   apiUrl: string
 ): () => Promise<XStocksApiAsset[]> {
   return async () => {
-    const response = await axios.get<{assets?: XStocksApiAsset[]}>(apiUrl, {
-      timeout: 10_000,
+    const response = await unirouteFetch<{assets?: XStocksApiAsset[]}>(ctx, {
+      method: 'GET',
+      url: apiUrl,
+      // Headers AND body, matching the whole-request deadline the axios
+      // `timeout: 10_000` this replaces enforced.
+      timeoutMs: 10_000,
+      metricTags: {vendor: 'xstocks-assets-api'},
     });
+    // axios threw on a non-2xx here, and the registry writer counts a failed
+    // run — so keep throwing rather than reconciling every chain against an
+    // empty asset list, which would start retirement clocks on live entries.
+    if (!response.ok || response.data === undefined) {
+      throw new Error(
+        `xStocks assets API request failed with HTTP ${response.status}`
+      );
+    }
     return filterLegacyV1Deployments(response.data.assets ?? []);
   };
 }
