@@ -59,3 +59,10 @@ export {type ProviderConfig, type LocalCacheEntry} from './provider';
 // Logger and metrics (types only — no globals)
 export {type Logger} from './util/log';
 export {MetricLoggerUnit, IMetric} from './util/metric';
+
+// Outbound HTTP transport for the GraphQL calls (ctx.fetch-backed)
+export {
+  type SubgraphFetch,
+  type SubgraphFetchFactory,
+  subgraphFetchFactoryFromContext,
+} from './util/subgraphFetch';

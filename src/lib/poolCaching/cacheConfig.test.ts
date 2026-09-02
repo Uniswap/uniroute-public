@@ -196,4 +196,51 @@ describe('cacheConfig', () => {
       expect(v2TrackedEthThreshold).toBe(0.025);
     });
   });
+
+  /**
+   * Backstop for a MISSED call site.
+   *
+   * Every provider takes the transport as a TRAILING OPTIONAL argument, so
+   * omitting it at one of the 68 construction sites is silent: it typechecks,
+   * every existing test passes, and that one chain+protocol quietly keeps the
+   * old cross-fetch transport with no metrics, no span and no deadline. This
+   * asserts at the seam instead of per site — the factory is invoked eagerly
+   * in each constructor, so it needs no network and no provider call.
+   *
+   * The expected count is COMPUTED from the returned entries rather than
+   * hardcoded: the three agg-hooks providers are conditional on an ethers
+   * provider existing (i.e. on UNI_RPC_ENDPOINT), so a literal would make this
+   * test's meaning depend on the environment it runs in.
+   */
+  describe('subgraph transport wiring', () => {
+    it('passes the transport factory to EVERY constructed provider', () => {
+      let invocations = 0;
+      const countingFactory = () => {
+        invocations += 1;
+        // eslint-disable-next-line n/no-unsupported-features/node-builtins
+        return async () => new Response('{}', {status: 200});
+      };
+
+      const protocols = createChainProtocols(
+        mockLogger,
+        mockMetric,
+        countingFactory
+      );
+
+      const providers = protocols.flatMap(p =>
+        [p.provider, p.eulerHooksProvider, p.aggHooksProvider].filter(
+          x => x !== undefined
+        )
+      );
+
+      expect(providers.length).toBeGreaterThan(60);
+      expect(invocations).toBe(providers.length);
+    });
+
+    it('constructs every provider without a factory too (kill-switch path)', () => {
+      // The kill switch withholds the factory entirely; that must still build.
+      const protocols = createChainProtocols(mockLogger, mockMetric, undefined);
+      expect(protocols.length).toBeGreaterThan(45);
+    });
+  });
 });

@@ -13,6 +13,7 @@ import {
 import * as zlib from 'zlib';
 
 import {
+  type SubgraphFetchFactory,
   V2SubgraphPool,
   V2SubgraphProvider,
   V3SubgraphPool,
@@ -91,7 +92,8 @@ async function cachePoolsForChainProtocol(
   s3: S3Client,
   config: CachePoolsConfig,
   logger: Logger,
-  metricInstance: IMetric
+  metricInstance: IMetric,
+  subgraphFetchFactory?: SubgraphFetchFactory
 ): Promise<void> {
   const {protocol, chainId, provider, eulerHooksProvider, aggHooksProvider} =
     chainProtocol;
@@ -127,7 +129,8 @@ async function cachePoolsForChainProtocol(
         v2SubgraphUrlOverride(ChainId.MAINNET),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metricInstance
+        metricInstance,
+        subgraphFetchFactory
       );
       const additionalPools = await v2MainnetSubgraphProvider.getPools();
       const filteredPools = additionalPools.filter(pool => {
@@ -246,7 +249,8 @@ async function cachePoolsForChainProtocol(
         v3SubgraphUrlOverride(ChainId.MAINNET),
         undefined,
         logger,
-        metricInstance
+        metricInstance,
+        subgraphFetchFactory
       );
       const additionalPools = await v3MainnetSubgraphProvider.getPools();
       const filteredPools = additionalPools.filter((pool: V3SubgraphPool) => {
@@ -835,14 +839,24 @@ export async function cacheAllPools(
   config: CachePoolsConfig,
   batchSize = 5,
   perJobTimeoutMs = 300000,
-  only?: Array<{chainId: number; protocol: Protocol}>
+  only?: Array<{chainId: number; protocol: Protocol}>,
+  /**
+   * ctx.fetch-backed transport for the subgraph GraphQL calls. Omitted,
+   * graphql-request keeps its bundled cross-fetch and the calls emit no
+   * client.* metrics and no spans.
+   */
+  subgraphFetchFactory?: SubgraphFetchFactory
 ): Promise<CacheAllPoolsResult> {
   const s3 = new S3Client({region: process.env.AWS_REGION || 'us-east-2'});
   const cronLogger = prefixedLogger(logger, '[SubgraphCron]');
   // Refresh factory-discovered ZLCA hooks before fetching so this run's
   // tvl-bypass subgraph query and V4 filtering see them (fail-open).
   await refreshDynamicZlcaHooks(cronLogger, metricInstance);
-  let chainProtocols = createChainProtocols(cronLogger, metricInstance);
+  let chainProtocols = createChainProtocols(
+    cronLogger,
+    metricInstance,
+    subgraphFetchFactory
+  );
   if (only !== undefined && only.length > 0) {
     chainProtocols = chainProtocols.filter(cp =>
       only.some(o => o.chainId === cp.chainId && o.protocol === cp.protocol)
@@ -886,7 +900,14 @@ export async function cacheAllPools(
     );
 
     const rawTasks = batch.map(cp =>
-      cachePoolsForChainProtocol(cp, s3, config, cronLogger, metricInstance)
+      cachePoolsForChainProtocol(
+        cp,
+        s3,
+        config,
+        cronLogger,
+        metricInstance,
+        subgraphFetchFactory
+      )
     );
     allRawTasks.push(...rawTasks);
     const results = await Promise.allSettled(

@@ -19,6 +19,7 @@ import _ from 'lodash';
 import pLimit from 'p-limit';
 
 import {ProviderConfig} from '../provider';
+import {SubgraphFetchFactory} from '../util/subgraphFetch';
 import {PAGE_SIZE} from '../subgraphProvider';
 import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
@@ -97,18 +98,36 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
     bearerToken?: string,
     private logger?: Logger,
     private metric?: IMetric,
-    private useExternalLiquidity = false
+    private useExternalLiquidity = false,
+    /**
+     * Transport for this provider's GraphQL calls. Left undefined,
+     * graphql-request falls back to its bundled cross-fetch (node-fetch@2),
+     * which bypasses the ctx.fetch middleware stack entirely. Only covers the
+     * GraphQL calls — this provider's on-chain reads go through ethers.
+     */
+    private subgraphFetchFactory?: SubgraphFetchFactory
   ) {
     const url = subgraphUrlOverride ?? SUBGRAPH_URL_BY_CHAIN[chainId];
     if (!url) {
       throw new Error(`No subgraph url for chain id: ${chainId}`);
     }
 
-    this.client = bearerToken
-      ? new GraphQLClient(url, {
-          headers: {authorization: `Bearer ${bearerToken}`},
-        })
-      : new GraphQLClient(url);
+    // Bound to this provider's own budget: the client middleware's 1s ambient
+    // default would abort every page.
+    this.client = new GraphQLClient(url, {
+      ...(bearerToken
+        ? {headers: {authorization: `Bearer ${bearerToken}`}}
+        : {}),
+      ...(this.subgraphFetchFactory
+        ? {
+            fetch: this.subgraphFetchFactory({
+              runTimeoutMs: this.timeout,
+              chainId,
+              protocol: 'v4_agg_hooks',
+            }),
+          }
+        : {}),
+    });
 
     this.metricTags = {chainId: String(chainId), protocol: 'v4'};
   }

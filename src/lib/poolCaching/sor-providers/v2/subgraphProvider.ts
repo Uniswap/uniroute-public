@@ -16,6 +16,7 @@ import {
   salvageAllowedSubgraphErrorOrRethrow,
 } from '../util/allowedSubgraphError';
 import {ProviderConfig} from '../provider';
+import {SubgraphFetchFactory} from '../util/subgraphFetch';
 
 export interface V2SubgraphPool {
   id: string;
@@ -81,7 +82,13 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
     private subgraphUrlOverride?: string,
     private bearerToken?: string,
     private logger?: Logger,
-    private metric?: IMetric
+    private metric?: IMetric,
+    /**
+     * Transport for this provider's GraphQL calls. Left undefined,
+     * graphql-request falls back to its bundled cross-fetch (node-fetch@2),
+     * which bypasses the ctx.fetch middleware stack entirely.
+     */
+    private subgraphFetchFactory?: SubgraphFetchFactory
   ) {
     this.metricTags = {chainId: String(chainId), protocol: 'v2'};
     if (this.logger) {
@@ -102,15 +109,25 @@ export class V2SubgraphProvider implements IV2SubgraphProvider {
     if (!subgraphUrl) {
       throw new Error(`No subgraph url for chain id: ${this.chainId}`);
     }
-    if (this.bearerToken) {
-      this.client = new GraphQLClient(subgraphUrl, {
-        headers: {
-          authorization: `Bearer ${this.bearerToken}`,
-        },
-      });
-    } else {
-      this.client = new GraphQLClient(subgraphUrl);
-    }
+    // `fetch` is a supported client option at graphql-request@3.7.0 (it reads
+    // `options.fetch` per request and only defaults to cross-fetch when the
+    // option is absent), so wiring ctx.fetch here needs no version bump.
+    // Bound to this provider's own budget: the client middleware's 1s ambient
+    // default would abort every page.
+    this.client = new GraphQLClient(subgraphUrl, {
+      ...(this.bearerToken
+        ? {headers: {authorization: `Bearer ${this.bearerToken}`}}
+        : {}),
+      ...(this.subgraphFetchFactory
+        ? {
+            fetch: this.subgraphFetchFactory({
+              runTimeoutMs: this.timeout,
+              chainId: this.chainId,
+              protocol: 'v2',
+            }),
+          }
+        : {}),
+    });
   }
 
   public async getPools(

@@ -180,7 +180,13 @@ describe('AggHooksSubgraphProvider', () => {
         true,
         MOCK_URL
       );
-      expect(vi.mocked(GraphQLClient)).toHaveBeenCalledWith(MOCK_URL);
+      // The constructor now always passes an options object (it may carry the
+      // injected `fetch`); `new GraphQLClient(url, {})` is identical to
+      // `new GraphQLClient(url)` since the library does `options || {}`. The
+      // property under test is that no auth header is set.
+      expect(vi.mocked(GraphQLClient)).toHaveBeenCalledWith(MOCK_URL, {});
+      const options = vi.mocked(GraphQLClient).mock.calls[0]![1];
+      expect(options).not.toHaveProperty('headers');
     });
   });
 

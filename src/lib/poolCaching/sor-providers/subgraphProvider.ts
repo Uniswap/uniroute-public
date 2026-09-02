@@ -23,6 +23,7 @@ import {
   salvageAllowedSubgraphErrorOrRethrow,
 } from './util/allowedSubgraphError';
 import {ProviderConfig} from './provider';
+import {SubgraphFetchFactory} from './util/subgraphFetch';
 
 export interface ISubgraphProvider<TSubgraphPool> {
   getPools(
@@ -127,7 +128,13 @@ export abstract class SubgraphProvider<
     private subgraphUrl: string | undefined,
     private bearerToken: string | undefined,
     protected logger: Logger,
-    protected metric: IMetric
+    protected metric: IMetric,
+    /**
+     * Transport for this provider's GraphQL calls. Left undefined,
+     * graphql-request falls back to its bundled cross-fetch (node-fetch@2),
+     * which bypasses the ctx.fetch middleware stack entirely.
+     */
+    private subgraphFetchFactory?: SubgraphFetchFactory
   ) {
     this.protocol = protocol;
     this.logger = {
@@ -146,15 +153,28 @@ export abstract class SubgraphProvider<
       throw new Error(`No subgraph url for chain id: ${this.chainId}`);
     }
 
-    if (this.bearerToken) {
-      this.client = new GraphQLClient(this.subgraphUrl, {
-        headers: {
-          authorization: `Bearer ${this.bearerToken}`,
-        },
-      });
-    } else {
-      this.client = new GraphQLClient(this.subgraphUrl);
-    }
+    // `fetch` is a supported client option at graphql-request@3.7.0 (it reads
+    // `options.fetch` per request and only defaults to cross-fetch when the
+    // option is absent), so wiring ctx.fetch here needs no version bump.
+    // Bound to this provider's own budget: the client middleware's 1s ambient
+    // default would abort every page.
+    this.client = new GraphQLClient(this.subgraphUrl, {
+      ...(this.bearerToken
+        ? {headers: {authorization: `Bearer ${this.bearerToken}`}}
+        : {}),
+      ...(this.subgraphFetchFactory
+        ? {
+            fetch: this.subgraphFetchFactory({
+              runTimeoutMs: this.timeout,
+              chainId: this.chainId,
+              // Lowercased so the tag set is consistent with the v2 provider's
+              // own 'v2' and with the hooks providers below; Datadog folds tag
+              // value case anyway.
+              protocol: String(this.protocol).toLowerCase(),
+            }),
+          }
+        : {}),
+    });
     this.metricTags = {chainId: String(chainId), protocol: String(protocol)};
   }
 

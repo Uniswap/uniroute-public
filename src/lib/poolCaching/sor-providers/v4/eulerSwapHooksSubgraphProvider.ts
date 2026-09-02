@@ -13,6 +13,7 @@ import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
 import {salvageAllowedSubgraphErrorOrRethrow} from '../util/allowedSubgraphError';
 import {ProviderConfig} from '../provider';
+import {SubgraphFetchFactory} from '../util/subgraphFetch';
 import {PAGE_SIZE} from '../subgraphProvider';
 
 import {SUBGRAPH_URL_BY_CHAIN, V4SubgraphPool} from './subgraphProvider';
@@ -46,12 +47,30 @@ export class EulerSwapHooksSubgraphProvider
     private rollback = true,
     subgraphUrlOverride = SUBGRAPH_URL_BY_CHAIN[chainId],
     private logger?: Logger,
-    private metric?: IMetric
+    private metric?: IMetric,
+    /**
+     * Transport for this provider's GraphQL calls. Left undefined,
+     * graphql-request falls back to its bundled cross-fetch (node-fetch@2),
+     * which bypasses the ctx.fetch middleware stack entirely.
+     */
+    private subgraphFetchFactory?: SubgraphFetchFactory
   ) {
     if (!subgraphUrlOverride) {
       throw new Error(`No subgraph url for chain id: ${chainId}`);
     }
-    this.client = new GraphQLClient(subgraphUrlOverride);
+    // Bound to this provider's own budget: the client middleware's 1s ambient
+    // default would abort every page.
+    this.client = new GraphQLClient(subgraphUrlOverride, {
+      ...(this.subgraphFetchFactory
+        ? {
+            fetch: this.subgraphFetchFactory({
+              runTimeoutMs: this.timeout,
+              chainId,
+              protocol: 'v4_euler_hooks',
+            }),
+          }
+        : {}),
+    });
     this.metricTags = {chainId: String(chainId), protocol: 'v4'};
   }
 

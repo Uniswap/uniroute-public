@@ -23,6 +23,7 @@ import {
   EulerSwapHooksSubgraphProvider,
   AggHooksSubgraphProvider,
   type ISubgraphProvider,
+  type SubgraphFetchFactory,
   type V2SubgraphPool,
   type V3SubgraphPool,
   type V4SubgraphPool,
@@ -242,7 +243,13 @@ export interface ChainProtocol {
 
 export function createChainProtocols(
   logger: Logger,
-  metric: IMetric
+  metric: IMetric,
+  /**
+   * ctx.fetch-backed transport for the V2/V3/V4 subgraph GraphQL calls.
+   * Omitted (tests, and any caller with no context), graphql-request keeps its
+   * bundled cross-fetch.
+   */
+  subgraphFetchFactory?: SubgraphFetchFactory
 ): ChainProtocol[] {
   // Build an ethers provider for chains that need on-chain pseudoTotalValueLocked calls.
   // Uses the same UNI_RPC_ENDPOINT pattern as the main service (see dependencies.ts).
@@ -282,7 +289,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.MAINNET),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -299,7 +307,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -316,7 +325,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.POLYGON),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -333,7 +343,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.OPTIMISM),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -350,7 +361,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.CELO),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -367,7 +379,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.BNB),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -384,7 +397,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.AVALANCHE),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -401,7 +415,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.BASE),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -418,7 +433,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.BLAST),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -435,7 +451,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.UNICHAIN),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -452,7 +469,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.WORLDCHAIN),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -469,7 +487,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.ZORA),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -486,7 +505,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.SONEIUM),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -503,7 +523,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.MONAD),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -520,7 +541,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(CHAIN_ID_TEMPO),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -537,7 +559,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.XLAYER),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -554,7 +577,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.LINEA),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -571,7 +595,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(CHAIN_ID_MEGAETH),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -588,7 +613,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -605,7 +631,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(CHAIN_ID_ARC),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -622,7 +649,8 @@ export function createChainProtocols(
         v3SubgraphUrlOverride(ChainId.INK),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     // V2
@@ -641,7 +669,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.MAINNET),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -659,7 +688,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -677,7 +707,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.POLYGON),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -695,7 +726,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.OPTIMISM),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -713,7 +745,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.BNB),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -731,7 +764,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.AVALANCHE),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -749,7 +783,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.BASE),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -767,7 +802,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.BLAST),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -785,7 +821,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.WORLDCHAIN),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -803,7 +840,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.MONAD_TESTNET),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -821,7 +859,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.UNICHAIN),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -839,7 +878,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.SONEIUM),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -857,7 +897,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.MONAD),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -875,7 +916,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(CHAIN_ID_TEMPO),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -893,7 +935,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.XLAYER),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -911,7 +954,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.LINEA),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -929,7 +973,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(CHAIN_ID_MEGAETH),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -947,7 +992,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -965,7 +1011,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(CHAIN_ID_ARC),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -983,7 +1030,8 @@ export function createChainProtocols(
         v2SubgraphUrlOverride(ChainId.INK),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     // V4
@@ -1001,7 +1049,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.SEPOLIA),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1018,7 +1067,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1035,7 +1085,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.BASE),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
       aggHooksProvider: baseEthersProvider
         ? new AggHooksSubgraphProvider(
@@ -1048,7 +1099,9 @@ export function createChainProtocols(
             v4SubgraphUrlOverride(ChainId.BASE),
             process.env.GRAPH_BEARER_TOKEN,
             logger,
-            metric
+            metric,
+            false, // useExternalLiquidity (default) — positional, precedes the transport
+            subgraphFetchFactory
           )
         : undefined,
     },
@@ -1066,7 +1119,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.POLYGON),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1083,7 +1137,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.WORLDCHAIN),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1100,7 +1155,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.ZORA),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1117,7 +1173,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.UNICHAIN),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
       eulerHooksProvider: new EulerSwapHooksSubgraphProvider(
         ChainId.UNICHAIN,
@@ -1126,7 +1183,8 @@ export function createChainProtocols(
         true,
         v4SubgraphUrlOverride(ChainId.UNICHAIN),
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1143,7 +1201,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.BLAST),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1160,7 +1219,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.MAINNET),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
       eulerHooksProvider: new EulerSwapHooksSubgraphProvider(
         ChainId.MAINNET,
@@ -1169,7 +1229,8 @@ export function createChainProtocols(
         true,
         v4SubgraphUrlOverride(ChainId.MAINNET),
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
       aggHooksProvider: mainnetEthersProvider
         ? new AggHooksSubgraphProvider(
@@ -1182,7 +1243,9 @@ export function createChainProtocols(
             v4SubgraphUrlOverride(ChainId.MAINNET),
             undefined,
             logger,
-            metric
+            metric,
+            false, // useExternalLiquidity (default) — positional, precedes the transport
+            subgraphFetchFactory
           )
         : undefined,
     },
@@ -1200,7 +1263,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.SONEIUM),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1217,7 +1281,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.OPTIMISM),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1234,7 +1299,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.BNB),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1251,7 +1317,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.MONAD),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1268,7 +1335,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(CHAIN_ID_TEMPO),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
       aggHooksProvider: tempoEthersProvider
         ? new AggHooksSubgraphProvider(
@@ -1282,7 +1350,8 @@ export function createChainProtocols(
             process.env.GOLD_SKY_BEARER_TOKEN,
             logger,
             metric,
-            true
+            true,
+            subgraphFetchFactory
           )
         : undefined,
     },
@@ -1300,7 +1369,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.XLAYER),
         process.env.GRAPH_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1317,7 +1387,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.AVALANCHE),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1334,7 +1405,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.CELO),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1351,7 +1423,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.LINEA),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1368,7 +1441,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(CHAIN_ID_MEGAETH),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1385,7 +1459,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1402,7 +1477,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(CHAIN_ID_ARC),
         undefined,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
     {
@@ -1419,7 +1495,8 @@ export function createChainProtocols(
         v4SubgraphUrlOverride(ChainId.INK),
         process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
-        metric
+        metric,
+        subgraphFetchFactory
       ),
     },
   ];

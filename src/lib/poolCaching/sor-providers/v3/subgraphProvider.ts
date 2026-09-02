@@ -9,6 +9,7 @@ import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
 import {ProviderConfig} from '../provider';
 import {SubgraphProvider} from '../subgraphProvider';
+import {SubgraphFetchFactory} from '../util/subgraphFetch';
 
 export interface V3SubgraphPool {
   id: string;
@@ -96,7 +97,8 @@ export class V3SubgraphProvider
     subgraphUrlOverride?: string,
     bearerToken?: string,
     logger?: Logger,
-    metric?: IMetric
+    metric?: IMetric,
+    subgraphFetchFactory?: SubgraphFetchFactory
   ) {
     super(
       Protocol.V3,
@@ -109,7 +111,8 @@ export class V3SubgraphProvider
       subgraphUrlOverride ?? SUBGRAPH_URL_BY_CHAIN[chainId],
       bearerToken,
       logger!,
-      metric!
+      metric!,
+      subgraphFetchFactory
     );
   }
 
