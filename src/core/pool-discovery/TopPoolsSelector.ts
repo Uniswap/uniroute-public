@@ -46,6 +46,7 @@ import {maybeDropPermissionedPools} from '../../models/hooks/PermissionedHooks';
 import {maybeDropErc4626Pools} from '../../models/hooks/Erc4626WrapperHooks';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {IPoolSelectionConfig} from '../../lib/config';
+import {matchesHooksOptions} from '../../lib/poolUtils';
 import {
   AGG_HOOKS_PER_CHAIN,
   getTvlBypassHookAddresses,
@@ -616,22 +617,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined
   ): boolean {
-    if (protocol !== Protocol.V4) {
-      return true;
-    }
-    if (
-      hooksOptions === undefined ||
-      hooksOptions === HooksOptions.HOOKS_INCLUSIVE
-    ) {
-      return true;
-    }
-    if (hooksOptions === HooksOptions.HOOKS_ONLY) {
-      return (pool as V4PoolInfo).hooks !== ADDRESS_ZERO;
-    }
-    if (hooksOptions === HooksOptions.NO_HOOKS) {
-      return (pool as V4PoolInfo).hooks === ADDRESS_ZERO;
-    }
-    return true;
+    return matchesHooksOptions(pool, protocol, hooksOptions);
   }
 
   private async getOrBuildSelectionView(
@@ -1355,25 +1341,9 @@ export class AggHooksTopPoolsSelector
         unsupportedTokens
       );
 
-    // 3. Filter out pools that don't match the hooks options, only if the uniswap protocol is v4.
-    const filteredPools = filteredUnsupportedPools.filter(pool => {
-      if (protocol === Protocol.V4) {
-        if (
-          hooksOptions === undefined ||
-          hooksOptions === HooksOptions.HOOKS_INCLUSIVE
-        ) {
-          return true;
-        }
-
-        if (hooksOptions === HooksOptions.HOOKS_ONLY) {
-          return (pool as V4PoolInfo).hooks !== ADDRESS_ZERO;
-        }
-        if (hooksOptions === HooksOptions.NO_HOOKS) {
-          return (pool as V4PoolInfo).hooks === ADDRESS_ZERO;
-        }
-      }
-      return true;
-    });
+    const filteredPools = filteredUnsupportedPools.filter(pool =>
+      matchesHooksOptions(pool, protocol, hooksOptions)
+    );
 
     ctx.logger.debug('AggHooksTopPoolsSelector filtering pools', {
       chainId,

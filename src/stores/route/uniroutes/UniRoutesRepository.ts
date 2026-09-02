@@ -37,7 +37,10 @@ import {
   getPoolTVL,
   getOtherToken,
 } from '../../../core/pool-discovery/TopPoolsSelector';
-import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
+import {
+  applyDynamicFeeIfNeeded,
+  matchesHooksOptions,
+} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
@@ -672,8 +675,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         chain.chainId
       );
       return (
-        hookProtocol === undefined ||
-        protocols.includes(hookProtocol as Protocol)
+        (hookProtocol === undefined ||
+          protocols.includes(hookProtocol as Protocol)) &&
+        matchesHooksOptions(pool, Protocol.V4, hooksOptions)
       );
     });
     // UniRoutesRepository does not write to the namespace-independent

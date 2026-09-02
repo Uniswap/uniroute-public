@@ -659,7 +659,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       chainId,
       protocol,
       tokenIn,
-      tokenOut
+      tokenOut,
+      hooksOptions
     );
 
     // Single source of truth for whether to write the cache. Initialize
@@ -670,6 +671,23 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       markPoolsForTokensUncacheable(
         cacheDirective,
         PoolsForTokensCacheSkipReason.CallerOptOut
+      );
+    }
+    // Defense in depth: UniRouteBL normally opts out before reaching the
+    // discoverer, but HOOKS_ONLY lists depend on experiment namespaces and
+    // NO_HOOKS is cacheable only behind its rollout flag / kill switch.
+    if (hooksOptions === HooksOptions.HOOKS_ONLY) {
+      markPoolsForTokensUncacheable(
+        cacheDirective,
+        PoolsForTokensCacheSkipReason.HooksOptionsUncacheable
+      );
+    } else if (
+      hooksOptions === HooksOptions.NO_HOOKS &&
+      !this.serviceConfig.PoolDiscovery.PoolsForTokensHooksVariantCacheEnabled
+    ) {
+      markPoolsForTokensUncacheable(
+        cacheDirective,
+        PoolsForTokensCacheSkipReason.HooksOptionsUncacheable
       );
     }
 
@@ -795,7 +813,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache'),
       1,
       {
-        tags: ['result', status],
+        tags: [
+          `result:${status}`,
+          `protocol:${protocol}`,
+          `hooksOptions:${hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE}`,
+        ],
       }
     );
 
@@ -810,13 +832,24 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     chainId: ChainId,
     protocol: Protocol,
     tokenIn: Address,
-    tokenOut: Address
+    tokenOut: Address,
+    hooksOptions?: HooksOptions
   ) {
     // sort tokens to ensure consistency of cache keys
     const sortedTokens = [tokenIn, tokenOut].sort((a, b) =>
       a.toString().localeCompare(b.toString())
     );
 
-    return `${this.getDiscovererName()}#POOLSFORTOKENS#${chainId}#${protocol}#${sortedTokens[0].toString()}#${sortedTokens[1].toString()}`;
+    const key = `${this.getDiscovererName()}#POOLSFORTOKENS#${chainId}#${protocol}#${sortedTokens[0].toString()}#${sortedTokens[1].toString()}`;
+
+    // Keep the inclusive key stable so existing entries remain useful. Every
+    // filtered variant gets its own key because NO_HOOKS uses the empty
+    // namespace context, bypassing the selector's fail-closed ERC4626 cache
+    // guard; sharing a V2/V3 inclusive key could otherwise cache an xStock
+    // pool where inclusive writes deliberately do not.
+    return hooksOptions !== undefined &&
+      hooksOptions !== HooksOptions.HOOKS_INCLUSIVE
+      ? `${key}#${hooksOptions}`
+      : key;
   }
 }

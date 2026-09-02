@@ -55,6 +55,12 @@ const getRouteCacheEntryTtlSecondsByChain = (): Record<number, number> =>
 const getPoolDiscoverySnapshotMemoEnabled = () =>
   parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_MEMO_ENABLED', false);
 
+const getPoolsForTokensHooksVariantCacheEnabled = () =>
+  parseBooleanEnvOrDefault(
+    'POOLS_FOR_TOKENS_HOOKS_VARIANT_CACHE_ENABLED',
+    false
+  );
+
 const getPoolDiscoverySnapshotSwrEnabled = () =>
   parseBooleanEnvOrDefault('POOL_DISCOVERY_SNAPSHOT_SWR_ENABLED', false);
 
@@ -167,6 +173,11 @@ export interface IUniRouteServiceConfig {
     PoolsCacheEntryTtlSecondsByChain?: Record<number, number>;
   };
   PoolDiscovery: {
+    // Cache NO_HOOKS pool lists under distinct keys instead of bypassing the
+    // pools-for-tokens cache (NO_HOOKS only — HOOKS_ONLY lists are
+    // experiment-namespace-dependent and stay uncached). Kill switch: set
+    // POOLS_FOR_TOKENS_HOOKS_VARIANT_CACHE_ENABLED to 'false' and redeploy.
+    PoolsForTokensHooksVariantCacheEnabled: boolean;
     // Memoize parsed pool snapshots and pair-independent selection views
     // in-process, so a per-pair pool-cache miss costs O(topN) instead of
     // O(all pools on the chain). Pure performance flag — selection output
@@ -360,6 +371,8 @@ export const getUniRouteSyncConfig = (
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
     },
     PoolDiscovery: {
+      PoolsForTokensHooksVariantCacheEnabled:
+        getPoolsForTokensHooksVariantCacheEnabled(),
       SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
       SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
       SnapshotSkipReparseEnabled: getPoolDiscoverySnapshotSkipReparseEnabled(),
@@ -475,6 +488,8 @@ export const getQuickRouteSyncConfig = (
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
     },
     PoolDiscovery: {
+      PoolsForTokensHooksVariantCacheEnabled:
+        getPoolsForTokensHooksVariantCacheEnabled(),
       SnapshotMemoEnabled: getPoolDiscoverySnapshotMemoEnabled(),
       SnapshotSwrEnabled: getPoolDiscoverySnapshotSwrEnabled(),
       SnapshotSkipReparseEnabled: getPoolDiscoverySnapshotSkipReparseEnabled(),

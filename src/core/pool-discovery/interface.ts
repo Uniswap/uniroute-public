@@ -90,6 +90,14 @@ export enum PoolsForTokensCacheSkipReason {
    * a future caller forgets the flag, the selector still suppresses the write.
    */
   AggHooksSelector = 'agg_hooks_selector',
+  /**
+   * Defensive backstop for hooksOptions-specific caching. UniRouteBL normally
+   * opts out first via `skipPoolsForTokensCache`: HOOKS_ONLY lists are
+   * experiment-namespace-dependent (TopPoolsSelector force-appends
+   * experiment pools), while NO_HOOKS variants are cacheable only when the
+   * rollout flag / kill switch is enabled.
+   */
+  HooksOptionsUncacheable = 'hooks_options_uncacheable',
 }
 
 /**

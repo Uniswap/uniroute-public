@@ -514,8 +514,18 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     } as unknown as CcaScheduledPoolsRepository;
     pairCache = makeCache();
     vi.mocked(pairCache.get).mockResolvedValue(JSON.stringify([basePool]));
+    // These tests deliver the base pool through a pair-cache HIT, and the
+    // NO_HOOKS cases only read the cache when the variant rollout flag is
+    // on (the discoverer-level backstop suppresses it otherwise) — matching
+    // the deployed configuration.
     discoverer = new S3SubgraphPoolDiscovererV4(
-      mockConfig,
+      {
+        ...mockConfig,
+        PoolDiscovery: {
+          ...mockConfig.PoolDiscovery,
+          PoolsForTokensHooksVariantCacheEnabled: true,
+        },
+      },
       makeCache(),
       pairCache,
       FeatureGatedTokensRepository.empty(),

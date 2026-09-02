@@ -3186,7 +3186,7 @@ describe('UniRouteBL', () => {
   });
 
   describe('skipPoolsForTokensCache behavior', () => {
-    it('should skip pools for tokens cache when hooksOptions is not HOOKS_INCLUSIVE', async () => {
+    it('should skip pools for tokens cache for non-inclusive hooks when variant caching is disabled', async () => {
       // Create a spy to track the getRoutes call
       const getRoutesSpy = vi.spyOn(routeRepository, 'getRoutes');
 
@@ -3227,6 +3227,105 @@ describe('UniRouteBL', () => {
       const callArgs = getRoutesSpy.mock.calls[0];
       expect(callArgs[6]).toBe(HooksOptions.NO_HOOKS); // hooksOptions
       expect(callArgs[7]).toBe(true); // skipPoolsForTokensCache should be true
+
+      getRoutesSpy.mockRestore();
+    });
+
+    it('should use pools for tokens cache for NO_HOOKS when variant caching is enabled', async () => {
+      const getRoutesSpy = vi.spyOn(routeRepository, 'getRoutes');
+      const variantCacheConfig = {
+        ...serviceConfig,
+        PoolDiscovery: {
+          ...serviceConfig.PoolDiscovery,
+          PoolsForTokensHooksVariantCacheEnabled: true,
+        },
+      };
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        hooksOptions: HooksOptions.NO_HOOKS,
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        variantCacheConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      await uniRouteBL.quote(ctx, request);
+
+      expect(getRoutesSpy).toHaveBeenCalledTimes(1);
+      const callArgs = getRoutesSpy.mock.calls[0];
+      expect(callArgs[6]).toBe(HooksOptions.NO_HOOKS);
+      expect(callArgs[7]).toBe(false);
+
+      getRoutesSpy.mockRestore();
+    });
+
+    it('should still skip pools for tokens cache for HOOKS_ONLY even when variant caching is enabled', async () => {
+      // HOOKS_ONLY pool lists are namespace-dependent (experiment hooks are
+      // force-appended without marking the entry uncacheable), so caching
+      // them would leak candidates across experiment contexts.
+      const getRoutesSpy = vi.spyOn(routeRepository, 'getRoutes');
+      const variantCacheConfig = {
+        ...serviceConfig,
+        PoolDiscovery: {
+          ...serviceConfig.PoolDiscovery,
+          PoolsForTokensHooksVariantCacheEnabled: true,
+        },
+      };
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        hooksOptions: HooksOptions.HOOKS_ONLY,
+      });
+
+      const uniRouteBL = new UniRouteBL(
+        variantCacheConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      await uniRouteBL.quote(ctx, request);
+
+      expect(getRoutesSpy).toHaveBeenCalledTimes(1);
+      const callArgs = getRoutesSpy.mock.calls[0];
+      expect(callArgs[6]).toBe(HooksOptions.HOOKS_ONLY);
+      expect(callArgs[7]).toBe(true);
 
       getRoutesSpy.mockRestore();
     });

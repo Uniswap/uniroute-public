@@ -1490,9 +1490,9 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * Fetches fresh routes from the route repository when no cached routes
-   * are available. `skipPoolsForTokensCache` is true when hooks are not
-   * inclusive — the resulting pool list may differ from the cached version.
+   * Fetches fresh routes from the route repository when no cached routes are
+   * available. Hook-filtered requests retain the old bypass until variant
+   * cache keys are enabled, so a rollout can be reversed without stale data.
    */
   private async fetchFreshRoutes(
     ctx: Context,
@@ -1507,8 +1507,18 @@ export class UniRouteBL implements IUniRoutedBL {
     testAggHooks: boolean | undefined,
     metricTags: string[]
   ): Promise<RouteBasic<Pool>[]> {
+    // Only NO_HOOKS is safe to cache under a variant key: it resolves to the
+    // empty namespace context, so its pool lists are namespace-independent.
+    // HOOKS_ONLY keeps the bypass — experiment namespaces force-append pools
+    // without marking the entry uncacheable, so a cached HOOKS_ONLY list
+    // would leak between experiment-on and experiment-off requests.
     const skipPoolsForTokensCache =
-      hooksOptions !== HooksOptions.HOOKS_INCLUSIVE;
+      hooksOptions !== HooksOptions.HOOKS_INCLUSIVE &&
+      !(
+        this.serviceConfig.PoolDiscovery
+          .PoolsForTokensHooksVariantCacheEnabled &&
+        hooksOptions === HooksOptions.NO_HOOKS
+      );
     const getRoutesStartTime = Date.now();
     ctx.logger.debug('Starting getRoutes');
     const routes = await this.routeRepository.getRoutes(

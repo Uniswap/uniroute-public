@@ -319,7 +319,11 @@ describe('BaseCachingPoolDiscoverer', () => {
 
     expect(pools).toEqual(cachedPools);
     expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
-      tags: ['result', 'hit'],
+      tags: [
+        'result:hit',
+        `protocol:${protocol}`,
+        `hooksOptions:${HooksOptions.HOOKS_INCLUSIVE}`,
+      ],
     });
   });
 
@@ -366,7 +370,11 @@ describe('BaseCachingPoolDiscoverer', () => {
       {tags: ['chain:MAINNET', `protocol:${protocol}`]}
     );
     expect(ctx.metrics.count).toHaveBeenCalledWith(expect.any(String), 1, {
-      tags: ['result', 'miss'],
+      tags: [
+        'result:miss',
+        `protocol:${protocol}`,
+        `hooksOptions:${HooksOptions.HOOKS_INCLUSIVE}`,
+      ],
     });
   });
 
@@ -563,6 +571,91 @@ describe('BaseCachingPoolDiscoverer', () => {
     );
   });
 
+  it('does not read or write HOOKS_ONLY cache entries when the variant cache flag is enabled', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+    const hooksVariantCacheEnabledConfig: IUniRouteServiceConfig = {
+      ...serviceConfig,
+      PoolDiscovery: {
+        ...serviceConfig.PoolDiscovery,
+        PoolsForTokensHooksVariantCacheEnabled: true,
+      },
+    };
+    const hooksOnlyDiscoverer = new TestPoolDiscoverer(
+      hooksVariantCacheEnabledConfig,
+      getPoolsCache,
+      getPoolsForTokensCache
+    );
+
+    // A stale HOOKS_ONLY entry must never be served: these lists are
+    // experiment-namespace-dependent even when the NO_HOOKS rollout is on.
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockResolvedValue(JSON.stringify([{id: 'hooks-only-cache-entry'}]));
+    await hooksOnlyDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      HooksOptions.HOOKS_ONLY,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(getPoolsForTokensCache.get).not.toHaveBeenCalled();
+    expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'PoolDiscoverer.getPoolsForTokens.Cache.SkipWrite'
+      ),
+      1,
+      {
+        tags: [
+          `chain:${chainId}`,
+          `protocol:${protocol}`,
+          `reason:${PoolsForTokensCacheSkipReason.HooksOptionsUncacheable}`,
+        ],
+      }
+    );
+  });
+
+  it('does not write NO_HOOKS cache entries when the variant cache flag is disabled', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+    const hooksVariantCacheDisabledConfig: IUniRouteServiceConfig = {
+      ...serviceConfig,
+      PoolDiscovery: {
+        ...serviceConfig.PoolDiscovery,
+        PoolsForTokensHooksVariantCacheEnabled: false,
+      },
+    };
+    const noHooksDiscoverer = new TestPoolDiscoverer(
+      hooksVariantCacheDisabledConfig,
+      getPoolsCache,
+      getPoolsForTokensCache
+    );
+
+    await noHooksDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      HooksOptions.NO_HOOKS,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+  });
+
   // Regression for the cross-namespace cache-poisoning hazard called out in
   // canIncludePermissionedPool: an inactive-namespace request must not seed a
   // stripped pool list under the namespace-independent POOLSFORTOKENS key, or
@@ -635,6 +728,150 @@ describe('BaseCachingPoolDiscoverer', () => {
     expect(poolsCacheKey).toBe('TestPoolDiscoverer#POOLS#1#v2');
     expect(poolsForTokensCacheKey).toBe(
       'TestPoolDiscoverer#POOLSFORTOKENS#1#v2#0x1111111111111111111111111111111111111111#0x2222222222222222222222222222222222222222'
+    );
+  });
+
+  it('keeps inclusive cache keys stable and separates hook-filtered variants', () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const tokenIn = new Address('0x2222222222222222222222222222222222222222');
+    const tokenOut = new Address('0x1111111111111111111111111111111111111111');
+    const inclusiveKey =
+      'TestPoolDiscoverer#POOLSFORTOKENS#1#v4#0x1111111111111111111111111111111111111111#0x2222222222222222222222222222222222222222';
+
+    expect(
+      poolDiscoverer.getPoolsForTokensCacheKey(
+        chainId,
+        protocol,
+        tokenIn,
+        tokenOut
+      )
+    ).toBe(inclusiveKey);
+    expect(
+      poolDiscoverer.getPoolsForTokensCacheKey(
+        chainId,
+        protocol,
+        tokenIn,
+        tokenOut,
+        HooksOptions.HOOKS_INCLUSIVE
+      )
+    ).toBe(inclusiveKey);
+    expect(
+      poolDiscoverer.getPoolsForTokensCacheKey(
+        chainId,
+        protocol,
+        tokenIn,
+        tokenOut,
+        HooksOptions.NO_HOOKS
+      )
+    ).toBe(`${inclusiveKey}#${HooksOptions.NO_HOOKS}`);
+    expect(
+      poolDiscoverer.getPoolsForTokensCacheKey(
+        chainId,
+        protocol,
+        tokenIn,
+        tokenOut,
+        HooksOptions.HOOKS_ONLY
+      )
+    ).toBe(`${inclusiveKey}#${HooksOptions.HOOKS_ONLY}`);
+    // Filtered variants use suffixed keys for every protocol because NO_HOOKS
+    // uses an empty namespace context that bypasses the selector's
+    // fail-closed ERC4626 cache guard.
+    expect(
+      poolDiscoverer.getPoolsForTokensCacheKey(
+        chainId,
+        Protocol.V3,
+        tokenIn,
+        tokenOut,
+        HooksOptions.NO_HOOKS
+      )
+    ).toBe(
+      'TestPoolDiscoverer#POOLSFORTOKENS#1#v3#0x1111111111111111111111111111111111111111#0x2222222222222222222222222222222222222222#NO_HOOKS'
+    );
+  });
+
+  it('does not share hook-filtered and inclusive pool-cache entries', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+    // NO_HOOKS only reaches the cache at all when the variant rollout flag
+    // is on — the discoverer-level backstop suppresses it otherwise.
+    const poolDiscoverer = new TestPoolDiscoverer(
+      {
+        ...serviceConfig,
+        PoolDiscovery: {
+          ...serviceConfig.PoolDiscovery,
+          PoolsForTokensHooksVariantCacheEnabled: true,
+        },
+      },
+      getPoolsCache,
+      getPoolsForTokensCache
+    );
+    const inclusiveKey = poolDiscoverer.getPoolsForTokensCacheKey(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut
+    );
+    const noHooksKey = poolDiscoverer.getPoolsForTokensCacheKey(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      HooksOptions.NO_HOOKS
+    );
+    const inclusivePools = [{id: 'inclusive-entry'}];
+    const noHooksPools = [{id: 'no-hooks-entry'}];
+
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockImplementation(async (key: string) =>
+        key === inclusiveKey ? JSON.stringify(inclusivePools) : undefined
+      );
+    const noHooksResult = await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      HooksOptions.NO_HOOKS,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(noHooksResult).not.toEqual(inclusivePools);
+    expect(getPoolsForTokensCache.get).toHaveBeenCalledWith(noHooksKey);
+    expect(getPoolsForTokensCache.set).toHaveBeenCalledWith(
+      noHooksKey,
+      expect.any(String),
+      expect.any(Object)
+    );
+
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockImplementation(async (key: string) =>
+        key === noHooksKey ? JSON.stringify(noHooksPools) : undefined
+      );
+    const inclusiveResult = await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      HooksOptions.HOOKS_INCLUSIVE,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(inclusiveResult).not.toEqual(noHooksPools);
+    expect(getPoolsForTokensCache.get).toHaveBeenCalledWith(inclusiveKey);
+    expect(getPoolsForTokensCache.set).toHaveBeenCalledWith(
+      inclusiveKey,
+      expect.any(String),
+      expect.any(Object)
     );
   });
 
