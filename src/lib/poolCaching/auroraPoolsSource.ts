@@ -11,10 +11,15 @@
  * Modes:
  *   - shadow:  subgraph result stays authoritative (written to S3); Aurora is
  *              fetched concurrently and diffed, parity metrics emitted.
- *   - primary: Aurora result is served; on Aurora error, empty result, or a
- *              pool count collapsing below minPoolCountRatio × the previous
- *              run's count, the run falls back to the subgraph provider —
- *              surviving an Aurora outage needs no deploy.
+ *   - primary: Aurora result is served; on Aurora error, empty result, a
+ *              pool count below the per-target absolute floor
+ *              (minPoolCountByTarget), or a count collapsing below
+ *              minPoolCountRatio × the previous run's count, the run falls
+ *              back to the subgraph provider — surviving an Aurora outage
+ *              needs no deploy. The absolute floor is what protects the FIRST
+ *              tick after a process start: the ratio guard's baseline is
+ *              in-memory, so without a floor a mass-inadmission result (e.g.
+ *              price-pipeline outage) would be accepted as the new baseline.
  */
 
 import * as fs from 'fs';
@@ -126,6 +131,11 @@ export interface AuroraPoolsSourceConfig {
   shadowTargets: 'all' | ReadonlySet<string>;
   primaryTargets: 'all' | ReadonlySet<string>;
   minPoolCountRatio: number;
+  // Absolute per-target pool-count floor for PRIMARY mode, keyed by
+  // targetKey(). A primary result below its floor falls back to the subgraph
+  // for that tick and never becomes the ratio guard's baseline. Targets
+  // without an entry have no absolute floor (ratio guard only).
+  minPoolCountByTarget: ReadonlyMap<string, number>;
 }
 
 export function targetKey(chainId: number, protocol: Protocol): string {
@@ -141,6 +151,32 @@ function parseTargets(raw: string | undefined): 'all' | ReadonlySet<string> {
       .map(entry => entry.trim().toUpperCase())
       .filter(entry => entry.length > 0)
   );
+}
+
+// JSON map of targetKey -> absolute floor, e.g. '{"4663:V4":40000}'. Keys are
+// normalized through targetKey casing (uppercased protocol). Malformed JSON or
+// non-positive values are dropped entry-wise rather than failing boot — the
+// floor is a safety net, and a config typo must not take the whole Aurora
+// source down; the ratio guard still applies either way.
+export function parseMinPoolCountByTarget(
+  raw: string | undefined
+): ReadonlyMap<string, number> {
+  const result = new Map<string, number>();
+  if (!raw || raw.trim() === '') return result;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return result;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return result;
+  for (const [key, value] of Object.entries(parsed)) {
+    const floor = Number(value);
+    if (Number.isFinite(floor) && floor > 0) {
+      result.set(key.trim().toUpperCase(), Math.floor(floor));
+    }
+  }
+  return result;
 }
 
 // Returns undefined when neither target env is set — the feature is fully off
@@ -161,6 +197,9 @@ export function auroraPoolsSourceConfigFromEnv():
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
         ? parsedRatio
         : 0.5,
+    minPoolCountByTarget: parseMinPoolCountByTarget(
+      process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET
+    ),
   };
 }
 
@@ -675,6 +714,8 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     private readonly chainId: number,
     private readonly protocol: Protocol,
     private readonly minPoolCountRatio: number,
+    // 0 = no absolute floor for this target (ratio guard only).
+    private readonly minPoolCount: number,
     private readonly logger: Logger,
     private readonly metric: IMetric
   ) {}
@@ -705,6 +746,14 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
       const baseline = lastAuroraPoolCountByTarget.get(baselineKey);
       if (pools.length === 0) {
         fallbackReason = 'empty';
+      } else if (this.minPoolCount > 0 && pools.length < this.minPoolCount) {
+        // Absolute floor: unlike the ratio guard it holds on the FIRST tick
+        // after a process start (in-memory baseline is empty then), so a
+        // mass-inadmission result can't be served or become the baseline.
+        fallbackReason = 'below_floor';
+        this.logger.warn(
+          `Aurora pool count ${pools.length} below absolute floor ${this.minPoolCount}`
+        );
       } else if (
         baseline !== undefined &&
         pools.length < baseline * this.minPoolCountRatio
@@ -974,6 +1023,7 @@ export function applyAuroraPoolSources<
       chainId,
       protocol,
       config.minPoolCountRatio,
+      config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
       logger,
       metric
     );

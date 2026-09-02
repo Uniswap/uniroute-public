@@ -87,6 +87,7 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     'POOL_CACHING_AURORA_SHADOW_TARGETS',
     'POOL_CACHING_AURORA_PRIMARY_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO',
+    'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
   ];
   const saved: Record<string, string | undefined> = {};
 
@@ -128,6 +129,23 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '1:V3';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO = '7';
     expect(auroraPoolsSourceConfigFromEnv()!.minPoolCountRatio).toBe(0.5);
+  });
+
+  it('parses the per-target absolute floor map, normalizing keys', () => {
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
+      '{"4663:v4": 40000.7, "1:V3": 0, "8453:V4": -5}';
+    const floors = auroraPoolsSourceConfigFromEnv()!.minPoolCountByTarget;
+    // Fractional floors truncate; non-positive entries are dropped.
+    expect(floors.get('4663:V4')).toBe(40000);
+    expect(floors.has('1:V3')).toBe(false);
+    expect(floors.has('8453:V4')).toBe(false);
+  });
+
+  it('treats malformed floor JSON as no floors (safety net must not block boot)', () => {
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = 'not json';
+    expect(auroraPoolsSourceConfigFromEnv()!.minPoolCountByTarget.size).toBe(0);
   });
 });
 
@@ -176,7 +194,8 @@ describe('AuroraSourcedProvider primary mode', () => {
   const mk = (
     aurora: ISubgraphProvider<V3SubgraphPool>,
     subgraph: ISubgraphProvider<V3SubgraphPool>,
-    metric: FakeMetric
+    metric: FakeMetric,
+    minPoolCount = 0
   ) =>
     new AuroraSourcedProvider(
       'primary',
@@ -185,6 +204,7 @@ describe('AuroraSourcedProvider primary mode', () => {
       1,
       Protocol.V3,
       0.5,
+      minPoolCount,
       noopLogger,
       metric
     );
@@ -239,6 +259,48 @@ describe('AuroraSourcedProvider primary mode', () => {
     );
   });
 
+  it('falls back below the absolute floor on the FIRST tick and never poisons the baseline', async () => {
+    const metric = new FakeMetric();
+    const fivePools = Array.from({length: 5}, (_, i) => v3Pool(`0x${i}`, 10));
+    const tenPools = Array.from({length: 10}, (_, i) => v3Pool(`0x${i}`, 10));
+
+    // Tick 1 (fresh process, no ratio baseline): 5 < floor 8 → fallback.
+    const first = mk(
+      fakeProvider([fivePools]),
+      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
+      metric,
+      8
+    );
+    expect((await first.getPools()).map(p => p.id)).toEqual(['0x9']);
+    expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
+      'below_floor'
+    );
+
+    // Tick 2 recovers above the floor: served, and the rejected 5-count must
+    // not have become the ratio baseline (10 vs baseline 5 would still pass,
+    // but a later 4-count against a poisoned 5-baseline would NOT fire the
+    // ratio guard — the floor result must leave the baseline unset).
+    const second = mk(
+      fakeProvider([tenPools]),
+      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
+      metric,
+      8
+    );
+    expect(await second.getPools()).toHaveLength(10);
+    expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+  });
+
+  it('applies no absolute floor when the target has no entry', async () => {
+    const metric = new FakeMetric();
+    const provider = mk(
+      fakeProvider([[v3Pool('0x1', 10)]]),
+      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
+      metric,
+      0
+    );
+    expect((await provider.getPools()).map(p => p.id)).toEqual(['0x1']);
+  });
+
   it('shares the collapse baseline across provider instances (cron re-wires each run)', async () => {
     const tenPools = Array.from({length: 10}, (_, i) => v3Pool(`0x${i}`, 10));
     const metric = new FakeMetric();
@@ -279,6 +341,7 @@ describe('AuroraSourcedProvider shadow mode', () => {
       1,
       Protocol.V3,
       0.5,
+      0,
       noopLogger,
       metric
     );
