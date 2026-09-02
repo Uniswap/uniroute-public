@@ -18,11 +18,6 @@ export type ProviderConfig = {
    */
   enableFeeOnTransferFeeFetching?: boolean;
   /**
-   * Tenderly natively support save simulation failures if failed,
-   * we need this as a pass-through flag to enable/disable this feature.
-   */
-  saveTenderlySimulationIfFailed?: boolean;
-  /**
    * Flag to indicate whether to use the CachedRoutes in optimistic mode.
    * Optimistic mode means that we will allow blocksToLive greater than 1.
    */

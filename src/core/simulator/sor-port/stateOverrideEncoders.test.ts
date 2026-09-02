@@ -1,8 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {
-  encodeGethStateOverrides,
-  encodeTenderlyStateObjects,
-} from './stateOverrideEncoders';
+import {encodeGethStateOverrides} from './stateOverrideEncoders';
 
 const SLOT =
   '0x0000000000000000000000000000000000000000000000000000000000000005';
@@ -42,26 +39,6 @@ describe('encodeGethStateOverrides', () => {
     ]);
     expect(out).toEqual({
       '0xcccc': {stateDiff: {[SLOT]: VAL}, code: '0xdead'},
-    });
-  });
-});
-
-describe('encodeTenderlyStateObjects', () => {
-  it('maps stateDiff -> storage; preserves balance + code', () => {
-    const out = encodeTenderlyStateObjects([
-      {
-        contractAddress: '0xDdDd',
-        stateDiff: new Map([[SLOT, VAL]]),
-        codeOverride: '0xdead',
-        balance: 7n,
-      },
-    ]);
-    expect(out).toEqual({
-      '0xdddd': {
-        storage: {[SLOT]: VAL},
-        code: '0xdead',
-        balance: '0x7',
-      },
     });
   });
 });

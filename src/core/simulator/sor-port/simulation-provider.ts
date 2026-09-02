@@ -99,7 +99,7 @@ export abstract class Simulator {
     );
 
     // Override says the account is not funded enough — sim would revert
-    // against the overridden state, no point spending a Tenderly call.
+    // against the overridden state, no point spending a sim call.
     if (balanceOverrideOutcome === BalanceOverrideOutcome.Insufficient) {
       ctx.logger.info(
         'Authoritative balance override is below needed amount; skipping sim.'

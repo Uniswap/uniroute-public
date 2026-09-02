@@ -6,10 +6,18 @@ import {
 } from '../../../lib/config';
 
 // Emitted without the UniRouteService.Metric. prefix (pre-existing raw-name
-// simulation metrics, shared with the Tenderly provider dashboards).
+// simulation metrics; routing dashboards query them by these names).
 const METRIC_UNIRPC_SIMULATION_LATENCY = 'UniRpcV2.Simulation.Latency.dist';
 const METRIC_UNIRPC_SIMULATION_REQUEST = 'UniRpcV2.Simulation.Request';
-const TAG_SIM_TYPE_ETH_SIMULATE_V1 = 'simType:eth_simulateV1';
+
+/**
+ * unirpc_simulateV0 is unirpc-v2's eth_simulateV1 subset with identical
+ * request/response shapes, for chains whose RPC vendors don't serve the
+ * native method (unirpc emulates the block with a batch-executor
+ * eth_call). Same wire contract, so this simulator serves both — only
+ * the method name switches.
+ */
+export type SimulateRpcMethod = 'eth_simulateV1' | 'unirpc_simulateV0';
 
 import {
   ERC20__factory,
@@ -21,6 +29,8 @@ import {
   SwapOptionsUniversalRouter,
   SwapType,
 } from './simulation-provider';
+import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
+import {hasNativeToken} from '../../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
 import {BEACON_CHAIN_DEPOSIT_ADDRESS, MAX_UINT160} from '../../../lib/helpers';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
@@ -96,19 +106,40 @@ interface ResultCall {
 // We multiply eth_simulateV1 gas limit by this to overestimate gas limit
 const DEFAULT_ESTIMATE_MULTIPLIER = 1.3;
 
+/**
+ * Geth's hexutil.Big rejects hex quantities with leading zero digits, and
+ * ethers' toHexString pads to an even digit count — so a native-input
+ * methodParameters.value like 1e18 arrives as '0x0de0b6b3a7640000' and a
+ * verbatim passthrough fails the whole eth_simulateV1 request with -32602.
+ */
+function toCanonicalHexQuantity(value: string): string {
+  return `0x${BigInt(value).toString(16)}`;
+}
+
 export class EthSimulateV1Simulator extends Simulator {
   private gasConverter: GasConverter;
+  private ethEstimateGasSimulator: EthEstimateGasSimulator;
+  private simulationSupportedChains: ChainId[];
   private overrideEstimateMultiplier: {[chainId in ChainId]?: number};
+  private readonly rpcMethod: SimulateRpcMethod;
+  private readonly simTypeTag: string;
 
   constructor(
     chainId: ChainId,
     provider: JsonRpcProvider,
     gasConverter: GasConverter,
-    overrideEstimateMultiplier?: {[chainId in ChainId]?: number}
+    ethEstimateGasSimulator: EthEstimateGasSimulator,
+    simulationSupportedChains: ChainId[],
+    overrideEstimateMultiplier?: {[chainId in ChainId]?: number},
+    rpcMethod: SimulateRpcMethod = 'eth_simulateV1'
   ) {
     super(provider, chainId);
     this.gasConverter = gasConverter;
+    this.ethEstimateGasSimulator = ethEstimateGasSimulator;
+    this.simulationSupportedChains = simulationSupportedChains;
     this.overrideEstimateMultiplier = overrideEstimateMultiplier ?? {};
+    this.rpcMethod = rpcMethod;
+    this.simTypeTag = `simType:${rpcMethod}`;
   }
 
   async ethSimulateV1(
@@ -207,7 +238,7 @@ export class EthSimulateV1Simulator extends Simulator {
           : quoteSplit.swapInfo!.methodParameters!.to,
         data: quoteSplit.swapInfo!.methodParameters!.calldata,
         value: quoteSplit.swapInfo!.tokenInIsNative
-          ? quoteSplit.swapInfo!.methodParameters!.value
+          ? toCanonicalHexQuantity(quoteSplit.swapInfo!.methodParameters!.value)
           : '0x0',
       };
 
@@ -215,7 +246,7 @@ export class EthSimulateV1Simulator extends Simulator {
       const expectedCallCount = allCalls.length;
       const swapCallIndex = expectedCallCount - 1;
 
-      ctx.logger.debug('eth_simulateV1 call params', {
+      ctx.logger.debug(`${this.rpcMethod} call params`, {
         useProxy: useUniversalRouterProxy,
         approvalCallCount: approvalCalls.length,
         swapValue: swap.value,
@@ -223,12 +254,15 @@ export class EthSimulateV1Simulator extends Simulator {
           ? '0x' + blockNumber.toString(16)
           : 'latest',
       });
-      ctx.logger.info('Simulating using eth_simulateV1 on Universal Router', {
-        addr: fromAddress,
-        methodParameters: quoteSplit.swapInfo!.methodParameters,
-        useProxy: useUniversalRouterProxy,
-        callCount: expectedCallCount,
-      });
+      ctx.logger.info(
+        `Simulating using ${this.rpcMethod} on Universal Router`,
+        {
+          addr: fromAddress,
+          methodParameters: quoteSplit.swapInfo!.methodParameters,
+          useProxy: useUniversalRouterProxy,
+          callCount: expectedCallCount,
+        }
+      );
       try {
         const overrideMap = encodeGethStateOverrides(stateOverrides);
         const blockStateCall: BlockStateCall = {
@@ -241,7 +275,7 @@ export class EthSimulateV1Simulator extends Simulator {
 
         const before = Date.now();
 
-        const result = (await this.provider.send('eth_simulateV1', [
+        const result = (await this.provider.send(this.rpcMethod, [
           blockStateCalls,
           blockNumber ? '0x' + blockNumber.toString(16) : 'latest',
         ])) as Array<ResultCall>;
@@ -263,7 +297,7 @@ export class EthSimulateV1Simulator extends Simulator {
               : undefined;
 
           if (swapCallError) {
-            ctx.logger.error('eth_simulateV1 returned error', {
+            ctx.logger.error(`${this.rpcMethod} returned error`, {
               result,
               error: swapCallError,
               chain: this.chainId,
@@ -278,7 +312,7 @@ export class EthSimulateV1Simulator extends Simulator {
               tags: [
                 `chain:${this.chainId}`,
                 TAG_STATUS_FAILURE,
-                TAG_SIM_TYPE_ETH_SIMULATE_V1,
+                this.simTypeTag,
               ],
             }
           );
@@ -287,15 +321,14 @@ export class EthSimulateV1Simulator extends Simulator {
             tags: [
               `chain:${this.chainId}`,
               TAG_STATUS_FAILURE,
-              TAG_SIM_TYPE_ETH_SIMULATE_V1,
+              this.simTypeTag,
               ...swapStepsTags,
             ],
           });
 
-          // Parity with Tenderly node path: map the swap revert data to a
-          // specific SimulationStatus (e.g. SLIPPAGE_TOO_LOW) instead of a
-          // generic FAILED, so callers can distinguish slippage from real
-          // failures.
+          // Map the swap revert data to a specific SimulationStatus
+          // (e.g. SLIPPAGE_TOO_LOW) instead of a generic FAILED, so
+          // callers can distinguish slippage from real failures.
           return {
             ...quoteSplit,
             simulationResult: {
@@ -307,7 +340,7 @@ export class EthSimulateV1Simulator extends Simulator {
                 quoteSplit.swapInfo!.tokenOutWrappedAddress,
                 swapCallError?.data
               ),
-              description: 'Error simulating transaction via eth_simulateV1',
+              description: `Error simulating transaction via ${this.rpcMethod}`,
             },
           };
         }
@@ -326,7 +359,7 @@ export class EthSimulateV1Simulator extends Simulator {
             tags: [
               `chain:${this.chainId}`,
               TAG_STATUS_SUCCESS,
-              TAG_SIM_TYPE_ETH_SIMULATE_V1,
+              this.simTypeTag,
             ],
           }
         );
@@ -335,14 +368,14 @@ export class EthSimulateV1Simulator extends Simulator {
           tags: [
             `chain:${this.chainId}`,
             TAG_STATUS_SUCCESS,
-            TAG_SIM_TYPE_ETH_SIMULATE_V1,
+            this.simTypeTag,
             ...swapStepsTags,
           ],
         });
 
         if (!useUniversalRouterProxy) {
           ctx.logger.info(
-            'Successfully Simulated Approvals + Swap via eth_simulateV1 for Universal Router. Gas used.',
+            `Successfully Simulated Approvals + Swap via ${this.rpcMethod} for Universal Router. Gas used.`,
             {
               approvePermit2GasUsed: (result[0].calls[0] as ReturnData).gasUsed,
               approveUniversalRouterGasUsed: (result[0].calls[1] as ReturnData)
@@ -353,7 +386,7 @@ export class EthSimulateV1Simulator extends Simulator {
           );
         } else {
           ctx.logger.info(
-            'Successfully Simulated Proxy Universal Router Approval + Swap via eth_simulateV1. Gas used.',
+            `Successfully Simulated Proxy Universal Router Approval + Swap via ${this.rpcMethod}. Gas used.`,
             {
               approveProxyContractGasUsed: (result[0].calls[0] as ReturnData)
                 .gasUsed,
@@ -363,13 +396,13 @@ export class EthSimulateV1Simulator extends Simulator {
           );
         }
       } catch (e) {
-        ctx.logger.error('Error simulating with eth_simulateV1', e);
+        ctx.logger.error(`Error simulating with ${this.rpcMethod}`, e);
 
         await ctx.metrics.count(METRIC_UNIRPC_SIMULATION_REQUEST, 1, {
           tags: [
             `chain:${this.chainId}`,
             TAG_STATUS_FAILURE,
-            TAG_SIM_TYPE_ETH_SIMULATE_V1,
+            this.simTypeTag,
             ...swapStepsTags,
           ],
         });
@@ -380,7 +413,7 @@ export class EthSimulateV1Simulator extends Simulator {
             estimatedGasUsedInQuoteToken: 0n,
             estimatedGasUsedInUSD: 0,
             status: SimulationStatus.FAILED,
-            description: 'Error simulating transaction via eth_simulateV1',
+            description: `Error simulating transaction via ${this.rpcMethod}`,
           },
         };
       }
@@ -418,7 +451,7 @@ export class EthSimulateV1Simulator extends Simulator {
         estimatedGasUsedInQuoteToken: gasCostInQuoteToken,
         estimatedGasUsedInUSD: gasCostInUSD,
         status: SimulationStatus.SUCCESS,
-        description: 'Simulation succeeded via eth_simulateV1',
+        description: `Simulation succeeded via ${this.rpcMethod}`,
       },
     };
   }
@@ -434,47 +467,75 @@ export class EthSimulateV1Simulator extends Simulator {
     blockNumber?: number,
     stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
-    const inputAmount = quoteSplit.swapInfo!.inputAmount;
     const hasOverrides = !!stateOverrides && stateOverrides.length > 0;
-    // Bypass the live-allowance precheck when state overrides are in
-    // play — the client may be supplying an allowance/code override to
-    // make approval succeed at sim time, which the live-RPC check
-    // wouldn't see. If the override doesn't actually fix approval, sim
-    // returns the real revert reason (more informative than a generic
-    // NOT_APPROVED short-circuit).
+
+    // eth_estimateGas state-override support is a non-standard Geth extension
+    // and provider-dependent. When overrides are present, skip the
+    // eth_estimateGas fast-path entirely — never silently drop overrides.
+    // Make call to eth estimate gas if possible
+    // For erc20s, we must check if the token allowance is sufficient
+    // Skip eth_estimateGas for chains without a native token (e.g. Tempo) —
+    // these chains use an ERC-20 as their gas token, causing eth_estimateGas
+    // to revert with ETH_TRANSFER_FAILED.
     if (
-      hasOverrides ||
-      quoteSplit.swapInfo!.tokenInIsNative ||
-      (await this.checkTokenApproved(
-        fromAddress,
-        quoteSplit.swapInfo!.tokenInWrappedAddress,
-        inputAmount,
-        swapOptions,
-        this.provider,
-        ctx
-      ))
+      !hasOverrides &&
+      hasNativeToken(this.chainId) &&
+      (quoteSplit.swapInfo!.tokenInIsNative ||
+        (await this.checkTokenApproved(
+          fromAddress,
+          quoteSplit.swapInfo!.tokenInWrappedAddress,
+          quoteSplit.swapInfo!.inputAmount,
+          swapOptions,
+          this.provider,
+          ctx
+        )))
     ) {
-      return await this.ethSimulateV1(
-        fromAddress,
-        swapOptions,
-        quoteSplit,
-        ctx,
-        gasPrice,
-        blockNumber,
-        stateOverrides
+      ctx.logger.info(
+        'Simulating with eth_estimateGas since token is native or approved.'
       );
-    } else {
-      ctx.logger.info('Token not approved, skipping simulation');
+
+      try {
+        return await this.ethEstimateGasSimulator.ethEstimateGas(
+          fromAddress,
+          swapOptions,
+          quoteSplit,
+          ctx,
+          blockNumber
+        );
+      } catch (err) {
+        ctx.logger.info('Error simulating using eth_estimateGas', {err: err});
+        // If it fails, we should still try the simulateV1-style backend
+      }
+    }
+
+    if (!this.simulationSupportedChains.includes(this.chainId)) {
+      const msg = `Simulation not supported on chain ${this.chainId}`;
+      ctx.logger.info(msg);
       return {
         ...quoteSplit,
         simulationResult: {
           estimatedGasUsed: 0n,
           estimatedGasUsedInQuoteToken: 0n,
           estimatedGasUsedInUSD: 0,
-          status: SimulationStatus.NOT_APPROVED,
-          description: 'Token not approved, skipping simulation',
+          status: SimulationStatus.NOT_SUPPORTED,
+          description: msg,
         },
       };
     }
+
+    // Unapproved tokens go through the bundle too — its approval calls
+    // simulate the missing approvals, and a client-supplied
+    // allowance/code override is honored instead of a live-RPC allowance
+    // precheck (if the override doesn't actually fix approval, sim
+    // returns the real revert reason).
+    return await this.ethSimulateV1(
+      fromAddress,
+      swapOptions,
+      quoteSplit,
+      ctx,
+      gasPrice,
+      blockNumber,
+      stateOverrides
+    );
   }
 }

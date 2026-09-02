@@ -1809,7 +1809,8 @@ export class UniRouteBL implements IUniRoutedBL {
 
     // Pass requestBlockNumber (not the resolved blockNumber) to simulation.
     // When the user doesn't provide a block number, requestBlockNumber is
-    // undefined, which causes simulation backends (Tenderly, eth_estimateGas)
+    // undefined, which causes simulation backends (eth_simulateV1,
+    // eth_estimateGas)
     // to use 'latest'. The resolved blockNumber is only used for the response
     // and for pool/quote fetching.
     const {bestQuote, unviableRouteStrings} =
@@ -2574,8 +2575,7 @@ export class UniRouteBL implements IUniRoutedBL {
       );
     }
 
-    // TODO: ROUTE-1002 -investigate uniroute InsufficienToken tenderly simulation error
-    //       ROUTE-1003 -fix uniroute to port gas estimate heurisitcs from routing
+    // TODO: ROUTE-1003 -fix uniroute to port gas estimate heurisitcs from routing
     if (quoteSplit.simulationResult?.status === SimulationStatus.FAILED) {
       finalGasUseEstimate = CHAIN_TO_GAS_LIMIT_MAP[chain.chainId].toBigInt();
 

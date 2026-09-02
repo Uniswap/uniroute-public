@@ -87,8 +87,8 @@ export class EthEstimateGasSimulator extends Simulator {
   ): Promise<QuoteSplit> {
     // `stateOverrides` is intentionally not threaded here — `eth_estimateGas`
     // state-override support is a non-standard Geth extension and provider-
-    // dependent. Override-bearing requests are routed to eth_simulateV1 /
-    // Tenderly upstream in `FallbackTenderlySimulator`.
+    // dependent. Override-bearing requests skip this fast path upstream in
+    // `EthSimulateV1Simulator.simulateTransaction`.
     let estimatedGasUsed: BigNumber;
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
       if (
@@ -98,8 +98,8 @@ export class EthEstimateGasSimulator extends Simulator {
         // w/o this gas estimate differs by a lot depending on if user holds enough native balance
         // always estimate gas as if user holds enough balance
         // so that gas estimate is consistent for UniswapX. Override-bearing
-        // requests never reach this fast path — FallbackTenderlySimulator
-        // routes them to eth_simulateV1/Tenderly where overrides apply.
+        // requests never reach this fast path — they go straight to the
+        // eth_simulateV1 bundle where overrides apply.
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       ctx.logger.info('Simulating using eth_estimateGas on Universal Router', {

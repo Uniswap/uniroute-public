@@ -61,10 +61,8 @@ export type SubgraphFetchFactory = (
  * bounded literal removes the dependency entirely, and it cannot regress when
  * a new subgraph URL shape is added.
  *
- * Same approach as `TENDERLY_NODE_METRIC_PATH` in
- * `core/simulator/sor-port/tenderly-simulation-provider.ts`. The `to` (host)
- * dimension still separates goldsky / thegraph / ellipfra, and `chainid` /
- * `protocol` (below) identify the individual subgraph.
+ * The `to` (host) dimension still separates goldsky / thegraph / ellipfra,
+ * and `chainid` / `protocol` (below) identify the individual subgraph.
  */
 export const SUBGRAPH_METRIC_PATH = '/{subgraph}';
 

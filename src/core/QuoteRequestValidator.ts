@@ -46,9 +46,9 @@ export class QuoteRequestValidator {
     private readonly chainRepository: IChainRepository,
     private readonly tokenProvider: ITokenProvider,
     // Chains where state-override-bearing requests will reach a backend
-    // that supports overrides (eth_simulateV1 or Tenderly node
-    // `tenderly_estimateGasBundle`). Reject overrides on other chains
-    // rather than routing them into a path that would throw at sim time.
+    // that supports overrides (eth_simulateV1 or its unirpc_simulateV0
+    // polyfill). Reject overrides on other chains rather than routing
+    // them into a path that would throw at sim time.
     // Configured by dependencies.ts → `stateOverridesSupportedChains`.
     private readonly stateOverridesSupportedChains: ChainId[] = []
   ) {}

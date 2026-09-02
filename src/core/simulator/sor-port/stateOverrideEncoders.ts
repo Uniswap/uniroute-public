@@ -2,9 +2,8 @@ import {utils} from 'ethers';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
 
 /**
- * Geth-style state-override block — the second arg of `eth_simulateV1`,
- * also accepted by `tenderly_estimateGasBundle` as its third positional
- * arg. Tenderly Sim API uses the same fields under `state_objects`.
+ * Geth-style state-override block — the second arg of `eth_simulateV1`
+ * (and of unirpc-v2's `unirpc_simulateV0` subset).
  *
  * Multiple overrides on the same contract are merged (storage maps
  * union). `balance` and `code` of duplicates are last-wins (resolver
@@ -39,34 +38,6 @@ export function encodeGethStateOverrides(
       entry.balance = '0x' + o.balance.toString(16);
     }
     out[key] = entry;
-  }
-  return out;
-}
-
-/**
- * Tenderly Sim API expects `state_objects` per call with `storage`
- * instead of `stateDiff`. Otherwise identical shape.
- */
-export interface TenderlyStateObjectEntry {
-  storage?: Record<string, string>;
-  code?: string;
-  balance?: string;
-}
-
-export type TenderlyStateObjects = Record<string, TenderlyStateObjectEntry>;
-
-export function encodeTenderlyStateObjects(
-  overrides: ResolvedStateOverride[] | undefined
-): TenderlyStateObjects | undefined {
-  const geth = encodeGethStateOverrides(overrides);
-  if (!geth) return undefined;
-  const out: TenderlyStateObjects = {};
-  for (const [addr, entry] of Object.entries(geth)) {
-    const t: TenderlyStateObjectEntry = {};
-    if (entry.stateDiff) t.storage = entry.stateDiff;
-    if (entry.code !== undefined) t.code = entry.code;
-    if (entry.balance !== undefined) t.balance = entry.balance;
-    out[addr] = t;
   }
   return out;
 }

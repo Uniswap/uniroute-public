@@ -1,19 +1,16 @@
 import {ISimulator} from './ISimulator';
 import {QuoteSplit} from '../../models/quote/QuoteSplit';
-import {FallbackTenderlySimulator} from './sor-port/tenderly-simulation-provider';
+import {EthSimulateV1Simulator} from './sor-port/eth-simulateV1-provider';
 import {ChainId} from '../../lib/config';
 import {SwapOptionsUniversalRouter} from './sor-port/simulation-provider';
 import {Context} from '@uniswap/lib-uni/context';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {ResolvedStateOverride} from './ResolvedStateOverride';
 
-// Wrapper for the fallback simulator that was ported from SOR as is.
+// Wrapper for the per-chain simulator that was ported from SOR as is.
 export class MainSimulator implements ISimulator {
   constructor(
-    private readonly fallbackTenderlySimulators: Map<
-      ChainId,
-      FallbackTenderlySimulator
-    >
+    private readonly simulators: Map<ChainId, EthSimulateV1Simulator>
   ) {}
 
   async simulate(
@@ -29,9 +26,8 @@ export class MainSimulator implements ISimulator {
     blockNumber?: number,
     stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
-    const fallbackTenderlySimulator =
-      this.fallbackTenderlySimulators.get(chainId)!;
-    return await fallbackTenderlySimulator.simulate(
+    const simulator = this.simulators.get(chainId)!;
+    return await simulator.simulate(
       swapOptions.simulate!.fromAddress,
       swapOptions,
       quote,

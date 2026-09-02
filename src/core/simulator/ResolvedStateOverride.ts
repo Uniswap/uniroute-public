@@ -1,8 +1,7 @@
 /**
  * Post-resolver shape: one entry per overridden account/contract. Each
- * field maps directly to a Geth-style state-override field; per-backend
- * translators serialize as appropriate (eth_simulateV1 `stateOverrides`,
- * Tenderly Sim API `state_objects`, Tenderly Node bundle-level overrides).
+ * field maps directly to a Geth-style state-override field, serialized
+ * into the eth_simulateV1 / unirpc_simulateV0 `stateOverrides` block.
  */
 export interface ResolvedStateOverride {
   contractAddress: string;
