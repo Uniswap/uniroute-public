@@ -1034,14 +1034,15 @@ describe('v4LpFeeCorrectionReadCapFromEnv', () => {
   );
 
   /**
-   * What reaches production is whatever infra/index.ts puts in the env var, so
-   * the resolved value is pinned here too — `||` there would be the wrong
-   * operator for a key whose zero is meaningful.
+   * What reaches production is whatever the infra env wiring (staticEnv.ts,
+   * shared by index.ts and preview.ts) puts in the env var, so the resolved
+   * value is pinned here too — `||` there would be the wrong operator for a
+   * key whose zero is meaningful.
    */
   describe('resolved read cap, infra layer included', () => {
     const serviceRoot = new URL('../../../../', import.meta.url);
     const infraFallback = readFileSync(
-      new URL('infra/index.ts', serviceRoot),
+      new URL('infra/staticEnv.ts', serviceRoot),
       'utf8'
     ).match(
       /envConfig\.get\('poolCachingV4LpFeeCorrectionMaxReadsPerTick'\)\s*(\?\?|\|\|)\s*'([^']*)'/
@@ -1143,7 +1144,7 @@ describe('v4LpFeeCorrectionChainsFromEnv', () => {
 
   /**
    * The parser is only half the default. What actually reaches production is
-   * whatever infra/index.ts puts in the env var, so a parser test alone can
+   * whatever the infra env wiring (staticEnv.ts) puts in the env var, so a parser test alone can
    * pass while the two layers together resolve to the opposite of what this
    * file claims. These pin the RESOLVED default across both layers.
    */
@@ -1152,7 +1153,7 @@ describe('v4LpFeeCorrectionChainsFromEnv', () => {
     const read = (relPath: string) =>
       readFileSync(new URL(relPath, serviceRoot), 'utf8');
     const infraFallback = () =>
-      read('infra/index.ts').match(
+      read('infra/staticEnv.ts').match(
         /envConfig\.get\('poolCachingV4LpFeeCorrectionChains'\)\s*(\?\?|\|\|)\s*'([^']*)'/
       );
 
