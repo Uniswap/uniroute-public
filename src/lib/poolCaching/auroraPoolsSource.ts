@@ -350,7 +350,9 @@ export function auroraContext(metric: IMetric): Context {
 // --- Aurora V4 provider ---
 
 export interface AuroraProviderDeps {
-  routablePools: RoutablePoolsService;
+  // Narrowed to the method the V4 provider consumes, so fakes and the wave-2
+  // V3 provider each depend only on their own slice of the lib interface.
+  routablePools: Pick<RoutablePoolsService, 'listAllV4RoutablePools'>;
   prices: CurrentTokenPricesService;
   logger: Logger;
   metric: IMetric;
