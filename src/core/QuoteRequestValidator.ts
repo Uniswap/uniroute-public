@@ -8,6 +8,7 @@ import {EnumUtils} from '../lib/EnumUtils';
 import {Protocol} from '../models/pool/Protocol';
 import {isAddress} from 'ethers/lib/utils';
 import {isNativeAddress} from '../lib/helpers';
+import {QuoteErrorReason, quoteErrorData} from '../lib/quoteErrorReason';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {Context} from '@uniswap/lib-uni/context';
@@ -64,6 +65,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: `Unsupported chainId: ${request.tokenInChainId}`,
+          data: quoteErrorData(QuoteErrorReason.CHAIN_UNSUPPORTED),
         },
       });
     }
@@ -105,6 +107,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: 'Mixed protocol cannot be specified explicitly',
+          data: quoteErrorData(QuoteErrorReason.MIXED_PROTOCOL_EXPLICIT),
         },
       });
     }
@@ -115,6 +118,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: 'Amount must be greater than zero',
+          data: quoteErrorData(QuoteErrorReason.AMOUNT_NOT_POSITIVE),
         },
       });
     }
@@ -128,6 +132,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: 'Token in and out must not be the same',
+          data: quoteErrorData(QuoteErrorReason.TOKEN_IN_OUT_SAME),
         },
       });
     }
@@ -138,6 +143,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: 'Recipient must be a valid address',
+          data: quoteErrorData(QuoteErrorReason.RECIPIENT_INVALID),
         },
       });
     }
@@ -148,6 +154,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: 'TokenInChainId and TokenOutChainId must be the same',
+          data: quoteErrorData(QuoteErrorReason.CHAIN_MISMATCH),
         },
       });
     }
@@ -166,7 +173,11 @@ export class QuoteRequestValidator {
         ],
       });
       return new QuoteResponse({
-        error: {code: 400, message: stateOverrideError.message},
+        error: {
+          code: 400,
+          message: stateOverrideError.message,
+          data: quoteErrorData(stateOverrideError.reason),
+        },
       });
     }
 
@@ -194,6 +205,7 @@ export class QuoteRequestValidator {
         error: {
           code: 400,
           message: 'Token in and out must not be the same',
+          data: quoteErrorData(QuoteErrorReason.TOKEN_IN_OUT_SAME),
         },
       });
     }

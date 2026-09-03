@@ -39,6 +39,7 @@ import {V4Pool} from '../models/pool/V4Pool';
 import {GasEstimateProvider} from './gas/estimator/GasEstimateProvider';
 import {NoGasEstimator} from './gas/estimator/IGasEstimator';
 import {ChainId} from '../lib/config';
+import {QuoteErrorReason, quoteErrorReasonOf} from '../lib/quoteErrorReason';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {PoolDiscoverer} from './pool-discovery/PoolDiscoverer';
 import {
@@ -1562,6 +1563,9 @@ describe('UniRouteBL', () => {
       expect(response.error).toBeDefined();
       expect(response.error?.code).equals(404);
       expect(response.error?.message).contains('No valid quotes found');
+      expect(quoteErrorReasonOf(response.error)).equals(
+        QuoteErrorReason.NO_ROUTE
+      );
     });
 
     it('should correctly adjust gas for EXACT_IN trade type', async () => {
@@ -3940,6 +3944,9 @@ describe('UniRouteBL', () => {
       expect(response.error).toBeDefined();
       expect(response.error?.code).equals(404);
       expect(response.error?.message).contains('No valid quotes found');
+      expect(quoteErrorReasonOf(response.error)).equals(
+        QuoteErrorReason.NO_ROUTE
+      );
       swapOptionsSpy.mockRestore();
     });
 

@@ -15,6 +15,7 @@ import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId, SUPPORTED_CHAINS} from '../lib/config';
+import {QuoteErrorReason, quoteErrorReasonOf} from '../lib/quoteErrorReason';
 import {Protocol} from '../models/pool/Protocol';
 
 describe('QuoteRequestValidator', () => {
@@ -119,6 +120,9 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error?.message).toBe(
         `Unsupported chainId: ${request.tokenInChainId}`
       );
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.CHAIN_UNSUPPORTED
+      );
     });
 
     it('should return error when mixed protocol is specified explicitly', async () => {
@@ -132,6 +136,9 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe(
         'Mixed protocol cannot be specified explicitly'
+      );
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.MIXED_PROTOCOL_EXPLICIT
       );
     });
 
@@ -171,6 +178,9 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error).toBeDefined();
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe('Amount must be greater than zero');
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.AMOUNT_NOT_POSITIVE
+      );
     });
 
     it('should return error when amount is negative', async () => {
@@ -197,6 +207,9 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe(
         'Token in and out must not be the same'
+      );
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.TOKEN_IN_OUT_SAME
       );
     });
 
@@ -226,6 +239,9 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error).toBeDefined();
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe('Recipient must be a valid address');
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.RECIPIENT_INVALID
+      );
     });
 
     it('should not return error when recipient is a valid address', async () => {
@@ -292,6 +308,9 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe(
         'TokenInChainId and TokenOutChainId must be the same'
+      );
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.CHAIN_MISMATCH
       );
     });
 
@@ -585,6 +604,9 @@ describe('QuoteRequestValidator', () => {
         const result = await validator.validateInputs(request, ctx);
         expect(result?.error?.code).toBe(400);
         expect(result?.error?.message).toMatch(/not supported on chainId/);
+        // State-override reasons forward the validator's own snake_case
+        // reason strings rather than a QuoteErrorReason value.
+        expect(quoteErrorReasonOf(result?.error)).toBe('chain_unsupported');
       });
 
       it('rejects ERC-20 TokenBalanceOverride on mainnet ETH input (broadened rule — any tokenBalance fails)', async () => {

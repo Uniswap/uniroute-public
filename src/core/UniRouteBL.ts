@@ -74,6 +74,7 @@ import {INoRouteCacheRepository} from '../stores/route/uniroutes/NoRouteCacheRep
 import {QuoteType} from '../models/quote/QuoteType';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {EnumUtils} from '../lib/EnumUtils';
+import {QuoteErrorReason, quoteErrorData} from '../lib/quoteErrorReason';
 import {QuoteSplit, allocateAmounts} from '../models/quote/QuoteSplit';
 import {SwapInfo} from '../models/quote/SwapInfo';
 import {IRouteQuoteAllocator} from './route/RouteQuoteAllocator';
@@ -454,6 +455,7 @@ export class UniRouteBL implements IUniRoutedBL {
           error: {
             code: 400,
             message: 'FOT tokens are not supported for EXACT_OUT trade type',
+            data: quoteErrorData(QuoteErrorReason.FOT_EXACT_OUT),
           },
           hitsCachedRoutes: false,
         });
@@ -476,6 +478,7 @@ export class UniRouteBL implements IUniRoutedBL {
           error: {
             code: 400,
             message: 'xStock tokens are not supported for EXACT_OUT trade type',
+            data: quoteErrorData(QuoteErrorReason.XSTOCK_EXACT_OUT),
           },
           hitsCachedRoutes: false,
         });
@@ -510,6 +513,9 @@ export class UniRouteBL implements IUniRoutedBL {
             error: {
               code: 400,
               message: `${result.failedCount} state override(s) could not be resolved; check STATE_OVERRIDE_NOT_APPLIED logs for per-entry detail`,
+              data: quoteErrorData(
+                QuoteErrorReason.STATE_OVERRIDE_RESOLVE_FAILED
+              ),
             },
             hitsCachedRoutes: false,
           });
@@ -523,6 +529,9 @@ export class UniRouteBL implements IUniRoutedBL {
             error: {
               code: 400,
               message: `Duplicate state override write at ${collision}; each (contract, slot/balance/code) target must be written by at most one entry`,
+              data: quoteErrorData(
+                QuoteErrorReason.STATE_OVERRIDE_DUPLICATE_WRITE
+              ),
             },
             hitsCachedRoutes: false,
           });
@@ -866,6 +875,7 @@ export class UniRouteBL implements IUniRoutedBL {
           error: {
             code: 404,
             message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+            data: quoteErrorData(QuoteErrorReason.NO_ROUTE),
           },
           hitsCachedRoutes: usedCachedRoutes,
           usdBucket: fineGrainedUsdBucket.toString(),
@@ -1232,6 +1242,7 @@ export class UniRouteBL implements IUniRoutedBL {
           error: {
             code: 404,
             message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+            data: quoteErrorData(QuoteErrorReason.NO_ROUTE_CACHE_HIT),
           },
           hitsCachedRoutes: false,
           usdBucket: fineGrainedUsdBucket.toString(),
@@ -1704,6 +1715,7 @@ export class UniRouteBL implements IUniRoutedBL {
           error: {
             code: 404,
             message: `No mixed valid routes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
+            data: quoteErrorData(QuoteErrorReason.NO_MIXED_ROUTE),
           },
           hitsCachedRoutes: usedCachedRoutes,
           usdBucket: fineGrainedUsdBucket.toString(),
