@@ -39,6 +39,7 @@ import {BlockNumberCache} from '../lib/blockNumberCache';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {TradeType} from '../models/quote/TradeType';
 import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
+import {OnChainQuoteFetchError} from '../stores/quote/OnChainQuoteFetchError';
 import {Chain} from '../models/chain/Chain';
 import {Pool} from '../models/pool/Pool';
 import {IQuoteSelector} from './quote/selector/IQuoteSelector';
@@ -931,6 +932,11 @@ export class UniRouteBL implements IUniRoutedBL {
       ctx.logger.error('Unhandled error in quote method', {
         error: error instanceof Error ? error.message : String(error),
         errorStack: error instanceof Error ? error.stack : undefined,
+        // Only our own fetch error gets its cause unwrapped, and only in the
+        // bounded form it defines. An arbitrary `cause` is not safe to log:
+        // undici's is the socket error behind 'fetch failed', which names the
+        // peer IP:port, and ethers' embeds whole request and response bodies.
+        ...(error instanceof OnChainQuoteFetchError ? error.toLogFields() : {}),
         request: {
           tokenInChainId: request.tokenInChainId,
           tokenInAddress: request.tokenInAddress,
