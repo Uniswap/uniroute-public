@@ -398,8 +398,15 @@ export const APEX_YIELD_HOOK_ON_BASE =
 export const UPEG_HOOK_ON_MAINNET =
   '0xe54082DfBf044B6a8F584bdDdb90a22d5613C440';
 
+// GuideStar stable-stable hook, deployed 2026-09-08 (mainnet block 25934112),
+// permission bits 0x3CC0: before/after initialize, add-liquidity and swap; no
+// custom-accounting (returns-delta) bits. Without this entry its pools are
+// rejected by isHooksPoolRoutable (swap permissions) and, on DAI/USDC/USDT
+// pairs, by the major-pair rule in the auto-allowlist. Allowlisting admits
+// its pools to the snapshot (the explicit-allowlist append is uncapped for
+// static entries); quote-time selection is then TVL-ranked like any hook.
 export const GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET =
-  '0x4509b7eb3f9641226804fea4976963435d1c6080';
+  '0x0000113dcf4add69999fad8f20f2b63f979bfcc0';
 export const ETIM_TAX_HOOK_ON_MAINNET =
   '0x41a9bf2969af822942a553babd6d8dda0dff80cc';
 export const ASH_HOOK_ON_MAINNET = '0xebac1d1a384d3ae1a162fdf30788fcfa228380cc';
@@ -1212,6 +1219,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SWING_HOOK_ON_MAINNET,
     FORGE_HOOK_ON_MAINNET,
     DOPPLER_HOOK_INITIALIZER_ON_MAINNET,
+    GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],

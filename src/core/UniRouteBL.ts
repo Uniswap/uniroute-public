@@ -114,7 +114,10 @@ import {
   getQuoteGasAndPortionAdjusted,
 } from '../lib/portionUtils';
 import {HooksOptions} from '../models/hooks/HooksOptions';
-import {EXPERIMENT_HOOKS, Experiment} from '../models/hooks/Experiment';
+import {
+  Experiment,
+  getExperimentHookAddresses,
+} from '../models/hooks/Experiment';
 import {resolveNamespaces} from './namespaces/RouteNamespaceResolver';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {
@@ -137,11 +140,13 @@ import {
   routeSetCountsForLogging,
   summarizeRouteForLogging,
   summarizeRoutesForLogging,
+  routeUsesHook,
 } from '../lib/observability';
 import {capRoutesByAggHookClass} from '../lib/routeCap';
 import {
   CacheNamespaceName,
   EMPTY_NAMESPACE_CONTEXT,
+  getActiveExperiment,
   isNamespaceActive,
 } from '../models/hooks/namespaces';
 import {RouteNamespaceContext} from '../models/hooks/namespaces/CacheNamespace';
@@ -416,7 +421,7 @@ export class UniRouteBL implements IUniRoutedBL {
       hooksOptions,
       ...namespaceLogFields,
       hasExternalProtocols: isExternalProtocol(protocols),
-      stableStableExperiment: experiment,
+      experiment,
       testAggHooks: options?.testAggHooks,
       requestSource,
       forceMixed,
@@ -815,11 +820,11 @@ export class UniRouteBL implements IUniRoutedBL {
         });
         status = QuoteStatus.Success;
 
-        await this.emitGuideStarMetricIfApplicable(
+        await this.emitExperimentHookMatchMetric(
           ctx,
           chain,
           bestQuote,
-          options,
+          getActiveExperiment(nsCtx),
           metricTags
         );
         await this.emitAggHookLeakMetrics(
@@ -981,9 +986,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const protocols = request.protocols
       .split(',')
       .map(p => EnumUtils.stringToEnum(Protocol, p));
-    const experiment = options?.stableStableHookEnabled
-      ? Experiment.GuideStar_Stable_Stable
-      : undefined;
+    const experiment = options?.experiment;
     const erc4626Snapshot = this.erc4626WrapperRegistry
       ? await this.erc4626WrapperRegistry.getSnapshot(chain.chainId, ctx)
       : undefined;
@@ -1865,38 +1868,35 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * Emits the GuideStar Stable-Stable experiment metric when the request
-   * opted into the experiment, tagging whether the chosen route actually
-   * traversed a GuideStar hook pool.
+   * Emits the experiment metric when the request is running an experiment
+   * (i.e. the ExperimentalHooks namespace is active, which requires the
+   * experiment to have registered hooks), tagging whether the chosen route
+   * actually traversed one of that experiment's hook pools.
    */
-  private async emitGuideStarMetricIfApplicable(
+  private async emitExperimentHookMatchMetric(
     ctx: Context,
     chain: Chain,
     bestQuote: QuoteSplit,
-    options: QuoteOptions | undefined,
+    experiment: Experiment | undefined,
     metricTags: string[]
   ): Promise<void> {
-    if (!options?.stableStableHookEnabled) {
+    if (experiment === undefined) {
       return;
     }
-    const guideStarHookAddresses = new Set(
-      (EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] ?? []).map(addr =>
-        addr.toLowerCase()
-      )
-    );
+    const experimentHookAddresses = getExperimentHookAddresses(experiment);
     const matched = bestQuote.quotes.some(quote =>
-      quote.route.path.some(
-        pool =>
-          pool instanceof V4Pool &&
-          pool.hooks !== undefined &&
-          guideStarHookAddresses.has(pool.hooks.toLowerCase())
-      )
+      routeUsesHook(quote.route, experimentHookAddresses)
     );
     await ctx.metrics.count(
-      buildMetricKey('BestQuote.GuideStarStableStableHookMatch'),
+      buildMetricKey('BestQuote.ExperimentHookMatch'),
       1,
       {
-        tags: [...metricTags, `chainId:${chain.chainId}`, `matched:${matched}`],
+        tags: [
+          ...metricTags,
+          `chainId:${chain.chainId}`,
+          `experiment:${experiment}`,
+          `matched:${matched}`,
+        ],
       }
     );
   }

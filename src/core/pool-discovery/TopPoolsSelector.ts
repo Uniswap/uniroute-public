@@ -37,7 +37,7 @@ import {
   V4Pool,
 } from '../../models/pool/V4Pool';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
-import {EXPERIMENT_HOOKS} from '../../models/hooks/Experiment';
+import {getExperimentHookAddresses} from '../../models/hooks/Experiment';
 import {
   getActiveExperiment,
   RouteNamespaceContext,
@@ -490,20 +490,28 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     // experimental-hooks routing path always sees them as candidates,
     // regardless of TVL / top-N thresholds. Operates on the pre-filter
     // `pools` input so pools that would otherwise be pruned still make it
-    // through. Gated on V4 because experiment hooks are a V4-only concept.
-    if (protocol === Protocol.V4 && experiment !== undefined) {
-      const experimentHookAddresses = new Set(
-        (EXPERIMENT_HOOKS[experiment] ?? []).map(addr => addr.toLowerCase())
-      );
-      const experimentPoolsAvailable = pools.filter(pool => {
-        const hooks = (pool as V4PoolInfo).hooks?.toLowerCase();
-        return hooks !== undefined && experimentHookAddresses.has(hooks);
-      }).length;
+    // through. Gated on V4 because experiment hooks are a V4-only concept,
+    // and on a non-empty hook set so a hookless experiment costs nothing here
+    // (resolveNamespaces already refuses to activate one).
+    const experimentHookAddresses =
+      experiment === undefined
+        ? undefined
+        : getExperimentHookAddresses(experiment);
+    if (
+      protocol === Protocol.V4 &&
+      experiment !== undefined &&
+      experimentHookAddresses !== undefined &&
+      experimentHookAddresses.size > 0
+    ) {
+      // The counter tallies every matching pool before the dedupe check, so
+      // `available` counts pools an earlier stage already selected too.
+      let experimentPoolsAvailable = 0;
       const experimentPools = pools.filter(pool => {
         const hooks = (pool as V4PoolInfo).hooks?.toLowerCase();
         if (!hooks || !experimentHookAddresses.has(hooks)) {
           return false;
         }
+        experimentPoolsAvailable++;
         const poolId = pool.id.toLowerCase();
         if (selectedPoolIds.has(poolId)) {
           return false;
@@ -522,21 +530,21 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         `chainId:${chainId}`,
         `experiment:${experiment}`,
       ];
-      await ctx.metrics.count(
-        buildMetricKey('TopPoolsSelector.ExperimentHit'),
-        1,
-        {tags: experimentMetricTags}
-      );
-      await ctx.metrics.count(
-        buildMetricKey('TopPoolsSelector.ExperimentPoolsAvailable'),
-        experimentPoolsAvailable,
-        {tags: experimentMetricTags}
-      );
-      await ctx.metrics.count(
-        buildMetricKey('TopPoolsSelector.ExperimentPoolsAppended'),
-        experimentPools.length,
-        {tags: experimentMetricTags}
-      );
+      await Promise.all([
+        ctx.metrics.count(buildMetricKey('TopPoolsSelector.ExperimentHit'), 1, {
+          tags: experimentMetricTags,
+        }),
+        ctx.metrics.count(
+          buildMetricKey('TopPoolsSelector.ExperimentPoolsAvailable'),
+          experimentPoolsAvailable,
+          {tags: experimentMetricTags}
+        ),
+        ctx.metrics.count(
+          buildMetricKey('TopPoolsSelector.ExperimentPoolsAppended'),
+          experimentPools.length,
+          {tags: experimentMetricTags}
+        ),
+      ]);
     }
 
     // 10. Finally, manually add some direct pairs pools if not already discovered/selected.

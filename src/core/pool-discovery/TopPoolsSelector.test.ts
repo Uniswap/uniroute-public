@@ -1,4 +1,4 @@
-import {describe, beforeEach, it, expect} from 'vitest';
+import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
 import {
   AggHooksTopPoolsSelector,
   BasicTopPoolsSelector,
@@ -41,7 +41,7 @@ import {
   WRAPPED_NATIVE_CURRENCY,
 } from '../../lib/tokenUtils';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
-import {Experiment} from 'src/models/hooks/Experiment';
+import {EXPERIMENT_HOOKS, Experiment} from 'src/models/hooks/Experiment';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {
   poolSelectionConfig,
@@ -738,10 +738,18 @@ describe('BasicTopPoolsSelector', () => {
     });
 
     describe('experiment manual append', () => {
-      // Matches EXPERIMENT_HOOKS[GuideStar_Stable_Stable] in
-      // src/models/hooks/Experiment.ts.
+      // The registry ships empty (no live experiment), so register a fixture
+      // hook for the duration of this block to exercise the append path.
       const experimentHookAddress =
-        '0x4509b7eb3f9641226804fea4976963435d1c6080';
+        '0x00000000000000000000000000000000000000c0';
+      beforeAll(() => {
+        EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] = [
+          experimentHookAddress,
+        ];
+      });
+      afterAll(() => {
+        delete EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable];
+      });
 
       const makeExperimentPool = (
         id: string,

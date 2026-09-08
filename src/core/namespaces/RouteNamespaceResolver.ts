@@ -1,6 +1,9 @@
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
-import {Experiment} from '../../models/hooks/Experiment';
+import {
+  Experiment,
+  getExperimentHookAddresses,
+} from '../../models/hooks/Experiment';
 import {ChainId} from '../../lib/config';
 import {allUniswapAndSomeExternalProtocolsAndMixed} from '../../lib/helpers';
 import {shouldUsePermissionedHookNamespace} from '../../models/hooks/PermissionedHooks';
@@ -29,10 +32,10 @@ export interface NamespaceResolutionInput {
   chainId: ChainId;
   /**
    * The active experiment for this request, when the caller has opted into
-   * experimental-hook routing (e.g. `x-stable-stable-hook-enabled: true` →
-   * `Experiment.GuideStar_Stable_Stable`). Presence activates the
-   * `ExperimentalHooks` namespace and scopes the cache keyspace under the
-   * specific experiment (`ExperimentalHooks#<experiment>#`).
+   * experimental-hook routing (`x-hook-experiment` header →
+   * `QuoteOptions.experiment`). Presence
+   * activates the `ExperimentalHooks` namespace and scopes the cache
+   * keyspace under the specific experiment (`ExperimentalHooks#<experiment>#`).
    */
   experiment?: Experiment;
   erc4626Snapshot?: Erc4626RegistrySnapshot;
@@ -133,7 +136,13 @@ export function resolveNamespaces(
     namespaces.push(new Erc4626WrapperHooksNamespace());
   }
 
-  if (experiment !== undefined) {
+  // An experiment forks the cache keyspace only if it can change the search
+  // space. With no registered hooks the force-append is a no-op, so a fork
+  // would just be a cold keyspace on the short TTL for identical routes.
+  if (
+    experiment !== undefined &&
+    getExperimentHookAddresses(experiment).size > 0
+  ) {
     namespaces.push(new ExperimentalHooksNamespace(experiment));
   }
 

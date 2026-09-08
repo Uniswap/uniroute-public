@@ -1,4 +1,4 @@
-import {describe, expect, it} from 'vitest';
+import {afterAll, beforeAll, describe, expect, it} from 'vitest';
 import {
   resolveNamespaces,
   isCacheReadAllowed,
@@ -6,7 +6,19 @@ import {
   NamespaceCacheConfig,
   NamespaceResolutionInput,
 } from './RouteNamespaceResolver';
-import {Experiment} from '../../models/hooks/Experiment';
+import {EXPERIMENT_HOOKS, Experiment} from '../../models/hooks/Experiment';
+
+// resolveNamespaces only forks the keyspace for an experiment with registered
+// hooks, and the registry ships empty — register a fixture for this file.
+const FIXTURE_EXPERIMENT_HOOK = '0x00000000000000000000000000000000000000c0';
+beforeAll(() => {
+  EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] = [
+    FIXTURE_EXPERIMENT_HOOK,
+  ];
+});
+afterAll(() => {
+  delete EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable];
+});
 import {Protocol} from '../../models/pool/Protocol';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {ChainId} from '../../lib/config';
@@ -259,6 +271,20 @@ describe('RouteNamespaceResolver', () => {
     it('does not include ExperimentalHooks when experiment is omitted', () => {
       const ctx = resolveNamespaces(makeInput());
       expect(names(ctx)).not.toContain('ExperimentalHooks');
+    });
+
+    it('does not include ExperimentalHooks when the experiment has no registered hooks', () => {
+      delete EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable];
+      try {
+        const ctx = resolveNamespaces(
+          makeInput({experiment: Experiment.GuideStar_Stable_Stable})
+        );
+        expect(names(ctx)).not.toContain('ExperimentalHooks');
+      } finally {
+        EXPERIMENT_HOOKS[Experiment.GuideStar_Stable_Stable] = [
+          FIXTURE_EXPERIMENT_HOOK,
+        ];
+      }
     });
 
     it('combines ExperimentalHooks with AggHooks when both are triggered', () => {

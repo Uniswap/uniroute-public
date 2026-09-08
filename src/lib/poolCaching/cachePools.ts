@@ -42,7 +42,6 @@ import {withTimeout} from './util/withTimeout';
 import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
-import {GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET} from './util/hooksAddressesAllowlist';
 import {getDynamicZlcaHooks} from './util/dynamicZlcaHooks';
 import {
   applyV4LpFeeCorrection,
@@ -571,17 +570,6 @@ async function cachePoolsForChainProtocol(
         metricInstance,
         dynamicZlcaHookMap ? new Set(dynamicZlcaHookMap.keys()) : undefined
       );
-
-      const guideStarStableStablePools = pools.filter(
-        pool =>
-          (pool as V4SubgraphPool).hooks?.toLowerCase() ===
-          GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET.toLowerCase()
-      );
-      if (guideStarStableStablePools.length > 0) {
-        logger.debug(
-          `Found GuideStar stable-stable pool ${JSON.stringify(guideStarStableStablePools)}`
-        );
-      }
     }
 
     metricInstance.putMetric(
