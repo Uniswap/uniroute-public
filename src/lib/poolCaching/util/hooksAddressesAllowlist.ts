@@ -14,7 +14,6 @@ import {
   FLUID_DEX_1,
   FLUID_DEX_LITE,
   PANCAKESWAP_V3,
-  SLIPSTREAM,
   STABLE_SWAP,
   STABLE_SWAP_NG,
 } from './aggHooksAddressesAllowlist';
@@ -64,9 +63,9 @@ export const AGG_HOOKS_PER_CHAIN: Partial<
   [Protocol.FLUIDDEXLITE]: {
     [ChainId.MAINNET]: FLUID_DEX_LITE,
   },
-  [Protocol.SLIPSTREAM]: {
-    [ChainId.BASE]: SLIPSTREAM,
-  },
+  // NOTE: SLIPSTREAM is intentionally omitted here. The Slipstream singleton
+  // on Base routes as a plain V4 pool through the V4Quoter — see
+  // SLIPSTREAM_AGG_HOOK_ON_BASE in ZLCA_HOOKS_PER_CHAIN.
   [Protocol.PANCAKESWAPV3]: {
     [ChainId.BASE]: PANCAKESWAP_V3,
   },
@@ -516,21 +515,29 @@ export const ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET =
   '0x2494d3d872a99b7b055304692454a226879de888';
 export const DUALPOOL_HOOK_ON_MAINNET =
   '0x00000078bd49d5279a99b5f4011a5c61ee8caac0';
+// Aerodrome Slipstream aggregator singleton on Base, the 2026-08-19
+// generation with no `expiryBlock()` (the 2026-08-05 predecessor
+// 0xa167c254ef8a24bda465760dc1969a5ce37ae888 expires at Base block 52555445
+// and is deliberately not listed).
+export const SLIPSTREAM_AGG_HOOK_ON_BASE =
+  '0xa1d866042c0989570cc35ce102c03d14184ee888';
 
 /**
  * "ZLCA Hooks" — Zero-Liquidity Custom-Accounting hooks: V4 hooks whose
  * custom accounting (e.g. a PSM-style fixed-parity conversion via
- * BeforeSwapReturnsDelta like the LitePSM hooks, or JIT-provisioned
- * liquidity like the dualpool hook) means their pools hold no ordinary LP
- * positions, so the standard concentrated-liquidity `liquidity` field is
- * structurally always 0 — and their subgraph `totalValueLockedETH` may not
- * reflect real economic backing either. Neither is a usable admission
- * signal, so they are admitted to routing purely by membership in this
- * registry (a small, explicitly curated list — same trust model as the
+ * BeforeSwapReturnsDelta like the LitePSM hooks, JIT-provisioned
+ * liquidity like the dualpool hook, or a pass-through to an external DEX
+ * pool like the Slipstream aggregator hook) means their pools hold no
+ * ordinary LP positions, so the standard concentrated-liquidity `liquidity`
+ * field is structurally always 0 — and their subgraph `totalValueLockedETH`
+ * may not reflect real economic backing either. Neither is a usable
+ * admission signal, so they are admitted to routing purely by membership in
+ * this registry (a small, explicitly curated list — same trust model as the
  * plain `HOOKS_ADDRESSES_ALLOWLIST`, and every address here must ALSO
- * appear there). Their reserves are custodied inside the PoolManager, so
- * the standard V4Quoter prices them fine — no
- * AggHookQuoter/AGG_HOOKS_PER_CHAIN treatment needed.
+ * appear there). The hook settles the whole swap inside the PoolManager's
+ * unlock (from reserves it custodies there, or by pulling them from an
+ * external pool in its callback), so the standard V4Quoter prices them
+ * fine — no AggHookQuoter/AGG_HOOKS_PER_CHAIN treatment needed.
  *
  * Routing behavior tied to this category: exemption from BOTH the
  * subgraph's V4_MIN_TVL_ETH floor at the query level AND the post-fetch
@@ -568,7 +575,11 @@ export const DUALPOOL_HOOK_ON_MAINNET =
  * view-calls through all three live pools measured 85,130-87,495 for the
  * full hop (both directions), so the callback's excess over the ~60-97k
  * heuristic base is <=~27k; doubled plus the +188k view-call
- * understatement bound stays under 250k.
+ * understatement bound stays under 250k. The Slipstream 500k was
+ * calibrated 2026-09-08 on Base: V4Quoter view-calls through the hook's
+ * WETH/USDC pool measured 255,750-275,300 for the full hop (both directions,
+ * 0.1-1 ETH; the expiring predecessor measured 255,693-276,061 on the same
+ * pair), the same envelope as LitePSM, so it takes the same doubled figure.
  *
  * Add future zero-liquidity custom-accounting hooks here to pick up the
  * same treatment automatically.
@@ -585,6 +596,9 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: 500_000n,
     [DUALPOOL_HOOK_ON_MAINNET]: 3_000_000n,
     [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: 250_000n,
+  },
+  [ChainId.BASE]: {
+    [SLIPSTREAM_AGG_HOOK_ON_BASE]: 500_000n,
   },
 };
 
@@ -1385,6 +1399,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     REVERT_STABLE_SWAP_HOOK_ON_BASE,
     STONK_HOOK_ON_BASE,
     FLASH_HOOK_ON_BASE,
+    SLIPSTREAM_AGG_HOOK_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],

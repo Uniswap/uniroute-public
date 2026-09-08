@@ -10,6 +10,7 @@ import {
   getProtocolForAggHookAddress,
   getTvlBypassHookAddresses,
   HOOKS_ADDRESSES_ALLOWLIST,
+  SLIPSTREAM_AGG_HOOK_ON_BASE,
   ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
   ZLCA_HOOKS_PER_CHAIN,
 } from './hooksAddressesAllowlist';
@@ -44,8 +45,20 @@ describe('AGG_HOOKS_PER_CHAIN', () => {
     expect(AGG_HOOKS_PER_CHAIN[Protocol.CURVESTABLESWAPNG]).toBeDefined();
     expect(AGG_HOOKS_PER_CHAIN[Protocol.FLUIDDEXT1]).toBeDefined();
     expect(AGG_HOOKS_PER_CHAIN[Protocol.FLUIDDEXLITE]).toBeDefined();
-    expect(AGG_HOOKS_PER_CHAIN[Protocol.SLIPSTREAM]).toBeDefined();
     expect(AGG_HOOKS_PER_CHAIN[Protocol.PANCAKESWAPV3]).toBeDefined();
+  });
+
+  it('routes the Base Slipstream singleton as a ZLCA hook, not an agg hook', () => {
+    expect(AGG_HOOKS_PER_CHAIN[Protocol.SLIPSTREAM]).toBeUndefined();
+    expect(
+      getProtocolForAggHookAddress(SLIPSTREAM_AGG_HOOK_ON_BASE, ChainId.BASE)
+    ).toBeUndefined();
+    expect(ZLCA_HOOKS_PER_CHAIN[ChainId.BASE]).toEqual({
+      [SLIPSTREAM_AGG_HOOK_ON_BASE]: 500_000n,
+    });
+    expect(
+      getTvlBypassHookAddresses(ChainId.BASE)?.has(SLIPSTREAM_AGG_HOOK_ON_BASE)
+    ).toBe(true);
   });
 });
 

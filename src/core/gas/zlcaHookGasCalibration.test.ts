@@ -201,13 +201,13 @@ describe('zlcaHookGasAdjustment dynamic ZLCA fallback', () => {
 
   it('works on chains with no static ZLCA registry at all', () => {
     setDynamicZlcaHooks(
-      ChainId.BASE,
+      ChainId.ARBITRUM,
       new Map([[DYNAMIC_HOOK, DYNAMIC_OVERHEAD]])
     );
     expect(
       zlcaHookGasAdjustment(
         [makeV4Pool(DYNAMIC_HOOK, FAKE_POOL_ID_A)],
-        ChainId.BASE
+        ChainId.ARBITRUM
       )
     ).toBe(DYNAMIC_OVERHEAD);
   });
