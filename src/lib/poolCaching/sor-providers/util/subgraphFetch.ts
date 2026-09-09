@@ -70,13 +70,13 @@ export const SUBGRAPH_METRIC_PATH = '/{subgraph}';
  * Deadline for ONE HTTP request (headers AND body), as distinct from the
  * provider's whole-run budget.
  *
- * 30s matches the base providers' own default whole-run `timeout`, so it is
- * generous for a single page of <= `PAGE_SIZE` entities while staying small
- * enough that the retries wrapped around `getPools` remain usable inside the
- * tightest job budget in the fleet — the 2-minute Robinhood V4 fast job, whose
- * per-run ceiling is 110s (`POOL_CACHING_ROBINHOOD_V4_JOB_TIMEOUT_MS`) against
- * a 90s provider budget. At 30s a failed page leaves room for three attempts
- * inside that job; at 90s it left room for one.
+ * 120s because real pages are slower than a "single page of <= `PAGE_SIZE`
+ * entities" suggests: prod measured Base V4 pages at up to 36.8s and the
+ * long V2/V3 crawls at up to 48.2s in the week before a 30s cap shipped, and
+ * that cap failed every Base V4 and Base V3 crawl for a week (one aborted page
+ * fails the whole ~183-page crawl, and the retries around `getPools` restart
+ * from page one). 120s clears the slowest observed page with ~2.5x headroom
+ * while still failing a genuinely stalled page inside the same job.
  *
  * Keeping this well under 300s also keeps undici's DEFAULT `headersTimeout` /
  * `bodyTimeout` (300s on Node 22, and nothing here installs a dispatcher) out
@@ -85,7 +85,7 @@ export const SUBGRAPH_METRIC_PATH = '/{subgraph}';
  * lands as a generic `status:error` and leaves `client.timeout` flat, whereas
  * our own abort raises `ErrTimeout` and is counted as `client.timeout`.
  */
-export const SUBGRAPH_PAGE_TIMEOUT_MS = 30_000;
+export const SUBGRAPH_PAGE_TIMEOUT_MS = 120_000;
 
 /**
  * The per-request budget: the page budget, or the provider's whole-run budget

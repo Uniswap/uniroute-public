@@ -31,11 +31,11 @@ describe('subgraphPageTimeoutMs', () => {
     }
   });
 
-  it('leaves the Robinhood fast job room to retry', () => {
-    // 110s job budget (POOL_CACHING_ROBINHOOD_V4_JOB_TIMEOUT_MS) against the
-    // 90s provider budget cacheConfig gives chain 4663.
-    const perRequest = subgraphPageTimeoutMs(90_000);
-    expect(perRequest * 3).toBeLessThan(110_000);
+  it('clears the slowest page prod has observed on Base', () => {
+    // Base V4 pages measured up to 36,759ms and the long V2/V3 crawls up to
+    // 48,160ms; a 30s cap failed every Base crawl for a week.
+    expect(SUBGRAPH_PAGE_TIMEOUT_MS).toBeGreaterThan(48_160);
+    expect(subgraphPageTimeoutMs(90_000)).toBeGreaterThan(36_759);
   });
 });
 
@@ -87,9 +87,11 @@ describe('subgraphFetchFactoryFromContext', () => {
     expect(response.status).toBe(200);
     expect(seen.length).toBe(1);
     expect(seen[0]!.init?.method).toBe('POST');
-    // NOT the 90s run budget: a per-request deadline equal to the whole-run
-    // deadline can never fire before the run is already over.
-    expect(seen[0]!.fetchConfig?.timeoutMs).toBe(SUBGRAPH_PAGE_TIMEOUT_MS);
+    // The page cap, bounded by the run budget when that is tighter (it is
+    // here: 90s run budget under a 120s cap).
+    expect(seen[0]!.fetchConfig?.timeoutMs).toBe(
+      Math.min(SUBGRAPH_PAGE_TIMEOUT_MS, OPTS.runTimeoutMs)
+    );
     expect(seen[0]!.fetchConfig?.metricTags).toEqual({
       vendor: 'subgraph',
       path: SUBGRAPH_METRIC_PATH,
