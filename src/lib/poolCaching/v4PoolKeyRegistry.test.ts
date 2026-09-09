@@ -14,11 +14,12 @@ import {
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import type {Logger} from './sor-providers/util/log';
 import {
+  isRegistryAdmissibleHook,
   parseV4PoolKeyRegistryFile,
   v4PoolKeyRegistryChainsFromEnv,
   v4RegistryPairKey,
 } from './util/v4PoolKeyRegistryFormat';
-import {Pool as V4SDKPool} from '@uniswap/v4-sdk';
+import {DYNAMIC_FEE_FLAG, Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {Token} from '@uniswap/sdk-core';
 import {nativeOnChain} from './util/nativeOnChain';
 import {V4TickSpacing} from '../../models/pool/V4Pool';
@@ -28,6 +29,7 @@ const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
 const SIERRA = '0xbceb5f6877d979ec621ae694da1102cb95691ad3';
 
 const GENERATED_AT = 1_754_000_000_000;
+const ARRAKIS_PRIVATE_HOOK_V2 = '0xa4e6f5500e88691fdcb289aa0e99067481434880';
 
 function poolIdFor(
   chainId: number,
@@ -59,6 +61,78 @@ function row(overrides: Partial<V4PoolKey>): V4PoolKey {
 }
 
 describe('buildV4PoolKeyRegistry', () => {
+  it('includes the Base Arrakis dynamic-fee hooked PoolKey when enabled (ROUTE-1837)', () => {
+    const previous = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+    process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = '8453';
+    try {
+      // The real pool this fix exists for, verbatim from its Base Initialize
+      // event (block 50219544): USDC/DGLD, dynamic-fee sentinel, tickSpacing
+      // 5, ArrakisPrivateHook v2. The pinned poolId proves the registry's
+      // keccak-preimage check reproduces the on-chain id for hooked rows.
+      const baseUsdc = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+      const baseDgld = '0xe908475f8beb7a138b0dc6eb5a05cb27068ffb9a';
+      const poolId =
+        '0x68ab198bc4c61c8c691a3e35d1b3a5248d8e04acb9e28a1bb2ef0d3fa564fe93';
+      const {file, stats} = buildV4PoolKeyRegistry(
+        8453,
+        [
+          row({
+            token0Address: baseUsdc,
+            token1Address: baseDgld,
+            feeBips: DYNAMIC_FEE_FLAG,
+            tickSpacing: 5,
+            hooksAddress: ARRAKIS_PRIVATE_HOOK_V2,
+            poolId,
+          }),
+        ],
+        GENERATED_AT
+      );
+      expect(file.pairs[v4RegistryPairKey(baseUsdc, baseDgld)]).toEqual([
+        [DYNAMIC_FEE_FLAG, 5, ARRAKIS_PRIVATE_HOOK_V2],
+      ]);
+      expect(stats.includedHooked).toBe(1);
+      expect(stats.skippedInvalidId).toBe(0);
+    } finally {
+      if (previous === undefined)
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+      else process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = previous;
+    }
+  });
+
+  it('skips a hooked pool on a canonical tier (grid cannot guess it, but snapshot admission owns it)', () => {
+    const previous = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+    process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = '8453';
+    try {
+      const {file, stats} = buildV4PoolKeyRegistry(
+        8453,
+        [
+          row({
+            feeBips: 3000,
+            tickSpacing: 60,
+            hooksAddress: ARRAKIS_PRIVATE_HOOK_V2,
+            poolId: V4SDKPool.getPoolId(
+              new Token(8453, USDC, 18),
+              new Token(8453, SIERRA, 18),
+              3000,
+              60,
+              ARRAKIS_PRIVATE_HOOK_V2
+            ).toLowerCase(),
+          }),
+        ],
+        GENERATED_AT
+      );
+      expect(stats.skippedCanonical).toBe(1);
+      expect(stats.includedHooked).toBe(0);
+      expect(file.pairs).toEqual({});
+    } finally {
+      if (previous === undefined) {
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+      } else {
+        process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = previous;
+      }
+    }
+  });
+
   it('includes a non-canonical hookless pool under its sorted pair key', () => {
     const {file, stats} = buildV4PoolKeyRegistry(1, [row({})], GENERATED_AT);
     expect(stats.included).toBe(1);
@@ -151,9 +225,9 @@ describe('buildV4PoolKeyRegistry', () => {
     // a flood of newer low-fee spam initializations. A fee-ordered policy
     // would evict the real pool; age-ordered retention must keep it.
     const realPool = row({
-      feeBips: 199000,
-      tickSpacing: 1990,
-      poolId: poolIdFor(1, USDC, SIERRA, 199000, 1990),
+      feeBips: 109000,
+      tickSpacing: 1090,
+      poolId: poolIdFor(1, USDC, SIERRA, 109000, 1090),
       poolCreatedAtBlockTimestamp: new Date('2026-06-01T00:00:00Z'),
     });
     const spam: V4PoolKey[] = [];
@@ -177,7 +251,7 @@ describe('buildV4PoolKeyRegistry', () => {
     );
     const entries = file.pairs[v4RegistryPairKey(USDC, SIERRA)]!;
     expect(entries).toHaveLength(MAX_REGISTRY_ENTRIES_PER_PAIR);
-    expect(entries).toContainEqual([199000, 1990]);
+    expect(entries).toContainEqual([109000, 1090]);
     expect(stats.truncatedPairs).toBe(1);
     expect(stats.included).toBe(MAX_REGISTRY_ENTRIES_PER_PAIR);
   });
@@ -266,6 +340,81 @@ describe('v4PoolKeyRegistryFormat', () => {
     expect(parsed.pairs['g:h']).toBeUndefined();
   });
 
+  it('keeps deployed two-field entries while parsing vetted three-field entries separately', () => {
+    const hooked = ARRAKIS_PRIVATE_HOOK_V2;
+    const json = JSON.stringify({
+      version: 1,
+      chainId: 8453,
+      generatedAtMs: GENERATED_AT,
+      pairs: {
+        'a:b': [
+          [375, 4],
+          [DYNAMIC_FEE_FLAG, 5, hooked],
+          [DYNAMIC_FEE_FLAG, 5],
+          [375, 4, ADDRESS_ZERO],
+          [375, 4, '0xBAD'],
+        ],
+      },
+    });
+    expect(parseV4PoolKeyRegistryFile(json, 8453)!.pairs['a:b']).toEqual([
+      [375, 4],
+      [DYNAMIC_FEE_FLAG, 5, hooked],
+    ]);
+  });
+
+  it('caps hookless and hooked entries independently', () => {
+    const hooked = ARRAKIS_PRIVATE_HOOK_V2;
+    const json = JSON.stringify({
+      version: 1,
+      chainId: 8453,
+      generatedAtMs: GENERATED_AT,
+      pairs: {
+        'a:b': [
+          ...Array.from({length: 10}, (_, fee) => [fee + 1, 1]),
+          ...Array.from({length: 10}, (_, fee) => [fee + 1, 1, hooked]),
+        ],
+      },
+    });
+    expect(parseV4PoolKeyRegistryFile(json, 8453)!.pairs['a:b']).toHaveLength(
+      MAX_REGISTRY_ENTRIES_PER_PAIR * 2
+    );
+  });
+
+  it('admits only allowlisted, non-aggregator hooks on hooked-enabled chains', () => {
+    const hookedChains = new Set([8453]);
+    // ARRAKIS_PRIVATE_HOOK_V2 is in the real Base allowlist and is not an
+    // aggregator or permissioned hook — the one class registry probing serves.
+    expect(
+      isRegistryAdmissibleHook(8453, ARRAKIS_PRIVATE_HOOK_V2, hookedChains)
+    ).toBe(true);
+    // Chain gate wins over allowlisting: same hook, gate off.
+    expect(
+      isRegistryAdmissibleHook(8453, ARRAKIS_PRIVATE_HOOK_V2, new Set())
+    ).toBe(false);
+    // Never in any allowlist.
+    expect(
+      isRegistryAdmissibleHook(
+        8453,
+        '0x00000000000000000000000000000000000000ff',
+        hookedChains
+      )
+    ).toBe(false);
+    // Slipstream is inside HOOKS_ADDRESSES_ALLOWLIST on Base via the agg-hook
+    // spread, but agg-hook pools belong to their own selector and quoting
+    // path — synthesizing them as plain V4 pools here would bypass it.
+    expect(
+      isRegistryAdmissibleHook(
+        8453,
+        '0xa167c254ef8a24bda465760dc1969a5ce37ae888',
+        hookedChains
+      )
+    ).toBe(false);
+    // The zero address is a hookless marker, never a hooked entry.
+    expect(isRegistryAdmissibleHook(8453, ADDRESS_ZERO, hookedChains)).toBe(
+      false
+    );
+  });
+
   it('rejects fees and tick spacings outside v4-core bounds', () => {
     const json = JSON.stringify({
       version: 1,
@@ -274,14 +423,14 @@ describe('v4PoolKeyRegistryFormat', () => {
       pairs: {
         'a:b': [
           [8388608, 60], // dynamic-fee sentinel — out of registry scope
-          [1000001, 60], // > MAX_LP_FEE
+          [1000001, 60], // > sanity ceiling
           [3000, 40000], // > MAX_TICK_SPACING
-          [199000, 1990], // legal high-fee pool stays
+          [110000, 1990], // ceiling is inclusive
         ],
       },
     });
     expect(parseV4PoolKeyRegistryFile(json, 1)!.pairs['a:b']).toEqual([
-      [199000, 1990],
+      [110000, 1990],
     ]);
   });
 

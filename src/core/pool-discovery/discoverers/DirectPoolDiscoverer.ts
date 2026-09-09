@@ -16,6 +16,8 @@ import {IRedisCache} from '@uniswap/lib-cache';
 import {IUniRouteServiceConfig} from '../../../lib/config';
 import _ from 'lodash';
 import {Protocol} from 'src/models/pool/Protocol';
+import {HooksOptions} from '../../../models/hooks/HooksOptions';
+import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
 export class DirectPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo> {
   constructor(
@@ -226,7 +228,8 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
-    ctx: Context
+    ctx: Context,
+    hooksOptions?: HooksOptions
   ): Promise<V4PoolInfo[]> {
     // Registry PoolKeys widen the probed (fee, tickSpacing) set beyond the
     // canonical grid for pairs with pools on non-canonical tiers. Strictly
@@ -248,8 +251,15 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
       // implementations anyway.
     }
 
+    const filteredRegistryKeys = registryKeys.filter(key =>
+      hooksOptions === HooksOptions.HOOKS_ONLY
+        ? key.hooks !== ADDRESS_ZERO
+        : hooksOptions === HooksOptions.NO_HOOKS
+          ? key.hooks === ADDRESS_ZERO
+          : true
+    );
     const registryPoolsPromise =
-      registryKeys.length === 0
+      filteredRegistryKeys.length === 0
         ? Promise.resolve([] as V4Pool[])
         : this.poolRepository
             .getPools(
@@ -257,9 +267,9 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
               chainId,
               tokenIn,
               tokenOut,
-              registryKeys.map(key => key.fee),
-              registryKeys.map(key => key.tickSpacing),
-              registryKeys.map(key => key.hooks)
+              filteredRegistryKeys.map(key => key.fee),
+              filteredRegistryKeys.map(key => key.tickSpacing),
+              filteredRegistryKeys.map(key => key.hooks)
             )
             .catch(err => {
               ctx.logger.warn(
@@ -269,7 +279,9 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
               return [] as V4Pool[];
             });
     const [canonicalPools, registryPools] = await Promise.all([
-      this.poolRepository.getPools(ctx, chainId, tokenIn, tokenOut),
+      hooksOptions === HooksOptions.HOOKS_ONLY
+        ? Promise.resolve([] as V4Pool[])
+        : this.poolRepository.getPools(ctx, chainId, tokenIn, tokenOut),
       registryPoolsPromise,
     ]);
     // Registry keys are non-canonical by construction, so the union is

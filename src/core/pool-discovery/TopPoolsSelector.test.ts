@@ -1668,6 +1668,70 @@ describe('BasicTopPoolsSelector', () => {
       expect(new Set(result.map(pool => pool.id)).size).toBe(result.length);
     });
 
+    it('generates only hooked registry pools for HOOKS_ONLY (no canonical grid)', async () => {
+      // The fallback bypasses filterPools' matchesHooksOptions pass, so it
+      // must self-gate: HOOKS_ONLY output containing a hookless pool would
+      // leak straight into route candidates.
+      const hookedKey = '0xa4e6f5500e88691fdcb289aa0e99067481434880';
+      const registrySelector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        FeatureGatedTokensRepository.empty(),
+        false,
+        {
+          getPoolKeysForPair: async () => [
+            {fee: 1234, tickSpacing: 7, hooks: ADDRESS_ZERO},
+            {fee: 8388608, tickSpacing: 5, hooks: hookedKey},
+          ],
+        }
+      );
+
+      const result = (await registrySelector['manuallyGenerateDirectPairs'](
+        Protocol.V4,
+        ChainId.BASE,
+        tokenIn.address,
+        tokenOut.address,
+        new Set<string>(),
+        HooksOptions.HOOKS_ONLY
+      )) as V4PoolInfo[];
+
+      expect(result.map(pool => [pool.feeTier, pool.hooks])).toEqual([
+        ['8388608', hookedKey],
+      ]);
+    });
+
+    it('drops hooked registry keys for NO_HOOKS', async () => {
+      const registrySelector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        FeatureGatedTokensRepository.empty(),
+        false,
+        {
+          getPoolKeysForPair: async () => [
+            {fee: 1234, tickSpacing: 7, hooks: ADDRESS_ZERO},
+            {
+              fee: 8388608,
+              tickSpacing: 5,
+              hooks: '0xa4e6f5500e88691fdcb289aa0e99067481434880',
+            },
+          ],
+        }
+      );
+
+      const result = (await registrySelector['manuallyGenerateDirectPairs'](
+        Protocol.V4,
+        ChainId.BASE,
+        tokenIn.address,
+        tokenOut.address,
+        new Set<string>(),
+        HooksOptions.NO_HOOKS
+      )) as V4PoolInfo[];
+
+      expect(result.every(pool => pool.hooks === ADDRESS_ZERO)).toBe(true);
+      expect(result.map(pool => pool.feeTier)).toContain('1234');
+      expect(result.map(pool => pool.feeTier)).not.toContain('8388608');
+    });
+
     it('keeps the canonical grid alone when the registry is empty', async () => {
       const result = (await selector['manuallyGenerateDirectPairs'](
         Protocol.V4,
@@ -2388,24 +2452,24 @@ describe('AggHooksTopPoolsSelector', () => {
 // poolSelectionConfig limit or add a fee tier, expect these to fail and update
 // both the formula and these pinned values together.
 describe('getMaxFilteredPoolCount', () => {
-  it('returns 84 for defaultPoolSelectionConfig', () => {
-    // 16 (max(topNDirectPairs=2, MAX_MANUAL_DIRECT_PAIRS_FALLBACK=16))
+  it('returns 92 for defaultPoolSelectionConfig', () => {
+    // 24 (max(topNDirectPairs=2, MAX_MANUAL_DIRECT_PAIRS_FALLBACK=24))
     // + 10 (2 × topNOneHopPairs=5)
     // + 40 (10 intermediaries × (topNSecondHopPairs=2 + WETH + ETH))
     // + 2  (topNPairs)
     // + 12 (2 × topNWithBaseToken=6)
     // + 4  (top WETH/ETH × {tokenIn, tokenOut})
-    // = 84
-    expect(getMaxFilteredPoolCount(defaultPoolSelectionConfig)).toBe(84);
+    // = 92
+    expect(getMaxFilteredPoolCount(defaultPoolSelectionConfig)).toBe(92);
   });
 
-  it('MAX_MANUAL_DIRECT_PAIRS_FALLBACK matches the V4 grid + registry cap', () => {
+  it('MAX_MANUAL_DIRECT_PAIRS_FALLBACK matches the V4 grid + registry caps', () => {
     // V4 is the worst case for manuallyGenerateDirectPairs: the canonical
     // grid (V4FeeAmounts.length = 8) plus up to MAX_REGISTRY_ENTRIES_PER_PAIR
-    // (8) PoolKey-registry entries. If a fee tier is added anywhere or the
-    // registry cap moves, this constant should grow and the pinned value
-    // above must be updated.
-    expect(MAX_MANUAL_DIRECT_PAIRS_FALLBACK).toBe(16);
+    // hookless (8) and hooked (8) PoolKey-registry entries. If a fee tier is
+    // added anywhere or either registry cap moves, this constant should grow
+    // and the pinned value above must be updated.
+    expect(MAX_MANUAL_DIRECT_PAIRS_FALLBACK).toBe(24);
   });
 });
 

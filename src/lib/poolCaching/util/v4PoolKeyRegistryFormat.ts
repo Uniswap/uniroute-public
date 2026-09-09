@@ -1,7 +1,7 @@
 /**
  * Shared contract between the pool-caching cron (writer) and the serving
  * path (reader) for the V4 PoolKey registry: an S3 file per chain mapping
- * token pair → the NON-CANONICAL hookless (fee, tickSpacing) combos of every
+ * token pair → the NON-CANONICAL (fee, tickSpacing[, hooks]) combos of every
  * initialized pool on that pair, sourced from the ingestion pipeline's
  * `v4_pool_metadata` (Initialize-event ground truth).
  *
@@ -13,11 +13,21 @@
  * and slot0 from chain, so a stale or wrong registry entry can add RPC reads
  * but never a phantom pool.
  *
- * Scope is deliberately hookless-only: hooked pools must keep flowing through
- * the snapshot's hook-admission filtering (allowlists, ZLCA registries), and
- * a direct probe would bypass that policy. Hookless also excludes dynamic-fee
- * pools by construction (the sentinel requires a hook).
+ * Hooked entries are deliberately narrow: only an explicitly enabled chain's
+ * allowlisted, non-aggregator, non-permissioned hooks may enter. This lets the
+ * direct probe recover vetted non-canonical hooked pools without synthesizing
+ * pools owned by another selector or namespace.
  */
+
+import {getPermissionedHookAddresses} from '@uniswap/lib-sharedconfig/permissionedTokens';
+import {DYNAMIC_FEE_FLAG} from '@uniswap/v4-sdk';
+import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+
+import {
+  getProtocolForAggHookAddress,
+  HOOKS_ADDRESSES_ALLOWLIST,
+} from './hooksAddressesAllowlist';
+import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 
 export const V4_POOLKEY_REGISTRY_VERSION = 1;
 
@@ -49,8 +59,10 @@ export const MAX_REGISTRY_ENTRIES_PER_PAIR = 8;
 export const S3_V4_POOLKEY_REGISTRY_KEY = (chainId: number): string =>
   `v4PoolKeyRegistryGzip.json-${chainId}`;
 
-/** `[fee, tickSpacing]` — hooks are always the zero address by scope. */
-export type V4PoolKeyRegistryEntry = [number, number];
+/** Hookless entries retain the deployed two-field shape; hooked entries append hooks. */
+export type V4PoolKeyRegistryEntry =
+  | [number, number]
+  | [number, number, string];
 
 export interface V4PoolKeyRegistryFile {
   version: number;
@@ -88,21 +100,95 @@ export function v4PoolKeyRegistryChainsFromEnv(): ReadonlySet<number> {
   );
 }
 
-// v4-core bounds: MAX_LP_FEE = 1e6 (the dynamic sentinel exceeds it and is
-// out of registry scope anyway) and tickSpacing ∈ [1, MAX_TICK_SPACING].
-const MAX_ENTRY_FEE = 1_000_000;
+/**
+ * Independent hooked-entry gate. It intentionally has no wildcard because
+ * each enabled chain increases direct-probe RPC fan-out.
+ */
+export function v4PoolKeyRegistryHookedChainsFromEnv(): ReadonlySet<number> {
+  const raw = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS?.trim();
+  if (!raw) return new Set();
+  return new Set(
+    raw
+      .split(',')
+      .map(entry => Number.parseInt(entry.trim(), 10))
+      .filter(chainId => Number.isInteger(chainId) && chainId > 0)
+  );
+}
+
+// Mirrors MAX_REASONABLE_V4_FEE_TIER_PPM in v4HooksPoolsFiltering.ts. Keep
+// this local: the format is also used on the serving path, not snapshot admission.
+export const MAX_REASONABLE_V4_FEE_TIER_PPM = 110_000;
 const MAX_ENTRY_TICK_SPACING = 32_767;
+const HOOK_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
+
+interface RegistryHookSets {
+  allowlisted: ReadonlySet<string>;
+  denylisted: ReadonlySet<string>;
+  permissioned: ReadonlySet<string>;
+}
+
+const registryHookSetsByChain = new Map<number, RegistryHookSets>();
+
+function getRegistryHookSets(chainId: number): RegistryHookSets {
+  const memoized = registryHookSetsByChain.get(chainId);
+  if (memoized) return memoized;
+  const sets = {
+    allowlisted: new Set(
+      (HOOKS_ADDRESSES_ALLOWLIST[chainId] ?? [])
+        .map(hook => hook.toLowerCase())
+        .filter(hook => hook !== ADDRESS_ZERO)
+    ),
+    denylisted: new Set(
+      (HOOKS_ADDRESSES_DENYLIST[chainId] ?? []).map(hook => hook.toLowerCase())
+    ),
+    permissioned: new Set(
+      getPermissionedHookAddresses(chainId).map(hook => hook.toLowerCase())
+    ),
+  };
+  registryHookSetsByChain.set(chainId, sets);
+  return sets;
+}
+
+/**
+ * Shared writer/reader trust boundary for hooked registry entries. Keeping it
+ * here avoids a stale file widening the quote path after policy changes.
+ */
+export function isRegistryAdmissibleHook(
+  chainId: number,
+  hooksAddress: string,
+  hookedChains: ReadonlySet<number> = v4PoolKeyRegistryHookedChainsFromEnv()
+): boolean {
+  const hooks = hooksAddress.toLowerCase();
+  if (!hookedChains.has(chainId) || hooks === ADDRESS_ZERO) return false;
+  const sets = getRegistryHookSets(chainId);
+  return (
+    sets.allowlisted.has(hooks) &&
+    !sets.denylisted.has(hooks) &&
+    !sets.permissioned.has(hooks) &&
+    getProtocolForAggHookAddress(hooks, chainId) === undefined
+  );
+}
 
 function isValidEntry(entry: unknown): entry is V4PoolKeyRegistryEntry {
-  if (!Array.isArray(entry) || entry.length !== 2) return false;
-  const [fee, tickSpacing] = entry as unknown[];
+  if (!Array.isArray(entry) || (entry.length !== 2 && entry.length !== 3)) {
+    return false;
+  }
+  const [fee, tickSpacing, hooks] = entry as unknown[];
+  const isHooked = entry.length === 3;
   return (
     Number.isInteger(fee) &&
     (fee as number) >= 0 &&
-    (fee as number) <= MAX_ENTRY_FEE &&
+    (isHooked
+      ? (fee as number) <= MAX_REASONABLE_V4_FEE_TIER_PPM ||
+        fee === DYNAMIC_FEE_FLAG
+      : (fee as number) <= MAX_REASONABLE_V4_FEE_TIER_PPM) &&
     Number.isInteger(tickSpacing) &&
     (tickSpacing as number) >= 1 &&
-    (tickSpacing as number) <= MAX_ENTRY_TICK_SPACING
+    (tickSpacing as number) <= MAX_ENTRY_TICK_SPACING &&
+    (!isHooked ||
+      (typeof hooks === 'string' &&
+        HOOK_ADDRESS_PATTERN.test(hooks) &&
+        hooks !== ADDRESS_ZERO))
   );
 }
 
@@ -132,9 +218,17 @@ export function parseV4PoolKeyRegistryFile(
     const pairs: Record<string, V4PoolKeyRegistryEntry[]> = {};
     for (const [pairKey, value] of Object.entries(parsed.pairs)) {
       if (!Array.isArray(value)) continue;
-      const entries = value
-        .filter(isValidEntry)
-        .slice(0, MAX_REGISTRY_ENTRIES_PER_PAIR);
+      // Keeping the old two-field shape means an old serving container drops
+      // only new hooked entries during a mixed deploy, not the whole file.
+      const validEntries = value.filter(isValidEntry);
+      const entries = [
+        ...validEntries
+          .filter(entry => entry.length === 2)
+          .slice(0, MAX_REGISTRY_ENTRIES_PER_PAIR),
+        ...validEntries
+          .filter(entry => entry.length === 3)
+          .slice(0, MAX_REGISTRY_ENTRIES_PER_PAIR),
+      ];
       if (entries.length > 0) pairs[pairKey] = entries;
     }
     return {

@@ -276,20 +276,27 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           ctx
         );
       case Protocol.V4:
-        if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
-          return this.v4DirectPoolDiscoverer.getPoolsForTokens(
-            chainId,
-            protocol,
-            tokenIn,
-            tokenOut,
-            topPoolsSelector,
-            hooksOptions,
-            skipPoolsForTokensCache,
-            nsCtx,
-            ctx
-          );
+        // Under HOOKS_ONLY the direct probe can only surface hooked PoolKey
+        // registry entries, and the registry deliberately excludes aggregator
+        // hooks — for an agg-hooks selector every probed pool would be
+        // discarded, so skip the RPC entirely.
+        if (
+          hooksOptions === HooksOptions.HOOKS_ONLY &&
+          topPoolsSelector.aggHooksOnly
+        ) {
+          return [];
         }
-        return [];
+        return this.v4DirectPoolDiscoverer.getPoolsForTokens(
+          chainId,
+          protocol,
+          tokenIn,
+          tokenOut,
+          topPoolsSelector,
+          hooksOptions,
+          skipPoolsForTokensCache,
+          nsCtx,
+          ctx
+        );
       default:
         return [];
     }

@@ -10,6 +10,7 @@ import {Address} from '../../../models/address/Address';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
 import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
+import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {
   IV4PoolKeyRegistry,
   V4RegistryPoolKey,
@@ -90,7 +91,10 @@ function makeDiscoverer(
   );
 }
 
-function probe(discoverer: DirectPoolDiscovererV4): Promise<unknown[]> {
+function probe(
+  discoverer: DirectPoolDiscovererV4,
+  hooksOptions?: HooksOptions
+): Promise<unknown[]> {
   const ctx = {
     logger: {debug: vi.fn(), warn: vi.fn(), error: vi.fn()},
     metrics: {count: vi.fn(), dist: vi.fn()},
@@ -104,10 +108,18 @@ function probe(discoverer: DirectPoolDiscovererV4): Promise<unknown[]> {
         protocol: Protocol,
         tokenIn: Address,
         tokenOut: Address,
-        ctx: Context
+        ctx: Context,
+        hooksOptions?: HooksOptions
       ) => Promise<unknown[]>;
     }
-  )._getPoolsForTokens(ChainId.MAINNET, Protocol.V4, USDC, SIERRA, ctx);
+  )._getPoolsForTokens(
+    ChainId.MAINNET,
+    Protocol.V4,
+    USDC,
+    SIERRA,
+    ctx,
+    hooksOptions
+  );
 }
 
 describe('DirectPoolDiscovererV4 PoolKey registry union', () => {
@@ -142,6 +154,26 @@ describe('DirectPoolDiscovererV4 PoolKey registry union', () => {
     expect(registryCall!.tickSpacings).toEqual([4]);
     expect(registryCall!.hooks).toEqual([ADDRESS_ZERO]);
     expect(pools).toHaveLength(2);
+  });
+
+  it('probes only hooked registry keys for HOOKS_ONLY', async () => {
+    const {repository, calls} = fakeRepository();
+    await probe(
+      makeDiscoverer(
+        repository,
+        fakeRegistry([
+          {fee: 375, tickSpacing: 4, hooks: ADDRESS_ZERO},
+          {
+            fee: 8388608,
+            tickSpacing: 5,
+            hooks: '0xa4e6f5500e88691fdcb289aa0e99067481434880',
+          },
+        ])
+      ),
+      HooksOptions.HOOKS_ONLY
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.feeAmounts).toEqual([8388608]);
   });
 
   it('keeps canonical results when the registry probe fails', async () => {

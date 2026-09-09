@@ -22,18 +22,12 @@ import {
   IV4PoolKeyRegistry,
   V4RegistryPoolKey,
 } from '../../stores/pool/V4PoolKeyRegistryStore';
-import {MAX_REGISTRY_ENTRIES_PER_PAIR} from '../../lib/poolCaching/util/v4PoolKeyRegistryFormat';
 import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
-import {
-  getApplicableV3FeeAmounts,
-  V3FeeAmountsBase,
-  V3Pool,
-} from '../../models/pool/V3Pool';
+import {getApplicableV3FeeAmounts, V3Pool} from '../../models/pool/V3Pool';
 import {
   getApplicableV4FeesTickspacingsHooks,
-  V4FeeAmounts,
   V4Pool,
 } from '../../models/pool/V4Pool';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
@@ -131,14 +125,10 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
 
 // Worst-case pool count returned by manuallyGenerateDirectPairs across all
 // (protocol, chain) combos. V2 → 1, V3 → up to V3FeeAmountsBase.length (BASE
-// has the most fee tiers), V4 → the canonical grid plus up to
-// MAX_REGISTRY_ENTRIES_PER_PAIR PoolKey-registry entries. Auto-tracks if any
-// protocol adds a fee tier or the registry cap moves.
-export const MAX_MANUAL_DIRECT_PAIRS_FALLBACK = Math.max(
-  1,
-  V3FeeAmountsBase.length,
-  V4FeeAmounts.length + MAX_REGISTRY_ENTRIES_PER_PAIR
-);
+// has the most fee tiers), V4 → canonical grid (8) + hookless registry (8) +
+// hooked registry (8). Keep 24 explicit: an arithmetic cap can silently
+// truncate hooked fallback keys if either source ordering changes.
+export const MAX_MANUAL_DIRECT_PAIRS_FALLBACK = 24;
 
 // Strict upper bound on pools BasicTopPoolsSelector.filterPools can return for
 // a given (chainId, protocol, tokenIn, tokenOut). Mirrors the stage limits in
@@ -1138,64 +1128,66 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         break;
       }
       case Protocol.V4: {
-        if (hooksOptions !== HooksOptions.HOOKS_ONLY) {
-          // Registry PoolKeys extend the "pool exists on chain but the
-          // snapshot missed it" safety net to non-canonical tiers. Accepted
-          // cost, shared with the canonical grid entries: the placeholder
-          // TVL/liquidity below flows into route candidates until fresh
-          // on-chain state replaces it, so a registry entry with no real
-          // liquidity can transiently reach route generation — the quoter's
-          // on-chain read then prices it out. A registry failure must never
-          // fail the fallback: degrade to the canonical grid alone.
-          let registryKeys: V4RegistryPoolKey[] = [];
-          try {
-            registryKeys =
-              (await this.poolKeyRegistry?.getPoolKeysForPair(
-                chainId,
-                tokenInAddress,
-                tokenOutAddress
-              )) ?? [];
-          } catch {
-            // Store contract is never-throw; guard other implementations.
-          }
-          const v4Combos: Array<[number, number, string]> = [
-            ...getApplicableV4FeesTickspacingsHooks(chainId),
-            ...registryKeys.map((key): [number, number, string] => [
-              key.fee,
-              key.tickSpacing,
-              key.hooks,
-            ]),
-          ];
-          forceAddedDirectPools = v4Combos.map(v4PoolParams => {
-            const fee = v4PoolParams[0];
-            const tickSpacing = v4PoolParams[1];
-            const hooks = v4PoolParams[2];
-
-            const poolId = V4Pool.computePoolId(
-              new Address(tokenInAddress),
-              new Address(tokenOutAddress),
-              fee,
-              tickSpacing,
-              hooks
-            );
-
-            return {
-              id: poolId,
-              feeTier: fee.toString(),
-              tickSpacing: tickSpacing.toString(),
-              hooks: hooks,
-              liquidity: '10000', // Not used. Set to arbitrary number.
-              token0: {
-                id: tokenInAddress,
-              },
-              token1: {
-                id: tokenOutAddress,
-              },
-              tvlETH: 10000, // Not used. Set to arbitrary number.
-              tvlUSD: 10000, // Not used. Set to arbitrary number.
-            } as V4PoolInfo;
-          });
+        // Registry PoolKeys extend the "pool exists on chain but the snapshot
+        // missed it" safety net. This fallback bypasses filterPools, so it
+        // must apply hooksOptions before constructing placeholder pools.
+        let registryKeys: V4RegistryPoolKey[] = [];
+        try {
+          registryKeys =
+            (await this.poolKeyRegistry?.getPoolKeysForPair(
+              chainId,
+              tokenInAddress,
+              tokenOutAddress
+            )) ?? [];
+        } catch {
+          // Store contract is never-throw; guard other implementations.
         }
+        const filteredRegistryKeys = registryKeys.filter(key =>
+          hooksOptions === HooksOptions.HOOKS_ONLY
+            ? key.hooks !== ADDRESS_ZERO
+            : hooksOptions === HooksOptions.NO_HOOKS
+              ? key.hooks === ADDRESS_ZERO
+              : true
+        );
+        const v4Combos: Array<[number, number, string]> = [
+          ...(hooksOptions === HooksOptions.HOOKS_ONLY
+            ? []
+            : getApplicableV4FeesTickspacingsHooks(chainId)),
+          ...filteredRegistryKeys.map((key): [number, number, string] => [
+            key.fee,
+            key.tickSpacing,
+            key.hooks,
+          ]),
+        ];
+        forceAddedDirectPools = v4Combos.map(v4PoolParams => {
+          const fee = v4PoolParams[0];
+          const tickSpacing = v4PoolParams[1];
+          const hooks = v4PoolParams[2];
+
+          const poolId = V4Pool.computePoolId(
+            new Address(tokenInAddress),
+            new Address(tokenOutAddress),
+            fee,
+            tickSpacing,
+            hooks
+          );
+
+          return {
+            id: poolId,
+            feeTier: fee.toString(),
+            tickSpacing: tickSpacing.toString(),
+            hooks: hooks,
+            liquidity: '10000', // Not used. Set to arbitrary number.
+            token0: {
+              id: tokenInAddress,
+            },
+            token1: {
+              id: tokenOutAddress,
+            },
+            tvlETH: 10000, // Not used. Set to arbitrary number.
+            tvlUSD: 10000, // Not used. Set to arbitrary number.
+          } as V4PoolInfo;
+        });
         break;
       }
       default:
@@ -1204,8 +1196,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 
     let directPairs = BasicTopPoolsSelector.filterAndAddPools(
       forceAddedDirectPools,
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      pool => true,
+      () => true,
       // Admit every generated pool — this constant is the worst case across
       // protocols (v4 canonical grid + registry entries).
       MAX_MANUAL_DIRECT_PAIRS_FALLBACK,

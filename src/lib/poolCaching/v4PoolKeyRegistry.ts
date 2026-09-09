@@ -18,7 +18,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import {Currency, Token} from '@uniswap/sdk-core';
-import {Pool as V4SDKPool} from '@uniswap/v4-sdk';
+import {DYNAMIC_FEE_FLAG, Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import type {ExtendedChainId} from '@uniswap/lib-data-api';
 import type {V4PoolKey} from '@uniswap/lib-data-ingestion-aurora';
@@ -34,6 +34,9 @@ import {
   V4PoolKeyRegistryEntry,
   V4PoolKeyRegistryFile,
   V4_POOLKEY_REGISTRY_VERSION,
+  isRegistryAdmissibleHook,
+  MAX_REASONABLE_V4_FEE_TIER_PPM,
+  v4PoolKeyRegistryHookedChainsFromEnv,
   v4PoolKeyRegistryChainsFromEnv,
   v4RegistryPairKey,
 } from './util/v4PoolKeyRegistryFormat';
@@ -98,6 +101,7 @@ export const ROW_COUNT_METADATA_KEY = 'registry-row-count';
 
 export interface V4PoolKeyRegistryBuildStats {
   included: number;
+  includedHooked: number;
   skippedCanonical: number;
   skippedHooked: number;
   skippedInvalidId: number;
@@ -126,7 +130,7 @@ function poolKeyReproducesId(chainId: number, row: V4PoolKey): boolean {
         poolKeyCurrency(chainId, row.token1Address.toLowerCase()),
         row.feeBips,
         row.tickSpacing,
-        ADDRESS_ZERO
+        (row.hooksAddress ?? ADDRESS_ZERO).toLowerCase()
       ).toLowerCase() === row.poolId.toLowerCase()
     );
   } catch {
@@ -137,6 +141,7 @@ function poolKeyReproducesId(chainId: number, row: V4PoolKey): boolean {
 interface CandidateEntry {
   fee: number;
   tickSpacing: number;
+  hooks?: string;
   createdAtMs: number;
 }
 
@@ -164,6 +169,7 @@ export function buildV4PoolKeyRegistry(
 ): {file: V4PoolKeyRegistryFile; stats: V4PoolKeyRegistryBuildStats} {
   const stats: V4PoolKeyRegistryBuildStats = {
     included: 0,
+    includedHooked: 0,
     skippedCanonical: 0,
     skippedHooked: 0,
     skippedInvalidId: 0,
@@ -173,9 +179,11 @@ export function buildV4PoolKeyRegistry(
 
   const byPair = new Map<string, CandidateEntry[]>();
   const seen = new Set<string>();
+  const hookedChains = v4PoolKeyRegistryHookedChainsFromEnv();
   for (const row of rows) {
     const hooks = (row.hooksAddress ?? ADDRESS_ZERO).toLowerCase();
-    if (hooks !== ADDRESS_ZERO) {
+    const isHooked = hooks !== ADDRESS_ZERO;
+    if (isHooked && !isRegistryAdmissibleHook(chainId, hooks, hookedChains)) {
       stats.skippedHooked++;
       continue;
     }
@@ -183,14 +191,21 @@ export function buildV4PoolKeyRegistry(
       stats.skippedCanonical++;
       continue;
     }
+    if (
+      (row.feeBips < 0 || row.feeBips > MAX_REASONABLE_V4_FEE_TIER_PPM) &&
+      (!isHooked || row.feeBips !== DYNAMIC_FEE_FLAG)
+    ) {
+      if (isHooked) stats.skippedHooked++;
+      continue;
+    }
     if (!poolKeyReproducesId(chainId, row)) {
       stats.skippedInvalidId++;
       continue;
     }
     const pairKey = v4RegistryPairKey(row.token0Address, row.token1Address);
-    // The (chain, pair, fee, tickSpacing, hookless) tuple IS the pool id, so
+    // The (chain, pair, fee, tickSpacing, hooks) tuple is the pool id, so
     // duplicates can only come from duplicate metadata rows; keep one.
-    const dedupeKey = `${pairKey}:${row.feeBips}:${row.tickSpacing}`;
+    const dedupeKey = `${pairKey}:${row.feeBips}:${row.tickSpacing}:${hooks}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     let entries = byPair.get(pairKey);
@@ -202,6 +217,7 @@ export function buildV4PoolKeyRegistry(
     entries.push({
       fee: row.feeBips,
       tickSpacing: row.tickSpacing,
+      hooks: isHooked ? hooks : undefined,
       // A missing/garbage timestamp sorts as newest: an entry that cannot
       // prove its age must not be able to displace the protected old slice.
       createdAtMs: Number.isFinite(createdAtMs)
@@ -212,12 +228,27 @@ export function buildV4PoolKeyRegistry(
 
   const pairs: Record<string, V4PoolKeyRegistryEntry[]> = {};
   for (const [pairKey, candidates] of byPair) {
-    const retained = selectRetainedEntries(candidates);
+    const hookless = candidates.filter(entry => entry.hooks === undefined);
+    const hooked = candidates.filter(entry => entry.hooks !== undefined);
+    const retainedHookless = selectRetainedEntries(hookless);
+    const retainedHooked = selectRetainedEntries(hooked);
+    const retained = [...retainedHookless, ...retainedHooked];
     if (retained.length < candidates.length) stats.truncatedPairs++;
     stats.included += retained.length;
+    stats.includedHooked += retainedHooked.length;
     pairs[pairKey] = retained
-      .map((entry): V4PoolKeyRegistryEntry => [entry.fee, entry.tickSpacing])
-      .sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      .map(
+        (entry): V4PoolKeyRegistryEntry =>
+          entry.hooks
+            ? [entry.fee, entry.tickSpacing, entry.hooks]
+            : [entry.fee, entry.tickSpacing]
+      )
+      .sort(
+        (a, b) =>
+          a[0] - b[0] ||
+          a[1] - b[1] ||
+          (a.length === 3 ? a[2] : '').localeCompare(b.length === 3 ? b[2] : '')
+      );
   }
   stats.pairs = byPair.size;
 
@@ -464,6 +495,12 @@ export async function materializeV4PoolKeyRegistries(
         tags
       );
       metric.putMetric(
+        'CachePools.v4PoolKeyRegistry.hookedKeys',
+        stats.includedHooked,
+        MetricLoggerUnit.Count,
+        tags
+      );
+      metric.putMetric(
         'CachePools.v4PoolKeyRegistry.skippedInvalidId',
         stats.skippedInvalidId,
         MetricLoggerUnit.Count,
@@ -477,7 +514,7 @@ export async function materializeV4PoolKeyRegistries(
       );
       logger.info(
         `V4 PoolKey registry chain ${chainId}: pairs=${stats.pairs} keys=${stats.included} ` +
-          `skippedCanonical=${stats.skippedCanonical} skippedHooked=${stats.skippedHooked} ` +
+          `skippedCanonical=${stats.skippedCanonical} skippedHooked=${stats.skippedHooked} includedHooked=${stats.includedHooked} ` +
           `skippedInvalidId=${stats.skippedInvalidId} truncatedPairs=${stats.truncatedPairs} ` +
           `rows=${rows.length} bytes=${body.length}`
       );

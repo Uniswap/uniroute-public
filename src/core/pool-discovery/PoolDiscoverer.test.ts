@@ -303,7 +303,7 @@ describe('PoolDiscoverer', () => {
       );
     });
 
-    it('should skip v4DirectPoolDiscoverer when hooksOptions is HOOKS_ONLY', async () => {
+    it('should call v4DirectPoolDiscoverer when hooksOptions is HOOKS_ONLY', async () => {
       const selector = makeSelector();
 
       await poolDiscoverer.getPoolsForTokens(
@@ -319,6 +319,27 @@ describe('PoolDiscoverer', () => {
       );
 
       expect(v4PoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
+      expect(v4DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
+    });
+
+    it('skips the V4 direct probe for HOOKS_ONLY with an agg-hooks selector', async () => {
+      // The registry deliberately excludes aggregator hooks, so under
+      // HOOKS_ONLY every direct-probed pool would be discarded by the
+      // agg-hooks selector — the probe is pure wasted RPC.
+      const selector = {...makeSelector(), aggHooksOnly: true};
+
+      await poolDiscoverer.getPoolsForTokens(
+        ChainId.MAINNET,
+        Protocol.V4,
+        TOKEN_IN,
+        TOKEN_OUT,
+        selector,
+        HooksOptions.HOOKS_ONLY,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+
       expect(v4DirectPoolDiscoverer.getPoolsForTokens).not.toHaveBeenCalled();
     });
 
@@ -579,7 +600,7 @@ describe('PoolDiscoverer', () => {
       expect((result[0] as V4PoolInfo).tvlUSD).toBe(2);
     });
 
-    it('still skips the V4 direct probe for HOOKS_ONLY under the flag', async () => {
+    it('runs the V4 direct probe for HOOKS_ONLY under the flag (hooked registry keys)', async () => {
       await buildDiscoverer(true).getPoolsForTokens(
         ChainId.MAINNET,
         Protocol.V4,
@@ -591,7 +612,17 @@ describe('PoolDiscoverer', () => {
         EMPTY_NAMESPACE_CONTEXT,
         ctx
       );
-      expect(v4DirectPoolDiscoverer.getPoolsForTokens).not.toHaveBeenCalled();
+      expect(v4DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalledWith(
+        ChainId.MAINNET,
+        Protocol.V4,
+        TOKEN_IN,
+        TOKEN_OUT,
+        expect.anything(),
+        HooksOptions.HOOKS_ONLY,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
     });
 
     it('rethrows the primary error without an unhandled rejection when the pre-started direct probe also fails', async () => {

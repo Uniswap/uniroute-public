@@ -634,7 +634,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     protocol: Protocol,
     tokenIn: Address,
     tokenOut: Address,
-    ctx: Context
+    ctx: Context,
+    hooksOptions?: HooksOptions
   ): Promise<TPool[]>;
 
   // Gets pools from the cache if available, otherwise fetches them from the _getPoolsForTokens implementation.
@@ -725,7 +726,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         protocol,
         tokenIn,
         tokenOut,
-        ctx
+        ctx,
+        hooksOptions
       );
 
       // Filter out pools with unsupported tokens. The memoized variant keys
