@@ -407,7 +407,9 @@ export const UPEG_HOOK_ON_MAINNET =
 // rejected by isHooksPoolRoutable (swap permissions) and, on DAI/USDC/USDT
 // pairs, by the major-pair rule in the auto-allowlist. Allowlisting admits
 // its pools to the snapshot (the explicit-allowlist append is uncapped for
-// static entries); quote-time selection is then TVL-ranked like any hook.
+// static entries). It is also in ZLCA_HOOKS_PER_CHAIN so its pools skip the
+// TVL floor and are force-selected past the top-N cut at quote time even
+// while new and thinly funded, and carry a per-hop gas overhead.
 export const GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET =
   '0x0000113dcf4add69999fad8f20f2b63f979bfcc0';
 export const ETIM_TAX_HOOK_ON_MAINNET =
@@ -598,6 +600,14 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
  * view-call understatement bound is ~508k, still under the ~560-597k the
  * heuristic base plus this overhead yields.
  *
+ * The GuideStar stable-stable hook is the one entry that is NOT
+ * custom-accounting: its pools hold ordinary concentrated liquidity and it
+ * has no returns-delta bits. It is here for the admission half (TVL floor
+ * bypass + force-select, so new low-TVL stable pools are still route
+ * candidates) and its 50k is a provisional owner-provided figure for the
+ * beforeSwap/afterSwap callbacks, not a calibrated one. Re-measure against
+ * V4Quoter view calls once its pools are live and adjust.
+ *
  * Add future zero-liquidity custom-accounting hooks here to pick up the
  * same treatment automatically.
  */
@@ -613,6 +623,7 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: 500_000n,
     [DUALPOOL_HOOK_ON_MAINNET]: 3_000_000n,
     [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: 250_000n,
+    [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: 50_000n,
   },
   [ChainId.BASE]: {
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: 500_000n,
