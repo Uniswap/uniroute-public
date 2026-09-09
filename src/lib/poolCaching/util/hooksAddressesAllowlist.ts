@@ -21,6 +21,9 @@ import {Protocol} from '../../../models/pool/Protocol';
 
 // ARC is not yet in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_ARC = 5042 as ChainId;
+// Faze Launchpad (LaunchpadHook) on ARC — fee-on-top, immutable 20% launch-window cap
+export const FAZE_LAUNCHPAD_HOOK_ON_ARC =
+  '0x8bfdf31eb89c13adb2188a3b1445ad90574360cc';
 // INK is not yet in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_INK = 57073 as ChainId;
 // Protocols listed here are excluded from cached-routes retrieval inside
@@ -1041,8 +1044,32 @@ export const REALM_SWAP_HOOK_ON_ROBINHOOD =
   '0x72034202d58001973751fb78d7e1c05a943100cc';
 export const REALM_HOOK_ON_ROBINHOOD =
   '0xae4c0cf7c3feb79e0c244edbc6a3f8a3290940cc';
+export const SPY_TREASURY_FEE_HOOK_ON_ROBINHOOD =
+  '0xbbcbd97241525086889f0b30bcf383831221e8cc';
+// PremiumLaunchHook second deployment (distinct from PREMIUM_LAUNCH_HOOK_ON_ROBINHOOD)
+export const PREMIUM_LAUNCH_HOOK_V2_ON_ROBINHOOD =
+  '0xfa225fe7b2404f8a361a15fa88ad515032726acc';
+// BoeingCrashHook (deployed as CrashBAHook) — CRASH/BA pool
+export const BOEING_CRASH_HOOK_ON_ROBINHOOD =
+  '0x4cf941b44263659686303a056ab53938fc4540cc';
+// HookrModularHookV6 — modular stack; fee capped by immutable MAX_TOTAL_FEE_PIPS=500_000
+// (50%) in the code-hash-pinned HookrNativeMechanicsBlockV2 module, frozen per pool
+export const HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD =
+  '0xb3ca29cf721380cee8b8e4755f3865ebc68fe8cc';
+// BlendHook (INDEX basket) — operator override of the G3 protocol-fee-bypass
+// determination: the basket pool is a liquidity layer; protocol-fee-earning swaps
+// happen in the underlying unhooked constituent pools. See ROUTE-1870 / ROUTE-1836.
+// v1/v2 were removed in #13253 and re-included here under the same override.
+export const BLEND_HOOK_ON_ROBINHOOD =
+  '0xb84c11114755b5cfb4d1342d7686acc72b06c888';
+export const BLEND_HOOK_V2_ON_ROBINHOOD =
+  '0x216e50c9538151c5af5892343f62176c4f088888';
+export const BLEND_HOOK_V3_ON_ROBINHOOD =
+  '0x219b93d7c067f3ccc9e25aecdbecf1279d1fc888';
 export const ADVANCED_FEE_HOOK_B20_ON_BASE =
   '0x805975d27518e3e23c4838802d9dda7302dca044';
+// RampHook — dynamic LP fee, all fee levers hard-capped at immutable MAX_FEE_BPS=20%
+export const RAMP_HOOK_ON_BASE = '0x63e0ff2e9c38db24c56a075b69653d99c412c880';
 export const ADVANCED_FEE_HOOK_ON_BASE =
   '0x03d2434d5a9ab7fb46bd3c7956a7c62e0cd46044';
 export const ADVANCED_FEE_HOOK_V3_ON_BASE =
@@ -1289,6 +1316,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ADVANCED_FEE_HOOK_ON_BASE,
     BRUNO_HOOK_STATIC_FEE_V2_ON_BASE,
     ADVANCED_FEE_HOOK_B20_ON_BASE,
+    RAMP_HOOK_ON_BASE,
     ADVANCED_FEE_HOOK_V3_ON_BASE,
     ADVANCED_FEE_HOOK_V6_ON_BASE,
     LAUNCH_HOOK_3_ON_BASE,
@@ -1617,8 +1645,15 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     CATCH_FAMILY_V1_CTSLA_ON_ROBINHOOD,
     REALM_SWAP_HOOK_ON_ROBINHOOD,
     REALM_HOOK_ON_ROBINHOOD,
+    SPY_TREASURY_FEE_HOOK_ON_ROBINHOOD,
+    PREMIUM_LAUNCH_HOOK_V2_ON_ROBINHOOD,
+    BOEING_CRASH_HOOK_ON_ROBINHOOD,
+    HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
+    BLEND_HOOK_ON_ROBINHOOD,
+    BLEND_HOOK_V2_ON_ROBINHOOD,
+    BLEND_HOOK_V3_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
-  [CHAIN_ID_ARC]: [ADDRESS_ZERO],
+  [CHAIN_ID_ARC]: [ADDRESS_ZERO, FAZE_LAUNCHPAD_HOOK_ON_ARC],
 };
