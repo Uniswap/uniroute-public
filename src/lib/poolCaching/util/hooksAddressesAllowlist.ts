@@ -525,12 +525,15 @@ export const ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET =
   '0x2494d3d872a99b7b055304692454a226879de888';
 export const DUALPOOL_HOOK_ON_MAINNET =
   '0x00000078bd49d5279a99b5f4011a5c61ee8caac0';
-// Aerodrome Slipstream aggregator singleton on Base, the 2026-08-19
-// generation with no `expiryBlock()` (the 2026-08-05 predecessor
-// 0xa167c254ef8a24bda465760dc1969a5ce37ae888 expires at Base block 52555445
-// and is deliberately not listed).
+// Aerodrome Slipstream aggregator singleton on Base: no `expiryBlock()`,
+// wired to the Slipstream factory 0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef.
+// Predecessors deliberately not listed: 0xa1d866042c0989570cc35ce102c03d14184ee888
+// (2026-08-19, same code generation but pointed at factory
+// 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A) and
+// 0xa167c254ef8a24bda465760dc1969a5ce37ae888 (2026-08-05, expires at Base
+// block 52555445).
 export const SLIPSTREAM_AGG_HOOK_ON_BASE =
-  '0xa1d866042c0989570cc35ce102c03d14184ee888';
+  '0xa1dfe862f1111f5e9d466fd4d7297d7d4fa76888';
 
 /**
  * "ZLCA Hooks" — Zero-Liquidity Custom-Accounting hooks: V4 hooks whose
@@ -586,10 +589,14 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
  * full hop (both directions), so the callback's excess over the ~60-97k
  * heuristic base is <=~27k; doubled plus the +188k view-call
  * understatement bound stays under 250k. The Slipstream 500k was
- * calibrated 2026-09-08 on Base: V4Quoter view-calls through the hook's
- * WETH/USDC pool measured 255,750-275,300 for the full hop (both directions,
- * 0.1-1 ETH; the expiring predecessor measured 255,693-276,061 on the same
- * pair), the same envelope as LitePSM, so it takes the same doubled figure.
+ * calibrated 2026-09-08 on Base against the predecessor hooks' WETH/USDC
+ * pools: V4Quoter view-calls measured 255,693-276,061 for the full hop
+ * (both directions, 0.1-1 ETH), the same envelope as LitePSM, so it takes
+ * the same doubled figure. Re-checked 2026-09-09 on the current hook's only
+ * pool (USDC/LAPTOP): 259,940-320,319, the high end being tick crossings in
+ * the thin external pool for 1,000 USDC in; worst case plus the +188k
+ * view-call understatement bound is ~508k, still under the ~560-597k the
+ * heuristic base plus this overhead yields.
  *
  * Add future zero-liquidity custom-accounting hooks here to pick up the
  * same treatment automatically.
