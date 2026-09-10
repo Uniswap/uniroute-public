@@ -965,6 +965,15 @@ export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
 export const NFTX_V4_HOOK_ON_MAINNET =
   '0xd2094b5cdb1a12b6274e4a4d3a252cd94c51efcc';
+// NFTX vToken hooks (deployer 0xB8A70b4d…). Operator override (Alex Francisci,
+// 2026-09-10) of G4 (getFee keyed on tx.origin) + G7 (owner-set fee validated
+// only up to MAX_LP_FEE = 100%, no immutable ceiling). NOT a gate-pass — allowed
+// on the basis that the builder is adding off-hook external controls on the fee cap.
+export const NFTX_FLEX_HOOK_ON_MAINNET =
+  '0xc26a5cb51b1818f62a4c6693a9a1fedb3340efc4';
+export const NFTX_V4_HOOK_ON_ARBITRUM =
+  '0xaa49adadd33c5e953b645567afb10cbbba63afc4';
+export const NFTX_V4_HOOK_ON_INK = '0xaa49adadd33c5e953b645567afb10cbbba63afc4';
 export const PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET =
   '0x025a386eaa79f6067d29848fd05ccc71beab20cc';
 export const PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET =
@@ -1106,6 +1115,18 @@ export const ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD =
 // NOTE: reverts on exact-output swaps (exact-input only); included per operator.
 export const FOOL_HOOK_ON_ROBINHOOD =
   '0x86460353c4264eeb3ac7b4d7c836b18b7f84e444';
+// NasdankFeeHookPairUniversal — dynamic LP fee, immutable MAX_FEE_BPS=1000 (10%) cap
+export const NASDANK_FEE_HOOK_ON_ROBINHOOD =
+  '0xea553f825bf879af542f8770144200be2c8840cc';
+// FoolHook (2nd deployment; same code as FOOL_HOOK_ON_ROBINHOOD, exact-input only)
+export const FOOL_HOOK_V2_ON_ROBINHOOD =
+  '0x99b00ecf6c6cfd4ac18f22a1245bb2d0087b6444';
+// LongerHook — 3% fee-on-top; anti-snipe starts 80% and decays to 3% over 10s (in-code)
+export const LONGER_HOOK_ON_MONAD =
+  '0x07114b9c40d99fee1672cdce8d3cc6a64d409088';
+// Ascnt SimHook (2nd deploy) — dynamic LP fee, immutable MAX_FEE=500000 (50%) cap
+export const ASCNT_SIM_HOOK_ON_MAINNET =
+  '0xbf9828455cdc5f02771536e3ecb3c0f931eabec4';
 export const BRUNO_HOOK_STATIC_FEE_V2_ON_BASE =
   '0x641110ac3cb30adeaab4db29ac61e9a8635a28cc';
 export const RHUBARB_FEE_HOOK_ON_ARBITRUM =
@@ -1246,6 +1267,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MAINNET]: [
     LAUNCH_HOOK_ON_MAINNET,
     KLIK_LABS_HOOK_ON_MAINNET,
+    ASCNT_SIM_HOOK_ON_MAINNET,
     ADDRESS_ZERO,
     WETH_HOOKS_ADDRESS_ON_MAINNET,
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
@@ -1308,6 +1330,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FWATOKENHOOK_ON_MAINNET,
     PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET,
     NFTX_V4_HOOK_ON_MAINNET,
+    NFTX_FLEX_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET_2,
     PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET,
     PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET,
@@ -1350,6 +1373,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AEGIS_DFM_ON_ARBITRUM,
     BACKGEOORACLE_ON_ARBITRUM,
     THE_POOL_ON_ARBITRUM,
+    NFTX_V4_HOOK_ON_ARBITRUM,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.ARBITRUM_SEPOLIA]: [ADDRESS_ZERO],
@@ -1536,6 +1560,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MONAD_TESTNET]: [ADDRESS_ZERO],
   [ChainId.MONAD]: [
     ADDRESS_ZERO,
+    LONGER_HOOK_ON_MONAD,
     WETH_HOOKS_ADDRESS_ON_MONAD,
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MONAD,
     DOPPLER_HOOKS_ADDRESS_ON_MONAD,
@@ -1553,6 +1578,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MEGAETH]: [ADDRESS_ZERO, TEST_HOOK_ON_MEGAETH],
   [ChainId.ROBINHOOD]: [
     ADDRESS_ZERO,
+    NASDANK_FEE_HOOK_ON_ROBINHOOD,
+    FOOL_HOOK_V2_ON_ROBINHOOD,
     FLOWSTATE_C1_HOOK_ON_ROBINHOOD,
     VLADS_HOOK_ON_ROBINHOOD,
     SHROOM_HOOK_ON_ROBINHOOD,
@@ -1727,7 +1754,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD,
     FOOL_HOOK_ON_ROBINHOOD,
   ],
-  [CHAIN_ID_INK]: [ADDRESS_ZERO],
+  [CHAIN_ID_INK]: [ADDRESS_ZERO, NFTX_V4_HOOK_ON_INK],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
   [CHAIN_ID_ARC]: [ADDRESS_ZERO, FAZE_LAUNCHPAD_HOOK_ON_ARC],
 };
