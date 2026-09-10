@@ -455,6 +455,14 @@ export const AEGIS_DFM_ON_BLAST = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_ZORA = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_WORLDCHAIN = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_XLAYER = AEGIS_DFM_ADDRESS;
+// SizeMemeHook (size.fun v2) — fee-on-top in afterSwap; per-pool fee frozen at
+// registration, capped at immutable MAX_TOTAL_TRADE_FEE_BPS = 2_000 (20%)
+export const SIZE_MEME_HOOK_ON_XLAYER =
+  '0x48ab5124b299c4c437ee6b3a03325ff3b9b56044';
+// KLIK Labs Hook — immutable EIP-1167 clone of ConfigurableKlikHook; fee-on-top,
+// effective tax capped at immutable 25% (MAX_EFFECTIVE_TAX_BPS)
+export const KLIK_LABS_HOOK_ON_MAINNET =
+  '0xb8d9477eb6ef5f0df5219cf0c8130dd7e520e0cc';
 export const AEGIS_DFM_ON_SONEIUM = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_AVALANCHE = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_BNB = AEGIS_DFM_ADDRESS;
@@ -1090,6 +1098,14 @@ export const CATCH_FAMILY_V1_CSPCX_ON_ROBINHOOD =
   '0x1fe80095a6c4e0bb562669577eb5e29e843980cc';
 export const CATCH_FAMILY_V1_CTSLA_ON_ROBINHOOD =
   '0x33c47df31f2ef88c95b87d5cd8e9e6ed828100cc';
+// RobinhoodMixedFeeHook — dividend fee-on-top, total fee capped at immutable
+// MAX_TOTAL_FEE_PPM = 99_000 (9.9%)
+export const ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD =
+  '0xa4555952075bdfd473521f3d754d13442ee3e0cc';
+// FoolHook — fixed 1% fee-on-top (constant FEE_BPS, taken in afterSwap).
+// NOTE: reverts on exact-output swaps (exact-input only); included per operator.
+export const FOOL_HOOK_ON_ROBINHOOD =
+  '0x86460353c4264eeb3ac7b4d7c836b18b7f84e444';
 export const BRUNO_HOOK_STATIC_FEE_V2_ON_BASE =
   '0x641110ac3cb30adeaab4db29ac61e9a8635a28cc';
 export const RHUBARB_FEE_HOOK_ON_ARBITRUM =
@@ -1229,6 +1245,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<number, Array<string>> = {
   [ChainId.MAINNET]: [
     LAUNCH_HOOK_ON_MAINNET,
+    KLIK_LABS_HOOK_ON_MAINNET,
     ADDRESS_ZERO,
     WETH_HOOKS_ADDRESS_ON_MAINNET,
     CLANKER_STATIC_FEE_HOOKS_ADDRESS_ON_MAINNET,
@@ -1530,6 +1547,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ADDRESS_ZERO,
     ARRAKIS_PRIVATE_HOOK_V2,
     AEGIS_DFM_ON_XLAYER,
+    SIZE_MEME_HOOK_ON_XLAYER,
   ],
   [ChainId.LINEA]: [ADDRESS_ZERO],
   [ChainId.MEGAETH]: [ADDRESS_ZERO, TEST_HOOK_ON_MEGAETH],
@@ -1706,6 +1724,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BLEND_HOOK_ON_ROBINHOOD,
     BLEND_HOOK_V2_ON_ROBINHOOD,
     BLEND_HOOK_V3_ON_ROBINHOOD,
+    ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD,
+    FOOL_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
