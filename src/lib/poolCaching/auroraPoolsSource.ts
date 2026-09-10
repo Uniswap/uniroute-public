@@ -250,9 +250,23 @@ export function getOrCreateUnirouteAuroraDb(logger: Logger): AuroraDbInitState {
   return auroraDbInitState;
 }
 
-export function createUnirouteAuroraDbFromEnv(
-  logger: Logger
-): Kysely<DataIngestionAuroraDB> | undefined {
+// Env + TLS recipe shared by every uniroute Aurora consumer (cron pool
+// source here, token-metadata serving pool in stores/token). Pool tuning is
+// deliberately NOT part of it — each consumer's sizing/timeouts are its own
+// decision, but credentials and hostname-verification rules must never fork.
+export function unirouteAuroraConnectionOptionsFromEnv(logger: {
+  warn: (message: string) => void;
+}):
+  | {
+      host: string;
+      database: string;
+      user: string;
+      password: string;
+      ssl: NonNullable<
+        Parameters<typeof createDataIngestionAuroraKysely>[0]['ssl']
+      >;
+    }
+  | undefined {
   const host = process.env.DATA_INGESTION_AURORA_HOST;
   if (!host) return undefined;
 
@@ -280,11 +294,17 @@ export function createUnirouteAuroraDbFromEnv(
       }
     : {ca: fs.readFileSync('/var/task/aws-rds-ca-bundle.pem', 'utf8')};
 
+  return {host, database, user, password, ssl};
+}
+
+export function createUnirouteAuroraDbFromEnv(
+  logger: Logger
+): Kysely<DataIngestionAuroraDB> | undefined {
+  const connection = unirouteAuroraConnectionOptionsFromEnv(logger);
+  if (!connection) return undefined;
+
   return createDataIngestionAuroraKysely({
-    host,
-    database,
-    user,
-    password,
+    ...connection,
     // Single pilot combo on a small chain — a tiny pool is plenty and keeps
     // reader connections bounded.
     max: 2,
@@ -292,7 +312,6 @@ export function createUnirouteAuroraDbFromEnv(
     // hung scan so it can't pin one of the 2 connections across cron ticks
     // (the cron's withTimeout detaches, it doesn't cancel).
     statementTimeoutMillis: 30_000,
-    ssl,
   });
 }
 
