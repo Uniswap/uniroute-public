@@ -36,6 +36,7 @@ import {
   V4_POOLKEY_REGISTRY_VERSION,
   isRegistryAdmissibleHook,
   MAX_REASONABLE_V4_FEE_TIER_PPM,
+  registryAdmissibleHookAddresses,
   v4PoolKeyRegistryHookedChainsFromEnv,
   v4PoolKeyRegistryChainsFromEnv,
   v4RegistryPairKey,
@@ -97,7 +98,13 @@ export function resetV4PoolKeyRegistryBaselinesForTesting(): void {
 // ingestion data mid-backfill could overwrite a complete incumbent with a
 // newer-timestamped partial registry.
 export const GENERATED_AT_METADATA_KEY = 'registry-generated-at-ms';
-export const ROW_COUNT_METADATA_KEY = 'registry-row-count';
+// v2: the Aurora read became server-side filtered (hookless non-canonical +
+// admissible hooks), so its row counts are a fraction of the old full-table
+// counts and NOT comparable. Keeping the old key would trip the latching
+// collapse guard against full-table baselines the moment the filter shipped
+// (mainnet ~132k → ~20k). A fresh key starts with no durable baseline; old
+// objects' v1 counts are simply ignored.
+export const ROW_COUNT_METADATA_KEY = 'registry-row-count-v2';
 
 export interface V4PoolKeyRegistryBuildStats {
   included: number;
@@ -390,6 +397,7 @@ export async function materializeV4PoolKeyRegistries(
 ): Promise<void> {
   const chains = v4PoolKeyRegistryChainsFromEnv();
   if (chains.size === 0) return;
+  const hookedChains = v4PoolKeyRegistryHookedChainsFromEnv();
 
   const init = getOrCreateUnirouteAuroraDb(logger);
   if (init.status !== 'ready') {
@@ -416,9 +424,27 @@ export async function materializeV4PoolKeyRegistries(
   for (const chainId of chains) {
     const tags = {chainId: String(chainId)};
     try {
+      // Server-side filter: the unfiltered read ships the chain's ENTIRE
+      // PoolKey set and blows the reader's statement_timeout on Base (>1M
+      // rows, dominated by hooked launchpad pools every one of which
+      // buildV4PoolKeyRegistry would discard anyway). Only rows the build
+      // could include come back: hookless off-grid tiers plus currently
+      // admissible hooks. The build's own checks stay as the trust boundary —
+      // this is a volume optimization, not policy.
       const rows = await routablePools.listAllV4PoolKeys(
         auroraContext(metric),
-        {chainId: chainId as ExtendedChainId}
+        {
+          chainId: chainId as ExtendedChainId,
+          poolKeyFilter: {
+            allowedHooks: registryAdmissibleHookAddresses(
+              chainId,
+              hookedChains
+            ),
+            excludedHooklessFeeTickSpacings: Object.entries(
+              CANONICAL_V4_FEE_TICK_SPACINGS
+            ).map(([fee, tickSpacing]) => [Number(fee), tickSpacing]),
+          },
+        }
       );
       const key = S3_V4_POOLKEY_REGISTRY_KEY(chainId);
       const incumbent = await headIncumbentRegistry(s3, config.s3Bucket, key);

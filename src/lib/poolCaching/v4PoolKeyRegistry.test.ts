@@ -16,6 +16,7 @@ import type {Logger} from './sor-providers/util/log';
 import {
   isRegistryAdmissibleHook,
   parseV4PoolKeyRegistryFile,
+  registryAdmissibleHookAddresses,
   v4PoolKeyRegistryChainsFromEnv,
   v4RegistryPairKey,
 } from './util/v4PoolKeyRegistryFormat';
@@ -378,6 +379,24 @@ describe('v4PoolKeyRegistryFormat', () => {
     expect(parseV4PoolKeyRegistryFile(json, 8453)!.pairs['a:b']).toHaveLength(
       MAX_REGISTRY_ENTRIES_PER_PAIR * 2
     );
+  });
+
+  it('registryAdmissibleHookAddresses lists exactly the per-chain admissible set', () => {
+    const hookedChains = new Set([8453]);
+    const addresses = registryAdmissibleHookAddresses(8453, hookedChains);
+    // Every listed address must pass the shared per-hook trust boundary, and
+    // the set must include the ROUTE-1837 hook while excluding the aggregator
+    // hooks the Base allowlist embeds (Slipstream).
+    expect(addresses).toContain(ARRAKIS_PRIVATE_HOOK_V2);
+    expect(addresses).not.toContain(
+      '0xa167c254ef8a24bda465760dc1969a5ce37ae888'
+    );
+    for (const hooks of addresses) {
+      expect(isRegistryAdmissibleHook(8453, hooks, hookedChains)).toBe(true);
+    }
+    // Gate off → empty, so the cron's server-side Aurora filter degrades to
+    // hookless-only rather than reading hooked rows it would then discard.
+    expect(registryAdmissibleHookAddresses(8453, new Set())).toEqual([]);
   });
 
   it('admits only allowlisted, non-aggregator hooks on hooked-enabled chains', () => {

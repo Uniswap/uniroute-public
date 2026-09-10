@@ -169,6 +169,24 @@ export function isRegistryAdmissibleHook(
   );
 }
 
+/**
+ * Every hook address currently admissible for the chain's hooked registry
+ * entries (lowercased), or [] when the hooked gate is off. Lets the cron push
+ * hook filtering into the Aurora query itself — the unfiltered
+ * `v4_pool_metadata` read blows the reader's statement_timeout on Base
+ * (>1M rows) — while `isRegistryAdmissibleHook` stays the per-row trust
+ * boundary on both write and read.
+ */
+export function registryAdmissibleHookAddresses(
+  chainId: number,
+  hookedChains: ReadonlySet<number> = v4PoolKeyRegistryHookedChainsFromEnv()
+): string[] {
+  if (!hookedChains.has(chainId)) return [];
+  return [...getRegistryHookSets(chainId).allowlisted].filter(hooks =>
+    isRegistryAdmissibleHook(chainId, hooks, hookedChains)
+  );
+}
+
 function isValidEntry(entry: unknown): entry is V4PoolKeyRegistryEntry {
   if (!Array.isArray(entry) || (entry.length !== 2 && entry.length !== 3)) {
     return false;
