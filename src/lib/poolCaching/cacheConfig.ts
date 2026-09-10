@@ -407,7 +407,14 @@ export function createChainProtocols(
       timeout: 90000,
       provider: new V3SubgraphProvider(
         ChainId.BASE,
-        3,
+        // Outer retries restart every shard from page one, and this crawl is
+        // ~6 min sharded 8 ways against a 900s per-chain-protocol ceiling
+        // (POOL_CACHING_JOB_TIMEOUT_MS, applied per task in cachePools). Only
+        // one restart can finish inside that budget, so further attempts
+        // cannot produce a snapshot — they only add load to a subgraph that
+        // just failed. Transient pages are retried on their own shard instead
+        // (PAGE_FETCH_RETRIES), which is what makes getting here rare.
+        1,
         900000,
         true,
         v3BaseTrackedEthThreshold,

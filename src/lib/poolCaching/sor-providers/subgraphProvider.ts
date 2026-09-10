@@ -39,13 +39,60 @@ export const BASE_V4_PAGE_SIZE = 500; // TheGraph v4 base max pagesize is 3600, 
 // ROBINHOOD is not in sdk-core ChainId yet — same workaround as cacheConfig.ts
 const CHAIN_ID_ROBINHOOD = 4663;
 
-// Chains whose V4 pool set is too large to walk with a single sequential
-// id_gt cursor inside the provider timeout (e.g. memetoken launchpads
-// creating pools at a high rate). The fetch is split into N id-keyspace
-// ranges paginated in parallel; results are merged and deduped by id.
-export const V4_SUBGRAPH_FETCH_SHARDS_BY_CHAIN: {[chainId: number]: number} = {
-  [CHAIN_ID_ROBINHOOD]: 4,
+// Retry budget for a SINGLE page of a single shard (see `fetchPage`). Small
+// and fast on purpose: it exists to absorb a transient 429/5xx without
+// discarding a whole fan-out, not to outlast a sustained outage — that is the
+// outer `retry`'s job.
+export const PAGE_FETCH_RETRIES = 2;
+const PAGE_FETCH_RETRY_BASE_DELAY_MS = 500;
+
+/**
+ * The outer retry answers a subgraph indexing error by rolling `blockNumber`
+ * back and re-reading everything, so this error class must never be retried at
+ * the page level: doing so would both waste the rollback and risk merging
+ * pages read at two different blocks into one snapshot. Duck-typed on
+ * `message` rather than `instanceof Error` to match what the outer `onRetry`
+ * matches on — the two must agree on this class or a rollback gets swallowed.
+ */
+function isSubgraphIndexingError(err: unknown): boolean {
+  const message = (err as {message?: unknown} | undefined)?.message;
+  return typeof message === 'string' && _.includes(message, 'indexed up to');
+}
+
+// Chain+protocol combinations whose pool set is too large to walk with a
+// single sequential id_gt cursor inside the job budget (e.g. memetoken
+// launchpads creating pools at a high rate). The fetch is split into N
+// id-keyspace ranges paginated in parallel; results are merged and deduped
+// by id.
+//
+// Base V3 has ~358k pools (~358 pages at PAGE_SIZE) and walks for ~45 minutes
+// sequentially, so POOL_CACHING_JOB_TIMEOUT_MS killed every run and its
+// snapshot froze on 2026-09-02. Base V4 is ~138k pools (~276 pages at
+// BASE_V4_PAGE_SIZE); it still finishes inside the ceiling on one cursor, but
+// with no margin to spare and a pool count that only grows.
+//
+// A shard issues its own page requests, so in-flight requests against one
+// subgraph endpoint are shards x that chain+protocol's query count. Count that
+// by driving the provider, not by reading the registries below: the V4 list is
+// registry-dependent, and `High tracked ETH pools` is built for V3 AND V4
+// despite reading as protocol-specific. Measured: Base V4 and Robinhood V4
+// build 3 queries each (12 in flight at 4 shards), mainnet V4 builds 5
+// requests and stays unsharded, and Base V3 builds 2 (16 in flight at 8
+// shards) — the high-water mark, at 1.33x the Robinhood precedent, and the
+// first count to revisit if the subgraph starts rate-limiting.
+export const SUBGRAPH_FETCH_SHARDS_BY_PROTOCOL_CHAIN: {
+  [protocol: string]: {[chainId: number]: number} | undefined;
+} = {
+  [Protocol.V4]: {[CHAIN_ID_ROBINHOOD]: 4, [ChainId.BASE]: 4},
+  [Protocol.V3]: {[ChainId.BASE]: 8},
 };
+
+export function subgraphFetchShardCount(
+  protocol: Protocol,
+  chainId: number
+): number {
+  return SUBGRAPH_FETCH_SHARDS_BY_PROTOCOL_CHAIN[protocol]?.[chainId] ?? 1;
+}
 
 export interface IdShard {
   startId: string; // exclusive lower bound (id_gt); '' = keyspace start
@@ -53,11 +100,13 @@ export interface IdShard {
 }
 
 /**
- * Splits the 0x-prefixed bytes32 id keyspace into `shardCount` contiguous
- * ranges using 2-nibble boundaries (256 slots). Pool ids are uniformly
- * distributed hashes, so ranges get roughly equal pool counts. Boundary
- * strings compare correctly against full-length lowercase hex ids under
- * the subgraph's lexicographic id_gt/id_lt ('0x3f...' < '0x40' < '0x40a...').
+ * Splits the 0x-prefixed hex id keyspace into `shardCount` contiguous ranges
+ * using 2-nibble boundaries (256 slots). Ids are uniformly distributed hashes
+ * — keccak256(PoolKey) for V4 pool ids, CREATE2 addresses for V3 pools — so
+ * ranges get roughly equal pool counts. Boundary strings compare correctly
+ * against full-length lowercase hex ids under the subgraph's lexicographic
+ * id_gt/id_lt ('0x3f...' < '0x40' < '0x40a...'), and that comparison is on the
+ * shared prefix, so the same boundaries bound 20-byte and 32-byte ids alike.
  */
 export function computeIdShards(shardCount: number): IdShard[] {
   if (shardCount <= 1) {
@@ -196,11 +245,9 @@ export abstract class SubgraphProvider<
         ? BASE_V4_PAGE_SIZE
         : PAGE_SIZE;
 
-    const shardCount =
-      this.protocol === Protocol.V4
-        ? V4_SUBGRAPH_FETCH_SHARDS_BY_CHAIN[this.chainId] ?? 1
-        : 1;
-    const shards = computeIdShards(shardCount);
+    const shards = computeIdShards(
+      subgraphFetchShardCount(this.protocol, this.chainId)
+    );
     // Interpolated into each query only for bounded shards — GraphQL rejects
     // declared-but-unused variables, so the unbounded shard omits $endId.
     const endIdVar = (shard: IdShard) =>
@@ -422,6 +469,87 @@ export abstract class SubgraphProvider<
       async () => {
         const timeout = new Timeout();
 
+        // Sharding turned one transient page failure into a fan-out-wide
+        // event: `Promise.all` rejects, every sibling shard keeps paginating
+        // (nothing here can cancel an in-flight loop), and the outer retry
+        // restarts all of them from page one. On a chain sharded 8 ways that
+        // stacks up to `retries + 1` generations of concurrent crawls against
+        // one endpoint — and the likeliest cause of the first failure, rate
+        // limiting, is exactly what extra concurrency provokes.
+        //
+        // Two mechanisms keep that bounded. A failed page retries HERE, on its
+        // own shard, resuming from the cursor it already reached — siblings
+        // keep their progress and nothing is re-read. And once some unit has
+        // failed for good, the rest stop at their next page boundary rather
+        // than walking the remainder of a range whose result is already
+        // discarded.
+        let attemptFailed = false;
+
+        const fetchPage = async (
+          queryDocument: string,
+          variables: Record<string, unknown>,
+          label: string,
+          tags: Record<string, string>
+        ): Promise<{pools: TRawSubgraphPool[]}> => {
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              return await this.client.request<{pools: TRawSubgraphPool[]}>(
+                queryDocument,
+                variables
+              );
+            } catch (err) {
+              // The queries pass subgraphError: allow, so a deterministic
+              // indexing error still returns usable (chain-head) data — but
+              // graphql-request throws whenever the response carries errors,
+              // even alongside data. Salvage that case so a non-fatal
+              // subgraph error degrades to flagged-but-fresh pools instead
+              // of zeroing the snapshot; anything else is a real failure.
+              let salvaged: {pools: TRawSubgraphPool[]};
+              try {
+                salvaged = salvageAllowedSubgraphErrorOrRethrow<{
+                  pools: TRawSubgraphPool[];
+                }>({
+                  err,
+                  rootField: 'pools',
+                  label,
+                  logger: this.logger,
+                  metric: this.metric,
+                  metricTags: tags,
+                });
+              } catch (fatal) {
+                if (
+                  attempt >= PAGE_FETCH_RETRIES ||
+                  attemptFailed ||
+                  isSubgraphIndexingError(fatal)
+                ) {
+                  throw fatal;
+                }
+                this.metric.putMetric(
+                  'SubgraphProvider.getPools.pageRetry',
+                  1,
+                  undefined,
+                  tags
+                );
+                this.logger.info(
+                  `Retrying ${label} from the same cursor after a transient error (attempt ${
+                    attempt + 1
+                  }/${PAGE_FETCH_RETRIES})`,
+                  {err: fatal}
+                );
+                await new Promise(resolve =>
+                  setTimeout(
+                    resolve,
+                    PAGE_FETCH_RETRY_BASE_DELAY_MS * 2 ** attempt
+                  )
+                );
+                continue;
+              }
+              salvagedAnyPage = true;
+              return salvaged;
+            }
+          }
+        };
+
         const fetchPoolsForQuery = async (
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           queryConfig: any,
@@ -446,6 +574,14 @@ export abstract class SubgraphProvider<
           let totalPages = 0;
 
           do {
+            // Some other unit of this attempt has already failed for good, so
+            // Promise.all has rejected and anything collected from here is
+            // discarded. Stop at the page boundary instead of walking the
+            // rest of the range into a result nobody reads.
+            if (attemptFailed) {
+              break;
+            }
+
             totalPages += 1;
 
             const start = Date.now();
@@ -453,35 +589,17 @@ export abstract class SubgraphProvider<
               `Starting fetching for ${queryConfig.name}${shardLabel} page ${totalPages} with page size ${pageSizeToUse}`
             );
 
-            let poolsResult: {pools: TRawSubgraphPool[]};
-            try {
-              poolsResult = await this.client.request<{
-                pools: TRawSubgraphPool[];
-              }>(queryDocument, {
+            const poolsResult = await fetchPage(
+              queryDocument,
+              {
                 pageSize: pageSizeToUse,
                 id: lastId,
                 ...(shard.endId !== undefined ? {endId: shard.endId} : {}),
                 ...queryConfig.variables,
-              });
-            } catch (err) {
-              // The queries pass subgraphError: allow, so a deterministic
-              // indexing error still returns usable (chain-head) data — but
-              // graphql-request throws whenever the response carries errors,
-              // even alongside data. Salvage that case so a non-fatal
-              // subgraph error degrades to flagged-but-fresh pools instead
-              // of zeroing the snapshot; anything else rethrows.
-              poolsResult = salvageAllowedSubgraphErrorOrRethrow<{
-                pools: TRawSubgraphPool[];
-              }>({
-                err,
-                rootField: 'pools',
-                label: `${queryConfig.name}${shardLabel} page ${totalPages}`,
-                logger: this.logger,
-                metric: this.metric,
-                metricTags: shardedMetricTags,
-              });
-              salvagedAnyPage = true;
-            }
+              },
+              `${queryConfig.name}${shardLabel} page ${totalPages}`,
+              shardedMetricTags
+            );
 
             poolsPage = poolsResult.pools;
 
@@ -530,7 +648,12 @@ export abstract class SubgraphProvider<
           // Fetch pools for each query × id-range shard in parallel
           const poolPromises = queries.flatMap(queryConfig =>
             shards.map((shard, shardIndex) =>
-              fetchPoolsForQuery(queryConfig, shard, shardIndex)
+              // Recording the failure is what lets the siblings stop early —
+              // Promise.all rejects on the first one but cannot cancel them.
+              fetchPoolsForQuery(queryConfig, shard, shardIndex).catch(err => {
+                attemptFailed = true;
+                throw err;
+              })
             )
           );
           const allPoolsArrays = await Promise.all(poolPromises);
@@ -568,11 +691,7 @@ export abstract class SubgraphProvider<
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onRetry: (err: any, retry: number) => {
           retries += 1;
-          if (
-            this.rollback &&
-            blockNumber &&
-            _.includes(err.message, 'indexed up to')
-          ) {
+          if (this.rollback && blockNumber && isSubgraphIndexingError(err)) {
             this.metric.putMetric(
               'SubgraphProvider.getPools.indexError',
               1,

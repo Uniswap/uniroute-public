@@ -3,7 +3,14 @@ import {parse} from 'graphql';
 import {ClientError} from 'graphql-request';
 import {ChainId} from '@uniswap/sdk-core';
 import {V4SubgraphProvider} from './v4/subgraphProvider';
-import {computeIdShards} from './subgraphProvider';
+import {V3SubgraphProvider} from './v3/subgraphProvider';
+import {
+  BASE_V4_PAGE_SIZE,
+  PAGE_FETCH_RETRIES,
+  computeIdShards,
+  subgraphFetchShardCount,
+} from './subgraphProvider';
+import {Protocol} from '@uniswap/router-sdk';
 import type {Logger} from './util/log';
 import {IMetric} from './util/metric';
 
@@ -445,6 +452,19 @@ describe('computeIdShards', () => {
     ]);
   });
 
+  it('splits the keyspace at 2-nibble boundaries for 8 shards', () => {
+    expect(computeIdShards(8)).toEqual([
+      {startId: '', endId: '0x20'},
+      {startId: '0x20', endId: '0x40'},
+      {startId: '0x40', endId: '0x60'},
+      {startId: '0x60', endId: '0x80'},
+      {startId: '0x80', endId: '0xa0'},
+      {startId: '0xa0', endId: '0xc0'},
+      {startId: '0xc0', endId: '0xe0'},
+      {startId: '0xe0', endId: undefined},
+    ]);
+  });
+
   it('produces contiguous coverage for non-power-of-two counts', () => {
     const shards = computeIdShards(3);
     expect(shards[0]!.startId).toBe('');
@@ -554,5 +574,306 @@ describe('SubgraphProvider V4 id-range sharding', () => {
 
     const pools = await provider.getPools();
     expect(pools.filter(p => p.id === dupPool.id).length).toBe(1);
+  });
+});
+
+/** V3 counterpart of makeRecordingProvider (same recording client). */
+function makeRecordingV3Provider(chainId: ChainId): {
+  provider: V3SubgraphProvider;
+  queries: string[];
+  calls: {query: string; variables: Record<string, unknown>}[];
+} {
+  const queries: string[] = [];
+  const calls: {query: string; variables: Record<string, unknown>}[] = [];
+  const provider = new V3SubgraphProvider(
+    chainId,
+    0, // retries
+    5000, // timeout
+    true,
+    0.01,
+    Number.MAX_VALUE,
+    'https://example.invalid/subgraph', // url override so constructor doesn't throw
+    undefined,
+    mockLogger,
+    new MockMetric()
+  );
+  // Reflect.set rather than an `as any` cast: the GraphQLClient is built in
+  // the base constructor and `--max-warnings 0` bans the suppression the cast
+  // would need.
+  Reflect.set(provider, 'client', {
+    request: async (query: string, variables: Record<string, unknown>) => {
+      queries.push(query);
+      calls.push({query, variables: variables ?? {}});
+      return {pools: []};
+    },
+  });
+  return {provider, queries, calls};
+}
+
+describe('SubgraphProvider V3 id-range sharding', () => {
+  const BASE_V3_SHARD_BOUNDS = [
+    {id: '', endId: '0x20'},
+    {id: '0x20', endId: '0x40'},
+    {id: '0x40', endId: '0x60'},
+    {id: '0x60', endId: '0x80'},
+    {id: '0x80', endId: '0xa0'},
+    {id: '0xa0', endId: '0xc0'},
+    {id: '0xc0', endId: '0xe0'},
+    {id: '0xe0', endId: undefined},
+  ];
+
+  it('fans each Base V3 query out into 8 concurrent id-range shards', async () => {
+    const {provider, calls} = makeRecordingV3Provider(ChainId.BASE);
+    await provider.getPools();
+
+    for (const queryName of ['getHighTrackedETHPools', 'getV3ZeroETHPools']) {
+      const shardCalls = calls.filter(c => c.query.includes(queryName));
+      expect(shardCalls.length).toBe(8);
+      expect(
+        shardCalls.map(c => ({id: c.variables.id, endId: c.variables.endId}))
+      ).toEqual(expect.arrayContaining(BASE_V3_SHARD_BOUNDS));
+    }
+  });
+
+  it('builds syntactically valid GraphQL for every sharded V3 query', async () => {
+    const {provider, queries} = makeRecordingV3Provider(ChainId.BASE);
+    await provider.getPools();
+
+    expect(queries.length).toBe(16);
+    for (const q of queries) {
+      expect(() => parse(q)).not.toThrow();
+    }
+  });
+
+  it('declares $endId only on bounded Base V3 shards', async () => {
+    const {provider, calls} = makeRecordingV3Provider(ChainId.BASE);
+    await provider.getPools();
+
+    for (const c of calls) {
+      if (c.variables.endId !== undefined) {
+        expect(c.query).toContain('$endId: String');
+        expect(c.query).toContain('id_lt: $endId');
+      } else {
+        expect(c.query).not.toContain('$endId');
+        expect(c.query).not.toContain('id_lt');
+      }
+    }
+  });
+
+  it('leaves every other V3 chain on a single unbounded fetch (mainnet)', async () => {
+    const {provider, calls} = makeRecordingV3Provider(ChainId.MAINNET);
+    await provider.getPools();
+
+    const trackedCalls = calls.filter(c =>
+      c.query.includes('getHighTrackedETHPools')
+    );
+    expect(trackedCalls.length).toBe(1);
+    expect(trackedCalls[0]!.variables.id).toBe('');
+    expect(trackedCalls[0]!.variables.endId).toBeUndefined();
+    expect(trackedCalls[0]!.query).not.toContain('id_lt');
+  });
+});
+
+describe('subgraphFetchShardCount', () => {
+  it('shards Base V3, Base V4 and Robinhood V4', () => {
+    expect(subgraphFetchShardCount(Protocol.V3, ChainId.BASE)).toBe(8);
+    expect(subgraphFetchShardCount(Protocol.V4, ChainId.BASE)).toBe(4);
+    expect(subgraphFetchShardCount(Protocol.V4, 4663)).toBe(4);
+  });
+
+  it('defaults to a single shard for every other combination', () => {
+    // Base is sharded on V3 and V4 but must stay unsharded on V2, and
+    // neither protocol's sharding may follow its chain id onto other chains.
+    expect(subgraphFetchShardCount(Protocol.V2, ChainId.BASE)).toBe(1);
+    expect(subgraphFetchShardCount(Protocol.V3, ChainId.MAINNET)).toBe(1);
+    expect(subgraphFetchShardCount(Protocol.V4, ChainId.MAINNET)).toBe(1);
+    expect(subgraphFetchShardCount(Protocol.V3, 4663)).toBe(1);
+  });
+});
+
+describe('SubgraphProvider Base V4 id-range sharding', () => {
+  it('fans the Base V4 pool query out into 4 concurrent id-range shards', async () => {
+    const {provider, calls} = makeRecordingProvider(ChainId.BASE);
+    await provider.getPools();
+
+    const highLiquidityCalls = calls.filter(c =>
+      c.query.includes('getV4HighLiquidityPools')
+    );
+    expect(highLiquidityCalls.length).toBe(4);
+    expect(
+      highLiquidityCalls.map(c => ({
+        id: c.variables.id,
+        endId: c.variables.endId,
+      }))
+    ).toEqual(
+      expect.arrayContaining([
+        {id: '', endId: '0x40'},
+        {id: '0x40', endId: '0x80'},
+        {id: '0x80', endId: '0xc0'},
+        {id: '0xc0', endId: undefined},
+      ])
+    );
+  });
+
+  it('keeps the Base-specific page size on every shard', async () => {
+    const {provider, calls} = makeRecordingProvider(ChainId.BASE);
+    await provider.getPools();
+
+    for (const c of calls) {
+      expect(c.variables.pageSize).toBe(BASE_V4_PAGE_SIZE);
+    }
+  });
+
+  it('builds syntactically valid GraphQL for every sharded Base V4 query', async () => {
+    const {provider, queries} = makeRecordingProvider(ChainId.BASE);
+    await provider.getPools();
+
+    expect(queries.length).toBeGreaterThan(0);
+    for (const q of queries) {
+      expect(() => parse(q)).not.toThrow();
+    }
+  });
+});
+
+describe('SubgraphProvider page-level retry and fan-out containment', () => {
+  const poolAt = (id: string) => ({
+    id,
+    feeTier: '3000',
+    tickSpacing: '60',
+    hooks: '0x0000000000000000000000000000000000000000',
+    liquidity: '1000000',
+    token0: {symbol: 'A', id: '0x1111', name: 'A', decimals: '18'},
+    token1: {symbol: 'B', id: '0x2222', name: 'B', decimals: '18'},
+    totalValueLockedUSD: '20000',
+    totalValueLockedETH: '10',
+    totalValueLockedUSDUntracked: '0',
+  });
+
+  it('retries a failed page from the cursor it reached, not from page one', async () => {
+    const firstPoolId = '0x11' + 'cd'.repeat(31);
+    let failuresLeft = 1;
+    // Unsharded chain so there is exactly one cursor to reason about: page 1
+    // returns a pool, page 2 fails once, and the retry must resume at the
+    // page-1 cursor rather than restarting the walk at ''.
+    const {provider, calls} = makeRecordingProvider(
+      ChainId.ARBITRUM_ONE,
+      (query, variables) => {
+        if (!query.includes('getV4HighLiquidityPools')) return {pools: []};
+        if (variables.id === '') return {pools: [poolAt(firstPoolId)]};
+        if (failuresLeft > 0) {
+          failuresLeft -= 1;
+          throw new Error('502 Bad Gateway');
+        }
+        return {pools: []};
+      }
+    );
+
+    await provider.getPools();
+
+    const cursors = calls
+      .filter(c => c.query.includes('getV4HighLiquidityPools'))
+      .map(c => c.variables.id);
+    // page 1, the failed page 2, then its retry — the retry repeats the
+    // page-2 cursor and never returns to ''.
+    expect(cursors).toEqual(['', firstPoolId, firstPoolId]);
+  });
+
+  it('gives up on a page after exhausting its retry budget', async () => {
+    let attempts = 0;
+    const {provider} = makeRecordingProvider(ChainId.ARBITRUM_ONE, query => {
+      if (!query.includes('getV4HighLiquidityPools')) return {pools: []};
+      attempts += 1;
+      throw new Error('429 Too Many Requests');
+    });
+
+    await expect(provider.getPools()).rejects.toThrow('429');
+    expect(attempts).toBe(PAGE_FETCH_RETRIES + 1);
+  });
+
+  it('does not page-retry a subgraph indexing error, leaving it to the outer rollback', async () => {
+    let attempts = 0;
+    const {provider} = makeRecordingProvider(ChainId.ARBITRUM_ONE, query => {
+      if (!query.includes('getV4HighLiquidityPools')) return {pools: []};
+      attempts += 1;
+      throw new Error('has only indexed up to block number 100');
+    });
+
+    await expect(provider.getPools()).rejects.toThrow('indexed up to');
+    // Retrying here would burn the attempt and risk mixing blocks, since the
+    // rollback that fixes it happens one level up.
+    expect(attempts).toBe(1);
+  });
+
+  it('stops sibling shards at their next page boundary once a shard fails for good', async () => {
+    // One shard fails; the siblings would otherwise walk their whole range to
+    // completion for a result Promise.all has already discarded.
+    //
+    // The failure is an indexing error specifically because that class is
+    // fatal on the first attempt (see the retry test above). A retryable
+    // error would sit in a backoff timer, and this recording client resolves
+    // synchronously — the sibling loops would starve the macrotask queue and
+    // the timer would never fire. Real pages are network round trips, so that
+    // starvation is an artifact of the mock, but it would hang the suite.
+    const failingShardStart = '0x40';
+    // Safety net: without it, a regression in the early stop hangs the whole
+    // test run instead of failing this assertion.
+    const SIBLING_PAGE_CAP = 500;
+    let siblingPages = 0;
+    const {provider} = makeRecordingProvider(
+      ChainId.ROBINHOOD,
+      (query, variables) => {
+        if (!query.includes('getV4HighLiquidityPools')) return {pools: []};
+        if (variables.id === failingShardStart) {
+          throw new Error('has only indexed up to block number 100');
+        }
+        // Every sibling page yields a pool, so an uncontained sibling never
+        // reaches an empty page and paginates until the cap.
+        siblingPages += 1;
+        if (siblingPages > SIBLING_PAGE_CAP) return {pools: []};
+        const seq = siblingPages.toString(16).padStart(6, '0');
+        return {pools: [poolAt(`0x${seq}${'ef'.repeat(29)}`)]};
+      }
+    );
+
+    await expect(provider.getPools()).rejects.toThrow('indexed up to');
+    // The bound is one in-flight page per sibling loop at the moment of
+    // failure, not a full range walk.
+    expect(siblingPages).toBeLessThan(SIBLING_PAGE_CAP);
+  });
+});
+
+describe('sharded chain in-flight concurrency', () => {
+  // The shard count lives in SUBGRAPH_FETCH_SHARDS_BY_PROTOCOL_CHAIN, but the
+  // query count that multiplies it does not: the V4 list grows when
+  // @uniswap/lib-sharedconfig gains a permissioned hook + adapter for a chain,
+  // and shrinks when a chain's ZLCA registry empties. Registering a
+  // permissioned hook for Base would take it from 12 concurrent page requests
+  // to 20 without touching this package. These numbers are the load the shard
+  // counts were chosen against, so pin them: a diff here means someone raised
+  // real subgraph concurrency, and the shard count needs re-deciding.
+  //
+  // Every recording provider returns an empty first page, so exactly one
+  // request per (query, shard) unit is issued — calls.length IS the peak
+  // in-flight count.
+  it('holds Base V4 and Robinhood V4 at 12 concurrent page requests', async () => {
+    for (const chainId of [ChainId.BASE, ChainId.ROBINHOOD]) {
+      const {provider, calls} = makeRecordingProvider(chainId);
+      await provider.getPools();
+      expect(calls.length, `chain ${chainId} V4`).toBe(12);
+    }
+  });
+
+  it('holds Base V3 at 16 concurrent page requests', async () => {
+    const {provider, calls} = makeRecordingV3Provider(ChainId.BASE);
+    await provider.getPools();
+    expect(calls.length).toBe(16);
+  });
+
+  it('leaves unsharded mainnet V4 at its 5 sequential queries', async () => {
+    // The 4-query V4 chain (its permissioned-hook query is split in two), and
+    // the reason it is not sharded: 5 in flight would become 20 at 4 shards.
+    const {provider, calls} = makeRecordingProvider(ChainId.MAINNET);
+    await provider.getPools();
+    expect(calls.length).toBe(5);
   });
 });
