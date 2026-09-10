@@ -4,9 +4,9 @@
  * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
  * format, serving path) is unchanged.
  *
- * SCOPE: hard-limited to Robinhood V4 (AURORA_SUPPORTED_TARGETS) — the pilot
- * combo. Env targets outside the allowlist are ignored with a metric, so even
- * a `*` flag cannot enable other chains/protocols without a code change.
+ * SCOPE: hard-limited to Robinhood V4 + V3 (AURORA_SUPPORTED_TARGETS). Env
+ * targets outside the allowlist are ignored with a metric, so even a `*`
+ * flag cannot enable other chains/protocols without a code change.
  *
  * Modes:
  *   - shadow:  subgraph result stays authoritative (written to S3); Aurora is
@@ -116,10 +116,12 @@ const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
 // The only chain×protocol combos the Aurora source may serve. Deliberately
-// Robinhood-V4-only for the pilot; expanding a rollout wave means adding the
-// combo here (and its wrapped native above) — env flags alone cannot widen it.
+// Robinhood-only (V4 shipped wave 1; V3 is wave 2); expanding a rollout wave
+// means adding the combo here (plus its wrapped native above and, for a new
+// chain, its implied-price quote assets) — env flags alone cannot widen it.
 export const AURORA_SUPPORTED_TARGETS: ReadonlySet<string> = new Set([
   `${CHAIN_ID_ROBINHOOD}:${Protocol.V4}`,
+  `${CHAIN_ID_ROBINHOOD}:${Protocol.V3}`,
 ]);
 
 // --- Config ---
@@ -347,12 +349,15 @@ export function auroraContext(metric: IMetric): Context {
   return ctx;
 }
 
-// --- Aurora V4 provider ---
+// --- Aurora providers (per-protocol) ---
 
-export interface AuroraProviderDeps {
-  // Narrowed to the method the V4 provider consumes, so fakes and the wave-2
-  // V3 provider each depend only on their own slice of the lib interface.
-  routablePools: Pick<RoutablePoolsService, 'listAllV4RoutablePools'>;
+export interface AuroraProviderDeps<
+  TListMethod extends keyof RoutablePoolsService = 'listAllV4RoutablePools',
+> {
+  // Narrowed to the single list method each provider consumes, so fakes and
+  // each per-protocol provider depend only on their own slice of the lib
+  // interface.
+  routablePools: Pick<RoutablePoolsService, TListMethod>;
   prices: CurrentTokenPricesService;
   logger: Logger;
   metric: IMetric;
@@ -363,19 +368,19 @@ export interface AuroraProviderDeps {
 // per-side TVL joins, so both freshness gates move together.
 const NATIVE_PRICE_MAX_STALENESS_MS = 24 * 60 * 60 * 1000;
 
-export class AuroraV4PoolsProvider
-  implements ISubgraphProvider<V4SubgraphPool>
-{
+abstract class BaseAuroraPoolsProvider<
+  TListMethod extends keyof RoutablePoolsService,
+> {
   constructor(
-    private readonly chainId: number,
-    private readonly trackedEthThreshold: number,
-    private readonly deps: AuroraProviderDeps
+    protected readonly chainId: number,
+    protected readonly trackedEthThreshold: number,
+    protected readonly deps: AuroraProviderDeps<TListMethod>
   ) {}
 
   // USD price of the chain's wrapped-native token: converts the ETH-denominated
   // TVL floors into USD and Aurora's USD TVL back into tvlETH, so the
   // serve-side TrackedEthThreshold filters keep working unchanged.
-  private async nativeUsdPrice(ctx: Context): Promise<number> {
+  protected async nativeUsdPrice(ctx: Context): Promise<number> {
     const wrappedNative = WRAPPED_NATIVE_BY_CHAIN[this.chainId];
     if (!wrappedNative) {
       throw new Error(
@@ -405,7 +410,12 @@ export class AuroraV4PoolsProvider
     }
     return price;
   }
+}
 
+export class AuroraV4PoolsProvider
+  extends BaseAuroraPoolsProvider<'listAllV4RoutablePools'>
+  implements ISubgraphProvider<V4SubgraphPool>
+{
   async getPools(): Promise<V4SubgraphPool[]> {
     const ctx = auroraContext(this.deps.metric);
     const nativePrice = await this.nativeUsdPrice(ctx);
@@ -531,6 +541,79 @@ export class AuroraV4PoolsProvider
   }
 }
 
+// V3 analog: same fetch-full-set + TS admission replication, mirroring the
+// V3 subgraph query families (sor-providers/subgraphProvider.ts getPools):
+//   (a) tvlETH > trackedEthThreshold
+//   (b) liquidity > 0 AND tvlETH == 0 ("V3 zero ETH pools": live liquidity
+//       the subgraph cannot value in tracked terms — an EXACT-zero match,
+//       not V4's (V4_MIN_TVL_ETH, threshold] band)
+// No hook families, and V3SubgraphPool carries no token decimals/symbols, so
+// null-decimals pools are kept (implied pricing just contributes 0 for them).
+export class AuroraV3PoolsProvider
+  extends BaseAuroraPoolsProvider<'listAllV3RoutablePools'>
+  implements ISubgraphProvider<V3SubgraphPool>
+{
+  async getPools(): Promise<V3SubgraphPool[]> {
+    const ctx = auroraContext(this.deps.metric);
+    const nativePrice = await this.nativeUsdPrice(ctx);
+    const pools = await this.deps.routablePools.listAllV3RoutablePools(ctx, {
+      chainId: this.chainId as ExtendedChainId,
+      minTvlUsd: 0,
+    });
+
+    const impliedSourceTokens =
+      IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
+    const impliedTopUpCapUsd = IMPLIED_TVL_TOPUP_CAP_ETH * nativePrice;
+    const result: V3SubgraphPool[] = [];
+    let impliedPriced = 0;
+    let impliedCapped = 0;
+    for (const pool of pools) {
+      const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
+      if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
+      const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
+      const tvlUsd = pool.tvlUsd + impliedUsd;
+      const tvlEth = tvlUsd / nativePrice;
+      // Family (b) is judged on the RAW priced-side TVL (pre-top-up): it
+      // mirrors the subgraph's exact `totalValueLockedETH: "0"` — the cohort
+      // the pricing pipeline can't see. The top-up only feeds family (a).
+      const admits = (tvlEthForA: number) =>
+        tvlEthForA > this.trackedEthThreshold ||
+        (parsePositiveLiquidity(pool.liquidity) && pool.tvlUsd === 0);
+      if (!admits(tvlEth)) continue;
+      // Count only admission FLIPS (rescued by the top-up), matching V4.
+      if (impliedUsd > 0 && !admits(pool.tvlUsd / nativePrice)) {
+        impliedPriced++;
+      }
+      result.push({
+        id: pool.poolAddress.toLowerCase(),
+        feeTier: String(pool.feeTier),
+        liquidity: pool.liquidity,
+        token0: {id: pool.token0Address.toLowerCase()},
+        token1: {id: pool.token1Address.toLowerCase()},
+        tvlETH: tvlEth,
+        tvlUSD: tvlUsd,
+      });
+    }
+    if (impliedPriced > 0) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.implied_priced',
+        impliedPriced,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V3)}
+      );
+    }
+    if (impliedCapped > 0) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.implied_capped',
+        impliedCapped,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V3)}
+      );
+    }
+    return result;
+  }
+}
+
 /**
  * USD value of a pool's UNPRICED side, derived one hop through the pool's own
  * spot price from the priced side — the analog of the subgraph's derivedETH
@@ -555,8 +638,23 @@ export class AuroraV4PoolsProvider
  * Float math is deliberate: values feed TVL floor comparisons and snapshot
  * ranking, not amounts — the ~15 significant digits of a double are plenty.
  */
+// Structural slice shared by V4RoutablePool and V3RoutablePool — the implied
+// one-hop math is protocol-agnostic (both carry sqrtPriceX96 + raw reserves).
+export type ImpliedPricingPool = Pick<
+  V4RoutablePool,
+  | 'token0Address'
+  | 'token1Address'
+  | 'sqrtPriceX96'
+  | 'tvlToken0'
+  | 'tvlToken1'
+  | 'token0PriceUsd'
+  | 'token1PriceUsd'
+  | 'token0Decimals'
+  | 'token1Decimals'
+>;
+
 export function impliedOneHopTvlUsd(
-  pool: V4RoutablePool,
+  pool: ImpliedPricingPool,
   impliedSourceTokens: ReadonlySet<string> | undefined
 ): number {
   if (!impliedSourceTokens) return 0;
@@ -972,7 +1070,7 @@ export function applyAuroraPoolSources<
   }
   const db = init.db;
 
-  const deps: AuroraProviderDeps = {
+  const deps: AuroraProviderDeps<keyof RoutablePoolsService> = {
     routablePools: createAuroraRoutablePoolsService(db, 'uniroute'),
     prices: createAuroraCurrentTokenPricesService(db, 'uniroute'),
     logger,
@@ -997,13 +1095,44 @@ export function applyAuroraPoolSources<
       continue;
     }
 
-    // The wrap below is V4-shaped (AuroraV4PoolsProvider + V4SubgraphPool
-    // cast). Keep the invariant local: a non-V4 combo added to
-    // AURORA_SUPPORTED_TARGETS must grow a protocol-specific provider, not
-    // silently map its pools through the V4 row shape.
-    if (protocol !== Protocol.V4) {
+    // Per-protocol provider dispatch. A combo added to
+    // AURORA_SUPPORTED_TARGETS must have a protocol-shaped provider branch
+    // here — never map one protocol's pools through another's row shape.
+    if (protocol === Protocol.V4) {
+      chainProtocol.provider = new AuroraSourcedProvider(
+        mode,
+        new AuroraV4PoolsProvider(
+          chainId,
+          thresholds.trackedEthThresholdFor(protocol, chainId),
+          deps
+        ),
+        chainProtocol.provider as ISubgraphProvider<V4SubgraphPool>,
+        chainId,
+        protocol,
+        config.minPoolCountRatio,
+        config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
+        logger,
+        metric
+      );
+    } else if (protocol === Protocol.V3) {
+      chainProtocol.provider = new AuroraSourcedProvider(
+        mode,
+        new AuroraV3PoolsProvider(
+          chainId,
+          thresholds.trackedEthThresholdFor(protocol, chainId),
+          deps
+        ),
+        chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
+        chainId,
+        protocol,
+        config.minPoolCountRatio,
+        config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
+        logger,
+        metric
+      );
+    } else {
       logger.warn(
-        `Aurora pool source targeted for ${targetKey(chainId, protocol)} but only V4 has an Aurora provider — staying on subgraph`
+        `Aurora pool source targeted for ${targetKey(chainId, protocol)} but no Aurora provider exists for ${String(protocol)} — staying on subgraph`
       );
       metric.putMetric(
         'CachePools.aurora.unsupported_target',
@@ -1013,22 +1142,6 @@ export function applyAuroraPoolSources<
       );
       continue;
     }
-
-    chainProtocol.provider = new AuroraSourcedProvider(
-      mode,
-      new AuroraV4PoolsProvider(
-        chainId,
-        thresholds.trackedEthThresholdFor(protocol, chainId),
-        deps
-      ),
-      chainProtocol.provider as ISubgraphProvider<V4SubgraphPool>,
-      chainId,
-      protocol,
-      config.minPoolCountRatio,
-      config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
-      logger,
-      metric
-    );
     logger.info(
       `Aurora pool source enabled (${mode}) for ${targetKey(chainId, protocol)}`
     );

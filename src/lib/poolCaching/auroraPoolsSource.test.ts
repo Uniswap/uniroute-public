@@ -4,6 +4,7 @@ import {Protocol} from '@uniswap/router-sdk';
 import {
   AURORA_SUPPORTED_TARGETS,
   AuroraSourcedProvider,
+  AuroraV3PoolsProvider,
   AuroraV4PoolsProvider,
   auroraPoolsSourceConfigFromEnv,
   computePoolParity,
@@ -781,6 +782,162 @@ describe('AuroraV4PoolsProvider', () => {
   });
 });
 
+describe('AuroraV3PoolsProvider', () => {
+  const ROBINHOOD = 4663;
+  const ROBINHOOD_WRAPPED_NATIVE = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+  const ROBINHOOD_WRAPPED_NATIVE_KEY = `4663_${ROBINHOOD_WRAPPED_NATIVE}`;
+
+  function v3Row(
+    overrides: Partial<{
+      poolAddress: string;
+      token0Address: string;
+      liquidity: string;
+      tvlUsd: number;
+      sqrtPriceX96: string;
+      tvlToken1: string;
+      token0PriceUsd: number | null;
+    }>
+  ) {
+    return {
+      poolAddress: overrides.poolAddress ?? '0xPOOL',
+      token0Address:
+        overrides.token0Address ?? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      token1Address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      feeTier: 3000,
+      tickSpacing: 60,
+      liquidity: overrides.liquidity ?? '42',
+      tvlUsd: overrides.tvlUsd ?? 4000,
+      // sqrtPrice 0 disables implied pricing unless a test opts in.
+      sqrtPriceX96: overrides.sqrtPriceX96 ?? '0',
+      tvlToken0: '0',
+      tvlToken1: overrides.tvlToken1 ?? '0',
+      token0PriceUsd:
+        overrides.token0PriceUsd !== undefined
+          ? overrides.token0PriceUsd
+          : null,
+      token1PriceUsd: null,
+      token0Decimals: 18,
+      token1Decimals: 6,
+      token0Symbol: 'WETH',
+      token1Symbol: 'USDC',
+      token0Name: 'Wrapped Ether',
+      token1Name: 'USD Coin',
+      stateAsOfTimestamp: new Date(),
+    };
+  }
+
+  function freshPrices(priceUsd = 2000) {
+    return {
+      batchGet: async () =>
+        new Map([
+          [
+            ROBINHOOD_WRAPPED_NATIVE_KEY,
+            {
+              chainId: ROBINHOOD,
+              tokenAddress: undefined as never,
+              priceUsd,
+              timestamp: new Date(),
+              updatedAt: new Date(),
+            },
+          ],
+        ]),
+    };
+  }
+
+  const mkProvider = (
+    rows: ReturnType<typeof v3Row>[],
+    metric = new FakeMetric()
+  ) =>
+    new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {listAllV3RoutablePools: async () => rows},
+      prices: freshPrices(),
+      logger: noopLogger,
+      metric,
+    });
+
+  it('replicates the V3 admission union (threshold / exact-zero-TVL with liquidity)', async () => {
+    // Native price 2000 → tvlETH = tvlUsd / 2000.
+    const rows = [
+      // (a) above tracked threshold (0.01 ETH = $20): kept
+      v3Row({poolAddress: '0xA1', tvlUsd: 4000, liquidity: '42'}),
+      // (b) EXACT zero raw TVL with liquidity: kept ("V3 zero ETH pools")
+      v3Row({poolAddress: '0xA2', tvlUsd: 0, liquidity: '1'}),
+      // Small nonzero TVL below threshold + liquidity: DROPPED — V3 has no
+      // (0, threshold) band, unlike V4's V4_MIN_TVL_ETH family.
+      v3Row({poolAddress: '0xA3', tvlUsd: 10, liquidity: '9'}),
+      // Zero TVL without liquidity: dropped
+      v3Row({poolAddress: '0xA4', tvlUsd: 0, liquidity: '0'}),
+    ];
+    const pools = await mkProvider(rows).getPools();
+    expect(pools.map(p => p.id).sort()).toEqual(['0xa1', '0xa2']);
+    const a1 = pools.find(p => p.id === '0xa1')!;
+    expect(a1.feeTier).toBe('3000');
+    expect(a1.token0.id).toBe('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2');
+    expect(a1.tvlETH).toBeCloseTo(2, 9);
+    expect(a1.tvlUSD).toBe(4000);
+  });
+
+  it('admits a launchpad-shaped pool via implied pricing and counts only flips', async () => {
+    const metric = new FakeMetric();
+    const rows = [
+      // Raw $1 (fails (a); fails (b) since raw != 0). Token0 = wrapped
+      // native (a designated implied source) priced $2000; token1 unpriced;
+      // sqrtPrice 2^96 with 1e17 raw token1 → implied ≈ $200 → admitted.
+      v3Row({
+        poolAddress: '0xF1',
+        tvlUsd: 1,
+        liquidity: '7',
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        token0PriceUsd: 2000,
+        sqrtPriceX96: '79228162514264337593543950336',
+        tvlToken1: '100000000000000000',
+      }),
+      // Same implied ingredients but raw tvlUsd = 0 with liquidity: admitted
+      // via family (b) either way → NOT a flip.
+      v3Row({
+        poolAddress: '0xF2',
+        tvlUsd: 0,
+        liquidity: '7',
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        token0PriceUsd: 2000,
+        sqrtPriceX96: '79228162514264337593543950336',
+        tvlToken1: '100000000000000000',
+      }),
+    ];
+    const pools = await mkProvider(rows, metric).getPools();
+    expect(pools.map(p => p.id).sort()).toEqual(['0xf1', '0xf2']);
+    const flips = metric.byKey('CachePools.aurora.implied_priced');
+    expect(flips).toHaveLength(1);
+    expect(flips[0]!.value).toBe(1);
+    expect(flips[0]!.tags?.protocol).toBe(String(Protocol.V3));
+  });
+
+  it('throws on a stale native price (primary mode falls back upstream)', async () => {
+    const staleTs = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    const provider = new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {listAllV3RoutablePools: async () => [v3Row({})]},
+      prices: {
+        batchGet: async () =>
+          new Map([
+            [
+              ROBINHOOD_WRAPPED_NATIVE_KEY,
+              {
+                chainId: ROBINHOOD,
+                tokenAddress: undefined as never,
+                priceUsd: 2000,
+                timestamp: staleTs,
+                updatedAt: staleTs,
+              },
+            ],
+          ]),
+      },
+      logger: noopLogger,
+      metric: new FakeMetric(),
+    });
+    await expect(provider.getPools()).rejects.toThrow(/Stale native/);
+  });
+});
+
 describe('targetKey', () => {
   it('builds CHAINID:PROTOCOL keys', () => {
     expect(targetKey(8453, Protocol.V4)).toBe('8453:V4');
@@ -788,7 +945,10 @@ describe('targetKey', () => {
 });
 
 describe('AURORA_SUPPORTED_TARGETS', () => {
-  it('is scoped to Robinhood V4 only', () => {
-    expect([...AURORA_SUPPORTED_TARGETS]).toEqual(['4663:V4']);
+  it('is scoped to Robinhood V4 + V3 only', () => {
+    expect([...AURORA_SUPPORTED_TARGETS].sort()).toEqual([
+      '4663:V3',
+      '4663:V4',
+    ]);
   });
 });
