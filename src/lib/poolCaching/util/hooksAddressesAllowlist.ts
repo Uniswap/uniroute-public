@@ -611,24 +611,60 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
  * Add future zero-liquidity custom-accounting hooks here to pick up the
  * same treatment automatically.
  */
+export interface ZlcaHookConfig {
+  /** Per-hop gas overhead (gas units) added on the heuristic estimation path. */
+  gasOverheadPerHop: bigint;
+  /**
+   * Derive the pool's `sqrtPriceX96` (and tick) from a small V4Quoter probe
+   * instead of the PoolManager's slot0. Set this for hooks that settle swaps
+   * against reserves outside the PoolManager (an external DEX pool, an RFQ
+   * fill): their pool holds no liquidity and its slot0 stays at whatever
+   * `initialize` was called with — 2^96, a 1:1 raw price, for the Slipstream
+   * singleton — forever. The SDK trade's mid price, and so the response's
+   * `priceImpact`, is derived from slot0, so for a pair whose decimals differ
+   * it is off by the decimal ratio (~5e11 for USDC/LAPTOP) and `priceImpact`
+   * clamps to -100 on every route through the pool. The probe runs at pool
+   * refresh (`stores/pool/ZlcaQuoterPriceReader.ts`, via
+   * `OnChainV4PoolsRepository`); any failure keeps the slot0 value. Not
+   * needed where the placeholder happens to be right (LitePSM DAI/USDS is 1:1
+   * with equal decimals). Quoting itself is unaffected either way: the
+   * V4Quoter always executes the hook.
+   */
+  sqrtPriceFromQuoter?: boolean;
+}
+
 // Intersected with Record<number, ...> (matching HOOKS_ADDRESSES_ALLOWLIST's
 // shape) so this can be indexed by both this file's @uniswap/sdk-core ChainId
 // and the separate, numerically-overlapping ChainId enum in lib/config.ts.
 export const ZLCA_HOOKS_PER_CHAIN: Partial<
-  Record<ChainId, Record<string, bigint>>
+  Record<ChainId, Record<string, ZlcaHookConfig>>
 > &
-  Record<number, Record<string, bigint>> = {
+  Record<number, Record<string, ZlcaHookConfig>> = {
   [ChainId.MAINNET]: {
-    [LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET]: 500_000n,
-    [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: 500_000n,
-    [DUALPOOL_HOOK_ON_MAINNET]: 3_000_000n,
-    [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: 250_000n,
-    [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: 50_000n,
+    [LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
+    [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
+    [DUALPOOL_HOOK_ON_MAINNET]: {gasOverheadPerHop: 3_000_000n},
+    [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: {gasOverheadPerHop: 250_000n},
+    [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: {gasOverheadPerHop: 50_000n},
   },
   [ChainId.BASE]: {
-    [SLIPSTREAM_AGG_HOOK_ON_BASE]: 500_000n,
+    [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
 };
+
+/** Whether `hooks` on `chainId` is a ZLCA hook flagged `sqrtPriceFromQuoter`. */
+export function isZlcaHookPricedFromQuoter(
+  chainId: number,
+  hooks: string
+): boolean {
+  return (
+    ZLCA_HOOKS_PER_CHAIN[chainId]?.[hooks.toLowerCase()]
+      ?.sqrtPriceFromQuoter === true
+  );
+}
 
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
 // same address across all supported chains

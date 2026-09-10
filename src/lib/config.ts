@@ -674,6 +674,7 @@ export enum MetricFailureReason {
   RPC_ERROR = 'rpc_error',
   REDIS_READ_ERROR = 'redis_read_error',
   SQS_SEND_ERROR = 'sqs_send_error',
+  ZLCA_QUOTER_PRICE_UNAVAILABLE = 'zlca_quoter_price_unavailable',
 }
 
 /** `status:` tag, plus the hardcoded `reason:` tag on failure. */

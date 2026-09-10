@@ -7,7 +7,7 @@ import {getDynamicZlcaHooks} from '../../lib/poolCaching/util/dynamicZlcaHooks';
 /**
  * Returns the total gas-unit adjustment for a route, adding each ZLCA
  * (Zero-Liquidity Custom-Accounting) hook's registered per-hop overhead
- * (the map value in `ZLCA_HOOKS_PER_CHAIN` — see that doc comment for
+ * (`gasOverheadPerHop` in `ZLCA_HOOKS_PER_CHAIN` — see that doc comment for
  * the full rationale and calibration history) for every leg that hops
  * through one of its pools. Multi-leg routes that use the same hook
  * twice add it twice — each hop runs the callback once.
@@ -38,7 +38,10 @@ export function zlcaHookGasAdjustment(path: Pool[], chainId: ChainId): bigint {
     const hookLower = hooks.toLowerCase();
     // Static registry wins; factory-discovered dynamic ZLCA hooks
     // (dynamicZlcaHooks.ts) fall back to their factory's per-hop overhead.
-    total += zlcaHooks?.[hookLower] ?? dynamicZlcaHooks?.get(hookLower) ?? 0n;
+    total +=
+      zlcaHooks?.[hookLower]?.gasOverheadPerHop ??
+      dynamicZlcaHooks?.get(hookLower) ??
+      0n;
   }
   return total;
 }

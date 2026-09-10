@@ -1,6 +1,7 @@
 /**
  * Process-wide store of dynamically discovered ZLCA hooks — the runtime
- * overlay to the static `ZLCA_HOOKS_PER_CHAIN` registry. Populated by
+ * overlay to the static `ZLCA_HOOKS_PER_CHAIN` registry (hook -> per-hop gas
+ * overhead only; the registry's other options are static). Populated by
  * `DynamicZlcaHooksRefresher` from on-chain enumeration of the factories in
  * `TRUSTED_ZLCA_HOOK_FACTORIES_PER_CHAIN`; consumed (static ∪ dynamic) by
  * `getTvlBypassHookAddresses` and `zlcaHookGasAdjustment`. Static entries

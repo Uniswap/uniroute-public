@@ -10,6 +10,8 @@ import {
   getProtocolForAggHookAddress,
   getTvlBypassHookAddresses,
   HOOKS_ADDRESSES_ALLOWLIST,
+  isZlcaHookPricedFromQuoter,
+  LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
   SLIPSTREAM_AGG_HOOK_ON_BASE,
   ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
   ZLCA_HOOKS_PER_CHAIN,
@@ -54,7 +56,10 @@ describe('AGG_HOOKS_PER_CHAIN', () => {
       getProtocolForAggHookAddress(SLIPSTREAM_AGG_HOOK_ON_BASE, ChainId.BASE)
     ).toBeUndefined();
     expect(ZLCA_HOOKS_PER_CHAIN[ChainId.BASE]).toEqual({
-      [SLIPSTREAM_AGG_HOOK_ON_BASE]: 500_000n,
+      [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
+        gasOverheadPerHop: 500_000n,
+        sqrtPriceFromQuoter: true,
+      },
     });
     expect(
       getTvlBypassHookAddresses(ChainId.BASE)?.has(SLIPSTREAM_AGG_HOOK_ON_BASE)
@@ -193,6 +198,59 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
         ).toBe(true);
       }
     }
+  });
+
+  it('every ZLCA hook carries a positive per-hop gas overhead', () => {
+    // A missing or zero overhead would under-estimate gas for the hook's
+    // legs, and gasUseEstimate becomes the tx gas limit downstream.
+    for (const [chainIdStr, hooks] of Object.entries(ZLCA_HOOKS_PER_CHAIN)) {
+      for (const [hook, config] of Object.entries(hooks)) {
+        expect(
+          config.gasOverheadPerHop,
+          `ZLCA hook ${hook} on chain ${chainIdStr}`
+        ).toBeGreaterThan(0n);
+      }
+    }
+  });
+
+  it('only the Slipstream singleton on Base is priced from the quoter', () => {
+    // Its PoolManager slot0 is the 1:1 initialize placeholder; the other
+    // registered hooks either hold a real price or are 1:1 pairs.
+    const quoterPriced = Object.entries(ZLCA_HOOKS_PER_CHAIN).flatMap(
+      ([chainIdStr, hooks]) =>
+        Object.entries(hooks)
+          .filter(([, config]) => config.sqrtPriceFromQuoter === true)
+          .map(([hook]) => `${chainIdStr}:${hook}`)
+    );
+    expect(quoterPriced).toEqual([
+      `${ChainId.BASE}:${SLIPSTREAM_AGG_HOOK_ON_BASE}`,
+    ]);
+  });
+
+  it('isZlcaHookPricedFromQuoter matches the flag case-insensitively and per chain', () => {
+    expect(
+      isZlcaHookPricedFromQuoter(ChainId.BASE, SLIPSTREAM_AGG_HOOK_ON_BASE)
+    ).toBe(true);
+    expect(
+      isZlcaHookPricedFromQuoter(
+        ChainId.BASE,
+        SLIPSTREAM_AGG_HOOK_ON_BASE.toUpperCase().replace('0X', '0x')
+      )
+    ).toBe(true);
+    expect(
+      isZlcaHookPricedFromQuoter(MAINNET, SLIPSTREAM_AGG_HOOK_ON_BASE)
+    ).toBe(false);
+    // A ZLCA hook without the flag keeps its StateView price.
+    expect(
+      isZlcaHookPricedFromQuoter(
+        MAINNET,
+        LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET
+      )
+    ).toBe(false);
+    // An unregistered chain is simply unflagged, never an error.
+    expect(
+      isZlcaHookPricedFromQuoter(999_999, SLIPSTREAM_AGG_HOOK_ON_BASE)
+    ).toBe(false);
   });
 
   it('every zero-measured-TVL hook is allowlisted on its chain', () => {

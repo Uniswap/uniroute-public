@@ -26,8 +26,11 @@ export interface TrustedZlcaHookFactory {
   /**
    * Per-hop gas overhead (gas units) inherited by every hook this factory
    * deploys — same semantics/calibration guidance as the
-   * `ZLCA_HOOKS_PER_CHAIN` map values (see that doc comment): erring high is
-   * safe, a shortfall reverts user swaps.
+   * `ZLCA_HOOKS_PER_CHAIN` entries' `gasOverheadPerHop` (see that doc
+   * comment): erring high is safe, a shortfall reverts user swaps. The
+   * registry's other per-hook options (`sqrtPriceFromQuoter`) are not
+   * inherited; a factory-admitted hook that needs one must be listed
+   * statically.
    */
   gasOverheadPerHop: bigint;
 }
