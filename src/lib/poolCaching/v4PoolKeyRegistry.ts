@@ -12,6 +12,7 @@
  */
 
 import * as zlib from 'zlib';
+import {utils} from 'ethers';
 import {
   HeadObjectCommand,
   PutObjectCommand,
@@ -436,10 +437,15 @@ export async function materializeV4PoolKeyRegistries(
         {
           chainId: chainId as ExtendedChainId,
           poolKeyFilter: {
+            // The filter matches the stored column RAW (lower() in SQL is a
+            // full-table seq scan past the statement timeout), so send both
+            // casings ingestion could have stored: lowercase and EIP-55.
+            // buildV4PoolKeyRegistry still lowercases per row, so a missed
+            // casing can only hide a pool, never admit a wrong one.
             allowedHooks: registryAdmissibleHookAddresses(
               chainId,
               hookedChains
-            ),
+            ).flatMap(hooks => [hooks, utils.getAddress(hooks)]),
             excludedHooklessFeeTickSpacings: Object.entries(
               CANONICAL_V4_FEE_TICK_SPACINGS
             ).map(([fee, tickSpacing]) => [Number(fee), tickSpacing]),
