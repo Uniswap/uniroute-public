@@ -4,7 +4,8 @@
  * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
  * format, serving path) is unchanged.
  *
- * SCOPE: hard-limited to Robinhood V4 + V3 (AURORA_SUPPORTED_TARGETS). Env
+ * SCOPE: hard-limited to the cron's V4 + V3 matrix (except Base and Ink;
+ * AURORA_SUPPORTED_TARGETS). Env
  * targets outside the allowlist are ignored with a metric, so even a `*`
  * flag cannot enable other chains/protocols without a code change.
  *
@@ -30,6 +31,10 @@ import {Context} from '@uniswap/lib-uni/context';
 import type {IMetrics, MetricOptions} from '@uniswap/lib-observability';
 import {createAddress, type ExtendedChainId} from '@uniswap/lib-data-api';
 import {
+  getPermissionedAdapterTokens,
+  getPermissionedHookAddresses,
+} from '@uniswap/lib-sharedconfig/permissionedTokens';
+import {
   createDataIngestionAuroraKysely,
   createAuroraRoutablePoolsService,
   createAuroraCurrentTokenPricesService,
@@ -49,10 +54,31 @@ import {
 import {V4_MIN_TVL_ETH} from './sor-providers/subgraphProvider';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
 import {getDynamicZlcaHooks} from './util/dynamicZlcaHooks';
+import {getMajorTokens} from './util/majorTokens';
 import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
 import {ChainId as SdkChainId} from '@uniswap/sdk-core';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {ARBITRUM} from '../../stores/chain/hardcoded/chains/Arbitrum';
+import {ARC} from '../../stores/chain/hardcoded/chains/Arc';
+import {AVALANCHE} from '../../stores/chain/hardcoded/chains/Avalanche';
+import {BNB} from '../../stores/chain/hardcoded/chains/BNB';
+import {BLAST} from '../../stores/chain/hardcoded/chains/Blast';
+import {CELO} from '../../stores/chain/hardcoded/chains/Celo';
+import {LINEA} from '../../stores/chain/hardcoded/chains/Linea';
+import {MAINNET} from '../../stores/chain/hardcoded/chains/Mainnet';
+import {MEGAETH} from '../../stores/chain/hardcoded/chains/MegaEth';
+import {MONAD} from '../../stores/chain/hardcoded/chains/Monad';
+import {OPTIMISM} from '../../stores/chain/hardcoded/chains/Optimism';
+import {POLYGON} from '../../stores/chain/hardcoded/chains/Polygon';
+import {ROBINHOOD} from '../../stores/chain/hardcoded/chains/Robinhood';
+import {SEPOLIA} from '../../stores/chain/hardcoded/chains/Sepolia';
+import {SONEIUM} from '../../stores/chain/hardcoded/chains/Soneium';
+import {TEMPO} from '../../stores/chain/hardcoded/chains/Tempo';
+import {UNICHAIN} from '../../stores/chain/hardcoded/chains/Unichain';
+import {WORLDCHAIN} from '../../stores/chain/hardcoded/chains/WorldChain';
+import {XLAYER} from '../../stores/chain/hardcoded/chains/XLayer';
+import {ZORA} from '../../stores/chain/hardcoded/chains/Zora';
 
 // Observability sinks for the servable-parity re-run of the serving filter:
 // the REAL filter run (cachePools) owns the filter's metrics/logs; the parity
@@ -75,12 +101,40 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
 const CHAIN_ID_ROBINHOOD = 4663;
 
-// Wrapped-native address per Aurora-supported chain (values from
-// src/stores/chain/hardcoded/chains/*), used to convert the ETH-denominated
-// TVL floors to USD and back. Grows with AURORA_SUPPORTED_TARGETS.
-const WRAPPED_NATIVE_BY_CHAIN: {[chainId: number]: string} = {
-  [CHAIN_ID_ROBINHOOD]: '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
-};
+// The hardcoded chain objects are side-effect-free definitions. Keep this
+// static collection local rather than constructing a repository, whose shared
+// registry overlays are unnecessary for the wrapped-native lookup.
+const HARD_CODED_CHAINS = [
+  ARBITRUM,
+  ARC,
+  AVALANCHE,
+  BNB,
+  BLAST,
+  CELO,
+  LINEA,
+  MAINNET,
+  MEGAETH,
+  MONAD,
+  OPTIMISM,
+  POLYGON,
+  ROBINHOOD,
+  SEPOLIA,
+  SONEIUM,
+  TEMPO,
+  UNICHAIN,
+  WORLDCHAIN,
+  XLAYER,
+  ZORA,
+];
+
+// Registry-derived wrapped-native addresses are lowercased for Aurora's
+// canonical-token keys. A missing entry still fails only that combo at init.
+export const WRAPPED_NATIVE_BY_CHAIN: ReadonlyMap<number, string> = new Map(
+  HARD_CODED_CHAINS.map(chain => [
+    chain.chainId,
+    chain.wrappedNativeToken.lowerCased,
+  ])
+);
 
 // USDG (Global Dollar) on Robinhood — the chain's dominant stable quote asset.
 const USDG_ON_ROBINHOOD = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
@@ -91,9 +145,10 @@ const USDG_ON_ROBINHOOD = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
 // is what admits fresh launchpad pools the pricing pipeline hasn't covered
 // yet). Restricting the propagation SOURCE to these chain quote assets
 // mirrors the subgraph's whitelist concept: a meme priced off another meme's
-// pool must not mint implied TVL. Lowercased; grows with
-// AURORA_SUPPORTED_TARGETS.
-const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
+// pool must not mint implied TVL. Per-chain opt-in requires verifying that
+// chain's deployed subgraph whitelist and minimumNativeLocked semantics; new
+// chains intentionally launch without it and shadow parity decides if needed.
+export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
   [chainId: number]: ReadonlySet<string>;
 } = {
   [CHAIN_ID_ROBINHOOD]: new Set([
@@ -104,7 +159,7 @@ const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
     // row ever went stale, native-quoted pools would silently lose implied
     // pricing (both sides null → no top-up).
     ZERO_ADDRESS,
-    WRAPPED_NATIVE_BY_CHAIN[CHAIN_ID_ROBINHOOD],
+    WRAPPED_NATIVE_BY_CHAIN.get(CHAIN_ID_ROBINHOOD)!,
     USDG_ON_ROBINHOOD,
   ]),
 };
@@ -115,14 +170,33 @@ const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 // pools in TopPools selection (council review finding on #11463).
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
-// The only chain×protocol combos the Aurora source may serve. Deliberately
-// Robinhood-only (V4 shipped wave 1; V3 is wave 2); expanding a rollout wave
-// means adding the combo here (plus its wrapped native above and, for a new
-// chain, its implied-price quote assets) — env flags alone cannot widen it.
-export const AURORA_SUPPORTED_TARGETS: ReadonlySet<string> = new Set([
-  `${CHAIN_ID_ROBINHOOD}:${Protocol.V4}`,
-  `${CHAIN_ID_ROBINHOOD}:${Protocol.V3}`,
-]);
+// This mirrors createChainProtocols' V3/V4 matrix. Base's 15.2M-row full
+// fetch needs SQL admission pushdown first; Ink has no Aurora pool rows yet.
+// Keep V2 out of this source even though it remains in the cron matrix.
+const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
+  readonly [Protocol, readonly number[]]
+> = [
+  [
+    Protocol.V3,
+    [
+      1, 42161, 137, 10, 42220, 56, 43114, 81457, 130, 480, 7777777, 1868, 143,
+      4217, 196, 59144, 4326, 4663, 5042,
+    ],
+  ],
+  [
+    Protocol.V4,
+    [
+      11155111, 42161, 137, 480, 7777777, 130, 81457, 1, 1868, 10, 56, 143,
+      4217, 196, 43114, 42220, 59144, 4326, 4663, 5042,
+    ],
+  ],
+];
+
+export const AURORA_SUPPORTED_TARGETS: ReadonlySet<string> = new Set(
+  AURORA_CHAIN_IDS_BY_PROTOCOL.flatMap(([protocol, chainIds]) =>
+    chainIds.map(chainId => targetKey(chainId, protocol))
+  )
+);
 
 // --- Config ---
 
@@ -136,8 +210,13 @@ export interface AuroraPoolsSourceConfig {
   // Absolute per-target pool-count floor for PRIMARY mode, keyed by
   // targetKey(). A primary result below its floor falls back to the subgraph
   // for that tick and never becomes the ratio guard's baseline. Targets
-  // without an entry have no absolute floor (ratio guard only).
+  // without an entry are never served in primary mode. An entry (or the whole
+  // env) that failed to parse also downgrades to shadow — same fail-closed
+  // outcome as an absent entry — but under a distinct misconfiguration metric
+  // so a typo stays distinguishable from a deliberate absence.
   minPoolCountByTarget: ReadonlyMap<string, number>;
+  minPoolCountFloorInvalidKeys: ReadonlySet<string>;
+  minPoolCountFloorUnparseable: boolean;
 }
 
 export function targetKey(chainId: number, protocol: Protocol): string {
@@ -160,25 +239,47 @@ function parseTargets(raw: string | undefined): 'all' | ReadonlySet<string> {
 // non-positive values are dropped entry-wise rather than failing boot — the
 // floor is a safety net, and a config typo must not take the whole Aurora
 // source down; the ratio guard still applies either way.
-export function parseMinPoolCountByTarget(
-  raw: string | undefined
-): ReadonlyMap<string, number> {
-  const result = new Map<string, number>();
-  if (!raw || raw.trim() === '') return result;
+export function parseMinPoolCountByTarget(raw: string | undefined): {
+  byTarget: ReadonlyMap<string, number>;
+  // Targets whose ENTRY existed but had a malformed value. Behaviorally an
+  // invalid entry downgrades the target to shadow exactly like an absent one
+  // (fail closed — a floorless primary is unprotected on the first
+  // post-deploy tick), but it is tracked separately so a typo stays
+  // distinguishable from a deliberate absence in metrics/alerting. Kept
+  // per-key so one bad entry cannot affect any OTHER target
+  // (security-gate finding on #12440).
+  invalidKeys: ReadonlySet<string>;
+  // The whole env failed to parse (bad JSON / non-object): key names are
+  // unknowable, so every primary target is treated as invalid-entry.
+  unparseable: boolean;
+} {
+  const byTarget = new Map<string, number>();
+  const invalidKeys = new Set<string>();
+  if (!raw || raw.trim() === '') {
+    return {byTarget, invalidKeys, unparseable: false};
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return result;
+    return {byTarget, invalidKeys, unparseable: true};
   }
-  if (typeof parsed !== 'object' || parsed === null) return result;
+  // Arrays pass the object check but read as {"0": value, ...} — index keys
+  // would land primary targets in primary_without_floor instead of
+  // primary_floor_config_invalid, and #12443's monitor keys off that
+  // distinction. Same fail-closed outcome either way; keep the metric honest.
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {byTarget, invalidKeys, unparseable: true};
+  }
   for (const [key, value] of Object.entries(parsed)) {
     const floor = Number(value);
     if (Number.isFinite(floor) && floor > 0) {
-      result.set(key.trim().toUpperCase(), Math.floor(floor));
+      byTarget.set(key.trim().toUpperCase(), Math.floor(floor));
+    } else {
+      invalidKeys.add(key.trim().toUpperCase());
     }
   }
-  return result;
+  return {byTarget, invalidKeys, unparseable: false};
 }
 
 // Returns undefined when neither target env is set — the feature is fully off
@@ -191,6 +292,9 @@ export function auroraPoolsSourceConfigFromEnv():
   if (!shadowRaw && !primaryRaw) return undefined;
 
   const ratioRaw = process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO;
+  const floorConfig = parseMinPoolCountByTarget(
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET
+  );
   const parsedRatio = ratioRaw ? Number(ratioRaw) : NaN;
   return {
     shadowTargets: parseTargets(shadowRaw),
@@ -199,9 +303,9 @@ export function auroraPoolsSourceConfigFromEnv():
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
         ? parsedRatio
         : 0.5,
-    minPoolCountByTarget: parseMinPoolCountByTarget(
-      process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET
-    ),
+    minPoolCountByTarget: floorConfig.byTarget,
+    minPoolCountFloorInvalidKeys: floorConfig.invalidKeys,
+    minPoolCountFloorUnparseable: floorConfig.unparseable,
   };
 }
 
@@ -217,6 +321,50 @@ export function resolveAuroraMode(
   if (inTargets(config.primaryTargets)) return 'primary';
   if (inTargets(config.shadowTargets)) return 'shadow';
   return undefined;
+}
+
+export function resolveAuroraModeWithPrimaryFloor(
+  config: AuroraPoolsSourceConfig,
+  chainId: number,
+  protocol: Protocol,
+  logger: Logger,
+  metric: IMetric
+): AuroraTargetMode | undefined {
+  const mode = resolveAuroraMode(config, chainId, protocol);
+  const key = targetKey(chainId, protocol);
+  if (mode !== 'primary' || config.minPoolCountByTarget.has(key)) return mode;
+  if (
+    config.minPoolCountFloorUnparseable ||
+    config.minPoolCountFloorInvalidKeys.has(key)
+  ) {
+    // FAIL CLOSED (review round on #12440): a primary target whose floor
+    // entry (or the whole env) failed to parse downgrades to shadow, same
+    // as an absent entry. Keeping primary here would drop the exact
+    // protection the floor exists for — the first tick after a deploy,
+    // where the ratio guard has no baseline. The cost of the downgrade is
+    // one deploy cycle of freshness; the distinct metric below keeps a typo
+    // distinguishable from a deliberate absence for the #12443 monitor.
+    logger.warn(
+      `Aurora pool source primary_floor_config_invalid for ${key} — downgrading to shadow`
+    );
+    metric.putMetric(
+      'CachePools.aurora.primary_floor_config_invalid',
+      1,
+      MetricLoggerUnit.Count,
+      {chainId: String(chainId), protocol: String(protocol)}
+    );
+    return 'shadow';
+  }
+  logger.warn(
+    `Aurora pool source primary_without_floor for ${key} — downgrading to shadow`
+  );
+  metric.putMetric(
+    'CachePools.aurora.primary_without_floor',
+    1,
+    MetricLoggerUnit.Count,
+    {chainId: String(chainId), protocol: String(protocol)}
+  );
+  return 'shadow';
 }
 
 // --- Connection (mirrors liquidity's createDeployedDataIngestionDbIfConfigured) ---
@@ -305,12 +453,19 @@ export function createUnirouteAuroraDbFromEnv(
 
   return createDataIngestionAuroraKysely({
     ...connection,
-    // Single pilot combo on a small chain — a tiny pool is plenty and keeps
-    // reader connections bounded.
-    max: 2,
+    // The all-chains sweep is batch=50, while the two-minute Robinhood job
+    // must still acquire a connection. The fetch limiter below uses three
+    // slots and each provider holds at most ONE connection inside its slot
+    // (price + list ride the same slot), so one of these four connections is
+    // genuinely always free for the scoped fast job. Checkout should
+    // therefore be near-immediate: 30s is a safety margin that still fails
+    // fast relative to the 2-minute fast-job cadence (the previous 120s
+    // could stall a whole fast tick — security-gate finding on #12440).
+    max: 4,
+    connectionTimeoutMillis: 30_000,
     // Full-set query measured 1.8s prod / 7.1s dev (~127k rows); 30s bounds a
-    // hung scan so it can't pin one of the 2 connections across cron ticks
-    // (the cron's withTimeout detaches, it doesn't cancel).
+    // hung scan so it can't pin a reader connection across cron ticks (the
+    // cron's withTimeout detaches, it doesn't cancel).
     statementTimeoutMillis: 30_000,
   });
 }
@@ -380,7 +535,66 @@ export interface AuroraProviderDeps<
   prices: CurrentTokenPricesService;
   logger: Logger;
   metric: IMetric;
+  // Absent on scoped runs (the 2-minute Robinhood job caches 1-2 combos and
+  // must never queue behind the all-chains sweep — the pool holds a spare
+  // connection precisely for it). Set to the shared semaphore on the sweep.
+  fetchSemaphore?: AsyncSemaphore;
 }
+
+// poolCachingBatchSize is 50 but Aurora's shared Kysely pool is deliberately
+// small. Limit full-set reads to three, below the pool's four connections, so
+// Robinhood's fast job keeps a checkout even during the all-chains sweep.
+export class AsyncSemaphore {
+  private inFlight = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private readonly concurrency: number) {}
+
+  async acquire(): Promise<() => void> {
+    if (this.inFlight < this.concurrency) {
+      this.inFlight++;
+    } else {
+      await new Promise<void>(resolve => this.waiters.push(resolve));
+    }
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.waiters.shift();
+      if (next) next();
+      else this.inFlight--;
+    };
+  }
+
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    const release = await this.acquire();
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+}
+
+// Shared by every sweep-time Aurora full-set read — the per-combo pool
+// fetches AND the V4 PoolKey registry materialization (which runs on the
+// sweep off the same singleton pool; unslotted it could take the 4th
+// connection and starve the fast Robinhood job, review round on #12440).
+// Scoped fast-job runs bypass it entirely (fetchSemaphore left unset).
+export const AURORA_FETCH_SEMAPHORE = new AsyncSemaphore(3);
+
+export interface AuroraV4AdmissionDeps {
+  permissionedHookAddresses(chainId: number): Iterable<string>;
+  permissionedAdapterTokens(chainId: number): Iterable<string>;
+  majorTokens(chainId: number): Iterable<string>;
+}
+
+const DEFAULT_V4_ADMISSION_DEPS: AuroraV4AdmissionDeps = {
+  permissionedHookAddresses: getPermissionedHookAddresses,
+  permissionedAdapterTokens: getPermissionedAdapterTokens,
+  majorTokens: getMajorTokens,
+};
 
 // A wrapped-native price older than this cannot be used for the floor/tvlETH
 // conversion. Matches the lib's DEFAULT_PRICE_STALENESS_SECONDS used for the
@@ -396,11 +610,16 @@ abstract class BaseAuroraPoolsProvider<
     protected readonly deps: AuroraProviderDeps<TListMethod>
   ) {}
 
+  protected withFetchSlot<T>(work: () => Promise<T>): Promise<T> {
+    const semaphore = this.deps.fetchSemaphore;
+    return semaphore ? semaphore.run(work) : work();
+  }
+
   // USD price of the chain's wrapped-native token: converts the ETH-denominated
   // TVL floors into USD and Aurora's USD TVL back into tvlETH, so the
   // serve-side TrackedEthThreshold filters keep working unchanged.
   protected async nativeUsdPrice(ctx: Context): Promise<number> {
-    const wrappedNative = WRAPPED_NATIVE_BY_CHAIN[this.chainId];
+    const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(this.chainId);
     if (!wrappedNative) {
       throw new Error(
         `No wrapped-native address known for chain ${this.chainId} — cannot derive tvlETH`
@@ -435,43 +654,108 @@ export class AuroraV4PoolsProvider
   extends BaseAuroraPoolsProvider<'listAllV4RoutablePools'>
   implements ISubgraphProvider<V4SubgraphPool>
 {
+  constructor(
+    chainId: number,
+    trackedEthThreshold: number,
+    deps: AuroraProviderDeps<'listAllV4RoutablePools'>,
+    private readonly admissionDeps: AuroraV4AdmissionDeps = DEFAULT_V4_ADMISSION_DEPS
+  ) {
+    super(chainId, trackedEthThreshold, deps);
+  }
+
   async getPools(): Promise<V4SubgraphPool[]> {
     const ctx = auroraContext(this.deps.metric);
-    const nativePrice = await this.nativeUsdPrice(ctx);
     // Fetch the FULL set (floor 0) and replicate the subgraph V4 admission
     // union in TS below — a single SQL floor would drop pools the subgraph
     // path includes (the [V4_MIN_TVL_ETH, trackedEthThreshold) high-liquidity
-    // band and the zero-TVL bypass-hook pools).
-    const pools = await this.deps.routablePools.listAllV4RoutablePools(ctx, {
-      chainId: this.chainId as ExtendedChainId,
-      minTvlUsd: 0,
-    });
+    // band and the zero-TVL bypass-hook pools). The native-price lookup rides
+    // the SAME fetch slot: a provider must hold at most one pool connection
+    // at a time, or dozens of concurrent price queries would drain the pool
+    // outside the semaphore's control (security-gate finding on #12440).
+    const {nativePrice, pools} = await this.withFetchSlot(async () => ({
+      nativePrice: await this.nativeUsdPrice(ctx),
+      pools: await this.deps.routablePools.listAllV4RoutablePools(ctx, {
+        chainId: this.chainId as ExtendedChainId,
+        minTvlUsd: 0,
+      }),
+    }));
 
-    // Subgraph V4 admission = union of three query families
+    // Subgraph V4 admission = union of four query families
     // (sor-providers/subgraphProvider.ts getPools):
     //   (a) tvlETH > trackedEthThreshold
     //   (b) liquidity > 0 AND tvlETH > V4_MIN_TVL_ETH
     //   (c) hooks ∈ TVL-bypass registries (no floor)
-    // A fourth family (permissioned hooks, adapter-bounded) is NOT replicated:
-    // it is empty for Robinhood, the only AURORA_SUPPORTED_TARGETS chain. It
-    // must be added before the allowlist grows to a permissioned-hooks chain.
-    const bypassHooks = getTvlBypassHookAddresses(this.chainId);
-    const admitted = (
+    //   (d) permissioned hook + bounded adapter/known-token pair (no floor)
+    const bypassHooks = new Set(
+      [...(getTvlBypassHookAddresses(this.chainId) ?? [])].map(hook =>
+        hook.toLowerCase()
+      )
+    );
+    // Build these once per fetch to keep every row comparison bounded and
+    // normalized. Permissioned pairs need an adapter endpoint; a major/major
+    // pool under a public hook is not an owned, finite admission family.
+    const permissionedHooks = new Set(
+      [...this.admissionDeps.permissionedHookAddresses(this.chainId)].map(
+        hook => hook.toLowerCase()
+      )
+    );
+    const permissionedAdapters = new Set(
+      [...this.admissionDeps.permissionedAdapterTokens(this.chainId)].map(
+        token => token.toLowerCase()
+      )
+    );
+    const permissionedKnownTokens = new Set([
+      ...permissionedAdapters,
+      ...[...this.admissionDeps.majorTokens(this.chainId)].map(token =>
+        token.toLowerCase()
+      ),
+    ]);
+    const canonicalFees = new Set([100, 500, 3000, 10000]);
+    const canonicalTickSpacings = new Set([1, 10, 60, 200]);
+    type V4AdmissionFamily =
+      | 'threshold'
+      | 'liquidity_band'
+      | 'bypass_hook'
+      | 'permissioned';
+    const admissionFamily = (
       tvlEth: number,
       liquidity: string,
-      hooks: string
-    ): boolean => {
-      if (tvlEth > this.trackedEthThreshold) return true;
+      hooks: string,
+      token0: string,
+      token1: string,
+      feeBips: number,
+      tickSpacing: number
+    ): V4AdmissionFamily | undefined => {
+      if (tvlEth > this.trackedEthThreshold) return 'threshold';
       if (parsePositiveLiquidity(liquidity) && tvlEth > V4_MIN_TVL_ETH) {
-        return true;
+        return 'liquidity_band';
       }
-      return bypassHooks?.has(hooks) ?? false;
+      if (bypassHooks.has(hooks)) return 'bypass_hook';
+      const token0IsAdapter = permissionedAdapters.has(token0);
+      const token1IsAdapter = permissionedAdapters.has(token1);
+      if (
+        parsePositiveLiquidity(liquidity) &&
+        permissionedHooks.has(hooks) &&
+        canonicalFees.has(feeBips) &&
+        canonicalTickSpacings.has(tickSpacing) &&
+        ((token0IsAdapter && permissionedKnownTokens.has(token1)) ||
+          (token1IsAdapter && permissionedKnownTokens.has(token0)))
+      ) {
+        return 'permissioned';
+      }
+      return undefined;
     };
 
     const impliedSourceTokens =
       IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
     const result: V4SubgraphPool[] = [];
     let droppedNullDecimals = 0;
+    const admittedByFamily: Record<V4AdmissionFamily, number> = {
+      threshold: 0,
+      liquidity_band: 0,
+      bypass_hook: 0,
+      permissioned: 0,
+    };
     // The implied top-up is spot-derived and therefore attacker-influenced:
     // anyone can initialize a pool at an arbitrary price and donate token
     // reserve, minting phantom TVL. The cap keeps that useful for ADMISSION
@@ -484,6 +768,8 @@ export class AuroraV4PoolsProvider
     let impliedCapped = 0;
     for (const pool of pools) {
       const hooks = (pool.hooksAddress ?? ZERO_ADDRESS).toLowerCase();
+      const token0 = pool.token0Address.toLowerCase();
+      const token1 = pool.token1Address.toLowerCase();
       // SQL tvlUsd counts only sides with a fresh price row. Fresh launchpad
       // tokens have none, so their pools (whole token supply vs a near-empty
       // quote side) would compute ≈$0 and fail admission even though the
@@ -493,14 +779,34 @@ export class AuroraV4PoolsProvider
       if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
       const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
       const tvlUsd = pool.tvlUsd + impliedUsd;
+      // On non-ETH-native chains, the historical ETH-named thresholds are
+      // native-unit thresholds: subgraph derivedETH is derivedNative there.
       const tvlEth = tvlUsd / nativePrice;
-      if (!admitted(tvlEth, pool.liquidity, hooks)) continue;
+      const family = admissionFamily(
+        tvlEth,
+        pool.liquidity,
+        hooks,
+        token0,
+        token1,
+        pool.feeBips,
+        pool.tickSpacing
+      );
+      if (!family) continue;
+      admittedByFamily[family]++;
       // Count only admission FLIPS — pools rescued by the top-up, not every
       // pool where the code path fired. This is the number the shadow
       // readout compares against the missing-pool gap.
       if (
         impliedUsd > 0 &&
-        !admitted(pool.tvlUsd / nativePrice, pool.liquidity, hooks)
+        !admissionFamily(
+          pool.tvlUsd / nativePrice,
+          pool.liquidity,
+          hooks,
+          token0,
+          token1,
+          pool.feeBips,
+          pool.tickSpacing
+        )
       ) {
         impliedPriced++;
       }
@@ -517,13 +823,13 @@ export class AuroraV4PoolsProvider
         hooks,
         liquidity: pool.liquidity,
         token0: {
-          id: pool.token0Address.toLowerCase(),
+          id: token0,
           symbol: pool.token0Symbol ?? undefined,
           name: pool.token0Name ?? undefined,
           decimals: String(pool.token0Decimals),
         },
         token1: {
-          id: pool.token1Address.toLowerCase(),
+          id: token1,
           symbol: pool.token1Symbol ?? undefined,
           name: pool.token1Name ?? undefined,
           decimals: String(pool.token1Decimals),
@@ -556,6 +862,14 @@ export class AuroraV4PoolsProvider
         {chainId: String(this.chainId), protocol: String(Protocol.V4)}
       );
     }
+    for (const [family, count] of Object.entries(admittedByFamily)) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.admitted_by_family',
+        count,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V4), family}
+      );
+    }
     return result;
   }
 }
@@ -574,11 +888,15 @@ export class AuroraV3PoolsProvider
 {
   async getPools(): Promise<V3SubgraphPool[]> {
     const ctx = auroraContext(this.deps.metric);
-    const nativePrice = await this.nativeUsdPrice(ctx);
-    const pools = await this.deps.routablePools.listAllV3RoutablePools(ctx, {
-      chainId: this.chainId as ExtendedChainId,
-      minTvlUsd: 0,
-    });
+    // Price lookup inside the fetch slot for the same one-connection-per-
+    // provider invariant as V4.
+    const {nativePrice, pools} = await this.withFetchSlot(async () => ({
+      nativePrice: await this.nativeUsdPrice(ctx),
+      pools: await this.deps.routablePools.listAllV3RoutablePools(ctx, {
+        chainId: this.chainId as ExtendedChainId,
+        minTvlUsd: 0,
+      }),
+    }));
 
     const impliedSourceTokens =
       IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
@@ -586,21 +904,30 @@ export class AuroraV3PoolsProvider
     const result: V3SubgraphPool[] = [];
     let impliedPriced = 0;
     let impliedCapped = 0;
+    const admittedByFamily = {threshold: 0, exact_zero: 0};
     for (const pool of pools) {
       const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
       if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
       const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
       const tvlUsd = pool.tvlUsd + impliedUsd;
+      // On non-ETH-native chains, the historical ETH-named thresholds are
+      // native-unit thresholds: subgraph derivedETH is derivedNative there.
       const tvlEth = tvlUsd / nativePrice;
       // Family (b) is judged on the RAW priced-side TVL (pre-top-up): it
       // mirrors the subgraph's exact `totalValueLockedETH: "0"` — the cohort
       // the pricing pipeline can't see. The top-up only feeds family (a).
-      const admits = (tvlEthForA: number) =>
-        tvlEthForA > this.trackedEthThreshold ||
-        (parsePositiveLiquidity(pool.liquidity) && pool.tvlUsd === 0);
-      if (!admits(tvlEth)) continue;
+      const admissionFamily = (tvlEthForThreshold: number) => {
+        if (tvlEthForThreshold > this.trackedEthThreshold) return 'threshold';
+        if (parsePositiveLiquidity(pool.liquidity) && pool.tvlUsd === 0) {
+          return 'exact_zero';
+        }
+        return undefined;
+      };
+      const family = admissionFamily(tvlEth);
+      if (!family) continue;
+      admittedByFamily[family]++;
       // Count only admission FLIPS (rescued by the top-up), matching V4.
-      if (impliedUsd > 0 && !admits(pool.tvlUsd / nativePrice)) {
+      if (impliedUsd > 0 && !admissionFamily(pool.tvlUsd / nativePrice)) {
         impliedPriced++;
       }
       result.push({
@@ -627,6 +954,14 @@ export class AuroraV3PoolsProvider
         impliedCapped,
         MetricLoggerUnit.Count,
         {chainId: String(this.chainId), protocol: String(Protocol.V3)}
+      );
+    }
+    for (const [family, count] of Object.entries(admittedByFamily)) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.admitted_by_family',
+        count,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V3), family}
       );
     }
     return result;
@@ -1064,7 +1399,13 @@ export function applyAuroraPoolSources<
   chainProtocols: T[],
   thresholds: AuroraSourceThresholds,
   logger: Logger,
-  metric: IMetric
+  metric: IMetric,
+  options?: {
+    // True for 'only'-filtered runs (the fast Robinhood job): their one or
+    // two fetches bypass the sweep's fetch semaphore and ride the spare pool
+    // connection instead of queueing FIFO behind ~40 sweep fetches.
+    scopedRun?: boolean;
+  }
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
   if (!config) return;
@@ -1094,11 +1435,18 @@ export function applyAuroraPoolSources<
     prices: createAuroraCurrentTokenPricesService(db, 'uniroute'),
     logger,
     metric,
+    fetchSemaphore: options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE,
   };
 
   for (const chainProtocol of chainProtocols) {
     const {chainId, protocol} = chainProtocol;
-    const mode = resolveAuroraMode(config, chainId, protocol);
+    const mode = resolveAuroraModeWithPrimaryFloor(
+      config,
+      chainId,
+      protocol,
+      logger,
+      metric
+    );
     if (!mode) continue;
 
     if (!AURORA_SUPPORTED_TARGETS.has(targetKey(chainId, protocol))) {

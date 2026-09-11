@@ -865,7 +865,10 @@ export async function cacheAllPools(
     chainProtocols,
     {trackedEthThresholdFor},
     cronLogger,
-    metricInstance
+    metricInstance,
+    // Scoped runs (the 2-minute Robinhood job) bypass the sweep's Aurora
+    // fetch semaphore so they never queue behind the all-chains batch.
+    {scopedRun: only !== undefined && only.length > 0}
   );
 
   cronLogger.info(

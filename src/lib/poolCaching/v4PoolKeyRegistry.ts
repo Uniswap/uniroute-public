@@ -25,7 +25,11 @@ import type {ExtendedChainId} from '@uniswap/lib-data-api';
 import type {V4PoolKey} from '@uniswap/lib-data-ingestion-aurora';
 import {createAuroraRoutablePoolsService} from '@uniswap/lib-data-ingestion-aurora';
 
-import {auroraContext, getOrCreateUnirouteAuroraDb} from './auroraPoolsSource';
+import {
+  AURORA_FETCH_SEMAPHORE,
+  auroraContext,
+  getOrCreateUnirouteAuroraDb,
+} from './auroraPoolsSource';
 import {nativeOnChain} from './util/nativeOnChain';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
@@ -425,6 +429,10 @@ export async function materializeV4PoolKeyRegistries(
   for (const chainId of chains) {
     const tags = {chainId: String(chainId)};
     try {
+      // Registry reads are sweep-time work on the shared singleton pool:
+      // take a sweep fetch slot so they queue with the per-combo fetches
+      // instead of occupying the connection reserved for the fast job.
+      //
       // Server-side filter: the unfiltered read ships the chain's ENTIRE
       // PoolKey set and blows the reader's statement_timeout on Base (>1M
       // rows, dominated by hooked launchpad pools every one of which
@@ -432,9 +440,8 @@ export async function materializeV4PoolKeyRegistries(
       // could include come back: hookless off-grid tiers plus currently
       // admissible hooks. The build's own checks stay as the trust boundary —
       // this is a volume optimization, not policy.
-      const rows = await routablePools.listAllV4PoolKeys(
-        auroraContext(metric),
-        {
+      const rows = await AURORA_FETCH_SEMAPHORE.run(() =>
+        routablePools.listAllV4PoolKeys(auroraContext(metric), {
           chainId: chainId as ExtendedChainId,
           poolKeyFilter: {
             // The filter matches the stored column RAW (lower() in SQL is a
@@ -450,7 +457,7 @@ export async function materializeV4PoolKeyRegistries(
               CANONICAL_V4_FEE_TICK_SPACINGS
             ).map(([fee, tickSpacing]) => [Number(fee), tickSpacing]),
           },
-        }
+        })
       );
       const key = S3_V4_POOLKEY_REGISTRY_KEY(chainId);
       const incumbent = await headIncumbentRegistry(s3, config.s3Bucket, key);

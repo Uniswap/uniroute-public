@@ -3,17 +3,26 @@ import {Protocol} from '@uniswap/router-sdk';
 
 import {
   AURORA_SUPPORTED_TARGETS,
+  AsyncSemaphore,
   AuroraSourcedProvider,
   AuroraV3PoolsProvider,
   AuroraV4PoolsProvider,
+  IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN,
+  WRAPPED_NATIVE_BY_CHAIN,
   auroraPoolsSourceConfigFromEnv,
   computePoolParity,
   impliedOneHopTvlUsd,
   resetAuroraPoolCountBaselinesForTesting,
   resolveAuroraMode,
+  resolveAuroraModeWithPrimaryFloor,
   targetKey,
 } from './auroraPoolsSource';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
+import {createChainProtocols} from './cacheConfig';
+import {
+  resetDynamicZlcaHooksForTest,
+  setDynamicZlcaHooks,
+} from './util/dynamicZlcaHooks';
 import {
   ISubgraphProvider,
   V3SubgraphPool,
@@ -141,12 +150,199 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     expect(floors.get('4663:V4')).toBe(40000);
     expect(floors.has('1:V3')).toBe(false);
     expect(floors.has('8453:V4')).toBe(false);
+    // Dropped entries are tracked per key so a value typo cannot silently
+    // downgrade ITS serving primary combo — while other targets keep the
+    // strict missing-floor rule.
+    const config = auroraPoolsSourceConfigFromEnv()!;
+    expect(config.minPoolCountFloorInvalidKeys).toEqual(
+      new Set(['1:V3', '8453:V4'])
+    );
+    expect(config.minPoolCountFloorUnparseable).toBe(false);
   });
 
-  it('treats malformed floor JSON as no floors (safety net must not block boot)', () => {
+  it('treats malformed floor JSON as no floors but flags it unparseable', () => {
     process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = 'not json';
-    expect(auroraPoolsSourceConfigFromEnv()!.minPoolCountByTarget.size).toBe(0);
+    const config = auroraPoolsSourceConfigFromEnv()!;
+    expect(config.minPoolCountByTarget.size).toBe(0);
+    expect(config.minPoolCountFloorUnparseable).toBe(true);
+  });
+
+  it('treats a JSON array as unparseable, not as index-keyed entries', () => {
+    // '[40000]' parses to an object with key "0" — without the array guard a
+    // primary target would read as primary_without_floor (deliberate absence)
+    // instead of primary_floor_config_invalid (typo), and #12443's monitor
+    // keys off that distinction.
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '[40000]';
+    const config = auroraPoolsSourceConfigFromEnv()!;
+    expect(config.minPoolCountByTarget.size).toBe(0);
+    expect(config.minPoolCountFloorUnparseable).toBe(true);
+  });
+});
+
+describe('resolveAuroraModeWithPrimaryFloor', () => {
+  it('downgrades a primary target without an absolute floor to shadow', () => {
+    const metric = new FakeMetric();
+    const warnings: string[] = [];
+    const logger: Logger = {
+      ...noopLogger,
+      warn: message => warnings.push(message),
+    };
+    const config = {
+      shadowTargets: new Set<string>(),
+      primaryTargets: new Set([targetKey(1, Protocol.V3)]),
+      minPoolCountRatio: 0.5,
+      minPoolCountByTarget: new Map<string, number>(),
+      minPoolCountFloorInvalidKeys: new Set<string>(),
+      minPoolCountFloorUnparseable: false,
+    };
+
+    expect(
+      resolveAuroraModeWithPrimaryFloor(config, 1, Protocol.V3, logger, metric)
+    ).toBe('shadow');
+    expect(warnings[0]).toMatch(/^Aurora pool source primary_without_floor/);
+    expect(
+      metric.byKey('CachePools.aurora.primary_without_floor')[0]!.tags
+    ).toEqual({
+      chainId: '1',
+      protocol: String(Protocol.V3),
+    });
+  });
+
+  it('downgrades an invalid floor entry to shadow (fail closed), scoped to that key', () => {
+    const metric = new FakeMetric();
+    const warnings: string[] = [];
+    const logger: Logger = {
+      ...noopLogger,
+      warn: message => warnings.push(message),
+    };
+    const config = {
+      shadowTargets: new Set<string>(),
+      primaryTargets: new Set([
+        targetKey(4663, Protocol.V4),
+        targetKey(1, Protocol.V3),
+      ]),
+      minPoolCountRatio: 0.5,
+      minPoolCountByTarget: new Map<string, number>(),
+      minPoolCountFloorInvalidKeys: new Set([targetKey(4663, Protocol.V4)]),
+      minPoolCountFloorUnparseable: false,
+    };
+
+    // The typo'd entry downgrades ITS combo to shadow — a floorless primary
+    // is unprotected on the first post-deploy tick — under the typo-specific
+    // metric...
+    expect(
+      resolveAuroraModeWithPrimaryFloor(
+        config,
+        4663,
+        Protocol.V4,
+        logger,
+        metric
+      )
+    ).toBe('shadow');
+    expect(warnings[0]).toMatch(
+      /^Aurora pool source primary_floor_config_invalid/
+    );
+    expect(
+      metric.byKey('CachePools.aurora.primary_floor_config_invalid')
+    ).toHaveLength(1);
+    // ...while a target with NO entry at all downgrades under the
+    // absence-specific metric.
+    expect(
+      resolveAuroraModeWithPrimaryFloor(config, 1, Protocol.V3, logger, metric)
+    ).toBe('shadow');
+    expect(
+      metric.byKey('CachePools.aurora.primary_without_floor')
+    ).toHaveLength(1);
+  });
+
+  it('downgrades every primary target to shadow on an unparseable floor env', () => {
+    const metric = new FakeMetric();
+    const config = {
+      shadowTargets: new Set<string>(),
+      primaryTargets: new Set([targetKey(4663, Protocol.V4)]),
+      minPoolCountRatio: 0.5,
+      minPoolCountByTarget: new Map<string, number>(),
+      minPoolCountFloorInvalidKeys: new Set<string>(),
+      minPoolCountFloorUnparseable: true,
+    };
+    expect(
+      resolveAuroraModeWithPrimaryFloor(
+        config,
+        4663,
+        Protocol.V4,
+        noopLogger,
+        metric
+      )
+    ).toBe('shadow');
+    expect(
+      metric.byKey('CachePools.aurora.primary_floor_config_invalid')
+    ).toHaveLength(1);
+  });
+
+  it('a valid floor entry keeps primary untouched', () => {
+    const metric = new FakeMetric();
+    const config = {
+      shadowTargets: new Set<string>(),
+      primaryTargets: new Set([targetKey(4663, Protocol.V4)]),
+      minPoolCountRatio: 0.5,
+      minPoolCountByTarget: new Map([[targetKey(4663, Protocol.V4), 40000]]),
+      minPoolCountFloorInvalidKeys: new Set<string>(),
+      minPoolCountFloorUnparseable: false,
+    };
+    expect(
+      resolveAuroraModeWithPrimaryFloor(
+        config,
+        4663,
+        Protocol.V4,
+        noopLogger,
+        metric
+      )
+    ).toBe('primary');
+    expect(metric.emitted).toHaveLength(0);
+  });
+});
+
+describe('AsyncSemaphore', () => {
+  it('holds a fourth Aurora fetch until one of three active fetches completes', async () => {
+    const semaphore = new AsyncSemaphore(3);
+    const releaseFirst = await semaphore.acquire();
+    const releaseSecond = await semaphore.acquire();
+    const releaseThird = await semaphore.acquire();
+    let fourthAcquired = false;
+    const fourth = semaphore.acquire().then(release => {
+      fourthAcquired = true;
+      return release;
+    });
+
+    await Promise.resolve();
+    expect(fourthAcquired).toBe(false);
+    releaseFirst();
+    const releaseFourth = await fourth;
+    expect(fourthAcquired).toBe(true);
+    releaseSecond();
+    releaseThird();
+    releaseFourth();
+  });
+
+  it('releases the slot when run() work throws, so a queued acquire still proceeds', async () => {
+    const semaphore = new AsyncSemaphore(1);
+    let queuedRan = false;
+    const queued = semaphore.run(async () => {
+      queuedRan = true;
+      return 'ok';
+    });
+    await expect(
+      semaphore.run(async () => {
+        throw new Error('fetch failed');
+      })
+    ).rejects.toThrow('fetch failed');
+    // The rejecting run above held the only slot; if rejection leaked the
+    // slot, this await would hang and the pool-sizing math (one connection
+    // always free for the fast job) would be violated in production.
+    await expect(queued).resolves.toBe('ok');
+    expect(queuedRan).toBe(true);
   });
 });
 
@@ -380,9 +576,12 @@ describe('AuroraV4PoolsProvider', () => {
     overrides: Partial<{
       poolId: string;
       token0Address: string;
+      token1Address: string;
       liquidity: string;
       tvlUsd: number;
       hooksAddress: string | null;
+      feeBips: number;
+      tickSpacing: number;
       token1Decimals: number | null;
       sqrtPriceX96: string;
       tvlToken0: string;
@@ -395,9 +594,10 @@ describe('AuroraV4PoolsProvider', () => {
       poolId: overrides.poolId ?? '0xABCD',
       token0Address:
         overrides.token0Address ?? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
-      token1Address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-      feeBips: 3000,
-      tickSpacing: 60,
+      token1Address:
+        overrides.token1Address ?? '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      feeBips: overrides.feeBips ?? 3000,
+      tickSpacing: overrides.tickSpacing ?? 60,
       hooksAddress:
         overrides.hooksAddress !== undefined ? overrides.hooksAddress : null,
       liquidity: overrides.liquidity ?? '42',
@@ -465,6 +665,7 @@ describe('AuroraV4PoolsProvider', () => {
       }),
     ];
     let capturedMinTvlUsd: number | undefined;
+    const metric = new FakeMetric();
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
         listAllV4RoutablePools: async (_ctx, options) => {
@@ -474,12 +675,147 @@ describe('AuroraV4PoolsProvider', () => {
       },
       prices: freshPrices(),
       logger: noopLogger,
-      metric: new FakeMetric(),
+      metric,
     });
 
     const pools = await provider.getPools();
     expect(capturedMinTvlUsd).toBe(0); // full set fetched, union applied in TS
     expect(pools.map(p => p.id).sort()).toEqual(['0xa1', '0xa2', '0xa5']);
+    const families = metric.byKey('CachePools.aurora.admitted_by_family');
+    expect(families).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'threshold'}),
+        }),
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'liquidity_band'}),
+        }),
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'bypass_hook'}),
+        }),
+        expect.objectContaining({
+          value: 0,
+          tags: expect.objectContaining({family: 'permissioned'}),
+        }),
+      ])
+    );
+  });
+
+  it('admits only bounded canonical permissioned-hook pairs', async () => {
+    const chainId = 1;
+    const hook = '0x0000000000000000000000000000000000000abc';
+    const adapter = '0x0000000000000000000000000000000000000a11';
+    const major = '0x0000000000000000000000000000000000000b22';
+    const unknown = '0x0000000000000000000000000000000000000c33';
+    const deps = {
+      permissionedHookAddresses: () => [hook],
+      permissionedAdapterTokens: () => [adapter],
+      majorTokens: () => [major],
+    };
+    const mkProvider = (row: ReturnType<typeof v4Row>) =>
+      new AuroraV4PoolsProvider(
+        chainId,
+        0.01,
+        {
+          routablePools: {listAllV4RoutablePools: async () => [row]},
+          prices: {
+            batchGet: async () =>
+              new Map([
+                [
+                  '1_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+                  {
+                    chainId,
+                    tokenAddress: undefined as never,
+                    priceUsd: 2000,
+                    timestamp: new Date(),
+                    updatedAt: new Date(),
+                  },
+                ],
+              ]),
+          },
+          logger: noopLogger,
+          metric: new FakeMetric(),
+        },
+        deps
+      );
+    const admitted = v4Row({
+      hooksAddress: hook.toUpperCase(),
+      token0Address: adapter,
+      token1Address: major,
+      tvlUsd: 0,
+      liquidity: '1',
+    });
+    await expect(mkProvider(admitted).getPools()).resolves.toHaveLength(1);
+    await expect(
+      mkProvider({
+        ...admitted,
+        token0Address: major,
+        token1Address: adapter,
+      }).getPools()
+    ).resolves.toHaveLength(1);
+    await expect(
+      mkProvider({...admitted, token1Address: adapter}).getPools()
+    ).resolves.toHaveLength(1);
+    await expect(
+      mkProvider({...admitted, hooksAddress: unknown}).getPools()
+    ).resolves.toHaveLength(0);
+    await expect(
+      mkProvider({
+        ...admitted,
+        token0Address: major,
+        token1Address: major,
+      }).getPools()
+    ).resolves.toHaveLength(0);
+    await expect(
+      mkProvider({...admitted, token1Address: unknown}).getPools()
+    ).resolves.toHaveLength(0);
+    await expect(
+      mkProvider({...admitted, feeBips: 42}).getPools()
+    ).resolves.toHaveLength(0);
+    await expect(
+      mkProvider({...admitted, tickSpacing: 42}).getPools()
+    ).resolves.toHaveLength(0);
+    await expect(
+      mkProvider({...admitted, liquidity: '0'}).getPools()
+    ).resolves.toHaveLength(0);
+  });
+
+  it('admits a dynamic ZLCA hook through the live bypass registry', async () => {
+    const chainId = 1;
+    const hook = '0x0000000000000000000000000000000000000d44';
+    setDynamicZlcaHooks(chainId, new Map([[hook, 1n]]));
+    try {
+      const provider = new AuroraV4PoolsProvider(chainId, 0.01, {
+        routablePools: {
+          listAllV4RoutablePools: async () => [
+            v4Row({hooksAddress: hook, tvlUsd: 0, liquidity: '0'}),
+          ],
+        },
+        prices: {
+          batchGet: async () =>
+            new Map([
+              [
+                '1_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+                {
+                  chainId,
+                  tokenAddress: undefined as never,
+                  priceUsd: 2000,
+                  timestamp: new Date(),
+                  updatedAt: new Date(),
+                },
+              ],
+            ]),
+        },
+        logger: noopLogger,
+        metric: new FakeMetric(),
+      });
+      await expect(provider.getPools()).resolves.toHaveLength(1);
+    } finally {
+      resetDynamicZlcaHooksForTest();
+    }
   });
 
   it('admits a launchpad-shaped pool via implied one-hop pricing of the unpriced side', async () => {
@@ -770,7 +1106,7 @@ describe('AuroraV4PoolsProvider', () => {
   });
 
   it('throws for chains without a known wrapped-native address', async () => {
-    const provider = new AuroraV4PoolsProvider(1, 0.01, {
+    const provider = new AuroraV4PoolsProvider(999999, 0.01, {
       routablePools: {
         listAllV4RoutablePools: async () => [],
       },
@@ -868,13 +1204,26 @@ describe('AuroraV3PoolsProvider', () => {
       // Zero TVL without liquidity: dropped
       v3Row({poolAddress: '0xA4', tvlUsd: 0, liquidity: '0'}),
     ];
-    const pools = await mkProvider(rows).getPools();
+    const metric = new FakeMetric();
+    const pools = await mkProvider(rows, metric).getPools();
     expect(pools.map(p => p.id).sort()).toEqual(['0xa1', '0xa2']);
     const a1 = pools.find(p => p.id === '0xa1')!;
     expect(a1.feeTier).toBe('3000');
     expect(a1.token0.id).toBe('0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2');
     expect(a1.tvlETH).toBeCloseTo(2, 9);
     expect(a1.tvlUSD).toBe(4000);
+    expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'threshold'}),
+        }),
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'exact_zero'}),
+        }),
+      ])
+    );
   });
 
   it('admits a launchpad-shaped pool via implied pricing and counts only flips', async () => {
@@ -945,10 +1294,59 @@ describe('targetKey', () => {
 });
 
 describe('AURORA_SUPPORTED_TARGETS', () => {
-  it('is scoped to Robinhood V4 + V3 only', () => {
-    expect([...AURORA_SUPPORTED_TARGETS].sort()).toEqual([
-      '4663:V3',
-      '4663:V4',
-    ]);
+  it('covers exactly the V3/V4 cron matrix minus Base and Ink, never V2', () => {
+    // Derived from the live cron matrix so adding or removing a cron target
+    // fails this test until the Aurora allowlist decision is revisited.
+    const CHAIN_ID_BASE = 8453;
+    const CHAIN_ID_INK = 57073;
+    const expected = new Set(
+      createChainProtocols(noopLogger, new FakeMetric())
+        .filter(
+          cp => cp.protocol === Protocol.V3 || cp.protocol === Protocol.V4
+        )
+        .filter(
+          cp => cp.chainId !== CHAIN_ID_BASE && cp.chainId !== CHAIN_ID_INK
+        )
+        .map(cp => targetKey(cp.chainId, cp.protocol))
+    );
+    expect(new Set(AURORA_SUPPORTED_TARGETS)).toEqual(expected);
+    for (const key of ['8453:V4', '8453:V3', '57073:V4', '57073:V3', '1:V2']) {
+      expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(false);
+    }
+  });
+});
+
+describe('Aurora registry lookups', () => {
+  it('derives wrapped-native addresses from hardcoded chain definitions', () => {
+    expect(WRAPPED_NATIVE_BY_CHAIN.get(1)).toBe(
+      '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'
+    );
+    expect(WRAPPED_NATIVE_BY_CHAIN.get(137)).toBe(
+      '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270'
+    );
+    expect(WRAPPED_NATIVE_BY_CHAIN.get(4663)).toBe(
+      '0x0bd7d308f8e1639fab988df18a8011f41eacad73'
+    );
+  });
+
+  it('has a wrapped-native entry for every Aurora-supported chain', () => {
+    // A supported combo without a wrapped-native address fails only at
+    // runtime, as a per-tick shadow_error/init failure for that combo — this
+    // pins the invariant so a future matrix addition fails HERE instead.
+    const missing = [...AURORA_SUPPORTED_TARGETS]
+      .map(key => Number(key.split(':')[0]))
+      .filter(chainId => !WRAPPED_NATIVE_BY_CHAIN.has(chainId));
+    expect(missing).toEqual([]);
+  });
+
+  it('keeps implied-price sources opt-in for Robinhood only', () => {
+    expect(IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[4663]).toEqual(
+      new Set([
+        '0x0000000000000000000000000000000000000000',
+        '0x0bd7d308f8e1639fab988df18a8011f41eacad73',
+        '0x5fc5360d0400a0fd4f2af552add042d716f1d168',
+      ])
+    );
+    expect(IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[1]).toBeUndefined();
   });
 });
