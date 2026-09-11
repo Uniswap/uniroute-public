@@ -381,6 +381,49 @@ describe('v4PoolKeyRegistryFormat', () => {
     );
   });
 
+  it('admits the X Layer Arrakis pool PoolKey when 196 is hooked-enabled (ROUTE-1926)', () => {
+    const previous = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+    process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS =
+      '1,10,56,137,196,4663,8453,42161';
+    try {
+      // The partner-reported X Layer pool, verbatim from Aurora
+      // v4_pool_metadata: dynamic-fee sentinel with tickSpacing 4 — off-grid
+      // because the PAIR (fee, tickSpacing) is what canonicality means; 4
+      // alone is on the grid (375/4).
+      expect(
+        registryAdmissibleHookAddresses(196).includes(ARRAKIS_PRIVATE_HOOK_V2)
+      ).toBe(true);
+      const {file, stats} = buildV4PoolKeyRegistry(
+        196,
+        [
+          row({
+            feeBips: DYNAMIC_FEE_FLAG,
+            tickSpacing: 4,
+            hooksAddress: ARRAKIS_PRIVATE_HOOK_V2,
+            poolId: V4SDKPool.getPoolId(
+              new Token(196, USDC, 18),
+              new Token(196, SIERRA, 18),
+              DYNAMIC_FEE_FLAG,
+              4,
+              ARRAKIS_PRIVATE_HOOK_V2
+            ).toLowerCase(),
+          }),
+        ],
+        GENERATED_AT
+      );
+      expect(stats.includedHooked).toBe(1);
+      expect(file.pairs[v4RegistryPairKey(USDC, SIERRA)]).toEqual([
+        [DYNAMIC_FEE_FLAG, 4, ARRAKIS_PRIVATE_HOOK_V2],
+      ]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+      } else {
+        process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = previous;
+      }
+    }
+  });
+
   it('registryAdmissibleHookAddresses lists exactly the per-chain admissible set', () => {
     const hookedChains = new Set([8453]);
     const addresses = registryAdmissibleHookAddresses(8453, hookedChains);
