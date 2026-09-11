@@ -28,6 +28,7 @@ import {
   HOOKS_ADDRESSES_ALLOWLIST,
 } from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
+import {MAX_REASONABLE_V4_FEE_TIER_PPM} from './feeTierSanityCeiling';
 
 export const V4_POOLKEY_REGISTRY_VERSION = 1;
 
@@ -115,9 +116,11 @@ export function v4PoolKeyRegistryHookedChainsFromEnv(): ReadonlySet<number> {
   );
 }
 
-// Mirrors MAX_REASONABLE_V4_FEE_TIER_PPM in v4HooksPoolsFiltering.ts. Keep
-// this local: the format is also used on the serving path, not snapshot admission.
-export const MAX_REASONABLE_V4_FEE_TIER_PPM = 110_000;
+// Single source of the routability ceiling is feeTierSanityCeiling.ts;
+// re-exported here because the registry format is consumed on both snapshot
+// admission and the serving path, and callers import the ceiling from this
+// module (e.g. v4PoolKeyRegistry.ts).
+export {MAX_REASONABLE_V4_FEE_TIER_PPM};
 const MAX_ENTRY_TICK_SPACING = 32_767;
 const HOOK_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/;
 

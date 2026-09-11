@@ -2,7 +2,7 @@
  * Ported from routing-api/lib/util/v4HooksPoolsFiltering.ts
  */
 
-import {DYNAMIC_FEE_FLAG, Hook, HookOptions} from '@uniswap/v4-sdk';
+import {Hook, HookOptions} from '@uniswap/v4-sdk';
 import {
   getAdapterHookConfig,
   getPermissionedHookAddresses,
@@ -19,6 +19,7 @@ import {MetricLoggerUnit} from '../sor-providers/util/metric';
 import {isPoolFeeDynamic} from './isPoolFeeDynamic';
 import {nativeOnChain} from './nativeOnChain';
 import {getMajorTokens, isMajorPair} from './majorTokens';
+import {isStaticFeeWithinSanityCeiling} from './feeTierSanityCeiling';
 
 type V4PoolGroupingKey = string;
 const TOP_GROUPED_V4_POOLS = 10;
@@ -42,22 +43,8 @@ const CANONICAL_V4_FEE_TICK_SPACINGS: Record<string, string> = {
   '10000': '200',
 };
 
-// V4 permits any static LP fee up to LPFeeLibrary.MAX_LP_FEE (1,000,000 ppm =
-// 100%), with or without a hook, and permissionless pool creation means
-// nothing on-chain stops a fee tier that is orders of magnitude above any
-// real trading fee. v3's highest enabled tier tops out at 10000 (1%,
-// FeeAmount.HIGH). A pool above this ceiling is routable-but-destructive
-// (quotes a user 90%+ of their input) rather than a genuine high-fee market,
-// so it is excluded from candidate routes regardless of hook status.
-const MAX_REASONABLE_V4_FEE_TIER_PPM = 110000; // 11%
-
 function isFeeTierWithinSanityCeiling(pool: V4SubgraphPool): boolean {
-  // DYNAMIC_FEE_FLAG is a sentinel bit marking "fee set by the hook at swap
-  // time", not a fee amount — the real fee isn't knowable from the subgraph
-  // snapshot. Dynamic-fee pools are gated separately via isDynamicFeePool, so
-  // this check only applies to pools reporting an actual static fee.
-  if (Number(pool.feeTier) === DYNAMIC_FEE_FLAG) return true;
-  return Number(pool.feeTier) <= MAX_REASONABLE_V4_FEE_TIER_PPM;
+  return isStaticFeeWithinSanityCeiling(Number(pool.feeTier));
 }
 
 function convertV4PoolToGroupingKey(pool: V4SubgraphPool): V4PoolGroupingKey {
@@ -256,6 +243,8 @@ export function v4HooksPoolsFiltering(
     if (denylistedHooksAddresses.has(hookAddress)) return false;
     if (hookAddress === ADDRESS_ZERO) return false;
     if (hasCustomAccountingPermissions(hookAddress)) return false;
+    // The auto-admit path must not be laxer than vetted routable/explicit paths; it admitted ROUTE-1607 pools.
+    if (!isFeeTierWithinSanityCeiling(pool)) return false;
     if (isMajorPair(pool.token0.id, pool.token1.id, majorTokens)) return false;
     if (isDynamicFeePool(pool, chainId, logger)) return false;
     return true;

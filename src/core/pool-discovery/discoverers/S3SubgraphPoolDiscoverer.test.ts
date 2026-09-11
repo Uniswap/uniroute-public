@@ -600,6 +600,26 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
   });
 
+  it('skips scheduled pools above the static-fee sanity ceiling (confiscatory-fee registry entry)', async () => {
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({feeTier: '999000'}),
+    ]);
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('merges scheduled pools at the static-fee sanity ceiling', async () => {
+    vi.mocked(repository.getActivePools).mockResolvedValue([
+      activePool({feeTier: '110000'}),
+    ]);
+
+    const pools = await getPoolsForTokens();
+
+    expect(pools.map(pool => pool.id)).toContain('0xccapool');
+  });
+
   it('merges scheduled pools with routing-inert hooks (LBP strategy-as-hook fallback)', async () => {
     // beforeInitialize-only permission bits (low 14 bits = 0x2000): the shape
     // migrate()'s front-run fallback rewrites key.hooks to.

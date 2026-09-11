@@ -26,6 +26,7 @@ import {
   shouldUseErc4626Namespace,
   synthesizeErc4626WrapperPools,
 } from '../../../models/hooks/Erc4626WrapperHooks';
+import {isStaticFeeWithinSanityCeiling} from '../../../lib/poolCaching/util/feeTierSanityCeiling';
 
 // Async inflate is unconditional (not behind the snapshot SWR flag): it keeps
 // the decompressed output identical to inflateSync while moving the work off
@@ -540,6 +541,7 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       ]);
       const existingIds = new Set(pools.map(pool => pool.id.toLowerCase()));
       let hookedSkipped = 0;
+      let staticFeeCapSkipped = 0;
       const merged = scheduled
         .filter(({pool, launchedToken}) => {
           if (!targets.has(launchedToken)) {
@@ -566,6 +568,12 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
             hookedSkipped++;
             return false;
           }
+          // Defense in depth: a hand-edited or stale registry entry must not
+          // smuggle a confiscatory-fee pool past selector trust boundaries.
+          if (!isStaticFeeWithinSanityCeiling(Number(pool.feeTier))) {
+            staticFeeCapSkipped++;
+            return false;
+          }
           return true;
         })
         .map(({pool}) => pool);
@@ -579,6 +587,19 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
               `chain:${ChainId[chainId]}`,
               'status:failure',
               'reason:hooked_entry',
+            ],
+          }
+        );
+      }
+      if (staticFeeCapSkipped > 0) {
+        await ctx.metrics.count(
+          buildMetricKey('CcaScheduledPools.staticFeeCapSkipped'),
+          staticFeeCapSkipped,
+          {
+            tags: [
+              `chain:${ChainId[chainId]}`,
+              'status:failure',
+              'reason:static_fee_cap',
             ],
           }
         );

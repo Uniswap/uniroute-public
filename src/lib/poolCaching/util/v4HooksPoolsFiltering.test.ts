@@ -668,29 +668,6 @@ describe('v4HooksPoolsFiltering', () => {
     });
   });
 
-  // --- High feeTier > 1000000 (non-routable) ---
-  describe('high feeTier non-routable', () => {
-    it('auto-allowlists non-major hooks even when feeTier > 1000000', () => {
-      // Use a hook that has no swap permissions but feeTier is too high
-      // ADDRESS_ZERO hooks bypass the feeTier check (they are always routable)
-      // We need a hook without swap permissions but with high feeTier
-      // A hook ending in 0x00 has no swap permissions
-      const hookNoSwap = '0x0000000000000000000000000000000000000100';
-      const pool = createPool({
-        hooks: hookNoSwap,
-        feeTier: '2000000',
-        tvlETH: 100,
-      });
-      const result = v4HooksPoolsFiltering(
-        ChainId.MAINNET,
-        [pool],
-        mockLogger,
-        mockMetric
-      );
-      expect(result.length).toBe(1);
-    });
-  });
-
   // --- Fee-tier sanity ceiling (ROUTE-1690) ---
   // Confirmed live on mainnet: NVDAx/USDC v4 pools with feeTier 960500 and
   // 955000 (~96%/95.5%) — scalper-created, near-zero-liquidity pools, not an
@@ -763,9 +740,7 @@ describe('v4HooksPoolsFiltering', () => {
     it('excludes an above-ceiling hookless major-pair pool that would otherwise be a routable candidate', () => {
       // Major/major pair, so the only admission paths are isHooksPoolRoutable
       // (blocked by the ceiling) and the explicit allowlist (this hook isn't
-      // on it) — unlike the auto-allowlist path, which only applies to
-      // non-major pairs and is unaffected by this change (see the pre-existing
-      // "auto-allowlists non-major hooks even when feeTier > 1000000" test).
+      // on it).
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         feeTier: '960500',
@@ -790,6 +765,74 @@ describe('v4HooksPoolsFiltering', () => {
         mockMetric
       );
       expect(result).toEqual([]);
+    });
+
+    describe('auto-allowlist path', () => {
+      const hookWithSwapPermission =
+        '0x0000000000000000000000000000000000000080';
+
+      it.each(['999000', '8388600'])(
+        'excludes a non-major hooked pool with incident fee tier %s',
+        feeTier => {
+          const pool = createPool({
+            hooks: hookWithSwapPermission,
+            feeTier,
+            tvlETH: 100,
+          });
+          const result = v4HooksPoolsFiltering(
+            ChainId.ROBINHOOD,
+            [pool],
+            mockLogger,
+            mockMetric
+          );
+          expect(result).toEqual([]);
+        }
+      );
+
+      it('admits an auto-allowlisted pool at the sanity ceiling boundary', () => {
+        const pool = createPool({
+          hooks: hookWithSwapPermission,
+          feeTier: '110000',
+          tvlETH: 100,
+        });
+        const result = v4HooksPoolsFiltering(
+          ChainId.MAINNET,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result.map(p => p.id)).toContain(pool.id);
+      });
+
+      it('rejects an auto-allowlisted pool just above the sanity ceiling boundary', () => {
+        const pool = createPool({
+          hooks: hookWithSwapPermission,
+          feeTier: '110001',
+          tvlETH: 100,
+        });
+        const result = v4HooksPoolsFiltering(
+          ChainId.MAINNET,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result).toEqual([]);
+      });
+
+      it('does not treat the dynamic-fee sentinel as an above-ceiling static fee', () => {
+        const pool = createPool({
+          hooks: hookWithSwapPermission,
+          feeTier: String(DYNAMIC_FEE_FLAG),
+          tvlETH: 100,
+        });
+        const result = v4HooksPoolsFiltering(
+          ChainId.MAINNET,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result.map(p => p.id)).toContain(pool.id);
+      });
     });
   });
 
