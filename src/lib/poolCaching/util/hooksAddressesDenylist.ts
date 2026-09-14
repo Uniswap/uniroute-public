@@ -13,11 +13,19 @@ const CHAIN_ID_TEMPO = 4217 as ChainId;
 // EURC/cbBTC route. Deny until the hook is fixed and re-reviewed.
 export const THBT_HOOK_ON_BASE = '0xf0930639457a2e64b4fa08fabe055b8dc840cac0';
 
+// Spiral Hook on Ethereum. Known critical vulnerability (operator directive) —
+// must never be routed through. Its address flags (0x2acc) carry the swap-delta
+// bits, so it does not auto-route and simply omitting it from the allowlist keeps
+// it un-routable; this denylist entry is defence-in-depth against a future
+// allowlist edit re-introducing it. Deployed on Ethereum only.
+export const SPIRAL_HOOK_ON_MAINNET =
+  '0x1725577dc9b1ee2d95db49c2193226471594aacc';
+
 // Manual per-chain denylist for hooks that should never be routed through.
 // Keep only chains that currently have explicit allowlisted hooks.
 export const HOOKS_ADDRESSES_DENYLIST: Partial<Record<ChainId, Array<string>>> &
   Record<number, Array<string>> = {
-  [ChainId.MAINNET]: [],
+  [ChainId.MAINNET]: [SPIRAL_HOOK_ON_MAINNET],
   [ChainId.SEPOLIA]: [],
   [ChainId.OPTIMISM]: [],
   [ChainId.ARBITRUM_ONE]: [],
