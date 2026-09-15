@@ -19,6 +19,7 @@ import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {CanonicalPools} from '../../lib/CanonicalPools';
 import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
@@ -325,6 +326,50 @@ describe('BaseCachingPoolDiscoverer', () => {
         `hooksOptions:${HooksOptions.HOOKS_INCLUSIVE}`,
       ],
     });
+  });
+
+  it('re-applies the canonical-pools rule to a cached pools-for-tokens hit', async () => {
+    // The cached list predates the token's entry: only the canonical pool
+    // may come back, without waiting for the TTL.
+    const chainId = ChainId.MAINNET;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+    const canonicalPool = {
+      id: 'canonical-pool',
+      feeTier: '3000',
+      tickSpacing: '1',
+      hooks: '0x1111111111111111111111111111111111111111',
+      liquidity: '1000',
+      token0: {id: tokenIn.address},
+      token1: {id: tokenOut.address},
+      tvlETH: 1000,
+      tvlUSD: 1000,
+    };
+    const nonCanonicalPool = {...canonicalPool, id: 'hookless-pool'};
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockResolvedValue(JSON.stringify([nonCanonicalPool, canonicalPool]));
+    CanonicalPools.__TEST_ONLY__injectTestData({
+      [chainId]: {[tokenIn.address]: [canonicalPool.id]},
+    });
+
+    try {
+      const pools = await poolDiscoverer.getPoolsForTokens(
+        chainId,
+        Protocol.V4,
+        tokenIn,
+        tokenOut,
+        topPoolSelector,
+        undefined,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+
+      expect(pools).toEqual([canonicalPool]);
+    } finally {
+      CanonicalPools.__TEST_ONLY__injectTestData();
+    }
   });
 
   it('should fetch pools for tokens and cache them if not available in cache', async () => {

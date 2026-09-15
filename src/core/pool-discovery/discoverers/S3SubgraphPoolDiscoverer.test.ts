@@ -26,6 +26,10 @@ import {sdkStreamMixin} from '@smithy/util-stream';
 import {Readable} from 'stream';
 import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {
+  CanonicalPools,
+  REGISTRY_COVERAGE_METRIC,
+} from '../../../lib/CanonicalPools';
+import {
   CcaScheduledActivePool,
   CcaScheduledPoolsRepository,
 } from '../CcaScheduledPoolsRepository';
@@ -265,6 +269,49 @@ describe('S3SubgraphPoolDiscoverer', () => {
       expect(pools[0]).toHaveProperty('token1');
       expect(pools[0]).toHaveProperty('tvlETH');
       expect(pools[0]).toHaveProperty('tvlUSD');
+    });
+
+    it('checks canonical-pool coverage against the loaded snapshot', async () => {
+      // First pool of the fixture, and an id no snapshot contains.
+      const token = '0x588ce4f028d8e7b53b687865d6a67b3a54c75518';
+      const presentPool =
+        '0x009e4bec17909bd85bfa66980a06b4f74f1b6d2ddb28ce8882055e81af14ac8f';
+      const missingPool = `0x${'ee'.repeat(32)}`;
+      CanonicalPools.__TEST_ONLY__injectTestData({
+        [ChainId.MAINNET]: {[token]: [presentPool, missingPool]},
+      });
+      const gzippedData = readTestData('v4-pools.json.gz');
+      vi.mocked(s3Client.send).mockResolvedValue(
+        createMockResponse(gzippedData) as never
+      );
+      const countSpy = vi.spyOn(mockContext.metrics, 'count');
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-ignore - protected method access for testing
+        await discoverer._getPools(ChainId.MAINNET, Protocol.V4, mockContext);
+
+        expect(countSpy).toHaveBeenCalledWith(REGISTRY_COVERAGE_METRIC, 1, {
+          tags: [
+            'chain:MAINNET',
+            'protocol:v4',
+            `token:${token}`,
+            'status:success',
+          ],
+        });
+        expect(countSpy).toHaveBeenCalledWith(REGISTRY_COVERAGE_METRIC, 1, {
+          tags: [
+            'chain:MAINNET',
+            'protocol:v4',
+            `token:${token}`,
+            'status:failure',
+            'reason:no_canonical_pool_present',
+          ],
+        });
+      } finally {
+        countSpy.mockRestore();
+        CanonicalPools.__TEST_ONLY__injectTestData();
+      }
     });
 
     it('does not materialize an undefined-valued isExternalLiquidity key', async () => {
@@ -699,6 +746,38 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     const pools = await getPoolsForTokens();
 
     expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+  });
+
+  it('drops merged scheduled pools that are not canonical for the launched token', async () => {
+    // The launched token's canonical pool is a different (hooked) pool, so
+    // the registry's migration pool must not be re-appended around the
+    // selector's filter.
+    CanonicalPools.__TEST_ONLY__injectTestData({
+      [ChainId.MAINNET]: {[NEW_TOKEN]: ['0xhookedcanonicalpool']},
+    });
+
+    try {
+      const pools = await getPoolsForTokens();
+
+      expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
+      expect(pools.map(pool => pool.id)).toContain('0xbasepool');
+    } finally {
+      CanonicalPools.__TEST_ONLY__injectTestData();
+    }
+  });
+
+  it("keeps merged scheduled pools that are the launched token's canonical pool", async () => {
+    CanonicalPools.__TEST_ONLY__injectTestData({
+      [ChainId.MAINNET]: {[NEW_TOKEN]: ['0xccapool']},
+    });
+
+    try {
+      const pools = await getPoolsForTokens();
+
+      expect(pools.map(pool => pool.id)).toContain('0xccapool');
+    } finally {
+      CanonicalPools.__TEST_ONLY__injectTestData();
+    }
   });
 
   it('prefers the real (cached) subgraph entry over a scheduled duplicate', async () => {

@@ -675,6 +675,12 @@ export enum MetricFailureReason {
   REDIS_READ_ERROR = 'redis_read_error',
   SQS_SEND_ERROR = 'sqs_send_error',
   ZLCA_QUOTER_PRICE_UNAVAILABLE = 'zlca_quoter_price_unavailable',
+  /**
+   * A canonical pool (`CanonicalPools`) is absent from the loaded snapshot
+   * of its protocol: the registry id is wrong or the snapshot lacks the
+   * pool. Either leaves the token unroutable.
+   */
+  NO_CANONICAL_POOL_PRESENT = 'no_canonical_pool_present',
 }
 
 /** `status:` tag, plus the hardcoded `reason:` tag on failure. */

@@ -1,5 +1,6 @@
-import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {RouteFinder} from './RouteFinder';
+import {CanonicalPools} from '../../lib/CanonicalPools';
 import {Pool} from '../../models/pool/Pool';
 import {Protocol} from '../../models/pool/Protocol';
 import {Address} from '../../models/address/Address';
@@ -55,6 +56,17 @@ describe('RouteFinder', () => {
   const token2 = new Address('0x0000000000000000000000000000000000000003');
   const token3 = new Address('0x0000000000000000000000000000000000000004');
   const token4 = new Address('0x0000000000000000000000000000000000000005');
+
+  // These fixtures are token/protocol-only Pool stubs with no address, and
+  // mainnet carries canonical-pools entries, so the canonical filter would
+  // try to read an address off them. The rule has its own tests in
+  // RouteFinderCanonicalPools.test.ts; clear the registry here.
+  beforeEach(() => {
+    CanonicalPools.__TEST_ONLY__injectTestData({});
+  });
+  afterEach(() => {
+    CanonicalPools.__TEST_ONLY__injectTestData();
+  });
 
   beforeEach(() => {
     // Create a network of pools

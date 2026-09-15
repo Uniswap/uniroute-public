@@ -1,4 +1,12 @@
-import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from 'vitest';
 import {
   AggHooksTopPoolsSelector,
   BasicTopPoolsSelector,
@@ -6,6 +14,7 @@ import {
   buildTokenPoolIndex,
   getMaxFilteredPoolCount,
   MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
+  METRIC_NON_CANONICAL_POOL,
 } from './TopPoolsSelector';
 import {defaultPoolSelectionConfig} from '../../lib/config';
 import {
@@ -50,6 +59,8 @@ import {
 } from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {CanonicalPools} from '../../lib/CanonicalPools';
+import {V4Pool} from '../../models/pool/V4Pool';
 import {FeatureGatedTokensFetcher} from '../../stores/compliance/FeatureGatedTokensFetcher';
 import {S3FeatureGatedTokensFetcher} from '../../stores/compliance/S3FeatureGatedTokensFetcher';
 import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
@@ -115,6 +126,12 @@ describe('BasicTopPoolsSelector', () => {
       liquidity: '10000',
       tvlETH: 10000,
     } as V4PoolInfo;
+  });
+
+  // Several blocks below inject canonical-pools entries; one reset here
+  // keeps a leaked entry from silently dropping pools in unrelated tests.
+  afterEach(() => {
+    CanonicalPools.__TEST_ONLY__injectTestData();
   });
 
   describe('getPoolTVL', () => {
@@ -305,6 +322,33 @@ describe('BasicTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
+    });
+
+    it('drops a direct pair that is non-canonical for a listed token and keeps the canonical one', async () => {
+      // Both V4 mocks pair token ...01 with ...02; only the hookless one is
+      // canonical, so the hooked one must not survive selection.
+      CanonicalPools.__TEST_ONLY__injectTestData({
+        [ChainId.MAINNET]: {
+          '0x0000000000000000000000000000000000000001': [mockV4Pool.id],
+        },
+      });
+
+      const result = await selector.filterPools(
+        [mockV4PoolWithHooks, mockV4Pool],
+        ChainId.MAINNET,
+        tokenIn,
+        tokenOut,
+        Protocol.V4,
+        HooksOptions.HOOKS_INCLUSIVE,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx,
+        {shouldUseCache: true}
+      );
+
+      expect(result.map(pool => pool.id)).toEqual([mockV4Pool.id]);
+      expect(
+        (ctx as TestContext).metrics.countStore[METRIC_NON_CANONICAL_POOL]
+      ).toBe(1);
     });
 
     it('should filter and return pools for V3 protocol', async () => {
@@ -792,6 +836,36 @@ describe('BasicTopPoolsSelector', () => {
         expect(result.map(p => p.id)).toContain('0xexp');
       });
 
+      it('does not append an experiment pool that is non-canonical for its token', async () => {
+        CanonicalPools.__TEST_ONLY__injectTestData({
+          [ChainId.MAINNET]: {
+            '0x0000000000000000000000000000000000000099': ['0xcanonical'],
+          },
+        });
+        const tinyExperimentPool = makeExperimentPool(
+          '0xexp',
+          experimentHookAddress,
+          /* tvlUSD= */ 1
+        );
+
+        const result = await selector.filterPools(
+          [tinyExperimentPool, mockV4Pool],
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          Protocol.V4,
+          HooksOptions.HOOKS_INCLUSIVE,
+          createNamespaceContext([
+            new ExperimentalHooksNamespace(Experiment.GuideStar_Stable_Stable),
+          ]),
+          ctx,
+          {shouldUseCache: true}
+        );
+
+        expect(result.map(p => p.id)).not.toContain('0xexp');
+        expect(result.map(p => p.id)).toContain(mockV4Pool.id);
+      });
+
       it('is a no-op when experiment is undefined', async () => {
         // Assert directly on the manual-append debug log since the experiment
         // pool may still be pulled in via the generic top-N path regardless
@@ -918,6 +992,67 @@ describe('BasicTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
+    });
+
+    describe('canonical pools', () => {
+      it('counts drops when given a context, even when no canonical pool survives', () => {
+        // No pool in the universe is the canonical one: every token-...01
+        // pool goes, and the failure reason fires once for the token.
+        CanonicalPools.__TEST_ONLY__injectTestData({
+          [ChainId.MAINNET]: {
+            '0x0000000000000000000000000000000000000001': ['0xnotinuniverse'],
+          },
+        });
+        const metricCtx = buildTestContext();
+
+        const result = BasicTopPoolsSelector['filterUnsupportedPools'](
+          [mockV2Pool, mockV3Pool],
+          ChainId.MAINNET,
+          new Set<string>(),
+          metricCtx
+        );
+
+        expect(result).toEqual([]);
+        // 2 dropped (status:success); no per-call failure signal, since a
+        // protocol-scoped universe legitimately lacks the canonical pool.
+        expect(metricCtx.metrics.countStore[METRIC_NON_CANONICAL_POOL]).toBe(2);
+        expect(
+          metricCtx.logger.outputs.filter(entry => entry.prefix === 'WARN:')
+        ).toHaveLength(0);
+      });
+
+      it('drops pools that carry a listed token without being one of its canonical pools', () => {
+        // Token ...01 sits in every mock pool; only the V2 pool is canonical.
+        CanonicalPools.__TEST_ONLY__injectTestData({
+          [ChainId.MAINNET]: {
+            '0x0000000000000000000000000000000000000001': [mockV2Pool.id],
+          },
+        });
+
+        const result = BasicTopPoolsSelector['filterUnsupportedPools'](
+          [mockV2Pool, mockV3Pool, mockV4Pool, mockV4PoolWithHooks],
+          ChainId.MAINNET,
+          new Set<string>()
+        );
+
+        expect(result.map(pool => pool.id)).toEqual(['0x123']);
+      });
+
+      it('only constrains the chain the entry is registered on', () => {
+        CanonicalPools.__TEST_ONLY__injectTestData({
+          [ChainId.MAINNET]: {
+            '0x0000000000000000000000000000000000000001': [mockV2Pool.id],
+          },
+        });
+
+        const result = BasicTopPoolsSelector['filterUnsupportedPools'](
+          [mockV3Pool, mockV4Pool],
+          ChainId.OPTIMISM,
+          new Set<string>()
+        );
+
+        expect(result).toHaveLength(2);
+      });
     });
   });
 
@@ -1750,6 +1885,53 @@ describe('BasicTopPoolsSelector', () => {
         '9000',
         '10000',
       ]);
+    });
+
+    describe('canonical pools', () => {
+      it('keeps only the canonical combo of the V4 grid for a listed token', async () => {
+        const canonicalPoolId = V4Pool.computePoolId(
+          tokenIn,
+          tokenOut,
+          3000,
+          60,
+          ADDRESS_ZERO
+        );
+        CanonicalPools.__TEST_ONLY__injectTestData({
+          [ChainId.MAINNET]: {[tokenIn.address]: [canonicalPoolId]},
+        });
+
+        const result = (await selector['manuallyGenerateDirectPairs'](
+          Protocol.V4,
+          ChainId.MAINNET,
+          tokenIn.address,
+          tokenOut.address,
+          new Set<string>()
+        )) as V4PoolInfo[];
+
+        expect(result.map(pool => [pool.id, pool.feeTier])).toEqual([
+          [canonicalPoolId, '3000'],
+        ]);
+      });
+
+      it('generates no V2 pair when the listed token has no canonical V2 pool', async () => {
+        CanonicalPools.__TEST_ONLY__injectTestData({
+          [ChainId.MAINNET]: {
+            [tokenIn.address]: [
+              '0xc73f3cd3fb68288e63f008e08ef69caa0437224e420963c6aeb4526178e87ad9',
+            ],
+          },
+        });
+
+        const result = await selector['manuallyGenerateDirectPairs'](
+          Protocol.V2,
+          ChainId.MAINNET,
+          tokenIn.address,
+          tokenOut.address,
+          new Set<string>()
+        );
+
+        expect(result).toEqual([]);
+      });
     });
   });
 });

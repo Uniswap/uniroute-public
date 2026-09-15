@@ -19,6 +19,7 @@ import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 import {getMaxFilteredPoolCount} from './TopPoolsSelector';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {CanonicalPools} from '../../lib/CanonicalPools';
 
 // Upper bound on serialized size of a getPoolsForTokens cache entry, derived
 // from the selector's pool-count cap and a pessimistic per-pool byte estimate.
@@ -704,6 +705,14 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
           retrievedPools = await this.filterUnsupportedTokenPools(
             retrievedPools!,
             ctx
+          );
+          // The cached list is the selector's output from an earlier
+          // process, so a token that gained a canonical-pools entry since
+          // is re-filtered here like the deny-set above rather than served
+          // for the rest of the TTL.
+          retrievedPools = CanonicalPools.filterAdmittedPools(
+            retrievedPools,
+            chainId
           );
           ctx.logger.debug(
             `[${this.discovererName}] Retrieved ${protocol} pools for tokens from cache`,

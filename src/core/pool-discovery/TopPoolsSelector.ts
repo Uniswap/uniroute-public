@@ -17,6 +17,7 @@ import {
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
+import {CanonicalPools, identifyPoolInfo} from '../../lib/CanonicalPools';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {
   IV4PoolKeyRegistry,
@@ -61,6 +62,10 @@ interface SelectionView {
   tokenPoolIndex: TokenPoolIndex;
   tvlSortedPools: UniPoolInfo[];
 }
+
+export const METRIC_NON_CANONICAL_POOL = buildMetricKey(
+  'TopPoolsSelector.NonCanonicalPool'
+);
 
 // Helper function to get pool liquidity based on pool type (using USD value for now)
 export const getPoolTVL = (pool: UniPoolInfo): number => {
@@ -259,7 +264,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         BasicTopPoolsSelector.filterUnsupportedPools(
           pools,
           chainId,
-          unsupportedTokens
+          unsupportedTokens,
+          ctx
         );
       ctx.logger.debug('Filtering unsupported tokens from pools', {
         chainId,
@@ -501,6 +507,18 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         if (!hooks || !experimentHookAddresses.has(hooks)) {
           return false;
         }
+        // Reads the pre-filter universe, so the canonical-pools rule has to
+        // be re-applied here.
+        if (
+          !CanonicalPools.isPoolAdmitted(
+            chainId,
+            pool.id,
+            pool.token0.id,
+            pool.token1.id
+          )
+        ) {
+          return false;
+        }
         experimentPoolsAvailable++;
         const poolId = pool.id.toLowerCase();
         if (selectedPoolIds.has(poolId)) {
@@ -576,17 +594,36 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return allPools;
   }
 
+  /**
+   * Drops pools that carry a feature-gated (unsupported) token, and pools
+   * that carry a token with a canonical-pools entry without being one of
+   * its canonical pools. Both selectors run every candidate universe through
+   * this before any selection stage, so a non-canonical pool can never
+   * occupy a top-N slot. Drops are counted on `TopPoolsSelector.NonCanonicalPool`
+   * when `ctx` is given. Whether the canonical pool exists at all is checked
+   * once per loaded snapshot by `CanonicalPools.checkRegistryCoverage`, not
+   * here: this runs per protocol and per pair, so the canonical v4 pool is
+   * legitimately absent from most inputs.
+   */
   public static filterUnsupportedPools(
     pools: UniPoolInfo[],
-    _chainId: ChainId,
-    unsupportedTokens: Set<string>
+    chainId: ChainId,
+    unsupportedTokens: Set<string>,
+    ctx?: Context
   ): UniPoolInfo[] {
-    return pools.filter(pool => {
+    const supportedPools = pools.filter(pool => {
       return (
         !unsupportedTokens.has(pool.token0.id.toLowerCase()) &&
         !unsupportedTokens.has(pool.token1.id.toLowerCase())
       );
     });
+    return CanonicalPools.dropNonCanonicalPools(
+      supportedPools,
+      chainId,
+      identifyPoolInfo,
+      ctx,
+      METRIC_NON_CANONICAL_POOL
+    );
   }
 
   protected static getAggHookAddressSet(chainId: ChainId): Set<string> {
@@ -665,7 +702,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       BasicTopPoolsSelector.filterUnsupportedPools(
         pools,
         chainId,
-        unsupportedTokens
+        unsupportedTokens,
+        ctx
       );
     const filteredPools = filteredUnsupportedPools.filter(
       pool =>
@@ -1216,7 +1254,10 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       });
     }
 
-    return directPairs;
+    // The generated grid never went through filterUnsupportedPools, so a
+    // token's non-canonical (fee, tickSpacing, hooks) combos would otherwise
+    // re-enter here after the snapshot filter removed them.
+    return CanonicalPools.filterAdmittedPools(directPairs, chainId);
   };
 }
 
@@ -1337,7 +1378,8 @@ export class AggHooksTopPoolsSelector
       BasicTopPoolsSelector.filterUnsupportedPools(
         aggHooksPools,
         chainId,
-        unsupportedTokens
+        unsupportedTokens,
+        ctx
       );
 
     const filteredPools = filteredUnsupportedPools.filter(pool =>

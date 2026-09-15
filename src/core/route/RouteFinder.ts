@@ -7,6 +7,11 @@ import {V4Pool} from '../../models/pool/V4Pool';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {Pool} from '../../models/pool/Pool';
 import {Protocol} from '../../models/pool/Protocol';
+import {CanonicalPools, identifyPoolModel} from '../../lib/CanonicalPools';
+
+const METRIC_NON_CANONICAL_POOL = buildMetricKey(
+  'RouteFinder.NonCanonicalPool'
+);
 
 export interface IRouteFinder<TPool extends Pool> {
   generateRoutes(
@@ -25,13 +30,29 @@ export class RouteFinder<TPool extends Pool> implements IRouteFinder<TPool> {
   // TODO: https://linear.app/uniswap/issue/ROUTE-410/ (modify for V4 - Support ETH+WETH pools)
   public async generateRoutes(
     chainId: ChainId,
-    pools: TPool[],
+    candidatePools: TPool[],
     tokenIn: Address,
     tokenOut: Address,
     allowMixedPools: boolean,
     ctx?: UniContext
   ): Promise<RouteBasic<TPool>[]> {
     const routes: RouteBasic<TPool>[] = [];
+
+    // Every non-cached route is built here, from whatever pool sources the
+    // repositories assembled (selector output, cache hits, cross-liquidity
+    // and registry appends, on-chain probes), so this is where the
+    // canonical-pools rule is enforced for correctness. Upstream filters
+    // only save slots and probes. Copied so the fake ETH/WETH push below
+    // never mutates the caller's array.
+    const pools = [
+      ...CanonicalPools.dropNonCanonicalPools(
+        candidatePools,
+        chainId,
+        identifyPoolModel,
+        ctx,
+        METRIC_NON_CANONICAL_POOL
+      ),
+    ];
 
     // If mixed pools are allowed and we have V4 pools, add a fake pool for ETH/WETH to allow connectivity.
     if (allowMixedPools && pools.some(pool => pool.protocol === Protocol.V4)) {

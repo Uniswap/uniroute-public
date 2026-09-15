@@ -5,6 +5,7 @@ import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
+import {CanonicalPools} from '../../../lib/CanonicalPools';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
 import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
@@ -225,6 +226,17 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         chainId,
         protocol,
       });
+
+      // Whole-snapshot check: the one place "registry id is wrong / the
+      // snapshot lacks the canonical pool" can be evaluated without the
+      // protocol-scoped or per-request false alarms a candidate-set check
+      // would raise.
+      CanonicalPools.checkRegistryCoverage(
+        chainId,
+        protocol,
+        filteredPools,
+        ctx
+      );
 
       success = true;
       return filteredPools;
@@ -611,9 +623,9 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       // filter every cached/selector-path pool passes through — a launched
       // token later added to the compliance list must not stay quotable via
       // the registry.
-      const compliantMerged = await this.filterUnsupportedTokenPools(
-        merged,
-        ctx
+      const compliantMerged = CanonicalPools.filterAdmittedPools(
+        await this.filterUnsupportedTokenPools(merged, ctx),
+        chainId
       );
       if (compliantMerged.length === 0) {
         return pools;
