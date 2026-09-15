@@ -543,6 +543,19 @@ export const DUALPOOL_HOOK_ON_MAINNET =
 export const SLIPSTREAM_AGG_HOOK_ON_BASE =
   '0xa1dfe862f1111f5e9d466fd4d7297d7d4fa76888';
 
+// flETH 1:1 ETH-wrapper hooks (flETHHooks). Defined here (above ZLCA_HOOKS_PER_CHAIN)
+// because they are referenced in that map. Identical source across Ethereum,
+// Unichain, Robinhood, Ink, Arbitrum (Base is a separate earlier build).
+export const FLETH_HOOK_ON_MAINNET =
+  '0x1ba56371505975eb65bd0789bb78a977b126e888';
+export const FLETH_HOOK_ON_UNICHAIN =
+  '0x26ba4c1494926c861994e24f9d906234fdf4a888';
+export const FLETH_HOOK_ON_ROBINHOOD =
+  '0xea22ae03085caf74ac3393f9902539fbe9786888';
+export const FLETH_HOOK_ON_INK = '0x1acf9e1642a3edaf0013f3f1a48adfb7ab54a888';
+export const FLETH_HOOK_ON_ARBITRUM =
+  '0x2a8d203ebc8e165b4d94b18131365f4d1c19e888';
+
 /**
  * "ZLCA Hooks" — Zero-Liquidity Custom-Accounting hooks: V4 hooks whose
  * custom accounting (e.g. a PSM-style fixed-parity conversion via
@@ -652,12 +665,29 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [DUALPOOL_HOOK_ON_MAINNET]: {gasOverheadPerHop: 3_000_000n},
     [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: {gasOverheadPerHop: 250_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: {gasOverheadPerHop: 50_000n},
+    // flETH 1:1 ETH wrapper: zero-liquidity custom curve (beforeSwap mints/burns
+    // flETH against the hook's ETH reserve). Pool is 1:1 with equal decimals, so
+    // slot0's 2^96 placeholder is already correct — no sqrtPriceFromQuoter needed.
+    [FLETH_HOOK_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
   },
   [ChainId.BASE]: {
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
     },
+    [ETH_FLETH_AUTO_WRAP_HOOKS_ADDRESS_ON_BASE]: {gasOverheadPerHop: 500_000n},
+  },
+  [ChainId.UNICHAIN]: {
+    [FLETH_HOOK_ON_UNICHAIN]: {gasOverheadPerHop: 500_000n},
+  },
+  [ChainId.ARBITRUM_ONE]: {
+    [FLETH_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 500_000n},
+  },
+  [ChainId.ROBINHOOD]: {
+    [FLETH_HOOK_ON_ROBINHOOD]: {gasOverheadPerHop: 500_000n},
+  },
+  [CHAIN_ID_INK]: {
+    [FLETH_HOOK_ON_INK]: {gasOverheadPerHop: 500_000n},
   },
 };
 
@@ -885,8 +915,6 @@ export const FLOCKFALL_DYNAMIC_FEE_HOOK_ON_ROBINHOOD =
   '0xdd1a91b3093c12bbe38ab80537f1b53a7d07a880';
 export const OK_MEME_TAX_HOOK_ON_XLAYER =
   '0xd5ebd05d63fdeb7ef3f91ddc387121623b51a8cc';
-export const FLETH_HOOK_ON_MAINNET =
-  '0x1ba56371505975eb65bd0789bb78a977b126e888';
 export const FAZE_LAUNCHPAD_HOOK_V2_ON_ARC =
   '0x47e7936ae9891e61c5123db720593c05de7120cc';
 export const RAMP_HOOK_ON_BNB = '0xd5c0249cc9f32f4696a6357d66b5317870d5c880';
@@ -1399,6 +1427,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.ARBITRUM_ONE]: [
     ALPHIX_HOOK_ON_ARBITRUM,
     ADDRESS_ZERO,
+    FLETH_HOOK_ON_ARBITRUM,
     ARRAKIS_PRIVATE_HOOK_V2,
     SLIPPAGE_FEE_HOOK_ON_ARBITRUM,
     RHUBARB_FEE_HOOK_ON_ARBITRUM,
@@ -1580,6 +1609,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.UNICHAIN_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.UNICHAIN]: [
     ADDRESS_ZERO,
+    FLETH_HOOK_ON_UNICHAIN,
     RENZO_ON_UNICHAIN,
     AEGIS_ON_UNICHAIN_V1,
     AEGIS_ON_UNICHAIN_V2,
@@ -1614,6 +1644,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MEGAETH]: [ADDRESS_ZERO],
   [ChainId.ROBINHOOD]: [
     ADDRESS_ZERO,
+    FLETH_HOOK_ON_ROBINHOOD,
     AEGIS_ENGINE_ON_ROBINHOOD,
     STONK_HOOK_V3_ON_ROBINHOOD,
     STANDARD_TAX_HOOK_ON_ROBINHOOD,
@@ -1806,7 +1837,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD,
     FOOL_HOOK_ON_ROBINHOOD,
   ],
-  [CHAIN_ID_INK]: [ADDRESS_ZERO, NFTX_V4_HOOK_ON_INK],
+  [CHAIN_ID_INK]: [ADDRESS_ZERO, NFTX_V4_HOOK_ON_INK, FLETH_HOOK_ON_INK],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
   [CHAIN_ID_ARC]: [
     ADDRESS_ZERO,

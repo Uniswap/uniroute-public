@@ -55,11 +55,11 @@ describe('AGG_HOOKS_PER_CHAIN', () => {
     expect(
       getProtocolForAggHookAddress(SLIPSTREAM_AGG_HOOK_ON_BASE, ChainId.BASE)
     ).toBeUndefined();
-    expect(ZLCA_HOOKS_PER_CHAIN[ChainId.BASE]).toEqual({
-      [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
-        gasOverheadPerHop: 500_000n,
-        sqrtPriceFromQuoter: true,
-      },
+    expect(
+      ZLCA_HOOKS_PER_CHAIN[ChainId.BASE]?.[SLIPSTREAM_AGG_HOOK_ON_BASE]
+    ).toEqual({
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
     });
     expect(
       getTvlBypassHookAddresses(ChainId.BASE)?.has(SLIPSTREAM_AGG_HOOK_ON_BASE)
@@ -278,7 +278,7 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     for (const hook of ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[4663] ?? []) {
       expect(robinhood?.has(hook.toLowerCase())).toBe(true);
     }
-    expect(getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)).toBeUndefined();
+    expect(getTvlBypassHookAddresses(ChainId.OPTIMISM)).toBeUndefined();
   });
 });
 
@@ -300,14 +300,11 @@ describe('getTvlBypassHookAddresses dynamic ZLCA overlay', () => {
   });
 
   it('returns dynamic-only hooks on chains with no static registry entries', () => {
-    expect(getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)).toBeUndefined();
-    setDynamicZlcaHooks(
-      ChainId.ARBITRUM_ONE,
-      new Map([[DYNAMIC_HOOK, 500_000n]])
+    expect(getTvlBypassHookAddresses(ChainId.OPTIMISM)).toBeUndefined();
+    setDynamicZlcaHooks(ChainId.OPTIMISM, new Map([[DYNAMIC_HOOK, 500_000n]]));
+    expect(getTvlBypassHookAddresses(ChainId.OPTIMISM)?.has(DYNAMIC_HOOK)).toBe(
+      true
     );
-    expect(
-      getTvlBypassHookAddresses(ChainId.ARBITRUM_ONE)?.has(DYNAMIC_HOOK)
-    ).toBe(true);
   });
 });
 

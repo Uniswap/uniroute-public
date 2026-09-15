@@ -211,8 +211,8 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     }
   });
 
-  it('omits the TVL-bypass Hook query for a chain with none configured (Arbitrum)', async () => {
-    const {provider, queries} = makeRecordingProvider(ChainId.ARBITRUM_ONE);
+  it('omits the TVL-bypass Hook query for a chain with none configured (Optimism)', async () => {
+    const {provider, queries} = makeRecordingProvider(ChainId.OPTIMISM);
     await provider.getPools();
 
     expect(queries.some(q => q.includes('getV4TvlBypassHookPools'))).toBe(
