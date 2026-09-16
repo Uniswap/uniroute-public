@@ -413,6 +413,8 @@ export const UPEG_HOOK_ON_MAINNET =
 // while new and thinly funded, and carry a per-hop gas overhead.
 export const GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET =
   '0x0000113dcf4add69999fad8f20f2b63f979bfcc0';
+export const RAREFRIENDS_HOOK_ON_MAINNET =
+  '0x7a65d0194e6cc43971c31ce7d1471da01d42a0cc';
 export const ETIM_TAX_HOOK_ON_MAINNET =
   '0x41a9bf2969af822942a553babd6d8dda0dff80cc';
 export const ASH_HOOK_ON_MAINNET = '0xebac1d1a384d3ae1a162fdf30788fcfa228380cc';
@@ -1408,6 +1410,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FORGE_HOOK_ON_MAINNET,
     DOPPLER_HOOK_INITIALIZER_ON_MAINNET,
     GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET,
+    RAREFRIENDS_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
