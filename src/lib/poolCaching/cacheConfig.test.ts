@@ -243,4 +243,99 @@ describe('cacheConfig', () => {
       expect(protocols.length).toBeGreaterThan(45);
     });
   });
+
+  /**
+   * Backstop for a MISSED bearer token.
+   *
+   * Goldsky's `/api/private/<project>/subgraphs/...` endpoints reject every
+   * request without `Authorization: Bearer`, and the token is a positional
+   * `string | undefined` constructor argument, so passing `undefined` at one
+   * call site typechecks and only shows up as a 401 on every pool-caching tick
+   * for that chain+protocol. The dedicated-instance URLs
+   * (`api.aws-us-east-1.goldsky.com/c/...`) need no header, which is why the
+   * check is keyed on the URL shape rather than applied to every provider.
+   *
+   * White-box on purpose, like the transport test above it: the header is only
+   * observable on the constructed GraphQLClient, and driving 60+ providers'
+   * `getPools` through a fake fetch would need per-query response fixtures.
+   */
+  describe('Goldsky private-path bearer wiring', () => {
+    const GOLDSKY_PRIVATE_PATH_SEGMENT = '/api/private/';
+    const TEST_BEARER_TOKEN = 'test-goldsky-bearer-token';
+
+    /** Redacts the credential/project segment so a failure never prints it. */
+    function redactPrivatePath(url: string): string {
+      return url.replace(
+        /\/api\/private\/[^/]+\//,
+        `${GOLDSKY_PRIVATE_PATH_SEGMENT}<redacted>/`
+      );
+    }
+
+    function graphqlClientOf(provider: object): {
+      url: string;
+      authorization: string | undefined;
+    } {
+      if (
+        !('client' in provider) ||
+        typeof provider.client !== 'object' ||
+        provider.client === null
+      ) {
+        throw new Error('provider has no GraphQLClient');
+      }
+      const client = provider.client;
+      if (!('url' in client) || typeof client.url !== 'string') {
+        throw new Error('GraphQLClient has no url');
+      }
+      const options =
+        'options' in client &&
+        typeof client.options === 'object' &&
+        client.options !== null
+          ? client.options
+          : {};
+      const headers =
+        'headers' in options &&
+        typeof options.headers === 'object' &&
+        options.headers !== null
+          ? options.headers
+          : {};
+      const authorization =
+        'authorization' in headers && typeof headers.authorization === 'string'
+          ? headers.authorization
+          : undefined;
+      return {url: client.url, authorization};
+    }
+
+    it('passes the bearer token to EVERY provider on a Goldsky private-path URL', () => {
+      const previousToken = process.env.GOLD_SKY_BEARER_TOKEN;
+      process.env.GOLD_SKY_BEARER_TOKEN = TEST_BEARER_TOKEN;
+      try {
+        const protocols = createChainProtocols(
+          mockLogger,
+          mockMetric,
+          undefined
+        );
+        const providers = protocols.flatMap(p =>
+          [p.provider, p.eulerHooksProvider, p.aggHooksProvider].filter(
+            x => x !== undefined
+          )
+        );
+
+        const privatePathClients = providers
+          .map(graphqlClientOf)
+          .filter(c => c.url.includes(GOLDSKY_PRIVATE_PATH_SEGMENT));
+        expect(privatePathClients.length).toBeGreaterThan(0);
+
+        const missingBearer = privatePathClients
+          .filter(c => c.authorization !== `Bearer ${TEST_BEARER_TOKEN}`)
+          .map(c => redactPrivatePath(c.url));
+        expect(missingBearer).toEqual([]);
+      } finally {
+        if (previousToken === undefined) {
+          delete process.env.GOLD_SKY_BEARER_TOKEN;
+        } else {
+          process.env.GOLD_SKY_BEARER_TOKEN = previousToken;
+        }
+      }
+    });
+  });
 });

@@ -4,7 +4,8 @@
  * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
  * format, serving path) is unchanged.
  *
- * SCOPE: hard-limited to the cron's V4 + V3 matrix (except Base and Ink;
+ * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix (except Base, Ink,
+ * and Monad testnet;
  * AURORA_SUPPORTED_TARGETS). Env
  * targets outside the allowlist are ignored with a metric, so even a `*`
  * flag cannot enable other chains/protocols without a code change.
@@ -62,6 +63,7 @@ import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {ARBITRUM} from '../../stores/chain/hardcoded/chains/Arbitrum';
 import {ARC} from '../../stores/chain/hardcoded/chains/Arc';
 import {AVALANCHE} from '../../stores/chain/hardcoded/chains/Avalanche';
+import {BASE} from '../../stores/chain/hardcoded/chains/Base';
 import {BNB} from '../../stores/chain/hardcoded/chains/BNB';
 import {BLAST} from '../../stores/chain/hardcoded/chains/Blast';
 import {CELO} from '../../stores/chain/hardcoded/chains/Celo';
@@ -108,6 +110,7 @@ const HARD_CODED_CHAINS = [
   ARBITRUM,
   ARC,
   AVALANCHE,
+  BASE,
   BNB,
   BLAST,
   CELO,
@@ -170,12 +173,20 @@ export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 // pools in TopPools selection (council review finding on #11463).
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
-// This mirrors createChainProtocols' V3/V4 matrix. Base's 15.2M-row full
-// fetch needs SQL admission pushdown first; Ink has no Aurora pool rows yet.
-// Keep V2 out of this source even though it remains in the cron matrix.
+// This mirrors createChainProtocols' V2/V3/V4 matrix. Base's 15.2M-row full
+// fetch needs SQL admission pushdown first; Ink and Monad testnet have no
+// Aurora pool rows yet. Unichain V2 is the largest supported fetch (~1.05M
+// rows), so shadow-mode RSS needs watching before any primary flip.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
   readonly [Protocol, readonly number[]]
 > = [
+  [
+    Protocol.V2,
+    [
+      1, 42161, 137, 10, 56, 43114, 81457, 480, 130, 1868, 143, 4217, 196,
+      59144, 4326, 4663, 5042,
+    ],
+  ],
   [
     Protocol.V3,
     [
@@ -968,6 +979,107 @@ export class AuroraV3PoolsProvider
   }
 }
 
+// V2 mirrors V2SubgraphProvider's four query families in their original
+// priority order. Aurora prices both reserve sides, which is the closest
+// equivalent to the subgraph's tracked reserve; shadow parity per chain is
+// the judge of any remaining divergence.
+export class AuroraV2PoolsProvider
+  extends BaseAuroraPoolsProvider<'listAllV2RoutablePools'>
+  implements ISubgraphProvider<V2SubgraphPool>
+{
+  constructor(
+    chainId: number,
+    trackedEthThreshold: number,
+    private readonly untrackedUsdThreshold: number,
+    deps: AuroraProviderDeps<'listAllV2RoutablePools'>
+  ) {
+    super(chainId, trackedEthThreshold, deps);
+  }
+
+  async getPools(): Promise<V2SubgraphPool[]> {
+    const ctx = auroraContext(this.deps.metric);
+    // Price lookup inside the fetch slot for the same one-connection-per-
+    // provider invariant as V4/V3.
+    const {nativePrice, pools} = await this.withFetchSlot(async () => ({
+      nativePrice: await this.nativeUsdPrice(ctx),
+      pools: await this.deps.routablePools.listAllV2RoutablePools(ctx, {
+        chainId: this.chainId as ExtendedChainId,
+        minTvlUsd: 0,
+      }),
+    }));
+
+    const fei = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
+    const virtual = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b';
+    type V2AdmissionFamily =
+      | 'fei'
+      | 'virtual'
+      | 'tracked_reserve'
+      | 'untracked_usd';
+    const admittedByFamily: Record<V2AdmissionFamily, number> = {
+      fei: 0,
+      virtual: 0,
+      tracked_reserve: 0,
+      untracked_usd: 0,
+    };
+    const result: V2SubgraphPool[] = [];
+    for (const pool of pools) {
+      const token0 = pool.token0Address.toLowerCase();
+      const token1 = pool.token1Address.toLowerCase();
+      // The V2 subgraph's trackedReserveETH DOUBLES the tracked side when only
+      // one side is whitelisted (both sides of a constant-product pair are
+      // value-equal at spot). Aurora's analog of "whitelisted" is "has a fresh
+      // price row": both sides priced → the sum is already two-sided; one side
+      // priced → the sum holds only that side, so double it; neither → 0.
+      const bothSidesPriced =
+        pool.token0PriceUsd !== null && pool.token1PriceUsd !== null;
+      const oneSidePriced =
+        pool.token0PriceUsd !== null || pool.token1PriceUsd !== null;
+      const trackedUsd = bothSidesPriced
+        ? pool.tvlUsd
+        : oneSidePriced
+          ? 2 * pool.tvlUsd
+          : 0;
+      const tvlNative = trackedUsd / nativePrice;
+      let family: V2AdmissionFamily | undefined;
+      if (token0 === fei || token1 === fei) {
+        family = 'fei';
+      } else if (
+        this.chainId === SdkChainId.BASE &&
+        (token0 === virtual || token1 === virtual)
+      ) {
+        family = 'virtual';
+      } else if (tvlNative > this.trackedEthThreshold) {
+        family = 'tracked_reserve';
+      } else if (trackedUsd > this.untrackedUsdThreshold) {
+        family = 'untracked_usd';
+      }
+      if (!family) continue;
+      admittedByFamily[family]++;
+      result.push({
+        id: pool.pairAddress.toLowerCase(),
+        token0: {id: token0},
+        token1: {id: token1},
+        // V2 LP tokens are always 18 decimals. This is only the snapshot's
+        // optional serve-side fallback, so a floating representation is fine —
+        // and Number() (unlike BigInt()) cannot throw on an unexpected numeric
+        // serialization, so one malformed row cannot fail the whole fetch.
+        supply: Number(pool.totalSupply) / 1e18,
+        reserve: tvlNative,
+        reserveUSD: trackedUsd,
+      });
+    }
+    for (const [family, count] of Object.entries(admittedByFamily)) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.admitted_by_family',
+        count,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V2), family}
+      );
+    }
+    return result;
+  }
+}
+
 /**
  * USD value of a pool's UNPRICED side, derived one hop through the pool's own
  * spot price from the priced side — the analog of the subgraph's derivedETH
@@ -1380,6 +1492,7 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
 
 export interface AuroraSourceThresholds {
   trackedEthThresholdFor(protocol: Protocol, chainId: number): number;
+  untrackedUsdThresholdFor(protocol: Protocol, chainId: number): number;
 }
 
 // Wraps the providers of targeted chain×protocol combos in place. Called by
@@ -1490,6 +1603,23 @@ export function applyAuroraPoolSources<
           deps
         ),
         chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
+        chainId,
+        protocol,
+        config.minPoolCountRatio,
+        config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
+        logger,
+        metric
+      );
+    } else if (protocol === Protocol.V2) {
+      chainProtocol.provider = new AuroraSourcedProvider(
+        mode,
+        new AuroraV2PoolsProvider(
+          chainId,
+          thresholds.trackedEthThresholdFor(protocol, chainId),
+          thresholds.untrackedUsdThresholdFor(protocol, chainId),
+          deps
+        ),
+        chainProtocol.provider as ISubgraphProvider<V2SubgraphPool>,
         chainId,
         protocol,
         config.minPoolCountRatio,

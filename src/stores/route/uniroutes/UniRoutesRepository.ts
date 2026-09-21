@@ -466,6 +466,28 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       }
     }
 
+    // Emitted only once every fallback (cross-liquidity, hardcoded pools) has
+    // had its chance, so it fires exactly when the route finder is about to
+    // receive zero pools — a deterministic no-route — and is bounded by that
+    // rate. Promoting the per-request universe debug line above would instead
+    // add an unsampled info log on the hottest path (ROUTE-1583).
+    if (poolsV2.length + poolsV3.length + poolsV4.length === 0) {
+      ctx.logger.info('Route pool universe empty', {
+        chainId: chain.chainId,
+        tokenIn: tokenInAddress.toString(),
+        tokenOut: tokenOutAddress.toString(),
+        protocols: protocols.join(',').toLowerCase(),
+        hooksOptions,
+        skipPoolsForTokensCache,
+        hasExternalProtocol: externalProtocolExists,
+      });
+      // Fire-and-forget: a metrics-client stall must not add latency to a
+      // no-route response. `void` satisfies no-floating-promises.
+      void ctx.metrics.count(buildMetricKey('RoutePoolUniverse.Empty'), 1, {
+        tags: [chainMetricTag],
+      });
+    }
+
     // To get allRoutes, use RouteFinder
     // Note: we need to convert UniPoolInfo to UniPool with outdated liquidity and reserves
     // - we could load latest pool info from poolRepository and then use RouteFinder but

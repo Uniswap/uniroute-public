@@ -12,6 +12,7 @@ import {
   HOOKS_ADDRESSES_ALLOWLIST,
   isZlcaHookPricedFromQuoter,
   LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
+  NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
   SLIPSTREAM_AGG_HOOK_ON_BASE,
   ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
   ZLCA_HOOKS_PER_CHAIN,
@@ -28,6 +29,7 @@ import {ChainId} from '@uniswap/sdk-core';
 
 const MAINNET = ChainId.MAINNET;
 const CHAIN_ID_TEMPO = 4217;
+const CHAIN_ID_ARC = 5042;
 
 describe('AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST', () => {
   it('is defined (guards against circular-import causing undefined at module load)', () => {
@@ -225,6 +227,30 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     expect(quoterPriced).toEqual([
       `${ChainId.BASE}:${SLIPSTREAM_AGG_HOOK_ON_BASE}`,
     ]);
+  });
+
+  it('admits the Arc native/ERC-20 USDC converter as a ZLCA hook priced from slot0', () => {
+    // Zero-liquidity return-delta hook, so it is only reachable through the
+    // TVL-bypass query and must be in both registries. Its pool is initialized
+    // at the exact 1e12 raw ratio, so slot0 is right and it must NOT take the
+    // quoter-pricing path (see the Slipstream-only assertion above).
+    expect(ZLCA_HOOKS_PER_CHAIN[CHAIN_ID_ARC]).toHaveProperty(
+      NATIVE_USDC_CONVERTER_HOOK_ON_ARC
+    );
+    expect(HOOKS_ADDRESSES_ALLOWLIST[CHAIN_ID_ARC]).toContain(
+      NATIVE_USDC_CONVERTER_HOOK_ON_ARC
+    );
+    expect(
+      getTvlBypassHookAddresses(CHAIN_ID_ARC)?.has(
+        NATIVE_USDC_CONVERTER_HOOK_ON_ARC
+      )
+    ).toBe(true);
+    expect(
+      isZlcaHookPricedFromQuoter(
+        CHAIN_ID_ARC,
+        NATIVE_USDC_CONVERTER_HOOK_ON_ARC
+      )
+    ).toBe(false);
   });
 
   it('isZlcaHookPricedFromQuoter matches the flag case-insensitively and per chain', () => {

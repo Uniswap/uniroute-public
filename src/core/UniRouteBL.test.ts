@@ -18,6 +18,7 @@ import {
   GetCachedRoutesRequest,
   DeleteCachedRoutesRequest,
   MethodParameters,
+  PerHopSlippage,
 } from '../../gen/uniroute/v1/api_pb';
 
 import {buildTestContext} from '@uniswap/lib-testhelpers';
@@ -2296,6 +2297,10 @@ describe('UniRouteBL', () => {
 
       // swapSteps populated; one V2_SWAP_EXACT_IN step covering the whole input.
       // Carried as Struct -> toJson() yields the flat {type,...} SDK shape.
+      expect(response.perHopSlippage).toBe(PerHopSlippage.OFF);
+      expect(response.toJson()).toMatchObject({
+        perHopSlippage: 'PER_HOP_SLIPPAGE_OFF',
+      });
       expect(response.swapSteps).toHaveLength(1);
       const step = response.swapSteps[0].toJson() as Record<string, unknown>;
       expect(step.type).toBe('V2_SWAP_EXACT_IN');
@@ -4753,6 +4758,70 @@ describe('UniRouteBL', () => {
       // swapOptions is created for V2_2_0 → simulation block is entered → FailingSimulator fires
       expect(response.simulationStatus).equals(SimulationStatus.FAILED);
 
+      swapOptionsSpy.mockRestore();
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
+    it('should run simulation when universalRouterVersion is V2_1_2 and simulateFromAddress is set', async () => {
+      const failingSimulator = new FailingSimulator();
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+      // 2.1.2 must dispatch to its own factory entry, not the 2.1.1 one:
+      // the two differ only in router address, which the factory owns.
+      const swapOptions2_1_1Spy = vi.spyOn(
+        SwapOptionsFactory,
+        'createUniversalRouterOptions_2_1_1'
+      );
+      const swapOptionsSpy = vi
+        .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_1_2')
+        .mockReturnValue({
+          simulate: {fromAddress: simulationRequest.simulateFromAddress},
+        } as unknown as SwapOptionsUniversalRouter);
+
+      const mockedQuoteStrategy = new MockedQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        simulationEnabledConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        mockedQuoteStrategy,
+        failingSimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, simulationRequest, {
+        universalRouterVersion: UniversalRouterVersion.V2_1_2,
+      });
+
+      expect(response.error).toBeUndefined();
+      // swapOptions is created for V2_1_2 → simulation block is entered → FailingSimulator fires
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+      expect(swapOptionsSpy).toHaveBeenCalled();
+      expect(swapOptions2_1_1Spy).not.toHaveBeenCalled();
+
+      swapOptions2_1_1Spy.mockRestore();
       swapOptionsSpy.mockRestore();
       buildTradeSpy.mockRestore();
       buildSwapMethodParametersSpy.mockRestore();

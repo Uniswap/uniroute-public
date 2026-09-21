@@ -218,8 +218,8 @@ describe('eth-simulateV1-provider', () => {
         ]);
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
-        // 150000 * 1.3 = 195000
-        expect(result.simulationResult?.estimatedGasUsed).toBe(195000n);
+        // Reported verbatim — the swap call's simulated gasUsed, unpadded.
+        expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
         expect(result.simulationResult?.estimatedGasUsedInQuoteToken).toBe(
           2000n
         );
@@ -281,7 +281,6 @@ describe('eth-simulateV1-provider', () => {
           gasConverter,
           ethEstimateGasSimulator,
           [ChainId.AVAX],
-          undefined,
           'unirpc_simulateV0'
         );
 
@@ -322,40 +321,10 @@ describe('eth-simulateV1-provider', () => {
         expect(result.simulationResult?.description).toBe(
           'Simulation succeeded via unirpc_simulateV0'
         );
-      });
-
-      it('should use custom gas multiplier when provided', async () => {
-        const customSimulator = new EthSimulateV1Simulator(
-          ChainId.MAINNET,
-          provider,
-          gasConverter,
-          ethEstimateGasSimulator,
-          [ChainId.MAINNET],
-          {[ChainId.MAINNET]: 1.5}
-        );
-
-        const mockResult = [
-          {
-            calls: [
-              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
-              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
-              {returnData: '0x', logs: [], gasUsed: '100000', status: '0x1'},
-            ],
-          },
-        ];
-
-        vi.mocked(provider.send).mockResolvedValue(mockResult);
-
-        const quoteSplit = createQuoteSplit();
-        const result = await customSimulator.ethSimulateV1(
-          USER_ADDRESS,
-          swapOptions,
-          quoteSplit,
-          ctx
-        );
-
-        // 100000 * 1.5 = 150000
-        expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
+        // The polyfill's gasUsed is already whole-transaction (it reconstructs
+        // the per-call intrinsic native simulateV1 charges), and like the
+        // native path it is reported unscaled.
+        expect(result.simulationResult?.estimatedGasUsed).toBe(100000n);
       });
 
       it('should handle native token swaps on mainnet by using BEACON_CHAIN_DEPOSIT_ADDRESS', async () => {
@@ -628,7 +597,7 @@ describe('eth-simulateV1-provider', () => {
             approvePermit2GasUsed: '45000',
             approveUniversalRouterGasUsed: '55000',
             swapGasUsed: '140000',
-            swapWithMultiplier: '182000', // 140000 * 1.3
+            estimatedGasUsed: '140000',
           }
         );
       });
@@ -870,7 +839,7 @@ describe('eth-simulateV1-provider', () => {
         );
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
-        expect(result.simulationResult?.estimatedGasUsed).toBe(195000n); // 150000 * 1.3
+        expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
 
         const sendArgs = vi.mocked(provider.send).mock.calls[0];
         const blockStateCalls = sendArgs[1][0];
@@ -917,26 +886,13 @@ describe('eth-simulateV1-provider', () => {
     });
 
     describe('constructor', () => {
-      it('should use default multiplier when not provided', () => {
+      it('should default to eth_simulateV1 when no rpc method is given', () => {
         const sim = new EthSimulateV1Simulator(
           ChainId.MAINNET,
           provider,
           gasConverter,
           ethEstimateGasSimulator,
           [ChainId.MAINNET]
-        );
-
-        expect(sim).toBeInstanceOf(EthSimulateV1Simulator);
-      });
-
-      it('should use provided multiplier override', () => {
-        const sim = new EthSimulateV1Simulator(
-          ChainId.MAINNET,
-          provider,
-          gasConverter,
-          ethEstimateGasSimulator,
-          [ChainId.MAINNET],
-          {[ChainId.MAINNET]: 2.0, [ChainId.ARBITRUM]: 1.5}
         );
 
         expect(sim).toBeInstanceOf(EthSimulateV1Simulator);

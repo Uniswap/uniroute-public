@@ -5,6 +5,7 @@ import {
   AURORA_SUPPORTED_TARGETS,
   AsyncSemaphore,
   AuroraSourcedProvider,
+  AuroraV2PoolsProvider,
   AuroraV3PoolsProvider,
   AuroraV4PoolsProvider,
   IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN,
@@ -1293,24 +1294,202 @@ describe('targetKey', () => {
   });
 });
 
+describe('AuroraV2PoolsProvider', () => {
+  const CHAIN_ID_ROBINHOOD = 4663;
+  const ROBINHOOD_WRAPPED_NATIVE = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+  const FEI = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
+  const VIRTUAL = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b';
+
+  function v2Row(
+    overrides: Partial<{
+      pairAddress: string;
+      token0Address: string;
+      token1Address: string;
+      totalSupply: string;
+      tvlUsd: number;
+      token0PriceUsd: number | null;
+      token1PriceUsd: number | null;
+    }> = {}
+  ) {
+    return {
+      pairAddress: overrides.pairAddress ?? '0xPAIR',
+      token0Address: overrides.token0Address ?? ROBINHOOD_WRAPPED_NATIVE,
+      token1Address:
+        overrides.token1Address ?? '0x0000000000000000000000000000000000000001',
+      reserve0: '1000000000000000000',
+      reserve1: '2000000',
+      totalSupply: overrides.totalSupply ?? '1234500000000000000',
+      tvlUsd: overrides.tvlUsd ?? 4000,
+      token0PriceUsd:
+        overrides.token0PriceUsd === undefined
+          ? 2000
+          : overrides.token0PriceUsd,
+      token1PriceUsd:
+        overrides.token1PriceUsd === undefined ? 1 : overrides.token1PriceUsd,
+      token0Decimals: 18,
+      token1Decimals: 6,
+      token0Symbol: 'WNATIVE',
+      token1Symbol: 'USD',
+      token0Name: 'Wrapped Native',
+      token1Name: 'USD',
+      stateAsOfTimestamp: new Date(),
+    };
+  }
+
+  function freshNativePrice(chainId: number, priceUsd = 2000) {
+    const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(chainId)!;
+    return {
+      batchGet: async () =>
+        new Map([
+          [
+            `${chainId}_${wrappedNative}`,
+            {
+              chainId,
+              tokenAddress: undefined as never,
+              priceUsd,
+              timestamp: new Date(),
+              updatedAt: new Date(),
+            },
+          ],
+        ]),
+    };
+  }
+
+  function provider(
+    chainId: number,
+    rows: ReturnType<typeof v2Row>[],
+    trackedEthThreshold = 0.025,
+    untrackedUsdThreshold = Number.MAX_VALUE,
+    metric = new FakeMetric()
+  ) {
+    return new AuroraV2PoolsProvider(
+      chainId,
+      trackedEthThreshold,
+      untrackedUsdThreshold,
+      {
+        routablePools: {listAllV2RoutablePools: async () => rows},
+        prices: freshNativePrice(chainId),
+        logger: noopLogger,
+        metric,
+      }
+    );
+  }
+
+  it('mirrors V2 special-case and threshold families, and maps supply/reserves', async () => {
+    const metric = new FakeMetric();
+    const pools = await provider(
+      CHAIN_ID_ROBINHOOD,
+      [
+        v2Row({pairAddress: '0xFEI', token0Address: FEI, tvlUsd: 0}),
+        v2Row({pairAddress: '0xTRACKED', tvlUsd: 51}), // strict > $50
+        v2Row({pairAddress: '0xEQUAL', tvlUsd: 50}),
+        v2Row({pairAddress: '0xVIRTUAL', token0Address: VIRTUAL, tvlUsd: 0}),
+      ],
+      0.025,
+      Number.MAX_VALUE,
+      metric
+    ).getPools();
+
+    expect(pools.map(pool => pool.id).sort()).toEqual(['0xfei', '0xtracked']);
+    const tracked = pools.find(pool => pool.id === '0xtracked')!;
+    expect(tracked.token0.id).toBe(ROBINHOOD_WRAPPED_NATIVE);
+    expect(tracked.supply).toBeCloseTo(1.2345, 9);
+    expect(tracked.reserve).toBeCloseTo(51 / 2000, 9);
+    expect(tracked.reserveUSD).toBe(51);
+    expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'fei'}),
+        }),
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'tracked_reserve'}),
+        }),
+      ])
+    );
+  });
+
+  it('keeps virtual-token pools Base-only and wires the otherwise inert untracked threshold', async () => {
+    const basePools = await provider(8453, [
+      v2Row({pairAddress: '0xVIRTUAL', token0Address: VIRTUAL, tvlUsd: 0}),
+    ]).getPools();
+    expect(basePools.map(pool => pool.id)).toEqual(['0xvirtual']);
+
+    const metric = new FakeMetric();
+    const untrackedPools = await provider(
+      CHAIN_ID_ROBINHOOD,
+      [v2Row({pairAddress: '0xUNTRACKED', tvlUsd: 101})],
+      1,
+      100,
+      metric
+    ).getPools();
+    expect(untrackedPools.map(pool => pool.id)).toEqual(['0xuntracked']);
+    expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'untracked_usd'}),
+        }),
+      ])
+    );
+  });
+
+  it('doubles a one-priced-side pool and zeroes an unpriced one, like trackedReserveETH', async () => {
+    // Threshold $50-native-equivalent (0.025 * $2000). A $30 one-sided pool
+    // doubles to $60 tracked and is admitted; the same value with both sides
+    // priced stays $30 and is rejected; an unpriced pool tracks $0.
+    const pools = await provider(CHAIN_ID_ROBINHOOD, [
+      v2Row({
+        pairAddress: '0xONESIDED',
+        tvlUsd: 30,
+        token1PriceUsd: null,
+      }),
+      v2Row({pairAddress: '0xBOTHSIDES', tvlUsd: 30}),
+      v2Row({
+        pairAddress: '0xUNPRICED',
+        tvlUsd: 0,
+        token0PriceUsd: null,
+        token1PriceUsd: null,
+      }),
+    ]).getPools();
+
+    expect(pools.map(pool => pool.id)).toEqual(['0xonesided']);
+    expect(pools[0]!.reserveUSD).toBe(60);
+    expect(pools[0]!.reserve).toBeCloseTo(60 / 2000, 9);
+  });
+});
+
 describe('AURORA_SUPPORTED_TARGETS', () => {
-  it('covers exactly the V3/V4 cron matrix minus Base and Ink, never V2', () => {
+  it('covers exactly the V2/V3/V4 cron matrix minus Base, Ink, and Monad testnet', () => {
     // Derived from the live cron matrix so adding or removing a cron target
     // fails this test until the Aurora allowlist decision is revisited.
     const CHAIN_ID_BASE = 8453;
     const CHAIN_ID_INK = 57073;
+    const CHAIN_ID_MONAD_TESTNET = 10143;
     const expected = new Set(
       createChainProtocols(noopLogger, new FakeMetric())
-        .filter(
-          cp => cp.protocol === Protocol.V3 || cp.protocol === Protocol.V4
+        .filter(cp =>
+          [Protocol.V2, Protocol.V3, Protocol.V4].includes(cp.protocol)
         )
         .filter(
-          cp => cp.chainId !== CHAIN_ID_BASE && cp.chainId !== CHAIN_ID_INK
+          cp =>
+            cp.chainId !== CHAIN_ID_BASE &&
+            cp.chainId !== CHAIN_ID_INK &&
+            cp.chainId !== CHAIN_ID_MONAD_TESTNET
         )
         .map(cp => targetKey(cp.chainId, cp.protocol))
     );
     expect(new Set(AURORA_SUPPORTED_TARGETS)).toEqual(expected);
-    for (const key of ['8453:V4', '8453:V3', '57073:V4', '57073:V3', '1:V2']) {
+    for (const key of [
+      '8453:V4',
+      '8453:V3',
+      '8453:V2',
+      '57073:V4',
+      '57073:V3',
+      '57073:V2',
+      '10143:V2',
+    ]) {
       expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(false);
     }
   });

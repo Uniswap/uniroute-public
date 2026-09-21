@@ -434,6 +434,65 @@ describe('SwapOptionsFactory', () => {
     });
   });
 
+  describe('createUniversalRouterOptions_2_1_2', () => {
+    const permitInput: SwapOptionsUniversalRouterInput = {
+      chainId: ChainId.MAINNET,
+      tradeType: TradeType.ExactIn,
+      amountIn: '1000000000000000000',
+      tokenInWrappedAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+      slippageTolerance: '0.5',
+      portionBips: 25,
+      portionRecipient: '0x000000fee13a103A10D593b9AE06b3e05F2E7E1c',
+      permitSignature: '0x1234567890abcdef',
+      permitNonce: '1',
+      permitExpiration: '1700000000',
+      permitAmount: '1000000000000000000',
+      permitSigDeadline: '1700001000',
+    };
+
+    it('targets the 2.1.2 router, not the 2.1.1 one', () => {
+      const result2_1_1 =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(permitInput);
+      const result2_1_2 =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_2(permitInput);
+
+      expect(result2_1_2!.urVersion).toBe(UniversalRouterVersion.V2_1_2);
+      // Mainnet v2.1.2 deployment (universal-router release 2.1.2).
+      expect(result2_1_2!.inputTokenPermit!.spender).toBe(
+        '0x23617e59A5925b2A4Bf75d73ff6711cD0b29De85'
+      );
+      expect(result2_1_2!.inputTokenPermit!.spender).not.toBe(
+        result2_1_1!.inputTokenPermit!.spender
+      );
+    });
+
+    it('is otherwise identical to 2.1.1 (same encoding inputs)', () => {
+      const result2_1_1 =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_1(permitInput);
+      const result2_1_2 =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_2(permitInput);
+
+      const {
+        urVersion: version2_1_1,
+        inputTokenPermit: permit2_1_1,
+        ...rest2_1_1
+      } = result2_1_1!;
+      const {
+        urVersion: version2_1_2,
+        inputTokenPermit: permit2_1_2,
+        ...rest2_1_2
+      } = result2_1_2!;
+
+      expect(version2_1_1).toBe(UniversalRouterVersion.V2_1_1);
+      expect(version2_1_2).toBe(UniversalRouterVersion.V2_1_2);
+      expect(rest2_1_2).toEqual(rest2_1_1);
+      const {spender: spender2_1_1, ...permitRest2_1_1} = permit2_1_1!;
+      const {spender: spender2_1_2, ...permitRest2_1_2} = permit2_1_2!;
+      expect(spender2_1_2).not.toBe(spender2_1_1);
+      expect(permitRest2_1_2).toEqual(permitRest2_1_1);
+    });
+  });
+
   describe('createUniversalRouterOptions_2_1_1', () => {
     const baseInput: SwapOptionsUniversalRouterInput = {
       chainId: ChainId.MAINNET,

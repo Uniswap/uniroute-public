@@ -16,9 +16,6 @@ import {SimulationStatus} from '../ISimulator';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
 import {breakDownSimulationError} from './simulationErrorBreakDown';
 
-// We multiply eth estimate gas by this to add a buffer for gas limits
-const DEFAULT_ESTIMATE_MULTIPLIER = 1.2;
-
 const MAX_REVERT_DATA_SEARCH_DEPTH = 5;
 const REVERT_DATA_REGEX = /^0x[0-9a-f]{8,}$/i;
 
@@ -64,18 +61,15 @@ export function extractRevertData(
 }
 
 export class EthEstimateGasSimulator extends Simulator {
-  private overrideEstimateMultiplier: {[chainId in ChainId]?: number};
   private gasConverter: GasConverter;
 
   constructor(
     chainId: ChainId,
     provider: JsonRpcProvider,
-    gasConverter: GasConverter,
-    overrideEstimateMultiplier?: {[chainId in ChainId]?: number}
+    gasConverter: GasConverter
   ) {
     super(provider, chainId);
     this.gasConverter = gasConverter;
-    this.overrideEstimateMultiplier = overrideEstimateMultiplier ?? {};
   }
 
   async ethEstimateGas(
@@ -146,7 +140,11 @@ export class EthEstimateGasSimulator extends Simulator {
       throw new Error(`Unsupported swap type ${swapOptions}`);
     }
 
-    estimatedGasUsed = this.adjustGasEstimate(estimatedGasUsed);
+    // Reported unscaled, but note this is not the same quantity the
+    // eth_simulateV1 bundle reports: eth_estimateGas binary-searches for the
+    // smallest limit at which the tx succeeds, so it sits above actual gasUsed
+    // (63/64 rule, refunds not applied). This path already ran high; the old
+    // multiplier stacked on top of that rather than correcting it.
     ctx.logger.info('Simulated using eth_estimateGas', {
       methodParameters: quoteSplit.swapInfo!.methodParameters,
       estimatedGasUsed: estimatedGasUsed.toString(),
@@ -187,16 +185,6 @@ export class EthEstimateGasSimulator extends Simulator {
         description: 'Simulation succeeded via eth_estimateGas',
       },
     };
-  }
-
-  private adjustGasEstimate(gasLimit: BigNumber): BigNumber {
-    const estimateMultiplier =
-      this.overrideEstimateMultiplier[this.chainId] ??
-      DEFAULT_ESTIMATE_MULTIPLIER;
-
-    return BigNumber.from(gasLimit)
-      .mul(estimateMultiplier * 100)
-      .div(100);
   }
 
   protected async simulateTransaction(

@@ -205,7 +205,7 @@ const v3UntrackedUsdThreshold = 25000;
 
 export const v2TrackedEthThreshold = 0.025;
 export const v2BaseTrackedEthThreshold = 0.1;
-const v2UntrackedUsdThreshold = Number.MAX_VALUE;
+export const v2UntrackedUsdThreshold = Number.MAX_VALUE;
 
 // --- Chain protocol definitions ---
 
@@ -226,6 +226,22 @@ export function trackedEthThresholdFor(
       return isBase ? v3BaseTrackedEthThreshold : v3TrackedEthThreshold;
     default:
       return isBase ? v4BaseTrackedEthThreshold : v4TrackedEthThreshold;
+  }
+}
+
+// Keep Aurora's admission union tied to the same per-protocol threshold the
+// corresponding subgraph provider receives.
+export function untrackedUsdThresholdFor(
+  protocol: Protocol,
+  _chainId: number
+): number {
+  switch (protocol) {
+    case Protocol.V2:
+      return v2UntrackedUsdThreshold;
+    case Protocol.V3:
+      return v3UntrackedUsdThreshold;
+    default:
+      return v4UntrackedUsdThreshold;
   }
 }
 
@@ -636,7 +652,7 @@ export function createChainProtocols(
         v3TrackedEthThreshold,
         v3UntrackedUsdThreshold,
         v3SubgraphUrlOverride(CHAIN_ID_ARC),
-        undefined,
+        process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
         metric,
         subgraphFetchFactory
@@ -1016,7 +1032,7 @@ export function createChainProtocols(
         v2TrackedEthThreshold,
         v2UntrackedUsdThreshold,
         v2SubgraphUrlOverride(CHAIN_ID_ARC),
-        undefined,
+        process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
         metric,
         subgraphFetchFactory
@@ -1482,7 +1498,7 @@ export function createChainProtocols(
         v4TrackedEthThreshold,
         v4UntrackedUsdThreshold,
         v4SubgraphUrlOverride(CHAIN_ID_ARC),
-        undefined,
+        process.env.GOLD_SKY_BEARER_TOKEN,
         logger,
         metric,
         subgraphFetchFactory

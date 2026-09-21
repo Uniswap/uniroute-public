@@ -198,7 +198,7 @@ describe('EthEstimateGasSimulator', () => {
   });
 
   describe('ethEstimateGas', () => {
-    it('returns SUCCESS with adjusted gas estimate on success', async () => {
+    it('returns SUCCESS with the unpadded gas estimate on success', async () => {
       vi.mocked(provider.estimateGas).mockResolvedValue(BigNumber.from(150000));
 
       const result = await simulator.ethEstimateGas(
@@ -209,8 +209,8 @@ describe('EthEstimateGasSimulator', () => {
       );
 
       expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
-      // 150000 * 1.2 default multiplier
-      expect(result.simulationResult?.estimatedGasUsed).toBe(180000n);
+      // Reported as returned by eth_estimateGas, with no buffer applied.
+      expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
     });
 
     it('returns SLIPPAGE_TOO_LOW when the revert carries a V4TooLittleReceived error', async () => {

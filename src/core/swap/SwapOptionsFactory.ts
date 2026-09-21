@@ -68,6 +68,15 @@ export class SwapOptionsFactory {
     );
   }
 
+  static createUniversalRouterOptions_2_1_2(
+    input: SwapOptionsUniversalRouterInput
+  ): SwapOptionsUniversalRouter | undefined {
+    return SwapOptionsFactory.createUniversalRouterOptions(
+      UniversalRouterVersion.V2_1_2,
+      input
+    );
+  }
+
   static createUniversalRouterOptions_2_2_0(
     input: SwapOptionsUniversalRouterInput
   ): SwapOptionsUniversalRouter | undefined {

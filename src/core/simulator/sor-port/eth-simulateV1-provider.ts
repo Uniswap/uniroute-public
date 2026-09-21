@@ -103,9 +103,6 @@ interface ResultCall {
   calls: Array<ReturnData | JsonRpcError>;
 }
 
-// We multiply eth_simulateV1 gas limit by this to overestimate gas limit
-const DEFAULT_ESTIMATE_MULTIPLIER = 1.3;
-
 /**
  * Geth's hexutil.Big rejects hex quantities with leading zero digits, and
  * ethers' toHexString pads to an even digit count — so a native-input
@@ -120,7 +117,6 @@ export class EthSimulateV1Simulator extends Simulator {
   private gasConverter: GasConverter;
   private ethEstimateGasSimulator: EthEstimateGasSimulator;
   private simulationSupportedChains: ChainId[];
-  private overrideEstimateMultiplier: {[chainId in ChainId]?: number};
   private readonly rpcMethod: SimulateRpcMethod;
   private readonly simTypeTag: string;
 
@@ -130,14 +126,12 @@ export class EthSimulateV1Simulator extends Simulator {
     gasConverter: GasConverter,
     ethEstimateGasSimulator: EthEstimateGasSimulator,
     simulationSupportedChains: ChainId[],
-    overrideEstimateMultiplier?: {[chainId in ChainId]?: number},
     rpcMethod: SimulateRpcMethod = 'eth_simulateV1'
   ) {
     super(provider, chainId);
     this.gasConverter = gasConverter;
     this.ethEstimateGasSimulator = ethEstimateGasSimulator;
     this.simulationSupportedChains = simulationSupportedChains;
-    this.overrideEstimateMultiplier = overrideEstimateMultiplier ?? {};
     this.rpcMethod = rpcMethod;
     this.simTypeTag = `simType:${rpcMethod}`;
   }
@@ -152,9 +146,6 @@ export class EthSimulateV1Simulator extends Simulator {
     stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     let estimatedGasUsed: bigint;
-    const estimateMultiplier =
-      this.overrideEstimateMultiplier[this.chainId] ??
-      DEFAULT_ESTIMATE_MULTIPLIER;
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
       // Tag swapsteps-mode simulations so their success rate is sliceable.
@@ -345,11 +336,14 @@ export class EthSimulateV1Simulator extends Simulator {
           };
         }
 
+        // Reported unscaled. Each call in the block is executed as its own
+        // transaction, so this gasUsed already carries the 21k intrinsic +
+        // calldata cost — unirpc_simulateV0 reconstructs the same charge to
+        // match. That makes it the same quantity guidestar reports from
+        // tx_total_gas, which is the comparison the hybrid multiplexer makes;
+        // a multiplier here only biased that comparison.
         estimatedGasUsed = BigInt(
-          (
-            Number((result[0].calls[swapCallIndex] as ReturnData).gasUsed) *
-            estimateMultiplier
-          ).toFixed(0)
+          (result[0].calls[swapCallIndex] as ReturnData).gasUsed
         );
 
         await ctx.metrics.dist(
@@ -381,7 +375,7 @@ export class EthSimulateV1Simulator extends Simulator {
               approveUniversalRouterGasUsed: (result[0].calls[1] as ReturnData)
                 .gasUsed,
               swapGasUsed: (result[0].calls[2] as ReturnData).gasUsed,
-              swapWithMultiplier: estimatedGasUsed.toString(),
+              estimatedGasUsed: estimatedGasUsed.toString(),
             }
           );
         } else {
@@ -391,7 +385,7 @@ export class EthSimulateV1Simulator extends Simulator {
               approveProxyContractGasUsed: (result[0].calls[0] as ReturnData)
                 .gasUsed,
               swapGasUsed: (result[0].calls[1] as ReturnData).gasUsed,
-              swapWithMultiplier: estimatedGasUsed.toString(),
+              estimatedGasUsed: estimatedGasUsed.toString(),
             }
           );
         }

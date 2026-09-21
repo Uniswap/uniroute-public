@@ -11,6 +11,7 @@ import {
   InspectCacheKeyRequest,
   InspectCacheKeyResponse,
   MethodParameters,
+  PerHopSlippage,
   PoolInRoute,
   QuoteRequest,
   QuoteResponse,
@@ -3004,6 +3005,7 @@ export class UniRouteBL implements IUniRoutedBL {
       gasUseEstimateUSD: finalGasUseEstimateUSD.toString(),
       routeString,
       route: filteredAllPools.map(pools => new Route({pools})),
+      perHopSlippage: PerHopSlippage.OFF,
       hitsCachedRoutes: usedCachedRoutes,
       debugInfo: debugInfo,
       routeCandidates,
@@ -3261,6 +3263,11 @@ export class UniRouteBL implements IUniRoutedBL {
     } else if (universalRouterVersion === UniversalRouterVersion.V2_1_1) {
       swapOptions =
         SwapOptionsFactory.createUniversalRouterOptions_2_1_1(swapOptionsInput);
+    } else if (universalRouterVersion === UniversalRouterVersion.V2_1_2) {
+      // UR 2.1.2 is a byte-identical redeploy of 2.1.1 at new addresses:
+      // same encoding and swap options, only the router address differs.
+      swapOptions =
+        SwapOptionsFactory.createUniversalRouterOptions_2_1_2(swapOptionsInput);
     } else if (universalRouterVersion === UniversalRouterVersion.V2_2_0) {
       // UR 2.2 (permissioned-pool support) — build swap options so the
       // route is simulated and calldata is produced, rather than skipped.

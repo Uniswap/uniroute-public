@@ -21,9 +21,17 @@ import {Protocol} from '../../../models/pool/Protocol';
 
 // ARC is not yet in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_ARC = 5042 as ChainId;
-// Faze Launchpad (LaunchpadHook) on ARC — fee-on-top, immutable 20% launch-window cap
 export const FAZE_LAUNCHPAD_HOOK_ON_ARC =
   '0x8bfdf31eb89c13adb2188a3b1445ad90574360cc';
+// provisional: approved on provided source, pending on-chain verification
+export const BASEDBID_HOOK_ON_ARC =
+  '0x2ff97fd4a58c653aade8f968e98de577b8d65acc';
+export const CTRL_NATIVE_LAUNCH_HOOK_ON_ARC =
+  '0xe0e48ae841741c1c5a6efa1dee2838e62d5168cc';
+export const BASEDBID_HOOK_ON_ARC_2 =
+  '0x0be4c82f9b4791076aaeca04996db454747a1acc';
+export const LOAD_V4_TAX_HOOK_ON_ARC =
+  '0xb164eaab68a07858dadb7915e1193a611f0888c8';
 // INK is not yet in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_INK = 57073 as ChainId;
 // Protocols listed here are excluded from cached-routes retrieval inside
@@ -121,6 +129,12 @@ export const FLAUNCH_POSM_V4_ON_BASE =
   '0x23321f11a6d44fd1ab790044fdfde5758c902fdc';
 export const FLAUNCH_ANYPOSM_V1_ON_BASE =
   '0x8dc3b85e1dc1c846ebf3971179a751896842e5dc';
+export const FLAUNCH_ANYPOSM_VESTED_ON_BASE =
+  '0xe753a351fb498051a09dc130fcc29aebc76525dc';
+export const FLAUNCH_ANYPOSM_VESTED_ON_ARBITRUM =
+  '0xe753a351fb498051a09dc130fcc29aebc76525dc';
+export const FLAUNCH_ANYPOSM_VESTED_ON_ROBINHOOD =
+  '0xe753a351fb498051a09dc130fcc29aebc76525dc';
 
 export const FLAUNCH_POSM_ON_ROBINHOOD =
   '0x5cf8e499c7c466c7e2cf127bdf129f57151e65dc';
@@ -356,7 +370,7 @@ export const ARRAKIS_PRIVATE_HOOK_ON_BASE =
   '0xf9527fb5a34ac6fbc579e4fbc3bf292ed57d4880';
 export const ARRAKIS_PRIVATE_HOOK_ON_MAINNET =
   '0xf9527fb5a34ac6fbc579e4fbc3bf292ed57d4880';
-// same CREATE2 address on 7 chains; XLayer bytecode differs
+// same CREATE2 address on 7 chains
 export const ARRAKIS_PRIVATE_HOOK_V2 =
   '0xa4e6f5500e88691fdcb289aa0e99067481434880';
 export const CUSTOM_FEE_MEV_PROTECTION_HOOK_ON_MAINNET =
@@ -402,15 +416,6 @@ export const TOKENS_FUN_4_ON_BASE =
 export const UPEG_HOOK_ON_MAINNET =
   '0xe54082DfBf044B6a8F584bdDdb90a22d5613C440';
 
-// GuideStar stable-stable hook, deployed 2026-09-08 (mainnet block 25934112),
-// permission bits 0x3CC0: before/after initialize, add-liquidity and swap; no
-// custom-accounting (returns-delta) bits. Without this entry its pools are
-// rejected by isHooksPoolRoutable (swap permissions) and, on DAI/USDC/USDT
-// pairs, by the major-pair rule in the auto-allowlist. Allowlisting admits
-// its pools to the snapshot (the explicit-allowlist append is uncapped for
-// static entries). It is also in ZLCA_HOOKS_PER_CHAIN so its pools skip the
-// TVL floor and are force-selected past the top-N cut at quote time even
-// while new and thinly funded, and carry a per-hop gas overhead.
 export const GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET =
   '0x0000113dcf4add69999fad8f20f2b63f979bfcc0';
 export const ETIM_TAX_HOOK_ON_MAINNET =
@@ -453,12 +458,8 @@ export const AEGIS_DFM_ON_BLAST = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_ZORA = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_WORLDCHAIN = AEGIS_DFM_ADDRESS;
 export const AEGIS_DFM_ON_XLAYER = AEGIS_DFM_ADDRESS;
-// SizeMemeHook (size.fun v2) — fee-on-top in afterSwap; per-pool fee frozen at
-// registration, capped at immutable MAX_TOTAL_TRADE_FEE_BPS = 2_000 (20%)
 export const SIZE_MEME_HOOK_ON_XLAYER =
   '0x48ab5124b299c4c437ee6b3a03325ff3b9b56044';
-// KLIK Labs Hook — immutable EIP-1167 clone of ConfigurableKlikHook; fee-on-top,
-// effective tax capped at immutable 25% (MAX_EFFECTIVE_TAX_BPS)
 export const KLIK_LABS_HOOK_ON_MAINNET =
   '0xb8d9477eb6ef5f0df5219cf0c8130dd7e520e0cc';
 export const AEGIS_DFM_ON_SONEIUM = AEGIS_DFM_ADDRESS;
@@ -531,15 +532,22 @@ export const LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET =
 // Declared above ZLCA_HOOKS_PER_CHAIN, which references it at module load.
 export const ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET =
   '0x2494d3d872a99b7b055304692454a226879de888';
+// Native/ERC-20 USDC converter on Arc (Uniswap-deployed, v4-hooks-public
+// ArcUSDCHook): a zero-liquidity return-delta hook that re-denominates between
+// 18-decimal native USDC (address(0)) and the 6-decimal ERC-20 view of the
+// SAME balance at 0x3600...0000 — nothing is wrapped, the hook takes one form
+// from the PoolManager and settles the other from the same balance. Its only
+// pool is (address(0), 0x3600, fee 0, tickSpacing 1), initialized at
+// 2^96 / 1e6 = the exact 1e12 raw ratio, so slot0 already reads the true
+// price and the pool needs no `sqrtPriceFromQuoter`. It is the bridge between
+// the ERC-20 form every request names (trading always sends 0x3600) and any
+// V4 pool keyed on native USDC.
+export const NATIVE_USDC_CONVERTER_HOOK_ON_ARC =
+  '0xcf2f5f59dfb87eb716d16b37e3e35999b9e56888';
 export const DUALPOOL_HOOK_ON_MAINNET =
   '0x00000078bd49d5279a99b5f4011a5c61ee8caac0';
 // Aerodrome Slipstream aggregator singleton on Base: no `expiryBlock()`,
 // wired to the Slipstream factory 0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef.
-// Predecessors deliberately not listed: 0xa1d866042c0989570cc35ce102c03d14184ee888
-// (2026-08-19, same code generation but pointed at factory
-// 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A) and
-// 0xa167c254ef8a24bda465760dc1969a5ce37ae888 (2026-08-05, expires at Base
-// block 52555445).
 export const SLIPSTREAM_AGG_HOOK_ON_BASE =
   '0xa1dfe862f1111f5e9d466fd4d7297d7d4fa76888';
 
@@ -558,77 +566,22 @@ export const FLETH_HOOK_ON_ARBITRUM =
 
 /**
  * "ZLCA Hooks" — Zero-Liquidity Custom-Accounting hooks: V4 hooks whose
- * custom accounting (e.g. a PSM-style fixed-parity conversion via
- * BeforeSwapReturnsDelta like the LitePSM hooks, JIT-provisioned
- * liquidity like the dualpool hook, or a pass-through to an external DEX
- * pool like the Slipstream aggregator hook) means their pools hold no
- * ordinary LP positions, so the standard concentrated-liquidity `liquidity`
- * field is structurally always 0 — and their subgraph `totalValueLockedETH`
- * may not reflect real economic backing either. Neither is a usable
- * admission signal, so they are admitted to routing purely by membership in
- * this registry (a small, explicitly curated list — same trust model as the
- * plain `HOOKS_ADDRESSES_ALLOWLIST`, and every address here must ALSO
- * appear there). The hook settles the whole swap inside the PoolManager's
- * unlock (from reserves it custodies there, or by pulling them from an
- * external pool in its callback), so the standard V4Quoter prices them
- * fine — no AggHookQuoter/AGG_HOOKS_PER_CHAIN treatment needed.
+ * custom accounting means their pools hold no ordinary LP positions, so the
+ * standard concentrated-liquidity `liquidity` field is structurally always 0
+ * and their subgraph `totalValueLockedETH` may not reflect real backing
+ * either. Neither is a usable admission signal, so they are admitted to
+ * routing purely by membership in this registry (a small, explicitly curated
+ * list — every address here must ALSO appear in `HOOKS_ADDRESSES_ALLOWLIST`).
+ * The hook settles the whole swap inside the PoolManager unlock, so the
+ * standard V4Quoter prices them fine.
  *
- * Routing behavior tied to this category: exemption from BOTH the
- * subgraph's V4_MIN_TVL_ETH floor at the query level AND the post-fetch
- * liquidity/TVL sanitize filter during pool-cache discovery (see
- * `subgraphProvider.ts`), plus force-selection past TVL-ranked topN cuts
- * (see `TopPoolsSelector.ts` / `S3SubgraphPoolDiscovererV4`). This matters
- * for their use as intermediate-hop candidates (direct-pair requests
- * already find them via DirectPoolDiscoverer regardless of TVL/liquidity).
- * Unlike the permissioned-hook query, no adapter/known-token bounding is
- * applied — safe only while no hook here can have compliance-sensitive
- * pools. Do not add a hook whose pools can involve permissioned or
- * compliance-sensitive tokens without adding bounding like the
- * permissioned-hook query's.
+ * Do not add a hook whose pools can involve permissioned or
+ * compliance-sensitive tokens — this list applies no known-token bounding.
  *
- * The map value is the hook's per-hop gas overhead (gas units), added on
- * the HEURISTIC estimation path for every leg through one of its pools
- * (see `zlcaHookGasCalibration.ts`). These hooks do real work in their
- * swap callbacks that the V3-style heuristic (tuned for plain
- * concentrated-liquidity hops at ~60-97k) cannot see, and an
- * under-estimated `gasUseEstimate` becomes the tx gas limit downstream
- * (trading uses it verbatim instead of simulating) — so a shortfall
- * reverts user swaps (OOG at the final Permit2 settle,
- * TRANSFER_FROM_FAILED), not just mis-ranks routes. Over-estimating is
- * safe (unused gas is refunded) at the cost of a gas-ranking penalty
- * against the hook's routes — the right direction to err. Quoter-based
- * estimates must NOT add it: the V4Quoter's `gasEstimate` already includes
- * the hook callback.
- *
- * Values: the LitePSM 500k was calibrated 2026-07-06 on mainnet — hook
- * callback frame ~218k in a reverted prod-shape trace, V4Quoter view-call
- * 258-275k for the full hop vs a ~60-97k heuristic base, doubled for
- * headroom since quoter view-calls understate tx-context cost by
- * +67k..+188k in the agg-hook calibration. The dualpool 3M is per the hook
- * team's guidance. The eToro RFQ 250k was calibrated 2026-08-14: V4Quoter
- * view-calls through all three live pools measured 85,130-87,495 for the
- * full hop (both directions), so the callback's excess over the ~60-97k
- * heuristic base is <=~27k; doubled plus the +188k view-call
- * understatement bound stays under 250k. The Slipstream 500k was
- * calibrated 2026-09-08 on Base against the predecessor hooks' WETH/USDC
- * pools: V4Quoter view-calls measured 255,693-276,061 for the full hop
- * (both directions, 0.1-1 ETH), the same envelope as LitePSM, so it takes
- * the same doubled figure. Re-checked 2026-09-09 on the current hook's only
- * pool (USDC/LAPTOP): 259,940-320,319, the high end being tick crossings in
- * the thin external pool for 1,000 USDC in; worst case plus the +188k
- * view-call understatement bound is ~508k, still under the ~560-597k the
- * heuristic base plus this overhead yields.
- *
- * The GuideStar stable-stable hook is the one entry that is NOT
- * custom-accounting: its pools hold ordinary concentrated liquidity and it
- * has no returns-delta bits. It is here for the admission half (TVL floor
- * bypass + force-select, so new low-TVL stable pools are still route
- * candidates) and its 50k is a provisional owner-provided figure for the
- * beforeSwap/afterSwap callbacks, not a calibrated one. Re-measure against
- * V4Quoter view calls once its pools are live and adjust.
- *
- * Add future zero-liquidity custom-accounting hooks here to pick up the
- * same treatment automatically.
+ * The map value is the hook's per-hop gas overhead (gas units): a ZLCA entry
+ * carries this gas figure, unlike a plain `HOOKS_ADDRESSES_ALLOWLIST` entry.
+ * Add future zero-liquidity custom-accounting hooks here for the same
+ * treatment automatically.
  */
 export interface ZlcaHookConfig {
   /** Per-hop gas overhead (gas units) added on the heuristic estimation path. */
@@ -665,9 +618,8 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [DUALPOOL_HOOK_ON_MAINNET]: {gasOverheadPerHop: 3_000_000n},
     [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: {gasOverheadPerHop: 250_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: {gasOverheadPerHop: 50_000n},
-    // flETH 1:1 ETH wrapper: zero-liquidity custom curve (beforeSwap mints/burns
-    // flETH against the hook's ETH reserve). Pool is 1:1 with equal decimals, so
-    // slot0's 2^96 placeholder is already correct — no sqrtPriceFromQuoter needed.
+    // Pool is 1:1 with equal decimals, so slot0's 2^96 placeholder is already
+    // correct — no sqrtPriceFromQuoter needed.
     [FLETH_HOOK_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
   },
   [ChainId.BASE]: {
@@ -689,6 +641,11 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [CHAIN_ID_INK]: {
     [FLETH_HOOK_ON_INK]: {gasOverheadPerHop: 500_000n},
   },
+  [CHAIN_ID_ARC]: {
+    // Pool initialized at the exact 1e12 raw ratio (2^96 / 1e6), so slot0 is
+    // already right — no sqrtPriceFromQuoter (see the constant's doc).
+    [NATIVE_USDC_CONVERTER_HOOK_ON_ARC]: {gasOverheadPerHop: 250_000n},
+  },
 };
 
 /** Whether `hooks` on `chainId` is a ZLCA hook flagged `sqrtPriceFromQuoter`. */
@@ -702,8 +659,6 @@ export function isZlcaHookPricedFromQuoter(
   );
 }
 
-// MEV-X Homelander is deployed on Base only. The same CREATE2 address is empty
-// (0x) on every other chain, so those entries were unroutable dead config.
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
 export const MEV_X_HOMELANDER_ON_BASE = MEV_X_HOMELANDER_ADDRESS;
 
@@ -723,6 +678,8 @@ export const STOCKIFY_FEE_HOOK_ON_BASE =
   '0x47ec48c74f3069e9ae69406197821996d80200cc';
 export const ZNS_HOOK_STATIC_FEE_ON_BASE =
   '0xacf358b129423f0107b0bf892b3eff6c770128cc';
+export const STOBOX_FEE_HOOK_ON_BASE =
+  '0x0507140088aa5b266d6b44eef02ad55cf1fb40c0';
 export const LAUNCH_HOOK_ON_BASE = '0x3b2b979df21036cee51b8debb13100e2cb8deacc';
 export const LAUNCH_HOOK_2_ON_BASE =
   '0x985c14baa2a18316ffda0aefb3a632fadfca2acc';
@@ -731,7 +688,6 @@ export const V4RCADE_FEE_HOOK_ON_BASE =
 export const REVERT_STABLE_SWAP_HOOK_ON_BASE =
   '0x37ca10c307fa8caa772f3583b3fd1e923dee2aa8';
 export const STONK_HOOK_ON_BASE = '0x702b1fe403ec993a102adde47f2ab52eb2eadacc';
-export const FLASH_HOOK_ON_BASE = '0xaf07116f1892c5fae4b55234a57ea20cf4e960cc';
 export const ZORA_V4_COIN_HOOK_ON_BASE =
   '0x0469a4bd3724dc86c9542f4694c976da13c450c0';
 export const CLANKER_HOOK_STATIC_FEE_V2_ON_BASE =
@@ -1019,10 +975,6 @@ export const PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x3a9f9e9fcb1377de2c2f88ea0d8166e92bbf60c0';
 export const NFTX_V4_HOOK_ON_MAINNET =
   '0xd2094b5cdb1a12b6274e4a4d3a252cd94c51efcc';
-// NFTX vToken hooks (deployer 0xB8A70b4d…). Operator override (Alex Francisci,
-// 2026-09-10) of G4 (getFee keyed on tx.origin) + G7 (owner-set fee validated
-// only up to MAX_LP_FEE = 100%, no immutable ceiling). NOT a gate-pass — allowed
-// on the basis that the builder is adding off-hook external controls on the fee cap.
 export const NFTX_FLEX_HOOK_ON_MAINNET =
   '0xc26a5cb51b1818f62a4c6693a9a1fedb3340efc4';
 export const NFTX_V4_HOOK_ON_ARBITRUM =
@@ -1043,9 +995,6 @@ export const PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET =
 export const PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET =
   '0x90c67c1e866f86526f0e338459cd435e1f23a0cc';
 
-// ClickHouse dynamic-fee sweep, ranks 27-100. Each verified on-chain and run
-// through the uni-new-hook gates (fee-on-top / bounded dynamic LP fee; protocol
-// fee preserved; no upgrade path; no tx.origin discrimination). See PR notes.
 export const DYNAMIC_FEE_HOOK_V2_ON_BASE =
   '0x4db263809e6ea36d223161535173a01b5b3240c0';
 export const ZORA_V4_COIN_HOOK_ON_BASE_2 =
@@ -1070,8 +1019,7 @@ export const TAX_HOOK_ON_BASE = '0x766d77aa976ad92fa785dc505228dca7a36f80cc';
 export const FORGE_HOOK_ON_BASE = '0xd103012ad40bcd053fdda1ae80f62f39366ca080';
 export const DOPPLER_HOOK_INITIALIZER_ON_MAINNET =
   '0xbdf938149ac6a781f94faa0ed45e6a0e984c6544';
-// same CREATE2 address as DOPPLER_HOOKS_ADDRESS_ON_BASE_V3 (line 229);
-// verified DopplerHookInitializer, byte-identical source on mainnet + base
+// same CREATE2 address as DOPPLER_HOOKS_ADDRESS_ON_BASE_V3 (line 229)
 export const CLANKER_HOOK_DYNAMIC_FEE_V2_ON_BNB =
   '0xd0c5728911a9f67efe47cf25411c2e052a2fe8cc';
 export const ZNS_HOOK_STATIC_FEE_ON_ROBINHOOD =
@@ -1099,10 +1047,6 @@ export const GLASS_BOX_HOOK_ON_ROBINHOOD =
 export const BAGS_V4_HOOK_ON_ROBINHOOD =
   '0x2380abf72c17aabab76480244759ac7e2932eecc';
 
-// Hook allowlist batch: 4 submitted (ROUTE-1844/1850/1851/1852) + 16 from the
-// swap-delta / dynamic-fee volume sweep. Each verified on-chain and gated:
-// fee-on-top or bounded dynamic LP fee, protocol fee preserved, no upgrade
-// path, no tx.origin/venue discrimination, owner fees within immutable caps.
 export const VLADS_HOOK_ON_ROBINHOOD =
   '0xadaf12314ba795702434cc542f4a43050a9a84cc';
 export const SHROOM_HOOK_ON_ROBINHOOD =
@@ -1171,26 +1115,24 @@ export const CATCH_FAMILY_V1_CSPCX_ON_ROBINHOOD =
   '0x1fe80095a6c4e0bb562669577eb5e29e843980cc';
 export const CATCH_FAMILY_V1_CTSLA_ON_ROBINHOOD =
   '0x33c47df31f2ef88c95b87d5cd8e9e6ed828100cc';
-// RobinhoodMixedFeeHook — dividend fee-on-top, total fee capped at immutable
-// MAX_TOTAL_FEE_PPM = 99_000 (9.9%)
 export const ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD =
   '0xa4555952075bdfd473521f3d754d13442ee3e0cc';
-// FoolHook — fixed 1% fee-on-top (constant FEE_BPS, taken in afterSwap).
-// NOTE: reverts on exact-output swaps (exact-input only); included per operator.
 export const FOOL_HOOK_ON_ROBINHOOD =
   '0x86460353c4264eeb3ac7b4d7c836b18b7f84e444';
-// NasdankFeeHookPairUniversal — dynamic LP fee, immutable MAX_FEE_BPS=1000 (10%) cap
 export const NASDANK_FEE_HOOK_ON_ROBINHOOD =
   '0xea553f825bf879af542f8770144200be2c8840cc';
-// FoolHook (2nd deployment; same code as FOOL_HOOK_ON_ROBINHOOD, exact-input only)
 export const FOOL_HOOK_V2_ON_ROBINHOOD =
   '0x99b00ecf6c6cfd4ac18f22a1245bb2d0087b6444';
-// LongerHook — 3% fee-on-top; anti-snipe starts 80% and decays to 3% over 10s (in-code)
 export const LONGER_HOOK_ON_MONAD =
   '0x07114b9c40d99fee1672cdce8d3cc6a64d409088';
-// Ascnt SimHook (2nd deploy) — dynamic LP fee, immutable MAX_FEE=500000 (50%) cap
 export const ASCNT_SIM_HOOK_ON_MAINNET =
   '0xbf9828455cdc5f02771536e3ecb3c0f931eabec4';
+export const ASCNT_SIM_HOOK_ON_ROBINHOOD =
+  '0x92ff73eba2289c3b5c1b4a2fb50ea2012df53ec4';
+export const HEKS_V2_HOOK_ON_ROBINHOOD =
+  '0x34981f91a8039610c8451040a6ffa09de38deafc';
+export const NIGHTSHADES_FACTION_GAME_HOOK_ON_ROBINHOOD =
+  '0x065388fa59505cef471529ffa08d7ecfab1faacc';
 export const BRUNO_HOOK_STATIC_FEE_V2_ON_BASE =
   '0x641110ac3cb30adeaab4db29ac61e9a8635a28cc';
 export const RHUBARB_FEE_HOOK_ON_ARBITRUM =
@@ -1201,20 +1143,12 @@ export const REALM_HOOK_ON_ROBINHOOD =
   '0xae4c0cf7c3feb79e0c244edbc6a3f8a3290940cc';
 export const SPY_TREASURY_FEE_HOOK_ON_ROBINHOOD =
   '0xbbcbd97241525086889f0b30bcf383831221e8cc';
-// PremiumLaunchHook second deployment (distinct from PREMIUM_LAUNCH_HOOK_ON_ROBINHOOD)
 export const PREMIUM_LAUNCH_HOOK_V2_ON_ROBINHOOD =
   '0xfa225fe7b2404f8a361a15fa88ad515032726acc';
-// BoeingCrashHook (deployed as CrashBAHook) — CRASH/BA pool
 export const BOEING_CRASH_HOOK_ON_ROBINHOOD =
   '0x4cf941b44263659686303a056ab53938fc4540cc';
-// HookrModularHookV6 — modular stack; fee capped by immutable MAX_TOTAL_FEE_PIPS=500_000
-// (50%) in the code-hash-pinned HookrNativeMechanicsBlockV2 module, frozen per pool
 export const HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD =
   '0xb3ca29cf721380cee8b8e4755f3865ebc68fe8cc';
-// BlendHook (INDEX basket) — operator override of the G3 protocol-fee-bypass
-// determination: the basket pool is a liquidity layer; protocol-fee-earning swaps
-// happen in the underlying unhooked constituent pools. See ROUTE-1870 / ROUTE-1836.
-// v1/v2 were removed in #13253 and re-included here under the same override.
 export const BLEND_HOOK_ON_ROBINHOOD =
   '0xb84c11114755b5cfb4d1342d7686acc72b06c888';
 export const BLEND_HOOK_V2_ON_ROBINHOOD =
@@ -1223,7 +1157,6 @@ export const BLEND_HOOK_V3_ON_ROBINHOOD =
   '0x219b93d7c067f3ccc9e25aecdbecf1279d1fc888';
 export const ADVANCED_FEE_HOOK_B20_ON_BASE =
   '0x805975d27518e3e23c4838802d9dda7302dca044';
-// RampHook — dynamic LP fee, all fee levers hard-capped at immutable MAX_FEE_BPS=20%
 export const RAMP_HOOK_ON_BASE = '0x63e0ff2e9c38db24c56a075b69653d99c412c880';
 export const ADVANCED_FEE_HOOK_ON_BASE =
   '0x03d2434d5a9ab7fb46bd3c7956a7c62e0cd46044';
@@ -1255,6 +1188,7 @@ export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
   Record<ChainId, string[]>
 > &
   Record<number, string[]> = {
+  [ChainId.MAINNET]: [NFTX_V4_HOOK_ON_MAINNET_2],
   [ChainId.ROBINHOOD]: [
     INDEX_FEE_HOOK_ON_ROBINHOOD,
     PENSION_TAX_HOOK_ON_ROBINHOOD,
@@ -1324,6 +1258,32 @@ export function getTvlBypassHookAddresses(
   return result;
 }
 
+export const B20_HOOK_ON_BASE = '0xf85f1f3082cfbc5e1149972309b25054e4d420cc';
+export const LAUNCH_HOOK_4_ON_BASE =
+  '0xa068cf4c52abdd3479145c4b3cbd8e3d71542a44';
+export const LEVERAGED_LIQUIDITY_HOOK_ON_BASE =
+  '0xa2f9ef299771f00ecca388ec46d3f4d30baaeac4';
+export const FEW_V4_SHELL_HOOK_ON_MAINNET =
+  '0xb003f2cc4b314d98b4ea77667350b974ad102088';
+export const FEW_V4_SHELL_HOOK_ON_MAINNET_2 =
+  '0xadef200b8e8b66e27d5bd11c87d789d4d6e82088';
+export const SPIRAL_HOOK_V3_ON_MAINNET =
+  '0xe3bf665a9545d34d061fa5bd7a0676c81b5aaacc';
+export const BOOST_HOOK_ON_ROBINHOOD =
+  '0x566d0c13bfcc3c4dd35aba341f1a4897f78d65cc';
+export const PULSE_HOOK_ON_ROBINHOOD =
+  '0x5e0cedebde9360bef3f527951e008bdb679b78cc';
+export const CTRL_LAUNCH_HOOK_V1_ON_ROBINHOOD =
+  '0x5ae59a607fbe48e62270272ee0ec266a544368cc';
+export const RARE_FRIENDS_HOOK_ON_ROBINHOOD =
+  '0x7a65d0194e6cc43971c31ce7d1471da01d42a0cc';
+
+export const NVDA_ADAPTIVE_FEE_HOOK_ON_ROBINHOOD =
+  '0xda56a5171a54afcaaed244f21d21d2553c0d60e4';
+export const PILAO_HOOK_ON_ROBINHOOD =
+  '0xda9e6f340daa16d260fc450d7081ffc21b0b20cc';
+export const FLASH_V2_HOOK_ON_BASE =
+  '0x9c91eb3879c469a124a6ed6e95dfc485b7dd60cc';
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
 > &
@@ -1408,6 +1368,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FORGE_HOOK_ON_MAINNET,
     DOPPLER_HOOK_INITIALIZER_ON_MAINNET,
     GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET,
+    FEW_V4_SHELL_HOOK_ON_MAINNET,
+    FEW_V4_SHELL_HOOK_ON_MAINNET_2,
+    SPIRAL_HOOK_V3_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -1441,6 +1404,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BACKGEOORACLE_ON_ARBITRUM,
     THE_POOL_ON_ARBITRUM,
     NFTX_V4_HOOK_ON_ARBITRUM,
+    FLAUNCH_ANYPOSM_VESTED_ON_ARBITRUM,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.ARBITRUM_SEPOLIA]: [ADDRESS_ZERO],
@@ -1475,6 +1439,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.BASE_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.BASE]: [
     AEGIS_ENGINE_ON_BASE,
+    STOBOX_FEE_HOOK_ON_BASE,
     FLASH_HOOK_V3_ON_BASE,
     DYNAMIC_STABLE_FEE_HOOK_ON_BASE,
     ADVANCED_FEE_HOOK_ON_BASE,
@@ -1508,6 +1473,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FLAUNCH_POSM_V3_ON_BASE,
     FLAUNCH_POSM_V4_ON_BASE,
     FLAUNCH_ANYPOSM_V1_ON_BASE,
+    FLAUNCH_ANYPOSM_VESTED_ON_BASE,
     ETH_FLETH_AUTO_WRAP_HOOKS_ADDRESS_ON_BASE,
     GRADUATION_HOOKS_ADDRESS_ON_BASE,
     TWAMM_HOOKS_ADDRESS_ON_BASE,
@@ -1596,8 +1562,11 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     V4RCADE_FEE_HOOK_ON_BASE,
     REVERT_STABLE_SWAP_HOOK_ON_BASE,
     STONK_HOOK_ON_BASE,
-    FLASH_HOOK_ON_BASE,
     SLIPSTREAM_AGG_HOOK_ON_BASE,
+    B20_HOOK_ON_BASE,
+    LAUNCH_HOOK_4_ON_BASE,
+    LEVERAGED_LIQUIDITY_HOOK_ON_BASE,
+    FLASH_V2_HOOK_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
@@ -1836,6 +1805,16 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BLEND_HOOK_V3_ON_ROBINHOOD,
     ROBINHOOD_MIXED_FEE_HOOK_ON_ROBINHOOD,
     FOOL_HOOK_ON_ROBINHOOD,
+    BOOST_HOOK_ON_ROBINHOOD,
+    PULSE_HOOK_ON_ROBINHOOD,
+    CTRL_LAUNCH_HOOK_V1_ON_ROBINHOOD,
+    RARE_FRIENDS_HOOK_ON_ROBINHOOD,
+    PILAO_HOOK_ON_ROBINHOOD,
+    NVDA_ADAPTIVE_FEE_HOOK_ON_ROBINHOOD,
+    ASCNT_SIM_HOOK_ON_ROBINHOOD,
+    HEKS_V2_HOOK_ON_ROBINHOOD,
+    FLAUNCH_ANYPOSM_VESTED_ON_ROBINHOOD,
+    NIGHTSHADES_FACTION_GAME_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [ADDRESS_ZERO, NFTX_V4_HOOK_ON_INK, FLETH_HOOK_ON_INK],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
@@ -1843,5 +1822,10 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ADDRESS_ZERO,
     FAZE_LAUNCHPAD_HOOK_ON_ARC,
     FAZE_LAUNCHPAD_HOOK_V2_ON_ARC,
+    NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
+    BASEDBID_HOOK_ON_ARC,
+    CTRL_NATIVE_LAUNCH_HOOK_ON_ARC,
+    BASEDBID_HOOK_ON_ARC_2,
+    LOAD_V4_TAX_HOOK_ON_ARC,
   ],
 };

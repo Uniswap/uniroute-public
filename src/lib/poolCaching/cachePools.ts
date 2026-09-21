@@ -15,7 +15,6 @@ import * as zlib from 'zlib';
 import {
   type SubgraphFetchFactory,
   V2SubgraphPool,
-  V2SubgraphProvider,
   V3SubgraphPool,
   V3SubgraphProvider,
   V4SubgraphPool,
@@ -24,8 +23,7 @@ import {
 import {
   createChainProtocols,
   trackedEthThresholdFor,
-  v2SubgraphUrlOverride,
-  v2TrackedEthThreshold,
+  untrackedUsdThresholdFor,
   v3SubgraphUrlOverride,
   v3TrackedEthThreshold,
   ChainProtocol,
@@ -117,28 +115,6 @@ async function cachePoolsForChainProtocol(
     >;
 
     if (protocol === Protocol.V2 && chainId === ChainId.MAINNET) {
-      const v2MainnetSubgraphProvider = new V2SubgraphProvider(
-        ChainId.MAINNET,
-        5,
-        1200000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        0, // wstETH/DOG reserveUSD is 0, but the pool balance is sufficiently high
-        v2SubgraphUrlOverride(ChainId.MAINNET),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metricInstance,
-        subgraphFetchFactory
-      );
-      const additionalPools = await v2MainnetSubgraphProvider.getPools();
-      const filteredPools = additionalPools.filter(pool => {
-        return (
-          pool.id.toLowerCase() === '0x801c868ce08fb5b396e6911eac351beb259d386c'
-        );
-      });
-      filteredPools.forEach(pool => pools.push(pool));
-
       const manuallyIncludedPools: V2SubgraphPool[] = [
         {
           id: '0x801c868ce08fb5b396e6911eac351beb259d386c',
@@ -863,7 +839,7 @@ export async function cacheAllPools(
   // POOL_CACHING_AURORA_*_TARGETS). No-op when the flags are unset.
   applyAuroraPoolSources(
     chainProtocols,
-    {trackedEthThresholdFor},
+    {trackedEthThresholdFor, untrackedUsdThresholdFor},
     cronLogger,
     metricInstance,
     // Scoped runs (the 2-minute Robinhood job) bypass the sweep's Aurora
