@@ -1,23 +1,48 @@
-import {describe, expect, it} from 'vitest';
+import * as zlib from 'zlib';
+import {beforeEach, describe, expect, it} from 'vitest';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
-import type {V4PoolKey} from '@uniswap/lib-data-ingestion-aurora';
-
-import type {S3Client} from '@aws-sdk/client-s3';
+import type {
+  ListPoolKeysOptions,
+  ListRoutablePoolsOptions,
+  RoutablePoolsService,
+  V2RoutablePool,
+  V3RoutablePool,
+  V4PoolKey,
+  V4RoutablePool,
+} from '@uniswap/lib-data-ingestion-aurora';
+import type {Context} from '@uniswap/lib-uni/context';
 
 import {
+  HeadObjectCommand,
+  HeadObjectCommandOutput,
+  NotFound,
+  PutObjectCommand,
+  PutObjectCommandOutput,
+  type S3Client,
+} from '@aws-sdk/client-s3';
+
+import {
+  GENERATED_AT_METADATA_KEY,
   MAX_REGISTRY_ENTRIES_PER_PAIR,
-  buildV4PoolKeyRegistry,
+  ROW_COUNT_METADATA_KEY,
+  RegistryObjectClient,
+  V4PoolKeyRegistryAccumulator,
+  V4PoolKeyRegistryBuildStats,
   isRowCountCollapse,
   materializeV4PoolKeyRegistries,
+  materializeV4PoolKeyRegistriesFrom,
+  resetV4PoolKeyRegistryBaselinesForTesting,
   selectRetainedEntries,
 } from './v4PoolKeyRegistry';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import type {Logger} from './sor-providers/util/log';
 import {
+  V4PoolKeyRegistryFile,
   isRegistryAdmissibleHook,
   parseV4PoolKeyRegistryFile,
   registryAdmissibleHookAddresses,
   v4PoolKeyRegistryChainsFromEnv,
+  v4PoolKeyRegistryHookedChainsFromEnv,
   v4RegistryPairKey,
 } from './util/v4PoolKeyRegistryFormat';
 import {DYNAMIC_FEE_FLAG, Pool as V4SDKPool} from '@uniswap/v4-sdk';
@@ -37,16 +62,83 @@ function poolIdFor(
   token0: string,
   token1: string,
   fee: number,
-  tickSpacing: number
+  tickSpacing: number,
+  hooks: string = ADDRESS_ZERO
 ): string {
   return V4SDKPool.getPoolId(
     new Token(chainId, token0, 18),
     new Token(chainId, token1, 18),
     fee,
     tickSpacing,
-    ADDRESS_ZERO
+    hooks
   ).toLowerCase();
 }
+
+/**
+ * The batch shape the production code used to expose: every row folded
+ * through one accumulator, hooked-chain gating from the same env var the
+ * cron reads. Kept here so the behavioural assertions below stay verbatim.
+ */
+function buildV4PoolKeyRegistry(
+  chainId: number,
+  rows: V4PoolKey[],
+  generatedAtMs: number
+): {file: V4PoolKeyRegistryFile; stats: V4PoolKeyRegistryBuildStats} {
+  const accumulator = new V4PoolKeyRegistryAccumulator(
+    chainId,
+    v4PoolKeyRegistryHookedChainsFromEnv()
+  );
+  for (const r of rows) accumulator.add(r);
+  return accumulator.finish(generatedAtMs);
+}
+
+class CollectingMetric extends IMetric {
+  readonly emitted: Array<{
+    key: string;
+    value: number;
+    tags?: Record<string, string>;
+  }> = [];
+  putDimensions(): void {}
+  setProperty(): void {}
+  putMetric(
+    key: string,
+    value: number,
+    _unit?: MetricLoggerUnit,
+    tags?: Record<string, string>
+  ): void {
+    this.emitted.push({key, value, tags});
+  }
+  withKey(key: string) {
+    return this.emitted.filter(e => e.key === key);
+  }
+}
+
+class CollectingLogger implements Logger {
+  readonly lines: Array<{level: string; message: string}> = [];
+  info = (message: string) => {
+    this.lines.push({level: 'info', message});
+  };
+  warn = (message: string) => {
+    this.lines.push({level: 'warn', message});
+  };
+  error = (message: string) => {
+    this.lines.push({level: 'error', message});
+  };
+  debug = (message: string) => {
+    this.lines.push({level: 'debug', message});
+  };
+  fatal = (message: string) => {
+    this.lines.push({level: 'fatal', message});
+  };
+}
+
+const noopLogger: Logger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  debug: () => {},
+  fatal: () => {},
+};
 
 function row(overrides: Partial<V4PoolKey>): V4PoolKey {
   return {
@@ -305,6 +397,406 @@ describe('buildV4PoolKeyRegistry', () => {
     const {stats} = buildV4PoolKeyRegistry(1, [row({}), row({})], GENERATED_AT);
     expect(stats.included).toBe(1);
   });
+
+  it('incremental retention equals one batch retention over the full list, in any arrival order', () => {
+    // A flooded pair in both partitions, with exact-timestamp ties and an
+    // unprovable age, arriving out of time order (pages come in pool_id
+    // order, which is unrelated to Initialize time). The reference is the
+    // batch policy itself — selectRetainedEntries over everything — so this
+    // pins the streaming fold to the retention contract rather than to a
+    // hand-derived list.
+    const hookedChains = new Set([1]);
+    const mainnetHook = registryAdmissibleHookAddresses(1, hookedChains)[0]!;
+    const timestamps = (i: number) =>
+      i % 5 === 0
+        ? new Date(NaN) // no provable age → sorts newest
+        : new Date(1_700_000_000_000 + ((i * 7919) % 13) * 86_400_000);
+    const hookless: V4PoolKey[] = Array.from({length: 23}, (_, i) =>
+      row({
+        feeBips: 111 + i,
+        tickSpacing: 3,
+        poolId: poolIdFor(1, USDC, SIERRA, 111 + i, 3),
+        poolCreatedAtBlockTimestamp: timestamps(i),
+      })
+    );
+    const hooked: V4PoolKey[] = Array.from({length: 17}, (_, i) =>
+      row({
+        feeBips: 1234 + i,
+        tickSpacing: 7,
+        hooksAddress: mainnetHook,
+        poolId: poolIdFor(1, USDC, SIERRA, 1234 + i, 7, mainnetHook),
+        poolCreatedAtBlockTimestamp: timestamps(i + 3),
+      })
+    );
+    const all = [...hookless, ...hooked];
+    // Deterministic shuffle: 41 is coprime with 40, so i*41 mod 40 is a
+    // permutation.
+    const shuffled = all.map((_, i) => all[(i * 41) % all.length]!);
+
+    const accumulator = new V4PoolKeyRegistryAccumulator(1, hookedChains);
+    for (const r of shuffled) accumulator.add(r);
+    const {file, stats} = accumulator.finish(GENERATED_AT);
+
+    const toCandidate = (r: V4PoolKey) => ({
+      fee: r.feeBips,
+      tickSpacing: r.tickSpacing,
+      hooks: r.hooksAddress ?? undefined,
+      createdAtMs: Number.isFinite(r.poolCreatedAtBlockTimestamp.getTime())
+        ? r.poolCreatedAtBlockTimestamp.getTime()
+        : Number.MAX_SAFE_INTEGER,
+    });
+    const expected = [
+      ...selectRetainedEntries(
+        shuffled.filter(r => r.hooksAddress === null).map(toCandidate)
+      ).map(e => [e.fee, e.tickSpacing]),
+      ...selectRetainedEntries(
+        shuffled.filter(r => r.hooksAddress !== null).map(toCandidate)
+      ).map(e => [e.fee, e.tickSpacing, e.hooks]),
+    ];
+    const actual = file.pairs[v4RegistryPairKey(USDC, SIERRA)]!;
+    expect(actual).toHaveLength(2 * MAX_REGISTRY_ENTRIES_PER_PAIR);
+    expect([...actual].sort()).toEqual([...expected].sort());
+    expect(accumulator.rowCount).toBe(all.length);
+    expect(stats).toEqual({
+      included: 2 * MAX_REGISTRY_ENTRIES_PER_PAIR,
+      includedHooked: MAX_REGISTRY_ENTRIES_PER_PAIR,
+      skippedCanonical: 0,
+      skippedHooked: 0,
+      skippedInvalidId: 0,
+      truncatedPairs: 1,
+      pairs: 1,
+    });
+  });
+
+  it('counts every offered row, admitted or not, and finish() is repeatable', () => {
+    const accumulator = new V4PoolKeyRegistryAccumulator(1, new Set());
+    accumulator.add(row({}));
+    accumulator.add(row({feeBips: 475})); // fails the keccak check
+    accumulator.add(
+      row({
+        feeBips: 3000,
+        tickSpacing: 60,
+        poolId: poolIdFor(1, USDC, SIERRA, 3000, 60),
+      })
+    );
+    expect(accumulator.rowCount).toBe(3);
+    const first = accumulator.finish(GENERATED_AT);
+    const second = accumulator.finish(GENERATED_AT);
+    expect(first.stats).toEqual({
+      included: 1,
+      includedHooked: 0,
+      skippedCanonical: 1,
+      skippedHooked: 0,
+      skippedInvalidId: 1,
+      truncatedPairs: 0,
+      pairs: 1,
+    });
+    expect(second).toEqual(first);
+  });
+});
+
+/**
+ * Closure Fake: `forEachV4PoolKeyPage` replays configured pages exactly as
+ * the Aurora impl would (sequential, awaiting the callback between pages);
+ * the full-set reads are not part of the registry's contract and throw.
+ */
+class FakeRoutablePoolsService implements RoutablePoolsService {
+  readonly calls: ListPoolKeysOptions[] = [];
+  constructor(
+    private readonly pagesByChain: ReadonlyMap<
+      number,
+      readonly (readonly V4PoolKey[])[] | Error
+    >
+  ) {}
+
+  listAllV2RoutablePools(
+    _ctx: Context,
+    _options: ListRoutablePoolsOptions
+  ): Promise<V2RoutablePool[]> {
+    return Promise.reject(new Error('not part of the registry contract'));
+  }
+  listAllV3RoutablePools(
+    _ctx: Context,
+    _options: ListRoutablePoolsOptions
+  ): Promise<V3RoutablePool[]> {
+    return Promise.reject(new Error('not part of the registry contract'));
+  }
+  listAllV4RoutablePools(
+    _ctx: Context,
+    _options: ListRoutablePoolsOptions
+  ): Promise<V4RoutablePool[]> {
+    return Promise.reject(new Error('not part of the registry contract'));
+  }
+  listAllV4PoolKeys(
+    _ctx: Context,
+    _options: ListPoolKeysOptions
+  ): Promise<V4PoolKey[]> {
+    return Promise.reject(
+      new Error('the registry must stream, never load a whole chain')
+    );
+  }
+  async forEachV4PoolKeyPage(
+    _ctx: Context,
+    options: ListPoolKeysOptions,
+    onPage: (page: readonly V4PoolKey[]) => Promise<void> | void
+  ): Promise<void> {
+    this.calls.push(options);
+    const pages = this.pagesByChain.get(Number(options.chainId));
+    if (pages === undefined) return;
+    if (pages instanceof Error) throw pages;
+    for (const page of pages) await onPage(page);
+  }
+}
+
+interface RecordedPut {
+  key: string;
+  body: Buffer;
+  metadata: Record<string, string>;
+  condition: {IfMatch?: string; IfNoneMatch?: string};
+}
+
+/** Answers HEAD from a configurable incumbent and records every PUT. */
+class FakeRegistryObjectClient implements RegistryObjectClient {
+  readonly puts: RecordedPut[] = [];
+  constructor(
+    private readonly incumbent?: {
+      etag: string;
+      generatedAtMs: number;
+      rowCount: number;
+    }
+  ) {}
+
+  send(command: HeadObjectCommand): Promise<HeadObjectCommandOutput>;
+  send(command: PutObjectCommand): Promise<PutObjectCommandOutput>;
+  send(
+    command: HeadObjectCommand | PutObjectCommand
+  ): Promise<HeadObjectCommandOutput | PutObjectCommandOutput> {
+    if (command instanceof HeadObjectCommand) {
+      if (!this.incumbent) {
+        return Promise.reject(
+          new NotFound({$metadata: {httpStatusCode: 404}, message: 'NotFound'})
+        );
+      }
+      return Promise.resolve({
+        $metadata: {httpStatusCode: 200},
+        ETag: this.incumbent.etag,
+        Metadata: {
+          [GENERATED_AT_METADATA_KEY]: String(this.incumbent.generatedAtMs),
+          [ROW_COUNT_METADATA_KEY]: String(this.incumbent.rowCount),
+        },
+      });
+    }
+    const {Key, Body, Metadata, IfMatch, IfNoneMatch} = command.input;
+    if (typeof Key !== 'string' || !Buffer.isBuffer(Body)) {
+      return Promise.reject(new Error('unexpected PutObject shape'));
+    }
+    this.puts.push({
+      key: Key,
+      body: Body,
+      metadata: Metadata ?? {},
+      condition: {IfMatch, IfNoneMatch},
+    });
+    return Promise.resolve({$metadata: {httpStatusCode: 200}, ETag: '"new"'});
+  }
+}
+
+describe('materializeV4PoolKeyRegistriesFrom', () => {
+  const CHAIN = 1;
+  const hookedChains = new Set([CHAIN]);
+  const config = {s3Bucket: 'pool-cache'};
+
+  function offGrid(fee: number, createdAt: string): V4PoolKey {
+    return row({
+      feeBips: fee,
+      tickSpacing: 3,
+      poolId: poolIdFor(CHAIN, USDC, SIERRA, fee, 3),
+      poolCreatedAtBlockTimestamp: new Date(createdAt),
+    });
+  }
+
+  beforeEach(() => {
+    resetV4PoolKeyRegistryBaselinesForTesting();
+  });
+
+  it('folds every page into one object the serving reader accepts, with the scan size as metadata', async () => {
+    const pages = [
+      [
+        offGrid(111, '2026-01-01T00:00:00Z'),
+        offGrid(112, '2026-01-02T00:00:00Z'),
+      ],
+      [
+        offGrid(113, '2026-01-03T00:00:00Z'),
+        row({
+          feeBips: 3000,
+          tickSpacing: 60,
+          poolId: poolIdFor(CHAIN, USDC, SIERRA, 3000, 60),
+        }),
+      ],
+      [offGrid(114, '2026-01-04T00:00:00Z')],
+    ];
+    const pools = new FakeRoutablePoolsService(new Map([[CHAIN, pages]]));
+    const s3 = new FakeRegistryObjectClient();
+    const metric = new CollectingMetric();
+    const logger = new CollectingLogger();
+
+    await materializeV4PoolKeyRegistriesFrom({
+      routablePools: pools,
+      chains: new Set([CHAIN]),
+      hookedChains,
+      s3,
+      config,
+      logger,
+      metric,
+    });
+
+    expect(s3.puts).toHaveLength(1);
+    const put = s3.puts[0]!;
+    expect(put.key).toBe('v4PoolKeyRegistryGzip.json-1');
+    expect(put.condition).toEqual({IfMatch: undefined, IfNoneMatch: '*'});
+    expect(put.metadata[ROW_COUNT_METADATA_KEY]).toBe('5');
+    const parsed = parseV4PoolKeyRegistryFile(
+      zlib.inflateSync(put.body).toString('utf8'),
+      CHAIN
+    );
+    expect(parsed?.pairs).toEqual({
+      [v4RegistryPairKey(USDC, SIERRA)]: [
+        [111, 3],
+        [112, 3],
+        [113, 3],
+        [114, 3],
+      ],
+    });
+    expect(metric.withKey('CachePools.v4PoolKeyRegistry.keys')).toEqual([
+      {
+        key: 'CachePools.v4PoolKeyRegistry.keys',
+        value: 4,
+        tags: {chainId: '1'},
+      },
+    ]);
+    expect(metric.withKey('CachePools.v4PoolKeyRegistry.error')).toEqual([]);
+    expect(
+      logger.lines.some(
+        line =>
+          line.level === 'info' &&
+          line.message.startsWith('V4 PoolKey registry chain 1: pairs=1 ') &&
+          line.message.includes(' rows=5 ')
+      )
+    ).toBe(true);
+    // The cron's server-side filter must reach the pool source unchanged.
+    expect(pools.calls).toHaveLength(1);
+    expect(
+      pools.calls[0]?.poolKeyFilter?.excludedHooklessFeeTickSpacings
+    ).toContainEqual([3000, 60]);
+    expect(pools.calls[0]?.poolKeyFilter?.allowedHooks).toEqual(
+      expect.arrayContaining(
+        registryAdmissibleHookAddresses(CHAIN, hookedChains)
+      )
+    );
+  });
+
+  it('keeps the incumbent when the scan returns no rows', async () => {
+    const pools = new FakeRoutablePoolsService(new Map([[CHAIN, []]]));
+    const s3 = new FakeRegistryObjectClient({
+      etag: '"old"',
+      generatedAtMs: 1,
+      rowCount: 100,
+    });
+    const metric = new CollectingMetric();
+
+    await materializeV4PoolKeyRegistriesFrom({
+      routablePools: pools,
+      chains: new Set([CHAIN]),
+      hookedChains,
+      s3,
+      config,
+      logger: noopLogger,
+      metric,
+    });
+
+    expect(s3.puts).toEqual([]);
+    expect(metric.withKey('CachePools.v4PoolKeyRegistry.error')).toEqual([
+      {
+        key: 'CachePools.v4PoolKeyRegistry.error',
+        value: 1,
+        tags: {chainId: '1', reason: 'no_metadata_rows'},
+      },
+    ]);
+  });
+
+  it('keeps the incumbent when the scan collapses against its durable row count', async () => {
+    const pools = new FakeRoutablePoolsService(
+      new Map([[CHAIN, [[offGrid(111, '2026-01-01T00:00:00Z')]]]])
+    );
+    const s3 = new FakeRegistryObjectClient({
+      etag: '"old"',
+      generatedAtMs: 1,
+      rowCount: 1000,
+    });
+    const metric = new CollectingMetric();
+    const logger = new CollectingLogger();
+
+    await materializeV4PoolKeyRegistriesFrom({
+      routablePools: pools,
+      chains: new Set([CHAIN]),
+      hookedChains,
+      s3,
+      config,
+      logger,
+      metric,
+    });
+
+    expect(s3.puts).toEqual([]);
+    expect(metric.withKey('CachePools.v4PoolKeyRegistry.error')).toEqual([
+      {
+        key: 'CachePools.v4PoolKeyRegistry.error',
+        value: 1,
+        tags: {chainId: '1', reason: 'row_count_collapse'},
+      },
+    ]);
+    expect(
+      logger.lines.some(
+        line =>
+          line.level === 'warn' &&
+          line.message.includes('1 metadata rows collapsed vs baseline') &&
+          line.message.includes('incumbent=1000')
+      )
+    ).toBe(true);
+  });
+
+  it('a failing scan on one chain is contained and the next chain still materializes', async () => {
+    const pools = new FakeRoutablePoolsService(
+      new Map<number, readonly (readonly V4PoolKey[])[] | Error>([
+        [CHAIN, new Error('statement timeout')],
+        [137, [[offGrid(111, '2026-01-01T00:00:00Z')]]],
+      ])
+    );
+    const s3 = new FakeRegistryObjectClient();
+    const metric = new CollectingMetric();
+
+    await materializeV4PoolKeyRegistriesFrom({
+      routablePools: pools,
+      chains: new Set([CHAIN, 137]),
+      hookedChains,
+      s3,
+      config,
+      logger: noopLogger,
+      metric,
+    });
+
+    expect(metric.withKey('CachePools.v4PoolKeyRegistry.error')).toEqual([
+      {
+        key: 'CachePools.v4PoolKeyRegistry.error',
+        value: 1,
+        tags: {chainId: '1', reason: 'materialize_failed'},
+      },
+    ]);
+    // Chain 137's pool id is derived for chain 1 above, so its row fails the
+    // keccak check and is skipped — the object is still written because the
+    // scan itself succeeded with rows.
+    expect(s3.puts.map(put => put.key)).toEqual([
+      'v4PoolKeyRegistryGzip.json-137',
+    ]);
+  });
 });
 
 describe('v4PoolKeyRegistryFormat', () => {
@@ -510,31 +1002,6 @@ describe('v4PoolKeyRegistryFormat', () => {
   });
 
   describe('materializeV4PoolKeyRegistries init failures', () => {
-    class CollectingMetric extends IMetric {
-      readonly emitted: Array<{
-        key: string;
-        tags?: Record<string, string>;
-      }> = [];
-      putDimensions(): void {}
-      setProperty(): void {}
-      putMetric(
-        key: string,
-        _value: number,
-        _unit?: MetricLoggerUnit,
-        tags?: Record<string, string>
-      ): void {
-        this.emitted.push({key, tags});
-      }
-    }
-
-    const noopLogger: Logger = {
-      info: () => {},
-      warn: () => {},
-      error: () => {},
-      debug: () => {},
-      fatal: () => {},
-    };
-
     it('emits one chainId-tagged error per enabled chain when Aurora is unavailable', async () => {
       // With no DATA_INGESTION_AURORA_HOST, getOrCreateUnirouteAuroraDb
       // latches env_missing — the exact "enabled but inert" state the

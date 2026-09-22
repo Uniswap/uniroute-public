@@ -1,9 +1,12 @@
 /**
  * Materializes the V4 PoolKey registry (see util/v4PoolKeyRegistryFormat.ts
  * for the contract and why it exists) in the pool-caching cron: one Aurora
- * `v4_pool_metadata` full-set read per enabled chain, filtered down to the
- * non-canonical hookless PoolKeys the direct probe cannot guess, written to
- * the pool-cache bucket next to the snapshots.
+ * `v4_pool_metadata` scan per enabled chain, streamed page by page and
+ * folded into a per-pair bounded set of the non-canonical PoolKeys the
+ * direct probe cannot guess, written to the pool-cache bucket next to the
+ * snapshots. Peak heap is proportional to the chain's PAIR count, never its
+ * row count: a chain with millions of admissible rows (Base) must not be
+ * able to take the cron process down.
  *
  * Fail-soft at every level: a chain that cannot be read or written keeps its
  * previous registry object (S3 is never cleared, and a shrunken or losing
@@ -15,14 +18,19 @@ import * as zlib from 'zlib';
 import {utils} from 'ethers';
 import {
   HeadObjectCommand,
+  HeadObjectCommandOutput,
   PutObjectCommand,
+  PutObjectCommandOutput,
   S3Client,
 } from '@aws-sdk/client-s3';
 import {Currency, Token} from '@uniswap/sdk-core';
 import {DYNAMIC_FEE_FLAG, Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import type {ExtendedChainId} from '@uniswap/lib-data-api';
-import type {V4PoolKey} from '@uniswap/lib-data-ingestion-aurora';
+import type {
+  RoutablePoolsService,
+  V4PoolKey,
+} from '@uniswap/lib-data-ingestion-aurora';
 import {createAuroraRoutablePoolsService} from '@uniswap/lib-data-ingestion-aurora';
 
 import {
@@ -174,12 +182,39 @@ export function selectRetainedEntries(
   ];
 }
 
-export function buildV4PoolKeyRegistry(
-  chainId: number,
-  rows: V4PoolKey[],
-  generatedAtMs: number
-): {file: V4PoolKeyRegistryFile; stats: V4PoolKeyRegistryBuildStats} {
-  const stats: V4PoolKeyRegistryBuildStats = {
+/**
+ * Retention state for one pair. Each partition holds at most
+ * MAX_REGISTRY_ENTRIES_PER_PAIR candidates at any time, so the whole
+ * accumulator's heap is bounded by the pair count rather than the row count.
+ */
+interface PairRetention {
+  hookless: CandidateEntry[];
+  hooked: CandidateEntry[];
+  truncated: boolean;
+}
+
+function isSamePoolKey(a: CandidateEntry, b: CandidateEntry): boolean {
+  return (
+    a.fee === b.fee && a.tickSpacing === b.tickSpacing && a.hooks === b.hooks
+  );
+}
+
+/**
+ * Folds `v4_pool_metadata` rows into a registry file one row at a time, so
+ * the caller can stream a chain in pages instead of holding it in memory.
+ *
+ * Retention is applied incrementally per pair partition: once a partition
+ * exceeds the cap, `selectRetainedEntries` runs over the retained set plus
+ * the new entry. This equals a single retention pass over the full list
+ * because an entry evicted from a set of cap+1 is beaten by RETAIN_OLDEST
+ * older and RETAIN_NEWEST newer entries, and both counts only grow as more
+ * rows arrive, so it could never re-enter the oldest slice or the newest
+ * window. Ties are resolved identically too: the sort is stable and rows
+ * arrive in the same pool_id order a batch build would have sorted.
+ */
+export class V4PoolKeyRegistryAccumulator {
+  private readonly byPair = new Map<string, PairRetention>();
+  private readonly stats: V4PoolKeyRegistryBuildStats = {
     included: 0,
     includedHooked: 0,
     skippedCanonical: 0,
@@ -188,95 +223,135 @@ export function buildV4PoolKeyRegistry(
     truncatedPairs: 0,
     pairs: 0,
   };
+  private rowsSeen = 0;
 
-  const byPair = new Map<string, CandidateEntry[]>();
-  const seen = new Set<string>();
-  const hookedChains = v4PoolKeyRegistryHookedChainsFromEnv();
-  for (const row of rows) {
+  constructor(
+    private readonly chainId: number,
+    private readonly hookedChains: ReadonlySet<number>
+  ) {}
+
+  /** Every row offered to `add`, admitted or not — the Aurora read's size. */
+  get rowCount(): number {
+    return this.rowsSeen;
+  }
+
+  add(row: V4PoolKey): void {
+    this.rowsSeen++;
     const hooks = (row.hooksAddress ?? ADDRESS_ZERO).toLowerCase();
     const isHooked = hooks !== ADDRESS_ZERO;
-    if (isHooked && !isRegistryAdmissibleHook(chainId, hooks, hookedChains)) {
-      stats.skippedHooked++;
-      continue;
+    if (
+      isHooked &&
+      !isRegistryAdmissibleHook(this.chainId, hooks, this.hookedChains)
+    ) {
+      this.stats.skippedHooked++;
+      return;
     }
     if (CANONICAL_V4_FEE_TICK_SPACINGS[row.feeBips] === row.tickSpacing) {
-      stats.skippedCanonical++;
-      continue;
+      this.stats.skippedCanonical++;
+      return;
     }
     if (
       (row.feeBips < 0 || row.feeBips > MAX_REASONABLE_V4_FEE_TIER_PPM) &&
       (!isHooked || row.feeBips !== DYNAMIC_FEE_FLAG)
     ) {
-      if (isHooked) stats.skippedHooked++;
-      continue;
+      if (isHooked) this.stats.skippedHooked++;
+      return;
     }
-    if (!poolKeyReproducesId(chainId, row)) {
-      stats.skippedInvalidId++;
-      continue;
+    if (!poolKeyReproducesId(this.chainId, row)) {
+      this.stats.skippedInvalidId++;
+      return;
     }
     const pairKey = v4RegistryPairKey(row.token0Address, row.token1Address);
-    // The (chain, pair, fee, tickSpacing, hooks) tuple is the pool id, so
-    // duplicates can only come from duplicate metadata rows; keep one.
-    const dedupeKey = `${pairKey}:${row.feeBips}:${row.tickSpacing}:${hooks}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    let entries = byPair.get(pairKey);
-    if (!entries) {
-      entries = [];
-      byPair.set(pairKey, entries);
+    let retention = this.byPair.get(pairKey);
+    if (!retention) {
+      retention = {hookless: [], hooked: [], truncated: false};
+      this.byPair.set(pairKey, retention);
     }
     const createdAtMs = row.poolCreatedAtBlockTimestamp?.getTime?.();
-    entries.push({
+    const entry: CandidateEntry = {
       fee: row.feeBips,
       tickSpacing: row.tickSpacing,
       hooks: isHooked ? hooks : undefined,
       // A missing/garbage timestamp sorts as newest: an entry that cannot
       // prove its age must not be able to displace the protected old slice.
-      createdAtMs: Number.isFinite(createdAtMs)
-        ? (createdAtMs as number)
-        : Number.MAX_SAFE_INTEGER,
-    });
+      createdAtMs:
+        typeof createdAtMs === 'number' && Number.isFinite(createdAtMs)
+          ? createdAtMs
+          : Number.MAX_SAFE_INTEGER,
+    };
+    const partition = isHooked ? retention.hooked : retention.hookless;
+    // The (chain, pair, fee, tickSpacing, hooks) tuple IS the pool id, and
+    // pool_id is the table's primary key, so a repeat can only be a
+    // duplicate metadata row for the same pool; keep the one already held.
+    // Only the retained window is consulted: remembering every pool id ever
+    // seen would cost heap proportional to rows again, and a duplicate that
+    // arrives after its original lost the retention race can only lose it
+    // the same way (it carries the same age).
+    if (partition.some(held => isSamePoolKey(held, entry))) return;
+    partition.push(entry);
+    if (partition.length > MAX_REGISTRY_ENTRIES_PER_PAIR) {
+      const retained = selectRetainedEntries(partition);
+      partition.length = 0;
+      partition.push(...retained);
+      retention.truncated = true;
+    }
   }
 
-  const pairs: Record<string, V4PoolKeyRegistryEntry[]> = {};
-  for (const [pairKey, candidates] of byPair) {
-    const hookless = candidates.filter(entry => entry.hooks === undefined);
-    const hooked = candidates.filter(entry => entry.hooks !== undefined);
-    const retainedHookless = selectRetainedEntries(hookless);
-    const retainedHooked = selectRetainedEntries(hooked);
-    const retained = [...retainedHookless, ...retainedHooked];
-    if (retained.length < candidates.length) stats.truncatedPairs++;
-    stats.included += retained.length;
-    stats.includedHooked += retainedHooked.length;
-    pairs[pairKey] = retained
-      .map(
-        (entry): V4PoolKeyRegistryEntry =>
-          entry.hooks
-            ? [entry.fee, entry.tickSpacing, entry.hooks]
-            : [entry.fee, entry.tickSpacing]
-      )
-      .sort(
-        (a, b) =>
-          a[0] - b[0] ||
-          a[1] - b[1] ||
-          (a.length === 3 ? a[2] : '').localeCompare(b.length === 3 ? b[2] : '')
-      );
-  }
-  stats.pairs = byPair.size;
+  finish(generatedAtMs: number): {
+    file: V4PoolKeyRegistryFile;
+    stats: V4PoolKeyRegistryBuildStats;
+  } {
+    // Totals are derived on a copy so the per-row counters stay the single
+    // source of truth and a second finish() call cannot double-count.
+    const stats = {...this.stats};
+    const pairs: Record<string, V4PoolKeyRegistryEntry[]> = {};
+    for (const [pairKey, retention] of this.byPair) {
+      const retained = [...retention.hookless, ...retention.hooked];
+      if (retention.truncated) stats.truncatedPairs++;
+      stats.included += retained.length;
+      stats.includedHooked += retention.hooked.length;
+      pairs[pairKey] = retained
+        .map(
+          (entry): V4PoolKeyRegistryEntry =>
+            entry.hooks
+              ? [entry.fee, entry.tickSpacing, entry.hooks]
+              : [entry.fee, entry.tickSpacing]
+        )
+        .sort(
+          (a, b) =>
+            a[0] - b[0] ||
+            a[1] - b[1] ||
+            (a.length === 3 ? a[2] : '').localeCompare(
+              b.length === 3 ? b[2] : ''
+            )
+        );
+    }
+    stats.pairs = this.byPair.size;
 
-  return {
-    file: {
-      version: V4_POOLKEY_REGISTRY_VERSION,
-      chainId,
-      generatedAtMs,
-      pairs,
-    },
-    stats,
-  };
+    return {
+      file: {
+        version: V4_POOLKEY_REGISTRY_VERSION,
+        chainId: this.chainId,
+        generatedAtMs,
+        pairs,
+      },
+      stats,
+    };
+  }
 }
 
 export interface V4PoolKeyRegistryMaterializeConfig {
   s3Bucket: string;
+}
+
+/**
+ * The two S3 operations the materializer performs, as a structural type so
+ * tests can drive the chain loop with a Fake that implements exactly these
+ * without casting through the SDK's generic client class.
+ */
+export interface RegistryObjectClient {
+  send(command: HeadObjectCommand): Promise<HeadObjectCommandOutput>;
+  send(command: PutObjectCommand): Promise<PutObjectCommandOutput>;
 }
 
 type WriteOutcome = 'written' | 'incumbent_fresher' | 'write_conflict';
@@ -294,7 +369,7 @@ interface IncumbentRegistry {
  * fresher object we couldn't read.
  */
 async function headIncumbentRegistry(
-  s3: S3Client,
+  s3: RegistryObjectClient,
   bucket: string,
   key: string
 ): Promise<IncumbentRegistry | undefined> {
@@ -341,7 +416,7 @@ export function isRowCountCollapse(
  * their object is at most one build interval different from ours.
  */
 async function writeRegistryObject(
-  s3: S3Client,
+  s3: RegistryObjectClient,
   bucket: string,
   key: string,
   body: Buffer,
@@ -424,41 +499,87 @@ export async function materializeV4PoolKeyRegistries(
     );
     return;
   }
-  const routablePools = createAuroraRoutablePoolsService(init.db, 'uniroute');
+  await materializeV4PoolKeyRegistriesFrom({
+    routablePools: createAuroraRoutablePoolsService(init.db, 'uniroute'),
+    chains,
+    hookedChains,
+    s3,
+    config,
+    logger,
+    metric,
+  });
+}
 
+export interface V4PoolKeyRegistryMaterializeDeps {
+  routablePools: RoutablePoolsService;
+  chains: ReadonlySet<number>;
+  hookedChains: ReadonlySet<number>;
+  s3: RegistryObjectClient;
+  config: V4PoolKeyRegistryMaterializeConfig;
+  logger: Logger;
+  metric: IMetric;
+}
+
+/**
+ * The per-chain materialization loop, separated from the env/Aurora wiring
+ * above so it can be driven end to end with a Fake pool source and object
+ * client. Never throws: each chain's failure is contained to its own catch.
+ */
+export async function materializeV4PoolKeyRegistriesFrom({
+  routablePools,
+  chains,
+  hookedChains,
+  s3,
+  config,
+  logger,
+  metric,
+}: V4PoolKeyRegistryMaterializeDeps): Promise<void> {
   for (const chainId of chains) {
     const tags = {chainId: String(chainId)};
     try {
+      const accumulator = new V4PoolKeyRegistryAccumulator(
+        chainId,
+        hookedChains
+      );
       // Registry reads are sweep-time work on the shared singleton pool:
       // take a sweep fetch slot so they queue with the per-combo fetches
-      // instead of occupying the connection reserved for the fast job.
+      // instead of occupying the connection reserved for the fast job. The
+      // fold runs inside the slot because it is interleaved with the page
+      // fetches; it is per-row work and adds no I/O of its own.
       //
       // Server-side filter: the unfiltered read ships the chain's ENTIRE
       // PoolKey set and blows the reader's statement_timeout on Base (>1M
-      // rows, dominated by hooked launchpad pools every one of which
-      // buildV4PoolKeyRegistry would discard anyway). Only rows the build
-      // could include come back: hookless off-grid tiers plus currently
-      // admissible hooks. The build's own checks stay as the trust boundary —
-      // this is a volume optimization, not policy.
-      const rows = await AURORA_FETCH_SEMAPHORE.run(() =>
-        routablePools.listAllV4PoolKeys(auroraContext(metric), {
-          chainId: chainId as ExtendedChainId,
-          poolKeyFilter: {
-            // The filter matches the stored column RAW (lower() in SQL is a
-            // full-table seq scan past the statement timeout), so send both
-            // casings ingestion could have stored: lowercase and EIP-55.
-            // buildV4PoolKeyRegistry still lowercases per row, so a missed
-            // casing can only hide a pool, never admit a wrong one.
-            allowedHooks: registryAdmissibleHookAddresses(
-              chainId,
-              hookedChains
-            ).flatMap(hooks => [hooks, utils.getAddress(hooks)]),
-            excludedHooklessFeeTickSpacings: Object.entries(
-              CANONICAL_V4_FEE_TICK_SPACINGS
-            ).map(([fee, tickSpacing]) => [Number(fee), tickSpacing]),
+      // rows, dominated by hooked launchpad pools every one of which the
+      // accumulator would discard anyway). Only rows the build could include
+      // come back: hookless off-grid tiers plus currently admissible hooks.
+      // The accumulator's own checks stay as the trust boundary — this is a
+      // volume optimization, not policy.
+      await AURORA_FETCH_SEMAPHORE.run(() =>
+        routablePools.forEachV4PoolKeyPage(
+          auroraContext(metric),
+          {
+            chainId: chainId as ExtendedChainId,
+            poolKeyFilter: {
+              // The filter matches the stored column RAW (lower() in SQL is
+              // a full-table seq scan past the statement timeout), so send
+              // both casings ingestion could have stored: lowercase and
+              // EIP-55. The accumulator still lowercases per row, so a
+              // missed casing can only hide a pool, never admit a wrong one.
+              allowedHooks: registryAdmissibleHookAddresses(
+                chainId,
+                hookedChains
+              ).flatMap(hooks => [hooks, utils.getAddress(hooks)]),
+              excludedHooklessFeeTickSpacings: Object.entries(
+                CANONICAL_V4_FEE_TICK_SPACINGS
+              ).map(([fee, tickSpacing]) => [Number(fee), tickSpacing]),
+            },
           },
-        })
+          page => {
+            for (const row of page) accumulator.add(row);
+          }
+        )
       );
+      const rowCount = accumulator.rowCount;
       const key = S3_V4_POOLKEY_REGISTRY_KEY(chainId);
       const incumbent = await headIncumbentRegistry(s3, config.s3Bucket, key);
       // An empty metadata table means ingestion does not cover this chain
@@ -466,25 +587,27 @@ export async function materializeV4PoolKeyRegistries(
       // regressing. Either way, overwriting would erase a previously useful
       // registry — keep the incumbent and surface the gap instead. The
       // baseline is the STRONGER of process memory and the incumbent's
-      // durable metadata count, so a cold container is protected too.
+      // durable metadata count, so a cold container is protected too. The
+      // count is only known once the scan has finished, so the guard sits
+      // after the fold; the fold itself is cheap and bounded, so the scan is
+      // no more expensive to discard than it was to accumulate.
       const collapsed = isRowCountCollapse(
-        rows.length,
+        rowCount,
         lastAcceptedRowCountByChain.get(chainId),
         incumbent?.rowCount
       );
-      if (rows.length === 0 || collapsed) {
+      if (rowCount === 0 || collapsed) {
         metric.putMetric(
           'CachePools.v4PoolKeyRegistry.error',
           1,
           MetricLoggerUnit.Count,
           {
             ...tags,
-            reason:
-              rows.length === 0 ? 'no_metadata_rows' : 'row_count_collapse',
+            reason: rowCount === 0 ? 'no_metadata_rows' : 'row_count_collapse',
           }
         );
         logger.warn(
-          `V4 PoolKey registry chain ${chainId}: ${rows.length} metadata rows` +
+          `V4 PoolKey registry chain ${chainId}: ${rowCount} metadata rows` +
             (collapsed
               ? ` collapsed vs baseline (process=${lastAcceptedRowCountByChain.get(chainId) ?? 'none'}, incumbent=${incumbent?.rowCount ?? 'none'})`
               : '') +
@@ -493,11 +616,7 @@ export async function materializeV4PoolKeyRegistries(
         continue;
       }
       const generatedAtMs = Date.now();
-      const {file, stats} = buildV4PoolKeyRegistry(
-        chainId,
-        rows,
-        generatedAtMs
-      );
+      const {file, stats} = accumulator.finish(generatedAtMs);
       const body = zlib.deflateSync(JSON.stringify(file));
       const outcome = await writeRegistryObject(
         s3,
@@ -505,10 +624,10 @@ export async function materializeV4PoolKeyRegistries(
         key,
         body,
         generatedAtMs,
-        rows.length,
+        rowCount,
         incumbent
       );
-      lastAcceptedRowCountByChain.set(chainId, rows.length);
+      lastAcceptedRowCountByChain.set(chainId, rowCount);
       if (outcome !== 'written') {
         metric.putMetric(
           'CachePools.v4PoolKeyRegistry.writeSkipped',
@@ -555,7 +674,7 @@ export async function materializeV4PoolKeyRegistries(
         `V4 PoolKey registry chain ${chainId}: pairs=${stats.pairs} keys=${stats.included} ` +
           `skippedCanonical=${stats.skippedCanonical} skippedHooked=${stats.skippedHooked} includedHooked=${stats.includedHooked} ` +
           `skippedInvalidId=${stats.skippedInvalidId} truncatedPairs=${stats.truncatedPairs} ` +
-          `rows=${rows.length} bytes=${body.length}`
+          `rows=${rowCount} bytes=${body.length}`
       );
     } catch (err) {
       metric.putMetric(
