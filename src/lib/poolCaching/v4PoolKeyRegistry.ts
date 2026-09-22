@@ -23,8 +23,7 @@ import {
   PutObjectCommandOutput,
   S3Client,
 } from '@aws-sdk/client-s3';
-import {Currency, Token} from '@uniswap/sdk-core';
-import {DYNAMIC_FEE_FLAG, Pool as V4SDKPool} from '@uniswap/v4-sdk';
+import {DYNAMIC_FEE_FLAG} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import type {ExtendedChainId} from '@uniswap/lib-data-api';
 import type {
@@ -38,7 +37,7 @@ import {
   auroraContext,
   getOrCreateUnirouteAuroraDb,
 } from './auroraPoolsSource';
-import {nativeOnChain} from './util/nativeOnChain';
+import {computeV4PoolId} from './util/v4PoolIdFast';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {
@@ -129,33 +128,22 @@ export interface V4PoolKeyRegistryBuildStats {
   pairs: number;
 }
 
-function poolKeyCurrency(chainId: number, address: string): Currency {
-  // Decimals pinned to 18: they do not enter the pool id derivation.
-  return address === ADDRESS_ZERO
-    ? nativeOnChain(chainId)
-    : new Token(chainId, address, 18);
-}
-
 /**
  * True when the row's PoolKey reproduces its stored pool_id — the same
  * offline keccak proof v4LpFeeCorrection uses. A row that fails is corrupt
- * (or uses an address shape the SDK rejects) and must not become a probe
- * candidate under a wrong id.
+ * (or uses an address shape outside the PoolKey domain) and must not become
+ * a probe candidate under a wrong id. This runs once per admissible row on
+ * every chain, so it uses the single-keccak encoder rather than the SDK.
  */
-function poolKeyReproducesId(chainId: number, row: V4PoolKey): boolean {
-  try {
-    return (
-      V4SDKPool.getPoolId(
-        poolKeyCurrency(chainId, row.token0Address.toLowerCase()),
-        poolKeyCurrency(chainId, row.token1Address.toLowerCase()),
-        row.feeBips,
-        row.tickSpacing,
-        (row.hooksAddress ?? ADDRESS_ZERO).toLowerCase()
-      ).toLowerCase() === row.poolId.toLowerCase()
-    );
-  } catch {
-    return false;
-  }
+function poolKeyReproducesId(row: V4PoolKey): boolean {
+  const derived = computeV4PoolId(
+    row.token0Address.toLowerCase(),
+    row.token1Address.toLowerCase(),
+    row.feeBips,
+    row.tickSpacing,
+    (row.hooksAddress ?? ADDRESS_ZERO).toLowerCase()
+  );
+  return derived !== undefined && derived === row.poolId.toLowerCase();
 }
 
 interface CandidateEntry {
@@ -165,7 +153,20 @@ interface CandidateEntry {
   createdAtMs: number;
 }
 
-/** Oldest slice + newest window; see RETAIN_OLDEST_PER_PAIR. */
+function compareHooks(a: string | undefined, b: string | undefined): number {
+  const left = a ?? '';
+  const right = b ?? '';
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+/**
+ * Oldest slice + newest window; see RETAIN_OLDEST_PER_PAIR. The order is
+ * total (hooks is the last key) so the retained set is a function of the
+ * candidate SET alone: two hooked pools on one pair can share age, fee and
+ * tick spacing, and which of them survives must not depend on the order
+ * rows happened to arrive in.
+ */
 export function selectRetainedEntries(
   candidates: CandidateEntry[]
 ): CandidateEntry[] {
@@ -174,7 +175,8 @@ export function selectRetainedEntries(
     (a, b) =>
       a.createdAtMs - b.createdAtMs ||
       a.fee - b.fee ||
-      a.tickSpacing - b.tickSpacing
+      a.tickSpacing - b.tickSpacing ||
+      compareHooks(a.hooks, b.hooks)
   );
   return [
     ...byAge.slice(0, RETAIN_OLDEST_PER_PAIR),
@@ -257,7 +259,7 @@ export class V4PoolKeyRegistryAccumulator {
       if (isHooked) this.stats.skippedHooked++;
       return;
     }
-    if (!poolKeyReproducesId(this.chainId, row)) {
+    if (!poolKeyReproducesId(row)) {
       this.stats.skippedInvalidId++;
       return;
     }

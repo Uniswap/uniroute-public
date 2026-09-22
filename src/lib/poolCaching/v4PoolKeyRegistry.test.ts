@@ -349,6 +349,31 @@ describe('buildV4PoolKeyRegistry', () => {
     expect(stats.included).toBe(MAX_REGISTRY_ENTRIES_PER_PAIR);
   });
 
+  it('retention order is total: hooks breaks exact ties, so the result is arrival-order independent', () => {
+    // Nine hooked entries sharing age, fee and tick spacing. Without the
+    // hooks tiebreak the sort is stable on arrival order, so which one is
+    // evicted would depend on the order rows came back from Aurora.
+    const hooks = Array.from(
+      {length: MAX_REGISTRY_ENTRIES_PER_PAIR + 1},
+      (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`
+    );
+    const tied = hooks.map(hook => ({
+      fee: 3000,
+      tickSpacing: 60,
+      hooks: hook,
+      createdAtMs: 1_000,
+    }));
+    const forward = selectRetainedEntries(tied).map(e => e.hooks);
+    const reversed = selectRetainedEntries([...tied].reverse()).map(
+      e => e.hooks
+    );
+    expect(forward).toHaveLength(MAX_REGISTRY_ENTRIES_PER_PAIR);
+    expect([...forward].sort()).toEqual([...reversed].sort());
+    // The evicted entry is deterministic: the seventh-smallest hooks address
+    // falls out of the oldest slice and is not in the newest window either.
+    expect(forward).not.toContain(hooks[6]);
+  });
+
   it('retention keeps a newest window so fresh pools on noisy pairs survive', () => {
     const candidates = Array.from({length: 20}, (_, i) => ({
       fee: 100 + i,
