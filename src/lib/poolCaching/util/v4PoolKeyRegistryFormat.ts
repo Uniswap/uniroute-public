@@ -24,6 +24,8 @@ import {DYNAMIC_FEE_FLAG} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
 import {
+  ARRAKIS_PRIVATE_HOOK_ON_BASE,
+  ARRAKIS_PRIVATE_HOOK_V2,
   getProtocolForAggHookAddress,
   HOOKS_ADDRESSES_ALLOWLIST,
 } from './hooksAddressesAllowlist';
@@ -152,6 +154,135 @@ function getRegistryHookSets(chainId: number): RegistryHookSets {
   return sets;
 }
 
+export type RestrictedRegistryHooksByChain = ReadonlyMap<
+  number,
+  ReadonlySet<string>
+>;
+
+/**
+ * Per-chain NARROWING of hooked registry admission, owned by code: a chain
+ * listed here admits only these hooks (each still has to pass the shared
+ * allowlist/denylist/aggregator/permissioned checks); a chain not listed
+ * admits every allowlisted hook. Exists because the routing allowlist is the
+ * wrong admission set for a pair-indexed object on a launchpad chain — on
+ * Base it admits ~15M pools from the Zora, Clanker and Doppler hooks, each
+ * on its own token pair, which the serving reader could never inflate and
+ * parse — while the pools the registry was extended for (ArrakisPrivateHook,
+ * ROUTE-1837) number in the thousands. Lives in code rather than only in
+ * stack config so that a missing or broken config value can never put Base
+ * back on the full allowlist.
+ */
+export const DEFAULT_REGISTRY_HOOK_RESTRICTIONS: Readonly<
+  Record<number, readonly string[]>
+> = {
+  8453: [ARRAKIS_PRIVATE_HOOK_ON_BASE, ARRAKIS_PRIVATE_HOOK_V2],
+};
+
+export type RegistryHookRestrictionProblem =
+  | {kind: 'malformed_env'}
+  | {kind: 'no_valid_hooks'; chainId: number}
+  | {kind: 'widens_default'; chainId: number};
+
+export interface RegistryHookRestrictions {
+  byChain: RestrictedRegistryHooksByChain;
+  /** Why the env override was not (fully) applied; callers emit these. */
+  problems: readonly RegistryHookRestrictionProblem[];
+}
+
+const RESTRICTED_HOOKS_ENV = 'V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN';
+let restrictionsMemo:
+  | {raw: string | undefined; value: RegistryHookRestrictions}
+  | undefined;
+
+function validHookSet(hooks: readonly string[]): ReadonlySet<string> {
+  const valid = new Set<string>();
+  for (const hook of hooks) {
+    const lowercased = hook.toLowerCase();
+    if (HOOK_ADDRESS_PATTERN.test(lowercased) && lowercased !== ADDRESS_ZERO) {
+      valid.add(lowercased);
+    }
+  }
+  return valid;
+}
+
+/**
+ * The code defaults above, narrowed per chain by the
+ * `V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN` env (Pulumi
+ * `env:v4PoolKeyRegistryHooksByChain`, JSON `{"<chainId>": ["0x…", …]}`).
+ * The override can only narrow, never lift: a chain with a code default
+ * keeps the INTERSECTION of that default and the override, so hooks outside
+ * the default are ignored and reported (`widens_default`); a chain without a
+ * default is narrowed to the override; a chain whose list has no valid
+ * address is CLOSED to hooked entries (empty set) rather than unrestricted
+ * (`no_valid_hooks`); a value that is not a JSON object, or has a non-numeric
+ * key, is rejected whole and leaves every default in force (`malformed_env`).
+ * Every problem is reported so the cron can raise
+ * the error counter; the way to lift a restriction is a code change. Parsed
+ * once per distinct env value: this runs on every hooked row of every chain
+ * build.
+ */
+export function v4PoolKeyRegistryHookRestrictionsFromEnv(): RegistryHookRestrictions {
+  const raw = process.env[RESTRICTED_HOOKS_ENV];
+  if (restrictionsMemo !== undefined && restrictionsMemo.raw === raw) {
+    return restrictionsMemo.value;
+  }
+  const byChain = new Map<number, ReadonlySet<string>>();
+  for (const [chainId, hooks] of Object.entries(
+    DEFAULT_REGISTRY_HOOK_RESTRICTIONS
+  )) {
+    byChain.set(Number(chainId), validHookSet(hooks));
+  }
+  const problems: RegistryHookRestrictionProblem[] = [];
+  if (raw !== undefined && raw.trim() !== '') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    // A non-object value or a non-numeric key rejects the WHOLE override, so
+    // `malformed_env` means exactly "nothing from the env was applied"; a
+    // partially applied object would make the fan-out error misleading.
+    // For a chain with a code default that is fail-closed (the default
+    // stays); a chain narrowed ONLY by the env falls back to its status quo,
+    // the full allowlist, with the error raised. Protecting a chain is the
+    // code default's job, never the env's.
+    const entries =
+      typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? Object.entries(parsed)
+        : undefined;
+    if (
+      entries === undefined ||
+      entries.some(([chainKey]) => !/^\d+$/.test(chainKey))
+    ) {
+      problems.push({kind: 'malformed_env'});
+    } else {
+      for (const [chainKey, hooks] of entries) {
+        const chainId = Number(chainKey);
+        const requested = Array.isArray(hooks)
+          ? validHookSet(
+              hooks.filter((hook): hook is string => typeof hook === 'string')
+            )
+          : new Set<string>();
+        const codeDefault = byChain.get(chainId);
+        const effective =
+          codeDefault === undefined
+            ? requested
+            : new Set([...requested].filter(hook => codeDefault.has(hook)));
+        if (requested.size === 0) {
+          problems.push({kind: 'no_valid_hooks', chainId});
+        } else if (effective.size < requested.size) {
+          problems.push({kind: 'widens_default', chainId});
+        }
+        byChain.set(chainId, effective);
+      }
+    }
+  }
+  const value = {byChain, problems};
+  restrictionsMemo = {raw, value};
+  return value;
+}
+
 /**
  * Shared writer/reader trust boundary for hooked registry entries. Keeping it
  * here avoids a stale file widening the quote path after policy changes.
@@ -159,10 +290,14 @@ function getRegistryHookSets(chainId: number): RegistryHookSets {
 export function isRegistryAdmissibleHook(
   chainId: number,
   hooksAddress: string,
-  hookedChains: ReadonlySet<number> = v4PoolKeyRegistryHookedChainsFromEnv()
+  hookedChains: ReadonlySet<number> = v4PoolKeyRegistryHookedChainsFromEnv(),
+  restrictedHooksByChain: RestrictedRegistryHooksByChain = v4PoolKeyRegistryHookRestrictionsFromEnv()
+    .byChain
 ): boolean {
   const hooks = hooksAddress.toLowerCase();
   if (!hookedChains.has(chainId) || hooks === ADDRESS_ZERO) return false;
+  const restricted = restrictedHooksByChain.get(chainId);
+  if (restricted !== undefined && !restricted.has(hooks)) return false;
   const sets = getRegistryHookSets(chainId);
   return (
     sets.allowlisted.has(hooks) &&
@@ -182,11 +317,18 @@ export function isRegistryAdmissibleHook(
  */
 export function registryAdmissibleHookAddresses(
   chainId: number,
-  hookedChains: ReadonlySet<number> = v4PoolKeyRegistryHookedChainsFromEnv()
+  hookedChains: ReadonlySet<number> = v4PoolKeyRegistryHookedChainsFromEnv(),
+  restrictedHooksByChain: RestrictedRegistryHooksByChain = v4PoolKeyRegistryHookRestrictionsFromEnv()
+    .byChain
 ): string[] {
   if (!hookedChains.has(chainId)) return [];
   return [...getRegistryHookSets(chainId).allowlisted].filter(hooks =>
-    isRegistryAdmissibleHook(chainId, hooks, hookedChains)
+    isRegistryAdmissibleHook(
+      chainId,
+      hooks,
+      hookedChains,
+      restrictedHooksByChain
+    )
   );
 }
 

@@ -51,7 +51,9 @@ import {
   registryAdmissibleHookAddresses,
   v4PoolKeyRegistryHookedChainsFromEnv,
   v4PoolKeyRegistryChainsFromEnv,
+  v4PoolKeyRegistryHookRestrictionsFromEnv,
   v4RegistryPairKey,
+  type RegistryHookRestrictionProblem,
 } from './util/v4PoolKeyRegistryFormat';
 
 export {MAX_REGISTRY_ENTRIES_PER_PAIR};
@@ -464,6 +466,19 @@ async function writeRegistryObject(
   }
 }
 
+function describeHookRestrictionProblem(
+  problem: RegistryHookRestrictionProblem
+): string {
+  switch (problem.kind) {
+    case 'malformed_env':
+      return 'malformed_env — code defaults in force on every chain';
+    case 'no_valid_hooks':
+      return `no_valid_hooks chain ${problem.chainId} — that chain admits no hooked entries`;
+    case 'widens_default':
+      return `widens_default chain ${problem.chainId} — hooks outside the code default were ignored`;
+  }
+}
+
 /**
  * One registry write per enabled chain. Both the scheduled all-chains job
  * and the on-demand poolCachingRunOnce worker can reach this, so writes are
@@ -480,6 +495,28 @@ export async function materializeV4PoolKeyRegistries(
   const chains = v4PoolKeyRegistryChainsFromEnv();
   if (chains.size === 0) return;
   const hookedChains = v4PoolKeyRegistryHookedChainsFromEnv();
+
+  // A broken hook-restriction override fails closed (the chain admits no
+  // hooked entries, or the code defaults stay in force), so the build below
+  // still runs; this is the only place the misconfiguration becomes visible.
+  // Tagged per affected enabled chain for the same monitor-group-by reason
+  // as the init failures below.
+  for (const problem of v4PoolKeyRegistryHookRestrictionsFromEnv().problems) {
+    const affected =
+      problem.kind === 'malformed_env' ? [...chains] : [problem.chainId];
+    for (const chainId of affected) {
+      if (!chains.has(chainId)) continue;
+      metric.putMetric(
+        'CachePools.v4PoolKeyRegistry.error',
+        1,
+        MetricLoggerUnit.Count,
+        {chainId: String(chainId), reason: `hook_restriction_${problem.kind}`}
+      );
+    }
+    logger.error(
+      `V4 PoolKey registry hook restriction misconfigured (${describeHookRestrictionProblem(problem)})`
+    );
+  }
 
   const init = getOrCreateUnirouteAuroraDb(logger);
   if (init.status !== 'ready') {

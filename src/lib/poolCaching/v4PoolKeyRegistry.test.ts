@@ -41,14 +41,18 @@ import {
   isRegistryAdmissibleHook,
   parseV4PoolKeyRegistryFile,
   registryAdmissibleHookAddresses,
+  DEFAULT_REGISTRY_HOOK_RESTRICTIONS,
+  RestrictedRegistryHooksByChain,
   v4PoolKeyRegistryChainsFromEnv,
   v4PoolKeyRegistryHookedChainsFromEnv,
+  v4PoolKeyRegistryHookRestrictionsFromEnv,
   v4RegistryPairKey,
 } from './util/v4PoolKeyRegistryFormat';
 import {DYNAMIC_FEE_FLAG, Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {Token} from '@uniswap/sdk-core';
 import {nativeOnChain} from './util/nativeOnChain';
 import {V4TickSpacing} from '../../models/pool/V4Pool';
+import {HOOKS_ADDRESSES_ALLOWLIST} from './util/hooksAddressesAllowlist';
 
 // ROUTE-1579's SIERRA/USDC fixture, re-keyed off the canonical grid.
 const USDC = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48';
@@ -56,6 +60,24 @@ const SIERRA = '0xbceb5f6877d979ec621ae694da1102cb95691ad3';
 
 const GENERATED_AT = 1_754_000_000_000;
 const ARRAKIS_PRIVATE_HOOK_V2 = '0xa4e6f5500e88691fdcb289aa0e99067481434880';
+
+/**
+ * An allowlisted Base hook that is NOT in Base's code-default restriction:
+ * exactly what an override would have to name to put a launchpad hook (and
+ * its millions of pairs) back into the registry.
+ */
+function allowlistedBaseHookOutsideDefault(): string {
+  const codeDefault = new Set(
+    DEFAULT_REGISTRY_HOOK_RESTRICTIONS[8453].map(hook => hook.toLowerCase())
+  );
+  const foreign = (HOOKS_ADDRESSES_ALLOWLIST[8453] ?? [])
+    .map(hook => hook.toLowerCase())
+    .find(hook => !codeDefault.has(hook));
+  if (foreign === undefined) {
+    throw new Error('Base allowlist has no hook outside the code default');
+  }
+  return foreign;
+}
 
 function poolIdFor(
   chainId: number,
@@ -222,6 +244,60 @@ describe('buildV4PoolKeyRegistry', () => {
         delete process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
       } else {
         process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = previous;
+      }
+    }
+  });
+
+  it('under the code-default Base hook restriction the build keeps Arrakis pools and skips launchpad pools (ROUTE-2026)', () => {
+    const prevHooked = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+    const prevRestricted = process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+    process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = '8453';
+    // No override: the restriction that protects Base must hold with no
+    // config value at all, or a lost Pulumi key re-creates the OOM.
+    delete process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+    try {
+      const baseUsdc = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+      const baseDgld = '0xe908475f8beb7a138b0dc6eb5a05cb27068ffb9a';
+      const zoraCoinHook = '0x0469a4bd3724dc86c9542f4694c976da13c450c0';
+      const {file, stats} = buildV4PoolKeyRegistry(
+        8453,
+        [
+          row({
+            token0Address: baseUsdc,
+            token1Address: baseDgld,
+            feeBips: DYNAMIC_FEE_FLAG,
+            tickSpacing: 5,
+            hooksAddress: ARRAKIS_PRIVATE_HOOK_V2,
+            poolId:
+              '0x68ab198bc4c61c8c691a3e35d1b3a5248d8e04acb9e28a1bb2ef0d3fa564fe93',
+          }),
+          // A Zora coin pool on a non-canonical tier: allowlisted for routing,
+          // admissible without the restriction, excluded with it.
+          row({
+            feeBips: 30000,
+            tickSpacing: 200,
+            hooksAddress: zoraCoinHook,
+            poolId: poolIdFor(8453, USDC, SIERRA, 30000, 200, zoraCoinHook),
+          }),
+        ],
+        GENERATED_AT
+      );
+      expect(file.pairs[v4RegistryPairKey(baseUsdc, baseDgld)]).toEqual([
+        [DYNAMIC_FEE_FLAG, 5, ARRAKIS_PRIVATE_HOOK_V2],
+      ]);
+      expect(file.pairs[v4RegistryPairKey(USDC, SIERRA)]).toBeUndefined();
+      expect(stats.includedHooked).toBe(1);
+      expect(stats.skippedHooked).toBe(1);
+    } finally {
+      if (prevHooked === undefined) {
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+      } else {
+        process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = prevHooked;
+      }
+      if (prevRestricted === undefined) {
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+      } else {
+        process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = prevRestricted;
       }
     }
   });
@@ -994,6 +1070,202 @@ describe('v4PoolKeyRegistryFormat', () => {
     );
   });
 
+  it('a per-chain hook restriction narrows admission to the listed hooks and shrinks the Aurora filter with it', () => {
+    const hookedChains = new Set([8453, 4663]);
+    // Zora's V4 coin hook: allowlisted on Base and admissible with NO
+    // restriction — the class of hook that put ~15M pools into the Base read.
+    const zoraCoinHook = '0x0469a4bd3724dc86c9542f4694c976da13c450c0';
+    const unrestricted: RestrictedRegistryHooksByChain = new Map();
+    expect(
+      isRegistryAdmissibleHook(8453, zoraCoinHook, hookedChains, unrestricted)
+    ).toBe(true);
+    // With the defaults (no env) Base is already restricted to Arrakis.
+    expect(isRegistryAdmissibleHook(8453, zoraCoinHook, hookedChains)).toBe(
+      false
+    );
+
+    const restricted: RestrictedRegistryHooksByChain = new Map([
+      [8453, new Set([ARRAKIS_PRIVATE_HOOK_V2])],
+    ]);
+    expect(
+      isRegistryAdmissibleHook(8453, zoraCoinHook, hookedChains, restricted)
+    ).toBe(false);
+    expect(
+      isRegistryAdmissibleHook(
+        8453,
+        ARRAKIS_PRIVATE_HOOK_V2,
+        hookedChains,
+        restricted
+      )
+    ).toBe(true);
+    // Casing of the row's hook must not matter, same as the allowlist check.
+    expect(
+      isRegistryAdmissibleHook(
+        8453,
+        ARRAKIS_PRIVATE_HOOK_V2.toUpperCase().replace('0X', '0x'),
+        hookedChains,
+        restricted
+      )
+    ).toBe(true);
+    // Narrowing only: a restricted hook that is NOT allowlisted stays out.
+    const notAllowlisted = new Map([
+      [8453, new Set(['0x00000000000000000000000000000000000000ff'])],
+    ]);
+    expect(
+      isRegistryAdmissibleHook(
+        8453,
+        '0x00000000000000000000000000000000000000ff',
+        hookedChains,
+        notAllowlisted
+      )
+    ).toBe(false);
+    // Unlisted chains are untouched by another chain's restriction.
+    const robinhoodBefore = registryAdmissibleHookAddresses(
+      4663,
+      hookedChains,
+      unrestricted
+    );
+    expect(
+      registryAdmissibleHookAddresses(4663, hookedChains, restricted)
+    ).toEqual(robinhoodBefore);
+    expect(robinhoodBefore.length).toBeGreaterThan(1);
+    // The cron's server-side filter derives from the same predicate, so the
+    // Base read narrows to exactly the restricted set.
+    expect(
+      registryAdmissibleHookAddresses(8453, hookedChains, restricted)
+    ).toEqual([ARRAKIS_PRIVATE_HOOK_V2]);
+  });
+
+  it('hook restrictions: code defaults hold with no env, the override only narrows, and failure modes fail closed', () => {
+    const prev = process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+    const arrakisOnBase = new Set(
+      DEFAULT_REGISTRY_HOOK_RESTRICTIONS[8453].map(h => h.toLowerCase())
+    );
+    try {
+      // No env: the code defaults are the restriction, with no problems.
+      delete process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+      const defaults = v4PoolKeyRegistryHookRestrictionsFromEnv();
+      expect(defaults.problems).toEqual([]);
+      expect(defaults.byChain.get(8453)).toEqual(arrakisOnBase);
+      expect(arrakisOnBase.has(ARRAKIS_PRIVATE_HOOK_V2)).toBe(true);
+      expect(defaults.byChain.has(4663)).toBe(false);
+
+      // Override: a chain without a code default is narrowed to its list
+      // (lowercased, junk dropped); a chain whose entries are all invalid is
+      // CLOSED, not unrestricted, and reported. Unmentioned chains keep their
+      // defaults.
+      process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = JSON.stringify({
+        4663: [
+          ARRAKIS_PRIVATE_HOOK_V2.toUpperCase().replace('0X', '0x'),
+          'not-an-address',
+          ADDRESS_ZERO,
+        ],
+        137: ['junk-only'],
+      });
+      const overridden = v4PoolKeyRegistryHookRestrictionsFromEnv();
+      expect([...(overridden.byChain.get(4663) ?? [])]).toEqual([
+        ARRAKIS_PRIVATE_HOOK_V2,
+      ]);
+      expect(overridden.byChain.get(137)?.size).toBe(0);
+      expect(
+        isRegistryAdmissibleHook(
+          137,
+          ARRAKIS_PRIVATE_HOOK_V2,
+          new Set([137]),
+          overridden.byChain
+        )
+      ).toBe(false);
+      expect(overridden.byChain.get(8453)).toEqual(arrakisOnBase);
+      expect(overridden.problems).toEqual([
+        {kind: 'no_valid_hooks', chainId: 137},
+      ]);
+      // Same env value → same instance (this runs per hooked row).
+      expect(v4PoolKeyRegistryHookRestrictionsFromEnv()).toBe(overridden);
+
+      // Malformed value: defaults stay in force (Base stays restricted) and
+      // the problem is reported so the cron can raise the error counter.
+      // A non-numeric key rejects the WHOLE object — the valid 4663 sibling
+      // is not applied — so `malformed_env` always means "nothing from the
+      // env took effect", matching the error's every-chain fan-out. For an
+      // override-only chain like 4663 that is its status quo (the full
+      // allowlist, asserted below), never a narrowing it was not given.
+      const unrestrictedRobinhood = registryAdmissibleHookAddresses(
+        4663,
+        new Set([4663]),
+        defaults.byChain
+      );
+      expect(unrestrictedRobinhood.length).toBeGreaterThan(1);
+      for (const malformed of [
+        'not json',
+        '[1,2]',
+        '{"abc":["0x00"]}',
+        JSON.stringify({abc: ['0x00'], 4663: [ARRAKIS_PRIVATE_HOOK_V2]}),
+      ]) {
+        process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = malformed;
+        const result = v4PoolKeyRegistryHookRestrictionsFromEnv();
+        expect(result.byChain.get(8453)).toEqual(arrakisOnBase);
+        expect(result.byChain.has(4663)).toBe(false);
+        expect(
+          registryAdmissibleHookAddresses(4663, new Set([4663]), result.byChain)
+        ).toEqual(unrestrictedRobinhood);
+        expect(result.problems).toEqual([{kind: 'malformed_env'}]);
+      }
+
+      // An override that names Base with an empty list closes Base entirely
+      // rather than widening it.
+      process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = '{"8453":[]}';
+      expect(registryAdmissibleHookAddresses(8453, new Set([8453]))).toEqual(
+        []
+      );
+
+      // An override cannot widen Base past its code default: a well-formed
+      // list of an allowlisted launchpad hook is intersected with the default
+      // (→ nothing) and reported, so the ~15M-row build can never be
+      // re-admitted from config.
+      const foreignBaseHook = allowlistedBaseHookOutsideDefault();
+      process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = JSON.stringify({
+        8453: [foreignBaseHook],
+      });
+      const widened = v4PoolKeyRegistryHookRestrictionsFromEnv();
+      expect(widened.byChain.get(8453)?.size).toBe(0);
+      expect(widened.problems).toEqual([
+        {kind: 'widens_default', chainId: 8453},
+      ]);
+      expect(registryAdmissibleHookAddresses(8453, new Set([8453]))).toEqual(
+        []
+      );
+      expect(
+        isRegistryAdmissibleHook(8453, foreignBaseHook, new Set([8453]))
+      ).toBe(false);
+
+      // A mixed list keeps only the default members, and is still reported.
+      process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = JSON.stringify({
+        8453: [foreignBaseHook, ARRAKIS_PRIVATE_HOOK_V2],
+      });
+      const mixed = v4PoolKeyRegistryHookRestrictionsFromEnv();
+      expect([...(mixed.byChain.get(8453) ?? [])]).toEqual([
+        ARRAKIS_PRIVATE_HOOK_V2,
+      ]);
+      expect(mixed.problems).toEqual([{kind: 'widens_default', chainId: 8453}]);
+
+      // A pure narrowing of Base is applied without complaint.
+      process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = JSON.stringify({
+        8453: [ARRAKIS_PRIVATE_HOOK_V2],
+      });
+      const narrowed = v4PoolKeyRegistryHookRestrictionsFromEnv();
+      expect([...(narrowed.byChain.get(8453) ?? [])]).toEqual([
+        ARRAKIS_PRIVATE_HOOK_V2,
+      ]);
+      expect(narrowed.problems).toEqual([]);
+    } finally {
+      if (prev === undefined) {
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+      } else {
+        process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = prev;
+      }
+    }
+  });
+
   it('rejects fees and tick spacings outside v4-core bounds', () => {
     const json = JSON.stringify({
       version: 1,
@@ -1062,6 +1334,91 @@ describe('v4PoolKeyRegistryFormat', () => {
         }
         if (savedHost !== undefined) {
           process.env.DATA_INGESTION_AURORA_HOST = savedHost;
+        }
+      }
+    });
+
+    it('raises a per-chain error for a broken hook-restriction override, then keeps going', async () => {
+      // The override fails closed, so the run is not aborted — the counter
+      // is what makes the misconfiguration visible. A malformed value hits
+      // every enabled chain; an all-invalid list hits only its chain.
+      const savedChains = process.env.V4_POOLKEY_REGISTRY_CHAINS;
+      const savedHost = process.env.DATA_INGESTION_AURORA_HOST;
+      const savedRestriction = process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+      try {
+        delete process.env.DATA_INGESTION_AURORA_HOST;
+        process.env.V4_POOLKEY_REGISTRY_CHAINS = '1,137';
+
+        process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = 'not json';
+        const malformed = new CollectingMetric();
+        await materializeV4PoolKeyRegistries(
+          {} as S3Client,
+          {s3Bucket: 'unused'},
+          noopLogger,
+          malformed
+        );
+        expect(
+          malformed.emitted
+            .filter(e => e.tags?.reason === 'hook_restriction_malformed_env')
+            .map(e => e.tags?.chainId)
+            .sort()
+        ).toEqual(['1', '137']);
+
+        process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = JSON.stringify({
+          137: ['junk'],
+          8453: ['also-junk'], // not an enabled chain: no emission for it
+        });
+        const closed = new CollectingMetric();
+        await materializeV4PoolKeyRegistries(
+          {} as S3Client,
+          {s3Bucket: 'unused'},
+          noopLogger,
+          closed
+        );
+        expect(
+          closed.emitted
+            .filter(e => e.tags?.reason === 'hook_restriction_no_valid_hooks')
+            .map(e => e.tags?.chainId)
+        ).toEqual(['137']);
+        // The Aurora init failure is still reported for both chains.
+        expect(
+          closed.emitted.filter(e => e.tags?.reason === 'env_missing')
+        ).toHaveLength(2);
+
+        // A well-formed override that tries to widen Base is reported for
+        // Base alone, and Base still builds with the intersected (empty) set.
+        process.env.V4_POOLKEY_REGISTRY_CHAINS = '1,8453';
+        process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = JSON.stringify({
+          8453: [allowlistedBaseHookOutsideDefault()],
+        });
+        const widened = new CollectingMetric();
+        await materializeV4PoolKeyRegistries(
+          {} as S3Client,
+          {s3Bucket: 'unused'},
+          noopLogger,
+          widened
+        );
+        expect(
+          widened.emitted
+            .filter(e => e.tags?.reason === 'hook_restriction_widens_default')
+            .map(e => e.tags?.chainId)
+        ).toEqual(['8453']);
+        expect(
+          widened.emitted.filter(e => e.tags?.reason === 'env_missing')
+        ).toHaveLength(2);
+      } finally {
+        if (savedChains === undefined) {
+          delete process.env.V4_POOLKEY_REGISTRY_CHAINS;
+        } else {
+          process.env.V4_POOLKEY_REGISTRY_CHAINS = savedChains;
+        }
+        if (savedHost !== undefined) {
+          process.env.DATA_INGESTION_AURORA_HOST = savedHost;
+        }
+        if (savedRestriction === undefined) {
+          delete process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
+        } else {
+          process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN = savedRestriction;
         }
       }
     });
