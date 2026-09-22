@@ -24,7 +24,6 @@ import {
 } from '../interface';
 import {sdkStreamMixin} from '@smithy/util-stream';
 import {Readable} from 'stream';
-import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {
   CanonicalPools,
   REGISTRY_COVERAGE_METRIC,
@@ -115,7 +114,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -192,7 +190,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -241,7 +238,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -405,7 +401,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -460,7 +455,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
         mockConfig,
         getPoolsCache,
         getPoolsForTokensCache,
-        FeatureGatedTokensRepository.empty(),
         s3Client
       );
     });
@@ -575,7 +569,6 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
       },
       makeCache(),
       pairCache,
-      FeatureGatedTokensRepository.empty(),
       s3Client,
       repository
     );
@@ -724,30 +717,6 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     expect(pools.map(pool => pool.id)).toContain('0xccapool');
   });
 
-  it('drops merged scheduled pools whose token is on the restricted list', async () => {
-    const restrictedRepo = new FeatureGatedTokensRepository(
-      {
-        fetchAll: async () => ({
-          tokens: [{chainId: ChainId.MAINNET, address: NEW_TOKEN}],
-          skippedUnsupportedChains: 0,
-        }),
-      },
-      {fetch: async () => []}
-    );
-    discoverer = new S3SubgraphPoolDiscovererV4(
-      mockConfig,
-      makeCache(),
-      pairCache,
-      restrictedRepo,
-      s3Client,
-      repository
-    );
-
-    const pools = await getPoolsForTokens();
-
-    expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
-  });
-
   it('drops merged scheduled pools that are not canonical for the launched token', async () => {
     // The launched token's canonical pool is a different (hooked) pool, so
     // the registry's migration pool must not be re-appended around the
@@ -822,8 +791,7 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
 
   it('never merges into an agg-hooks selector fetch (would leak a V4 route into an agg-hooks-only request)', async () => {
     const aggSelector = new AggHooksTopPoolsSelector(
-      aggHooksPoolSelectionPerChainConfig,
-      FeatureGatedTokensRepository.empty()
+      aggHooksPoolSelectionPerChainConfig
     );
     // Replicate PoolDiscoverer's anonymous adapter: the gate must read the
     // aggHooksOnly marker THROUGH the wrapper — an instanceof check is

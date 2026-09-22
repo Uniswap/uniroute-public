@@ -18,7 +18,6 @@ import {
 import {Context} from '@uniswap/lib-uni/context';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
 import {CanonicalPools, identifyPoolInfo} from '../../lib/CanonicalPools';
-import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {
   IV4PoolKeyRegistry,
   V4RegistryPoolKey,
@@ -159,20 +158,19 @@ export function getMaxFilteredPoolCount(config: IPoolSelectionConfig): number {
 }
 
 export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
-  // Selection views memoized by (pools array, deny-list payload) identity.
-  // Layer-1 memoization in BaseCachingPoolDiscoverer keeps both references
-  // stable for the lifetime of a snapshot, so views rebuild exactly when the
-  // snapshot or deny list actually changes and are GC'd with the old arrays.
-  // The inner key is the ≤4-valued hooksOptions variant per chain/protocol.
+  // Selection views memoized by pools-array identity. Layer-1 memoization in
+  // BaseCachingPoolDiscoverer keeps the reference stable for the lifetime of
+  // a snapshot, so views rebuild exactly when the snapshot actually changes
+  // and are GC'd with the old arrays. The inner key is the ≤4-valued
+  // hooksOptions variant per chain/protocol.
   private readonly selectionViewMemo = new WeakMap<
     UniPoolInfo[],
-    WeakMap<Set<string>, Map<string, SelectionView>>
+    Map<string, SelectionView>
   >();
 
   constructor(
     private readonly chainRepository: IChainRepository,
     private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
-    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository,
     private readonly snapshotMemoEnabled: boolean = false,
     // Optional so existing construction sites keep working; without it the
     // manual direct-pair fallback stays on the canonical grid alone.
@@ -194,11 +192,6 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     ctx.logger.debug(
       `Starting Filtering pools for tokens ${tokenIn} and ${tokenOut}`
     );
-
-    // Filter out pools that are unsupported:
-    // Only consider pools where neither tokens are in the blocked token list.
-    const {globalSet: unsupportedTokens} =
-      await this.featureGatedTokensRepository.getSnapshot(ctx);
 
     const chain =
       protocol === Protocol.V4
@@ -233,7 +226,6 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     if (canUseSelectionView) {
       const view = await this.getOrBuildSelectionView(
         pools,
-        unsupportedTokens,
         chainId,
         protocol,
         hooksOptions,
@@ -242,7 +234,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       filteredPools = view.filteredPools;
       tokenPoolIndex = view.tokenPoolIndex;
       tvlSortedPools = view.tvlSortedPools;
-      ctx.logger.debug('Filtering unsupported tokens from pools', {
+      ctx.logger.debug('Selection view pools', {
         chainId,
         totalChainPools: pools.length,
         filteredPools: filteredPools.length,
@@ -260,17 +252,15 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
           }
         );
       }
-      const filteredUnsupportedPools =
-        BasicTopPoolsSelector.filterUnsupportedPools(
-          pools,
-          chainId,
-          unsupportedTokens,
-          ctx
-        );
-      ctx.logger.debug('Filtering unsupported tokens from pools', {
+      const canonicalPools = BasicTopPoolsSelector.dropNonCanonicalPools(
+        pools,
+        chainId,
+        ctx
+      );
+      ctx.logger.debug('Filtering non-canonical pools', {
         chainId,
         totalChainPools: pools.length,
-        filteredUnsupportedPools: filteredUnsupportedPools.length,
+        canonicalPools: canonicalPools.length,
       });
 
       // Also filter out pools that don't match the hooks options,
@@ -283,7 +273,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       let permissionedFilteredPools: UniPoolInfo[];
       if (chain !== undefined) {
         const dropResult = await maybeDropPermissionedPools(
-          filteredUnsupportedPools as V4PoolInfo[],
+          canonicalPools as V4PoolInfo[],
           chain,
           nsCtx,
           tokenIn,
@@ -299,7 +289,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
           );
         }
       } else {
-        permissionedFilteredPools = filteredUnsupportedPools;
+        permissionedFilteredPools = canonicalPools;
       }
 
       const erc4626DropResult = nsCtx.erc4626Snapshot
@@ -343,7 +333,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 
       ctx.logger.debug("Filtering pools that don't match the hooks options", {
         chainId,
-        filteredUnsupportedPools: filteredUnsupportedPools.length,
+        totalChainPools: pools.length,
         filteredPools: filteredPools.length,
       });
 
@@ -595,30 +585,22 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   }
 
   /**
-   * Drops pools that carry a feature-gated (unsupported) token, and pools
-   * that carry a token with a canonical-pools entry without being one of
-   * its canonical pools. Both selectors run every candidate universe through
-   * this before any selection stage, so a non-canonical pool can never
+   * Drops pools that carry a token with a canonical-pools entry without
+   * being one of its canonical pools. Both selectors run every candidate
+   * universe through this before any selection stage, so a non-canonical pool can never
    * occupy a top-N slot. Drops are counted on `TopPoolsSelector.NonCanonicalPool`
    * when `ctx` is given. Whether the canonical pool exists at all is checked
    * once per loaded snapshot by `CanonicalPools.checkRegistryCoverage`, not
    * here: this runs per protocol and per pair, so the canonical v4 pool is
    * legitimately absent from most inputs.
    */
-  public static filterUnsupportedPools(
+  public static dropNonCanonicalPools(
     pools: UniPoolInfo[],
     chainId: ChainId,
-    unsupportedTokens: Set<string>,
     ctx?: Context
   ): UniPoolInfo[] {
-    const supportedPools = pools.filter(pool => {
-      return (
-        !unsupportedTokens.has(pool.token0.id.toLowerCase()) &&
-        !unsupportedTokens.has(pool.token1.id.toLowerCase())
-      );
-    });
     return CanonicalPools.dropNonCanonicalPools(
-      supportedPools,
+      pools,
       chainId,
       identifyPoolInfo,
       ctx,
@@ -657,21 +639,15 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
 
   private async getOrBuildSelectionView(
     pools: UniPoolInfo[],
-    unsupportedTokens: Set<string>,
     chainId: ChainId,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
     ctx: Context
   ): Promise<SelectionView> {
-    let byDenySet = this.selectionViewMemo.get(pools);
-    if (byDenySet === undefined) {
-      byDenySet = new WeakMap();
-      this.selectionViewMemo.set(pools, byDenySet);
-    }
-    let byVariant = byDenySet.get(unsupportedTokens);
+    let byVariant = this.selectionViewMemo.get(pools);
     if (byVariant === undefined) {
       byVariant = new Map();
-      byDenySet.set(unsupportedTokens, byVariant);
+      this.selectionViewMemo.set(pools, byVariant);
     }
     // Canonicalized: hooksOptions only affects V4 filtering, and undefined
     // is filter-identical to HOOKS_INCLUSIVE — collapsing those variants
@@ -698,14 +674,12 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     const buildStartTime = Date.now();
     const aggHookAddressSet =
       BasicTopPoolsSelector.getAggHookAddressSet(chainId);
-    const filteredUnsupportedPools =
-      BasicTopPoolsSelector.filterUnsupportedPools(
-        pools,
-        chainId,
-        unsupportedTokens,
-        ctx
-      );
-    const filteredPools = filteredUnsupportedPools.filter(
+    const canonicalPools = BasicTopPoolsSelector.dropNonCanonicalPools(
+      pools,
+      chainId,
+      ctx
+    );
+    const filteredPools = canonicalPools.filter(
       pool =>
         !BasicTopPoolsSelector.isExcludedAggHookPool(
           pool,
@@ -1254,7 +1228,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       });
     }
 
-    // The generated grid never went through filterUnsupportedPools, so a
+    // The generated grid never went through dropNonCanonicalPools, so a
     // token's non-canonical (fee, tickSpacing, hooks) combos would otherwise
     // re-enter here after the snapshot filter removed them.
     return CanonicalPools.filterAdmittedPools(directPairs, chainId);
@@ -1289,7 +1263,6 @@ export class AggHooksTopPoolsSelector
 
   constructor(
     private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
-    protected readonly featureGatedTokensRepository: FeatureGatedTokensRepository,
     private readonly snapshotMemoEnabled: boolean = false
   ) {}
 
@@ -1371,18 +1344,14 @@ export class AggHooksTopPoolsSelector
       aggHooksPools: aggHooksPools.length,
     });
 
-    // 2. Drop pools whose tokens are on the routing block list.
-    const {globalSet: unsupportedTokens} =
-      await this.featureGatedTokensRepository.getSnapshot(ctx);
-    const filteredUnsupportedPools =
-      BasicTopPoolsSelector.filterUnsupportedPools(
-        aggHooksPools,
-        chainId,
-        unsupportedTokens,
-        ctx
-      );
+    // 2. Drop non-canonical pools and pools that don't match the hooks options.
+    const canonicalPools = BasicTopPoolsSelector.dropNonCanonicalPools(
+      aggHooksPools,
+      chainId,
+      ctx
+    );
 
-    const filteredPools = filteredUnsupportedPools.filter(pool =>
+    const filteredPools = canonicalPools.filter(pool =>
       matchesHooksOptions(pool, protocol, hooksOptions)
     );
 
@@ -1391,15 +1360,14 @@ export class AggHooksTopPoolsSelector
       protocol,
       totalPools: pools.length,
       aggHooksPools: aggHooksPools.length,
-      filteredUnsupportedPools: filteredUnsupportedPools.length,
       filteredPools: filteredPools.length,
     });
 
-    // 4. Build token-to-pool index for faster lookups
+    // 3. Build token-to-pool index for faster lookups
     const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
     const selectedPoolIds = new Set<string>();
 
-    // 5. Direct pairs (pools with both tokenIn and tokenOut)
+    // 4. Direct pairs (pools with both tokenIn and tokenOut)
     const directPairs = BasicTopPoolsSelector.getDirectPairs(
       filteredPools,
       chainId,
@@ -1411,7 +1379,7 @@ export class AggHooksTopPoolsSelector
       this.poolSelectionConfig
     );
 
-    // 6. Pools with only tokenIn
+    // 5. Pools with only tokenIn
     const tokenInOnlyPairs = BasicTopPoolsSelector.getTokenInOnlyPairs(
       tokenIn,
       tokenOut,
@@ -1421,7 +1389,7 @@ export class AggHooksTopPoolsSelector
       this.poolSelectionConfig
     );
 
-    // 7. Pools with only tokenOut
+    // 6. Pools with only tokenOut
     const tokenOutOnlyPairs = BasicTopPoolsSelector.getTokenOutOnlyPairs(
       tokenIn,
       tokenOut,
@@ -1431,7 +1399,7 @@ export class AggHooksTopPoolsSelector
       this.poolSelectionConfig
     );
 
-    // 8. Get tokens from first hop pools to use as intermediary tokens
+    // 7. Get tokens from first hop pools to use as intermediary tokens
     const intermediaryTokenIds = BasicTopPoolsSelector.getIntermediaryTokenIds(
       tokenInOnlyPairs,
       tokenOutOnlyPairs,
@@ -1439,7 +1407,7 @@ export class AggHooksTopPoolsSelector
       tokenOut
     );
 
-    // 9. For each intermediary token, get top N pools
+    // 8. For each intermediary token, get top N pools
     const secondHopPairs =
       BasicTopPoolsSelector.getTopNPoolsForIntermediaryToken(
         intermediaryTokenIds,
@@ -1449,7 +1417,7 @@ export class AggHooksTopPoolsSelector
         this.poolSelectionConfig
       );
 
-    // 10. Get top N pools with highest liquidity (excluding already selected pools)
+    // 9. Get top N pools with highest liquidity (excluding already selected pools)
     const topNPairs = BasicTopPoolsSelector.getTopNPairs(
       filteredPools,
       selectedPoolIds,
@@ -1457,7 +1425,7 @@ export class AggHooksTopPoolsSelector
       this.poolSelectionConfig
     );
 
-    // 11. Get top base token pools for tokenIn and tokenOut
+    // 10. Get top base token pools for tokenIn and tokenOut
     const topBaseTokenPoolsTokenIn = BasicTopPoolsSelector.getTopBaseTokenPools(
       selectedPoolIds,
       chainId,
@@ -1475,7 +1443,7 @@ export class AggHooksTopPoolsSelector
         this.poolSelectionConfig
       );
 
-    // 12. Top 1 WETH and ETH pool for tokenIn
+    // 11. Top 1 WETH and ETH pool for tokenIn
     const topWethPoolTokenIn = BasicTopPoolsSelector.getTopPoolForTokens(
       selectedPoolIds,
       WRAPPED_NATIVE_CURRENCY[chainId].address,
@@ -1489,7 +1457,7 @@ export class AggHooksTopPoolsSelector
       tokenPoolIndex
     );
 
-    // 13. Top 1 WETH and ETH pool for tokenOut
+    // 12. Top 1 WETH and ETH pool for tokenOut
     const topWethPoolTokenOut = BasicTopPoolsSelector.getTopPoolForTokens(
       selectedPoolIds,
       WRAPPED_NATIVE_CURRENCY[chainId].address,

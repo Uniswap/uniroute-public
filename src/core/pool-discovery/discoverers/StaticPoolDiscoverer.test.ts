@@ -13,7 +13,6 @@ import {USDC_MAINNET, USDT_MAINNET} from '../../../lib/tokenUtils';
 import {V3Pool} from 'src/models/pool/V3Pool';
 import {V4Pool} from 'src/models/pool/V4Pool';
 import {IRedisCache} from '@uniswap/lib-cache';
-import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {
   getUniRouteTestConfig,
   IUniRouteServiceConfig,
@@ -85,8 +84,7 @@ describe('StaticPoolDiscovererV2', () => {
       serviceConfig,
       poolRepositoryV2,
       getPoolsCache,
-      getPoolsForTokensCache,
-      FeatureGatedTokensRepository.empty()
+      getPoolsForTokensCache
     );
 
     ctx = buildTestContext();
@@ -191,8 +189,7 @@ describe('StaticPoolDiscovererV3', () => {
       serviceConfig,
       poolRepositoryV3,
       getPoolsCache,
-      getPoolsForTokensCache,
-      FeatureGatedTokensRepository.empty()
+      getPoolsForTokensCache
     );
 
     ctx = buildTestContext();
@@ -299,8 +296,7 @@ describe('StaticPoolDiscovererV4', () => {
       serviceConfig,
       poolRepositoryV4,
       getPoolsCache,
-      getPoolsForTokensCache,
-      FeatureGatedTokensRepository.empty()
+      getPoolsForTokensCache
     );
 
     ctx = buildTestContext();

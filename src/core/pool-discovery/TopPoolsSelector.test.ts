@@ -58,11 +58,8 @@ import {
   IPoolSelectionConfig,
 } from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
-import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../lib/CanonicalPools';
 import {V4Pool} from '../../models/pool/V4Pool';
-import {FeatureGatedTokensFetcher} from '../../stores/compliance/FeatureGatedTokensFetcher';
-import {S3FeatureGatedTokensFetcher} from '../../stores/compliance/S3FeatureGatedTokensFetcher';
 import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
 
 describe('BasicTopPoolsSelector', () => {
@@ -76,11 +73,7 @@ describe('BasicTopPoolsSelector', () => {
 
   beforeEach(() => {
     chainRepository = new HardcodedChainRepository();
-    selector = new BasicTopPoolsSelector(
-      chainRepository,
-      poolSelectionConfig,
-      FeatureGatedTokensRepository.empty()
-    );
+    selector = new BasicTopPoolsSelector(chainRepository, poolSelectionConfig);
 
     ctx = buildTestContext();
 
@@ -758,7 +751,7 @@ describe('BasicTopPoolsSelector', () => {
         // Mainnet chain doesn't set permissionedHookAddress, so a pool
         // with the same hook address shouldn't be dropped on Mainnet.
         const poolWithSepoliaHook = makePermissionedPool();
-        // Override token addresses to mainnet (avoid unsupported-token filter).
+        // Override token addresses to mainnet.
         const mainnetPool: V4PoolInfo = {
           ...poolWithSepoliaHook,
           token0: {id: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2'}, // WETH
@@ -971,29 +964,7 @@ describe('BasicTopPoolsSelector', () => {
     });
   });
 
-  describe('filterUnsupportedPools', () => {
-    it('should filter out pools with unsupported tokens', () => {
-      // 0xd233d1f6fd11640081abb8db125f722b5dc729dc is a real unsupported token on MAINNET
-      const unsupportedToken = '0xd233d1f6fd11640081abb8db125f722b5dc729dc';
-      const pools = [
-        {
-          ...mockV2Pool,
-          token0: {id: unsupportedToken},
-          token1: {id: '0x0000000000000000000000000000000000000002'},
-        },
-        mockV2Pool,
-      ];
-
-      const result = BasicTopPoolsSelector['filterUnsupportedPools'](
-        pools,
-        ChainId.MAINNET,
-        new Set<string>([unsupportedToken])
-      );
-
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe('0x123');
-    });
-
+  describe('dropNonCanonicalPools', () => {
     describe('canonical pools', () => {
       it('counts drops when given a context, even when no canonical pool survives', () => {
         // No pool in the universe is the canonical one: every token-...01
@@ -1005,10 +976,9 @@ describe('BasicTopPoolsSelector', () => {
         });
         const metricCtx = buildTestContext();
 
-        const result = BasicTopPoolsSelector['filterUnsupportedPools'](
+        const result = BasicTopPoolsSelector['dropNonCanonicalPools'](
           [mockV2Pool, mockV3Pool],
           ChainId.MAINNET,
-          new Set<string>(),
           metricCtx
         );
 
@@ -1029,10 +999,9 @@ describe('BasicTopPoolsSelector', () => {
           },
         });
 
-        const result = BasicTopPoolsSelector['filterUnsupportedPools'](
+        const result = BasicTopPoolsSelector['dropNonCanonicalPools'](
           [mockV2Pool, mockV3Pool, mockV4Pool, mockV4PoolWithHooks],
-          ChainId.MAINNET,
-          new Set<string>()
+          ChainId.MAINNET
         );
 
         expect(result.map(pool => pool.id)).toEqual(['0x123']);
@@ -1045,10 +1014,9 @@ describe('BasicTopPoolsSelector', () => {
           },
         });
 
-        const result = BasicTopPoolsSelector['filterUnsupportedPools'](
+        const result = BasicTopPoolsSelector['dropNonCanonicalPools'](
           [mockV3Pool, mockV4Pool],
-          ChainId.OPTIMISM,
-          new Set<string>()
+          ChainId.OPTIMISM
         );
 
         expect(result).toHaveLength(2);
@@ -1766,7 +1734,6 @@ describe('BasicTopPoolsSelector', () => {
       const registrySelector = new BasicTopPoolsSelector(
         chainRepository,
         poolSelectionConfig,
-        FeatureGatedTokensRepository.empty(),
         false,
         {
           // A key outside the canonical grid — 375/4 became canonical when
@@ -1811,7 +1778,6 @@ describe('BasicTopPoolsSelector', () => {
       const registrySelector = new BasicTopPoolsSelector(
         chainRepository,
         poolSelectionConfig,
-        FeatureGatedTokensRepository.empty(),
         false,
         {
           getPoolKeysForPair: async () => [
@@ -1839,7 +1805,6 @@ describe('BasicTopPoolsSelector', () => {
       const registrySelector = new BasicTopPoolsSelector(
         chainRepository,
         poolSelectionConfig,
-        FeatureGatedTokensRepository.empty(),
         false,
         {
           getPoolKeysForPair: async () => [
@@ -1992,13 +1957,9 @@ describe('AggHooksTopPoolsSelector', () => {
   let ctx: Context;
 
   beforeEach(() => {
-    selector = new AggHooksTopPoolsSelector(
-      fullHeuristicsConfig,
-      FeatureGatedTokensRepository.empty()
-    );
+    selector = new AggHooksTopPoolsSelector(fullHeuristicsConfig);
     selectorDefault = new AggHooksTopPoolsSelector(
-      aggHooksPoolSelectionPerChainConfig,
-      FeatureGatedTokensRepository.empty()
+      aggHooksPoolSelectionPerChainConfig
     );
     ctx = buildTestContext();
   });
@@ -2541,58 +2502,6 @@ describe('AggHooksTopPoolsSelector', () => {
     });
   });
 
-  describe('unsupported token filtering', () => {
-    it('should exclude pools whose tokens are on the routing block list', async () => {
-      const unsupportedToken = '0xd233d1f6fd11640081abb8db125f722b5dc729dc';
-      const badPool = makeAggV4Pool(
-        '0xbad',
-        unsupportedToken,
-        TOKEN_OUT,
-        AGG_HOOK_FLUID_LITE
-      );
-      const goodPool = makeAggV4Pool('0xgood', TOKEN_IN, TOKEN_OUT);
-
-      // Build a selector wired to a repo whose bootstrap fallback contains
-      // the unsupported token — exercises the deny-list filter end-to-end
-      // through the cold-start path (compliance fetch fails → bootstrap
-      // S3 fetch succeeds with our denied token).
-      const denyListedRepo = new FeatureGatedTokensRepository(
-        {
-          fetchAll: async () => {
-            throw new Error('test: forcing cold-start path');
-          },
-        } as unknown as FeatureGatedTokensFetcher,
-        {
-          fetch: async () => [
-            {
-              chainId: ChainId.MAINNET,
-              address: unsupportedToken.toLowerCase(),
-            },
-          ],
-        } as unknown as S3FeatureGatedTokensFetcher
-      );
-      const selectorWithDenyList = new AggHooksTopPoolsSelector(
-        fullHeuristicsConfig,
-        denyListedRepo
-      );
-
-      const result = await selectorWithDenyList.filterPools(
-        [badPool, goodPool],
-        ChainId.MAINNET,
-        tokenIn,
-        tokenOut,
-        Protocol.V4,
-        undefined,
-        EMPTY_NAMESPACE_CONTEXT,
-        ctx,
-        {shouldUseCache: true}
-      );
-
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe('0xgood');
-    });
-  });
-
   describe('no manuallyGenerateDirectPairs fallback', () => {
     it('does not generate synthetic direct pairs when none exist in pool universe', async () => {
       // Only non-direct pools — BasicTopPoolsSelector would fall back to
@@ -2668,7 +2577,6 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
   let legacySelector: BasicTopPoolsSelector;
   let memoSelector: BasicTopPoolsSelector;
   let ctx: Context;
-  const featureGatedTokensRepository = FeatureGatedTokensRepository.empty();
 
   const makeV4Pool = (
     id: string,
@@ -2741,13 +2649,11 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
     chainRepository = new HardcodedChainRepository();
     legacySelector = new BasicTopPoolsSelector(
       chainRepository,
-      poolSelectionConfig,
-      featureGatedTokensRepository
+      poolSelectionConfig
     );
     memoSelector = new BasicTopPoolsSelector(
       chainRepository,
       poolSelectionConfig,
-      featureGatedTokensRepository,
       true
     );
     ctx = buildTestContext();
@@ -3029,12 +2935,10 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
   describe('AggHooksTopPoolsSelector subset memoization', () => {
     it('matches legacy output and stays consistent on repeated calls', async () => {
       const legacyAgg = new AggHooksTopPoolsSelector(
-        aggHooksPoolSelectionPerChainConfig,
-        featureGatedTokensRepository
+        aggHooksPoolSelectionPerChainConfig
       );
       const memoAgg = new AggHooksTopPoolsSelector(
         aggHooksPoolSelectionPerChainConfig,
-        featureGatedTokensRepository,
         true
       );
       const pools = stable(buildV4Universe());
