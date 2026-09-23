@@ -501,8 +501,8 @@ describe('buildV4PoolKeyRegistry', () => {
 
   it('incremental retention equals one batch retention over the full list, in any arrival order', () => {
     // A flooded pair in both partitions, with exact-timestamp ties and an
-    // unprovable age, arriving out of time order (pages come in pool_id
-    // order, which is unrelated to Initialize time). The reference is the
+    // unprovable age, arriving out of time order (the read's row order is
+    // unspecified and unrelated to Initialize time). The reference is the
     // batch policy itself — selectRetainedEntries over everything — so this
     // pins the streaming fold to the retention contract rather than to a
     // hand-derived list.

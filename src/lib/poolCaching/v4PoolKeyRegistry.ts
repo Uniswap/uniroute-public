@@ -1,7 +1,7 @@
 /**
  * Materializes the V4 PoolKey registry (see util/v4PoolKeyRegistryFormat.ts
  * for the contract and why it exists) in the pool-caching cron: one Aurora
- * `v4_pool_metadata` scan per enabled chain, streamed page by page and
+ * `v4_pool_metadata` scan per enabled chain, handed over in chunks and
  * folded into a per-pair bounded set of the non-canonical PoolKeys the
  * direct probe cannot guess, written to the pool-cache bucket next to the
  * snapshots. Peak heap is proportional to the chain's PAIR count, never its
@@ -213,8 +213,10 @@ function isSamePoolKey(a: CandidateEntry, b: CandidateEntry): boolean {
  * because an entry evicted from a set of cap+1 is beaten by RETAIN_OLDEST
  * older and RETAIN_NEWEST newer entries, and both counts only grow as more
  * rows arrive, so it could never re-enter the oldest slice or the newest
- * window. Ties are resolved identically too: the sort is stable and rows
- * arrive in the same pool_id order a batch build would have sorted.
+ * window. Ties are resolved identically too: `selectRetainedEntries` orders
+ * totally (hooks is the last key), so the retained set is a function of the
+ * candidate set alone and the read's row order — unspecified, it is one
+ * unordered statement — cannot change it.
  */
 export class V4PoolKeyRegistryAccumulator {
   private readonly byPair = new Map<string, PairRetention>();
