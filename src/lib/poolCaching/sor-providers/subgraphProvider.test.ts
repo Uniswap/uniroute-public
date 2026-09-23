@@ -674,20 +674,73 @@ describe('SubgraphProvider V3 id-range sharding', () => {
   });
 });
 
+describe('SubgraphProvider Robinhood V3 id-range sharding', () => {
+  const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
+  const ROBINHOOD_SHARD_BOUNDS = [
+    {id: '', endId: '0x40'},
+    {id: '0x40', endId: '0x80'},
+    {id: '0x80', endId: '0xc0'},
+    {id: '0xc0', endId: undefined},
+  ];
+
+  it('fans both V3 queries out into 4 concurrent id-range shards', async () => {
+    const {provider, calls} = makeRecordingV3Provider(CHAIN_ID_ROBINHOOD);
+    await provider.getPools();
+
+    for (const queryName of ['getHighTrackedETHPools', 'getV3ZeroETHPools']) {
+      const shardCalls = calls.filter(c => c.query.includes(queryName));
+      expect(shardCalls.length).toBe(4);
+      expect(
+        shardCalls.map(c => ({id: c.variables.id, endId: c.variables.endId}))
+      ).toEqual(expect.arrayContaining(ROBINHOOD_SHARD_BOUNDS));
+    }
+  });
+
+  it('issues 8 requests in flight (2 queries x 4 shards), all valid GraphQL', async () => {
+    // The in-flight count is the number the registry comment claims; it is
+    // measured here rather than read off the registry because the query list
+    // is protocol-dependent.
+    const {provider, queries} = makeRecordingV3Provider(CHAIN_ID_ROBINHOOD);
+    await provider.getPools();
+
+    expect(queries.length).toBe(8);
+    for (const q of queries) {
+      expect(() => parse(q)).not.toThrow();
+    }
+  });
+
+  it('declares $endId only on bounded Robinhood V3 shards', async () => {
+    const {provider, calls} = makeRecordingV3Provider(CHAIN_ID_ROBINHOOD);
+    await provider.getPools();
+
+    for (const c of calls) {
+      if (c.variables.endId !== undefined) {
+        expect(c.query).toContain('$endId: String');
+        expect(c.query).toContain('id_lt: $endId');
+      } else {
+        expect(c.query).not.toContain('$endId');
+        expect(c.query).not.toContain('id_lt');
+      }
+    }
+  });
+});
+
 describe('subgraphFetchShardCount', () => {
-  it('shards Base V3, Base V4 and Robinhood V4', () => {
+  it('shards Base V3, Base V4, Robinhood V4 and Robinhood V3', () => {
     expect(subgraphFetchShardCount(Protocol.V3, ChainId.BASE)).toBe(8);
     expect(subgraphFetchShardCount(Protocol.V4, ChainId.BASE)).toBe(4);
     expect(subgraphFetchShardCount(Protocol.V4, 4663)).toBe(4);
+    expect(subgraphFetchShardCount(Protocol.V3, 4663)).toBe(4);
   });
 
   it('defaults to a single shard for every other combination', () => {
-    // Base is sharded on V3 and V4 but must stay unsharded on V2, and
-    // neither protocol's sharding may follow its chain id onto other chains.
+    // Base and Robinhood are sharded on V3 and V4 but must stay unsharded on
+    // V2, and neither protocol's sharding may follow its chain id onto other
+    // chains.
     expect(subgraphFetchShardCount(Protocol.V2, ChainId.BASE)).toBe(1);
+    expect(subgraphFetchShardCount(Protocol.V2, 4663)).toBe(1);
     expect(subgraphFetchShardCount(Protocol.V3, ChainId.MAINNET)).toBe(1);
     expect(subgraphFetchShardCount(Protocol.V4, ChainId.MAINNET)).toBe(1);
-    expect(subgraphFetchShardCount(Protocol.V3, 4663)).toBe(1);
   });
 });
 

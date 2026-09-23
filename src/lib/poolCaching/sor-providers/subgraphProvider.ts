@@ -69,7 +69,12 @@ function isSubgraphIndexingError(err: unknown): boolean {
 // sequentially, so POOL_CACHING_JOB_TIMEOUT_MS killed every run and its
 // snapshot froze on 2026-09-02. Base V4 is ~138k pools (~276 pages at
 // BASE_V4_PAGE_SIZE); it still finishes inside the ceiling on one cursor, but
-// with no margin to spare and a pool count that only grows.
+// with no margin to spare and a pool count that only grows. Robinhood V3 is
+// only ~33k pools (~34 pages) but its Goldsky endpoint serves a page in
+// anywhere from 0.1s to 50s+, so one cursor takes 9-10 minutes on a normal
+// tick and blew the 900s per-job budget on every tick for 12 hours on
+// 2026-09-19/20 (and again three times on 09-21) while the endpoint was
+// returning 429 "slow requests" — the sequential walk is the whole cost.
 //
 // A shard issues its own page requests, so in-flight requests against one
 // subgraph endpoint are shards x that chain+protocol's query count. Count that
@@ -77,14 +82,18 @@ function isSubgraphIndexingError(err: unknown): boolean {
 // registry-dependent, and `High tracked ETH pools` is built for V3 AND V4
 // despite reading as protocol-specific. Measured: Base V4 and Robinhood V4
 // build 3 queries each (12 in flight at 4 shards), mainnet V4 builds 5
-// requests and stays unsharded, and Base V3 builds 2 (16 in flight at 8
-// shards) — the high-water mark, at 1.33x the Robinhood precedent, and the
-// first count to revisit if the subgraph starts rate-limiting.
+// requests and stays unsharded, Base V3 builds 2 (16 in flight at 8
+// shards) — the high-water mark, at 1.33x the Robinhood V4 precedent, and the
+// first count to revisit if the subgraph starts rate-limiting — and Robinhood
+// V3 builds 2 (8 in flight at 4 shards, sharing the Goldsky project with the
+// 2-minute Robinhood V4 fast job's 12). Sharding cuts wall clock, not total
+// page requests: the same ~34 pages land in a quarter of the time, so if that
+// endpoint's 429s return, lower this entry first.
 export const SUBGRAPH_FETCH_SHARDS_BY_PROTOCOL_CHAIN: {
   [protocol: string]: {[chainId: number]: number} | undefined;
 } = {
   [Protocol.V4]: {[CHAIN_ID_ROBINHOOD]: 4, [ChainId.BASE]: 4},
-  [Protocol.V3]: {[ChainId.BASE]: 8},
+  [Protocol.V3]: {[ChainId.BASE]: 8, [CHAIN_ID_ROBINHOOD]: 4},
 };
 
 export function subgraphFetchShardCount(
