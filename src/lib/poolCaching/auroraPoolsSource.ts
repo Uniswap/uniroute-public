@@ -456,6 +456,46 @@ export function unirouteAuroraConnectionOptionsFromEnv(logger: {
   return {host, database, user, password, ssl};
 }
 
+// Server-side statement_timeout for the cron's Aurora reads. The default
+// bounds a hung scan so it can't pin a reader connection across cron ticks
+// (the cron's withTimeout detaches, it doesn't cancel): a full-set query
+// measured 1.8s prod / 7.1s dev at ~127k rows, so the largest supported
+// fetches (~1M rows: mainnet V2, Unichain V2) fit the default in prod but
+// not on the slower dev reader. The ceiling keeps any override under the
+// Robinhood fast job's 110s budget (POOL_CACHING_ROBINHOOD_V4_JOB_TIMEOUT_MS),
+// not merely its two-minute cadence: withTimeout detaches rather than
+// cancels, so a statement still running at the ceiling must have released
+// the fast job's one spare pool connection before that job's next tick can
+// need it.
+const DEFAULT_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS = 30_000;
+const MIN_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS = 5_000;
+const MAX_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS = 100_000;
+
+// Absent → default. A present value that is not an integer inside the bounds
+// is refused with a warn and the default applies: like the other pool-source
+// env knobs, a typo must degrade this one setting, not take the whole Aurora
+// source down.
+export function poolCachingAuroraStatementTimeoutMsFromEnv(logger: {
+  warn: (message: string) => void;
+}): number {
+  const raw = process.env.POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < MIN_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS ||
+    parsed > MAX_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS
+  ) {
+    logger.warn(
+      `POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS must be an integer in [${MIN_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS}, ${MAX_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS}] ms, got "${raw}" — using ${DEFAULT_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS}`
+    );
+    return DEFAULT_POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS;
+  }
+  return parsed;
+}
+
 export function createUnirouteAuroraDbFromEnv(
   logger: Logger
 ): Kysely<DataIngestionAuroraDB> | undefined {
@@ -474,10 +514,7 @@ export function createUnirouteAuroraDbFromEnv(
     // could stall a whole fast tick — security-gate finding on #12440).
     max: 4,
     connectionTimeoutMillis: 30_000,
-    // Full-set query measured 1.8s prod / 7.1s dev (~127k rows); 30s bounds a
-    // hung scan so it can't pin a reader connection across cron ticks (the
-    // cron's withTimeout detaches, it doesn't cancel).
-    statementTimeoutMillis: 30_000,
+    statementTimeoutMillis: poolCachingAuroraStatementTimeoutMsFromEnv(logger),
   });
 }
 

@@ -17,6 +17,7 @@ import {
   resolveAuroraMode,
   resolveAuroraModeWithPrimaryFloor,
   targetKey,
+  poolCachingAuroraStatementTimeoutMsFromEnv,
 } from './auroraPoolsSource';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
 import {createChainProtocols} from './cacheConfig';
@@ -180,6 +181,47 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     expect(config.minPoolCountByTarget.size).toBe(0);
     expect(config.minPoolCountFloorUnparseable).toBe(true);
   });
+});
+
+describe('poolCachingAuroraStatementTimeoutMsFromEnv', () => {
+  const KEY = 'POOL_CACHING_AURORA_STATEMENT_TIMEOUT_MS';
+  let saved: string | undefined;
+  let warnings: string[];
+  const logger = {warn: (message: string) => warnings.push(message)};
+
+  beforeEach(() => {
+    saved = process.env[KEY];
+    delete process.env[KEY];
+    warnings = [];
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KEY];
+    else process.env[KEY] = saved;
+  });
+
+  it('defaults to 30s when unset or blank, without warning', () => {
+    expect(poolCachingAuroraStatementTimeoutMsFromEnv(logger)).toBe(30_000);
+    process.env[KEY] = '  ';
+    expect(poolCachingAuroraStatementTimeoutMsFromEnv(logger)).toBe(30_000);
+    expect(warnings).toEqual([]);
+  });
+
+  it('applies an in-range integer override', () => {
+    process.env[KEY] = '90000';
+    expect(poolCachingAuroraStatementTimeoutMsFromEnv(logger)).toBe(90_000);
+    expect(warnings).toEqual([]);
+  });
+
+  it.each(['abc', '30000.5', '0', '4999', '100001', '-30000'])(
+    'refuses %s with a warn and keeps the default',
+    raw => {
+      process.env[KEY] = raw;
+      expect(poolCachingAuroraStatementTimeoutMsFromEnv(logger)).toBe(30_000);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(`got "${raw}"`);
+    }
+  );
 });
 
 describe('resolveAuroraModeWithPrimaryFloor', () => {
