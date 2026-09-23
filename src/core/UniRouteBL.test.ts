@@ -5082,7 +5082,8 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver
+        stateOverrideResolver,
+        FeatureGatedTokensRepository.empty()
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
