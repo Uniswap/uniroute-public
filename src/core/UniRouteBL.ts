@@ -2315,24 +2315,28 @@ export class UniRouteBL implements IUniRoutedBL {
       // Check each USD bucket for cached routes
       for (const usdBucket of allUsdBuckets) {
         try {
-          // Admin inspection — read + process only, no refresh enqueue.
+          // Admin inspection — read + process only, no refresh enqueue, and
+          // the LITERAL bucket contents: the serving read may backfill an
+          // empty bucket from a neighbor, which would list the same routes
+          // under several buckets and hide whether this one repopulated.
           // Admin endpoint operates on the base (pure-Uniswap) keyspace —
           // specialised namespaces aren't surfaced here. See ROUTE-1103
           // (payload will accept nsCtx when we expand).
           // TODO: https://linear.app/uniswap/issue/ROUTE-1103/tech-debt-admin-getcachedroutes-request-payload-to-modify-to-accept
           const adminProtocols = [...UNISWAP_NATIVE_PROTOCOLS]; // All protocols
           const adminQuoteRequest = new QuoteRequest(); // Empty — we're not doing a full quote
-          const readResult = await this.cachedRoutesRepository.readCachedRoutes(
-            EMPTY_NAMESPACE_CONTEXT,
-            chain.chainId,
-            tokenInCurrencyInfo,
-            tokenOutCurrencyInfo,
-            tradeType,
-            amountIn,
-            usdBucket,
-            adminProtocols,
-            ctx
-          );
+          const readResult =
+            await this.cachedRoutesRepository.readCachedRoutesAtBucket(
+              EMPTY_NAMESPACE_CONTEXT,
+              chain.chainId,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
+              tradeType,
+              amountIn,
+              usdBucket,
+              adminProtocols,
+              ctx
+            );
           const routes =
             await this.cachedRoutesRepository.processCachedRoutesResult(
               readResult,

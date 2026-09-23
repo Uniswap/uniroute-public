@@ -7031,6 +7031,20 @@ describe('UniRouteBL', () => {
         };
       }
 
+      async readCachedRoutesAtBucket(
+        nsCtx: RouteNamespaceContext,
+        chainId: number,
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo
+      ): Promise<CachedRoutesReadResult> {
+        return this.readCachedRoutes(
+          nsCtx,
+          chainId,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo
+        );
+      }
+
       async processCachedRoutesResult(
         readResult: CachedRoutesReadResult,
         _nsCtx: RouteNamespaceContext,
