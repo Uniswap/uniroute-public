@@ -7,6 +7,7 @@ import {Address} from '../../../models/address/Address';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
+import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {
   IV4PoolKeyRegistry,
   V4RegistryPoolKey,
@@ -23,12 +24,14 @@ export class DirectPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     protected serviceConfig: IUniRouteServiceConfig,
     private readonly poolRepository: IPoolsRepository<V2Pool>,
     protected getPoolsCache: IRedisCache<string, string>,
-    protected getPoolsForTokensCache: IRedisCache<string, string>
+    protected getPoolsForTokensCache: IRedisCache<string, string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
+      featureGatedTokensRepository,
       'DirectPoolDiscovererV2'
     );
   }
@@ -110,12 +113,14 @@ export class DirectPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     protected serviceConfig: IUniRouteServiceConfig,
     private readonly poolRepository: IPoolsRepository<V3Pool>,
     protected getPoolsCache: IRedisCache<string, string>,
-    protected getPoolsForTokensCache: IRedisCache<string, string>
+    protected getPoolsForTokensCache: IRedisCache<string, string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
+      featureGatedTokensRepository,
       'DirectPoolDiscovererV3'
     );
   }
@@ -189,6 +194,7 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     private readonly poolRepository: IPoolsRepository<V4Pool>,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository,
     // Optional so existing construction sites keep working; without it the
     // probe set is the canonical grid, exactly as before.
     private readonly poolKeyRegistry?: IV4PoolKeyRegistry
@@ -197,6 +203,7 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
+      featureGatedTokensRepository,
       'DirectPoolDiscovererV4'
     );
   }

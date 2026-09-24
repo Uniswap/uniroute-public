@@ -15,14 +15,13 @@ import {QuoteType} from '../models/quote/QuoteType';
 import {QuoteOptions} from './IUniRouteBL';
 import {
   QuoteRequest,
-  QuoteResponse,
   GetCachedRoutesRequest,
   DeleteCachedRoutesRequest,
   MethodParameters,
   PerHopSlippage,
 } from '../../gen/uniroute/v1/api_pb';
 
-import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
+import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
 import {Chain} from '../models/chain/Chain';
 import {Address} from '../models/address/Address';
@@ -75,7 +74,6 @@ import {NoOpMessageQueue} from 'src/lib/queue';
 import {HooksOptions} from '../models/hooks/HooksOptions';
 import {TokenProvider} from 'src/stores/token/provider/TokenProvider';
 import {TokenList} from '@uniswap/token-lists';
-import DEFAULT_TOKEN_LIST from '@uniswap/default-token-list';
 import {UsdBucket} from '../stores/route/uniroutes/usdBucketUtils';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {HandlerContext} from '@connectrpc/connect';
@@ -98,8 +96,6 @@ import {
   RouteNamespaceContext,
 } from '../models/hooks/namespaces';
 import {FeatureGatedTokensRepository} from '../stores/compliance/FeatureGatedTokensRepository';
-import {FeatureGatedTokensFetcher} from '../stores/compliance/FeatureGatedTokensFetcher';
-import {S3FeatureGatedTokensFetcher} from '../stores/compliance/S3FeatureGatedTokensFetcher';
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
 // addresses are actually deployed in production.
@@ -457,7 +453,8 @@ describe('UniRouteBL', () => {
     cachedRoutesRepository = new CachedRoutesRepository(
       redisCache,
       serviceConfig,
-      new NoOpMessageQueue()
+      new NoOpMessageQueue(),
+      FeatureGatedTokensRepository.empty()
     );
     noRouteCacheRepository = new NoRouteCacheRepository(
       redisCache,
@@ -490,12 +487,42 @@ describe('UniRouteBL', () => {
   );
   const localPoolCache = new InMemoryRedisCache<string, string>();
   const poolDiscoverer = new PoolDiscoverer(
-    new EmptyPoolDiscovererV2(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV3(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV4(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV2(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV3(serviceConfig, localPoolCache, localPoolCache),
-    new EmptyPoolDiscovererV4(serviceConfig, localPoolCache, localPoolCache)
+    new EmptyPoolDiscovererV2(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV3(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV4(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV2(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV3(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    ),
+    new EmptyPoolDiscovererV4(
+      serviceConfig,
+      localPoolCache,
+      localPoolCache,
+      FeatureGatedTokensRepository.empty()
+    )
   );
   const freshPoolDetailsWrapper = new TestFreshPoolDetailsWrapper();
   const dummySimulator = new DummySimulator();
@@ -568,8 +595,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // First call should not use cached routes because cache is empty
@@ -609,8 +635,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -647,8 +672,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // First call should not use cached routes because cache is empty
@@ -688,8 +712,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -741,8 +764,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
     // Minimal Headers stand-in to avoid the lint warning about the
@@ -976,35 +998,20 @@ describe('UniRouteBL', () => {
       }
     }
 
-    class CountingRoutesRepository
-      extends TestRoutesRepository
-      implements IRoutesRepository<Pool>
-    {
+    class CountingRoutesRepository extends TestRoutesRepository {
       public getRoutesCalls = 0;
-
-      constructor(
-        private readonly getRoutesImpl = (
-          ...args: Parameters<TestRoutesRepository['getRoutes']>
-        ) => routeRepository.getRoutes(...args)
-      ) {
-        super();
-      }
 
       public async getRoutes(
         ...args: Parameters<TestRoutesRepository['getRoutes']>
       ): Promise<RouteBasic[]> {
         this.getRoutesCalls++;
-        return this.getRoutesImpl(...args);
+        return super.getRoutes(...args);
       }
     }
 
-    const buildBL = (
-      routesRepository: IRoutesRepository<Pool>,
-      featureGatedTokensRepository = FeatureGatedTokensRepository.empty(),
-      config = serviceConfig
-    ) =>
+    const buildBL = (routesRepository: IRoutesRepository<Pool>) =>
       new UniRouteBL(
-        config,
+        serviceConfig,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -1023,32 +1030,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        featureGatedTokensRepository
-      );
-
-    class FakeComplianceFetcher
-      implements Pick<FeatureGatedTokensFetcher, 'fetchAll'>
-    {
-      constructor(readonly fetchAll: FeatureGatedTokensFetcher['fetchAll']) {}
-    }
-
-    class FakeBootstrapFetcher
-      implements Pick<S3FeatureGatedTokensFetcher, 'fetch'>
-    {
-      constructor(readonly fetch: S3FeatureGatedTokensFetcher['fetch']) {}
-    }
-
-    const denyListing = (
-      tokens: {chainId: ChainId; address: string}[],
-      isRestrictedRegion: (ctx: Context) => boolean = () => true
-    ) =>
-      new FeatureGatedTokensRepository(
-        new FakeComplianceFetcher(async ctx => ({
-          tokens: isRestrictedRegion(ctx) ? tokens : [],
-          skippedUnsupportedChains: 0,
-        })),
-        new FakeBootstrapFetcher(async () => [])
+        stateOverrideResolver
       );
 
     it('falls back to fresh discovery when every cached route is invalid for the request shape', async () => {
@@ -1084,215 +1066,6 @@ describe('UniRouteBL', () => {
       expect(response.error).toBeUndefined();
       expect(response.hitsCachedRoutes).toBe(true);
     });
-
-    describe('endpoint compliance gate', () => {
-      const WETH_CHECKSUMMED = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
-
-      const expectRestricted = (
-        testCtx: TestContext,
-        response: QuoteResponse,
-        countingRepository: CountingRoutesRepository
-      ) => {
-        expect(response.error?.code).toBe(404);
-        expect(quoteErrorReasonOf(response.error)).toBe(
-          QuoteErrorReason.TOKEN_RESTRICTED
-        );
-        expect(countingRepository.getRoutesCalls).toBe(0);
-        // The verdict depends on the caller's region, not the pair, so it
-        // must never be written to the pair-keyed no-route cache.
-        expect(
-          testCtx.metrics.countStore['UniRouteService.Metric.NoRouteCache.Set']
-        ).toBeUndefined();
-        expect(testCtx.metrics.distStore).toContainEqual(
-          expect.objectContaining({
-            metric_name: 'UniRouteService.Metric.Latency.dist',
-            opts: expect.objectContaining({
-              tags: expect.arrayContaining([
-                'status:noroute',
-                'reason:token_restricted',
-              ]),
-            }),
-          })
-        );
-      };
-
-      it('rejects a quote whose tokenOut is restricted before any routing work', async () => {
-        const countingRepository = new CountingRoutesRepository();
-        const testCtx = buildTestContext();
-
-        const response = await buildBL(
-          countingRepository,
-          denyListing([
-            {chainId: ChainId.MAINNET, address: baseRequest.tokenOutAddress},
-          ])
-        ).quote(
-          testCtx,
-          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
-        );
-
-        expectRestricted(testCtx, response, countingRepository);
-      });
-
-      it('rejects a quote whose tokenIn is restricted, matching the address case-insensitively', async () => {
-        const countingRepository = new CountingRoutesRepository();
-        const testCtx = buildTestContext();
-
-        const response = await buildBL(
-          countingRepository,
-          denyListing([
-            {chainId: ChainId.MAINNET, address: WETH_CHECKSUMMED.toLowerCase()},
-          ])
-        ).quote(
-          testCtx,
-          new QuoteRequest({
-            ...baseRequest,
-            tokenInAddress: WETH_CHECKSUMMED,
-            tradeType: 'EXACT_IN',
-          })
-        );
-
-        expectRestricted(testCtx, response, countingRepository);
-      });
-
-      it.each(['WETH', 'ETH'])(
-        'rejects %s input when its resolved wrapped address is restricted',
-        async tokenInAddress => {
-          const countingRepository = new CountingRoutesRepository();
-          const testCtx = buildTestContext();
-          await tokenProvider.initFromTokenList(testCtx, DEFAULT_TOKEN_LIST);
-
-          const response = await buildBL(
-            countingRepository,
-            denyListing([{chainId: ChainId.MAINNET, address: WETH_CHECKSUMMED}])
-          ).quote(
-            testCtx,
-            new QuoteRequest({
-              ...baseRequest,
-              tokenInAddress,
-              tradeType: 'EXACT_IN',
-            })
-          );
-
-          expectRestricted(testCtx, response, countingRepository);
-        }
-      );
-
-      it('does not poison the no-route cache for an unrestricted region in async mode', async () => {
-        const countingRepository = new CountingRoutesRepository();
-        const restrictedCtx = buildTestContext();
-        restrictedCtx.auth = {
-          ...restrictedCtx.auth,
-          countryCode: 'US',
-          subdivisionCode: '',
-        };
-        const unrestrictedCtx = buildTestContext();
-        unrestrictedCtx.auth = {
-          ...unrestrictedCtx.auth,
-          countryCode: 'FR',
-          subdivisionCode: '',
-        };
-        const bl = buildBL(
-          countingRepository,
-          denyListing(
-            [{chainId: ChainId.MAINNET, address: baseRequest.tokenOutAddress}],
-            ctx => ctx.auth.countryCode === 'US'
-          ),
-          serviceConfigAsync
-        );
-        const request = new QuoteRequest({
-          ...baseRequest,
-          tradeType: 'EXACT_IN',
-        });
-
-        const restrictedResponse = await bl.quote(restrictedCtx, request);
-        expectRestricted(restrictedCtx, restrictedResponse, countingRepository);
-
-        const unrestrictedResponse = await bl.quote(unrestrictedCtx, request);
-        expect(unrestrictedResponse.error).toBeUndefined();
-        expect(countingRepository.getRoutesCalls).toBe(1);
-      });
-
-      it.each([ChainId.OPTIMISM, ChainId.MAINNET])(
-        'scopes an Optimism endpoint restriction to chain %s',
-        async restrictedChainId => {
-          const countingRepository = new CountingRoutesRepository();
-          const testCtx = buildTestContext();
-          const response = await buildBL(
-            countingRepository,
-            denyListing([
-              {
-                chainId: restrictedChainId,
-                address: baseRequest.tokenOutAddress,
-              },
-            ])
-          ).quote(
-            testCtx,
-            new QuoteRequest({
-              ...baseRequest,
-              tokenInChainId: ChainId.OPTIMISM,
-              tokenOutChainId: ChainId.OPTIMISM,
-              blockNumber: 12345678,
-              tradeType: 'EXACT_IN',
-            })
-          );
-
-          if (restrictedChainId === ChainId.OPTIMISM) {
-            expectRestricted(testCtx, response, countingRepository);
-          } else {
-            expect(response.error).toBeUndefined();
-            expect(countingRepository.getRoutesCalls).toBe(1);
-          }
-        }
-      );
-
-      it('preserves a restricted intermediate token in the returned two-hop route', async () => {
-        const intermediate = new Address(
-          '0x1111111111111111111111111111111111111111'
-        );
-        const countingRepository = new CountingRoutesRepository(
-          async (_chain, tokenIn, tokenOut) => [
-            new RouteBasic(Protocol.V2, [
-              new V2Pool(
-                tokenIn.wrappedAddress,
-                intermediate,
-                new Address('0x2222222222222222222222222222222222222222'),
-                1000000000000n,
-                1000000000000n
-              ),
-              new V2Pool(
-                intermediate,
-                tokenOut.wrappedAddress,
-                new Address('0x3333333333333333333333333333333333333333'),
-                1000000000000n,
-                1000000000000n
-              ),
-            ]),
-          ]
-        );
-        const testCtx = buildTestContext();
-
-        const response = await buildBL(
-          countingRepository,
-          denyListing([
-            {chainId: ChainId.MAINNET, address: intermediate.address},
-          ])
-        ).quote(
-          testCtx,
-          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
-        );
-
-        expect(response.error).toBeUndefined();
-        expect(countingRepository.getRoutesCalls).toBe(1);
-        expect(response.route).toHaveLength(1);
-        expect(response.route[0].pools).toHaveLength(2);
-        expect(response.route[0].pools[0].tokenOut?.address).toBe(
-          intermediate.address
-        );
-        expect(response.route[0].pools[1].tokenIn?.address).toBe(
-          intermediate.address
-        );
-      });
-    });
   });
 
   // getCachedRoutes/saveCachedRoutes is only enabled for the all-Uniswap-protocols case
@@ -1326,8 +1099,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -1365,8 +1137,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -1412,8 +1183,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -1451,8 +1221,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, request);
@@ -1495,8 +1264,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // Populate the Uniswap cache
@@ -1552,8 +1320,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // First call: cache miss → async saves
@@ -1594,8 +1361,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const firstResponse = await uniRouteBL.quote(ctx, mixedRequest);
@@ -1637,8 +1403,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // Mixed protocol first call: cache miss (nothing saved yet for this key)
@@ -1680,8 +1445,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // First call: cache miss → async saves with mixed protocols
@@ -1744,8 +1508,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1791,8 +1554,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1855,8 +1617,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1918,8 +1679,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -1983,8 +1743,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2104,8 +1863,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2271,8 +2029,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2370,8 +2127,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2459,8 +2215,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2533,8 +2288,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2596,8 +2350,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -2660,8 +2413,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -2801,8 +2553,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
     it('omits routeCandidates when the flag is not set', async () => {
@@ -3148,8 +2899,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -3242,8 +2992,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3290,8 +3039,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3334,8 +3082,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.getCachedRoutes(ctx, request);
@@ -3373,8 +3120,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // Manually create a dummy route and cache it
@@ -3478,8 +3224,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3528,8 +3273,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3580,8 +3324,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3625,8 +3368,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3671,8 +3413,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -3778,8 +3519,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request, {
@@ -3890,8 +3630,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request, {
@@ -3975,8 +3714,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request, {
@@ -4083,8 +3821,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -4199,8 +3936,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -4270,8 +4006,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -4383,8 +4118,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -4497,8 +4231,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -4611,8 +4344,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -4717,8 +4449,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request, {
@@ -4795,8 +4526,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -4850,8 +4580,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // No universalRouterVersion in options → defaults to V2_0 → simulation runs
@@ -4906,8 +4635,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -4963,8 +4691,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -5020,8 +4747,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -5082,8 +4808,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, simulationRequest, {
@@ -5147,8 +4872,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, requestWithoutSimulate, {
@@ -5192,8 +4916,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.deleteCachedRoutes(ctx, request);
@@ -5232,8 +4955,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // First, manually create a dummy route and cache it
@@ -5363,8 +5085,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5467,8 +5188,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5552,8 +5272,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5637,8 +5356,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5722,8 +5440,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5793,8 +5510,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5869,8 +5585,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -5945,8 +5660,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -6021,8 +5735,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -6097,8 +5810,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const responseAt100 = await uniRouteBL.quote(ctx, request);
@@ -6167,8 +5879,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const responseAtNeg100 = await uniRouteBLNeg100.quote(ctx, request);
@@ -6235,8 +5946,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const responseAt0 = await uniRouteBL0.quote(ctx, request);
@@ -6399,8 +6109,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -6460,8 +6169,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -6548,8 +6256,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -6592,8 +6299,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // Sync + cache miss + all protocols = should NOT use reduced config
@@ -6640,8 +6346,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -6680,8 +6385,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
       await asyncBL.quote(ctx, request);
 
@@ -6711,8 +6415,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await syncBL.quote(ctx, request);
@@ -6751,8 +6454,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // Async + cache miss should NOT use reduced config even with partial protocols
@@ -6797,8 +6499,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // QuickRoute sync + cache miss + partial protocols should NOT use reduced config
@@ -6848,8 +6549,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(ctx, request);
@@ -7109,8 +6809,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7151,8 +6850,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7197,8 +6895,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7244,8 +6941,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7291,8 +6987,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7345,8 +7040,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7399,8 +7093,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       await uniRouteBL.quote(
@@ -7453,8 +7146,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // External protocol without testAggHooks — treated as unexpected.
@@ -7512,8 +7204,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       // External protocol + testAggHooks=true — this is the expected path.
@@ -7579,8 +7270,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -7617,8 +7307,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);
@@ -7711,8 +7400,7 @@ describe('UniRouteBL', () => {
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
-        stateOverrideResolver,
-        FeatureGatedTokensRepository.empty()
+        stateOverrideResolver
       );
 
       const response = await uniRouteBL.quote(ctx, request);

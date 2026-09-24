@@ -18,6 +18,7 @@ import {IRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
 import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../lib/CanonicalPools';
 import {
   EMPTY_NAMESPACE_CONTEXT,
@@ -80,12 +81,14 @@ class TestPoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
   constructor(
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,
-    protected getPoolsForTokensCache: IRedisCache<string, string>
+    protected getPoolsForTokensCache: IRedisCache<string, string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository = FeatureGatedTokensRepository.empty()
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
+      featureGatedTokensRepository,
       'TestPoolDiscoverer'
     );
   }
@@ -150,12 +153,14 @@ class ClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
-    private readonly loadPools: () => Promise<UniPoolInfo[]>
+    private readonly loadPools: () => Promise<UniPoolInfo[]>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository = FeatureGatedTokensRepository.empty()
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
+      featureGatedTokensRepository,
       'ClosurePoolDiscoverer'
     );
   }
@@ -915,7 +920,7 @@ describe('BaseCachingPoolDiscoverer', () => {
     );
   });
 
-  describe('snapshot parse memoization', () => {
+  describe('snapshot parse + compliance memoization', () => {
     const memoConfig: IUniRouteServiceConfig = {
       ...serviceConfig,
       PoolDiscovery: {
@@ -989,6 +994,33 @@ describe('BaseCachingPoolDiscoverer', () => {
 
       expect(first).toEqual(snapshotA);
       expect(second).toEqual(snapshotB);
+      expect(second).not.toBe(first);
+    });
+
+    it('re-filters when the deny-list payload changes between calls', async () => {
+      const cachedPools = makeSnapshotPools(['0x1', '0x2']);
+      let snapshot = {globalSet: new Set<string>()};
+      const denyRepo = {
+        getSnapshot: async () => snapshot,
+      } as unknown as FeatureGatedTokensRepository;
+      const discoverer = new TestPoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        denyRepo
+      );
+      getPoolsCache.get = vi
+        .fn()
+        .mockResolvedValue(JSON.stringify(cachedPools));
+
+      const first = await discoverer.getPools(chainId, protocol, ctx);
+      expect(first).toHaveLength(2);
+
+      // New payload object denying pool 0x2's token0.
+      snapshot = {globalSet: new Set(['0xaaa2'])};
+      const second = await discoverer.getPools(chainId, protocol, ctx);
+
+      expect(second.map(p => p.id)).toEqual(['0x1']);
       expect(second).not.toBe(first);
     });
 
@@ -1168,7 +1200,8 @@ describe('BaseCachingPoolDiscoverer', () => {
 
     it('does not mark per-request _getPoolsForTokens arrays as memo-stable', async () => {
       // Direct/Static discoverers return fresh arrays per pair; stability
-      // must not leak onto them, or the selector-side gate is defeated.
+      // must not leak onto them via the compliance-filter self-seed, or the
+      // selector-side gate is defeated (round-2 adversarial finding).
       const observed: boolean[] = [];
       const recordingSelector = {
         filterPools: async (pools: UniPoolInfo[]) => {

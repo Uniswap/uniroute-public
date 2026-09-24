@@ -9,6 +9,7 @@ import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
+import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {
   IV4PoolKeyRegistry,
@@ -85,6 +86,7 @@ function makeDiscoverer(
     repository,
     noopCache,
     noopCache,
+    {} as FeatureGatedTokensRepository,
     registry
   );
 }

@@ -4,6 +4,7 @@ import {ChainId} from '../../../lib/config';
 import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
+import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../../lib/CanonicalPools';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
@@ -73,12 +74,14 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
+    protected featureGatedTokensRepository: FeatureGatedTokensRepository,
     protected readonly s3: S3Client
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
+      featureGatedTokensRepository,
       'BaseS3SubgraphPoolDiscoverer',
       [Protocol.V2, Protocol.V3, Protocol.V4]
     );
@@ -386,13 +389,20 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
     serviceConfig: IUniRouteServiceConfig,
     getPoolsCache: IRedisCache<string, string>,
     getPoolsForTokensCache: IRedisCache<string, string>,
+    featureGatedTokensRepository: FeatureGatedTokensRepository,
     s3: S3Client,
     // Optional: CCA launch pools pre-registered at a known migrationBlock
     // (ROUTE-1134). Merged AFTER the caching layers so activation isn't
     // delayed by the pool-cache TTLs.
     private readonly ccaScheduledPoolsRepository?: CcaScheduledPoolsRepository
   ) {
-    super(serviceConfig, getPoolsCache, getPoolsForTokensCache, s3);
+    super(
+      serviceConfig,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      featureGatedTokensRepository,
+      s3
+    );
   }
 
   protected override getDiscovererName(): string {
@@ -609,27 +619,29 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       if (merged.length === 0) {
         return pools;
       }
-      // Merged entries must pass the canonical-pools filter so the registry
-      // cannot re-append a pool excluded by the selector.
-      const canonicalMerged = CanonicalPools.filterAdmittedPools(
-        merged,
+      // Merged entries must clear the same restricted-token (globalSet)
+      // filter every cached/selector-path pool passes through — a launched
+      // token later added to the compliance list must not stay quotable via
+      // the registry.
+      const compliantMerged = CanonicalPools.filterAdmittedPools(
+        await this.filterUnsupportedTokenPools(merged, ctx),
         chainId
       );
-      if (canonicalMerged.length === 0) {
+      if (compliantMerged.length === 0) {
         return pools;
       }
       ctx.logger.debug('Merged CCA scheduled pools into V4 pool set', {
         chainId,
-        merged: canonicalMerged.map(pool => pool.id),
+        merged: compliantMerged.map(pool => pool.id),
       });
       await ctx.metrics.count(
         buildMetricKey('CcaScheduledPools.merged'),
-        canonicalMerged.length,
+        compliantMerged.length,
         {
           tags: [`chain:${ChainId[chainId]}`, 'status:success'],
         }
       );
-      return [...pools, ...canonicalMerged];
+      return [...pools, ...compliantMerged];
     } catch (error) {
       ctx.logger.warn('CCA scheduled pools merge failed; serving base pools', {
         chainId,

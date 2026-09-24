@@ -31,6 +31,7 @@ import {poolSelectionConfig} from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
 import {EMPTY_NAMESPACE_CONTEXT} from '../../models/hooks/namespaces';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 
 // ---------------------------------------------------------------------------
@@ -119,7 +120,8 @@ describe('BasicTopPoolsSelector — agg hook exclusion (mocked hooksAddressesAll
   beforeEach(() => {
     selector = new BasicTopPoolsSelector(
       new HardcodedChainRepository(),
-      poolSelectionConfig
+      poolSelectionConfig,
+      FeatureGatedTokensRepository.empty()
     );
     ctx = buildTestContext();
   });
@@ -253,7 +255,10 @@ describe('AggHooksTopPoolsSelector — agg hook inclusion (mocked hooksAddresses
   let ctx: Context;
 
   beforeEach(() => {
-    selector = new AggHooksTopPoolsSelector(poolSelectionConfig);
+    selector = new AggHooksTopPoolsSelector(
+      poolSelectionConfig,
+      FeatureGatedTokensRepository.empty()
+    );
     ctx = buildTestContext();
   });
 

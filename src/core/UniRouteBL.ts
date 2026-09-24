@@ -73,7 +73,6 @@ import {IFreshPoolDetailsWrapper} from '../stores/pool/FreshPoolDetailsWrapper';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {ICachedRoutesRepository} from '../stores/route/uniroutes/ICachedRoutesRepository';
 import {INoRouteCacheRepository} from '../stores/route/uniroutes/NoRouteCacheRepository';
-import {FeatureGatedTokensRepository} from '../stores/compliance/FeatureGatedTokensRepository';
 import {QuoteType} from '../models/quote/QuoteType';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {EnumUtils} from '../lib/EnumUtils';
@@ -255,7 +254,6 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly tokenProvider: ITokenProvider,
     private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
     private readonly stateOverrideResolver: StateOverrideResolver,
-    private readonly featureGatedTokensRepository: FeatureGatedTokensRepository,
     private readonly erc4626WrapperRegistry?: Erc4626WrapperRegistrySource
   ) {
     this.blockNumberCache = new BlockNumberCache(
@@ -433,48 +431,16 @@ export class UniRouteBL implements IUniRoutedBL {
     });
 
     try {
-      const [tokenInCurrencyInfo, tokenOutCurrencyInfo] = await Promise.all([
-        this.tokenProvider.searchForToken(chain, request.tokenInAddress, ctx),
-        this.tokenProvider.searchForToken(chain, request.tokenOutAddress, ctx),
-      ]);
-
-      // Resolve aliases before compliance so symbols and native names cannot
-      // bypass address-based restrictions. Pools carry wrapped native tokens,
-      // so checking the wrapped address preserves the pool-level filter's
-      // native-swap restrictions. Only endpoints are gated, leaving restricted
-      // intermediate hops available. Regional verdicts must precede RPC fan-out
-      // and route-cache access so they cannot poison the pair's no-route cache.
-      const [tokenInRestricted, tokenOutRestricted] = await Promise.all([
-        this.featureGatedTokensRepository.isRestricted(
-          ctx,
-          chain.chainId,
-          tokenInCurrencyInfo.wrappedAddress.address
-        ),
-        this.featureGatedTokensRepository.isRestricted(
-          ctx,
-          chain.chainId,
-          tokenOutCurrencyInfo.wrappedAddress.address
-        ),
-      ]);
-      if (tokenInRestricted || tokenOutRestricted) {
-        metricTags.push(`status:${QuoteStatus.NoRoute}`);
-        metricTags.push('reason:token_restricted');
-        await emitCallMetrics(metricTags);
-        return new QuoteResponse({
-          error: {
-            code: 404,
-            message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
-            data: quoteErrorData(QuoteErrorReason.TOKEN_RESTRICTED),
-          },
-          hitsCachedRoutes: false,
-        });
-      }
-
-      const {tokensInfo, blockNumber, gasPrice} = await this.fetchRequestData(
-        ctx,
-        chain,
+      const {
         tokenInCurrencyInfo,
         tokenOutCurrencyInfo,
+        tokensInfo,
+        blockNumber,
+        gasPrice,
+      } = await this.fetchRequestData(
+        ctx,
+        chain,
+        request,
         requestBlockNumber,
         metricTags
       );
@@ -1115,17 +1081,23 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * Fetches token metadata, block number, and gas price in parallel after
-   * the resolved endpoints have passed compliance.
+   * Fetches the per-request data needed before route discovery: token
+   * currency info (parallel), token metadata + block number + gas price
+   * (parallel). Preserves the two-stage await pattern of the inline code.
    */
   private async fetchRequestData(
     ctx: Context,
     chain: Chain,
-    tokenInCurrencyInfo: CurrencyInfo,
-    tokenOutCurrencyInfo: CurrencyInfo,
+    request: QuoteRequest,
     requestBlockNumber: number | undefined,
     metricTags: string[]
   ) {
+    // Start parallel token search operations
+    const [tokenInCurrencyInfo, tokenOutCurrencyInfo] = await Promise.all([
+      this.tokenProvider.searchForToken(chain, request.tokenInAddress, ctx),
+      this.tokenProvider.searchForToken(chain, request.tokenOutAddress, ctx),
+    ]);
+
     // Check if we need to fetch gasPrice based on chain and tokens
     const needToFetchGasPrice = needsGasPriceFetching(
       chain.chainId,
@@ -1185,7 +1157,13 @@ export class UniRouteBL implements IUniRoutedBL {
       metricTags
     );
 
-    return {tokensInfo, blockNumber, gasPrice};
+    return {
+      tokenInCurrencyInfo,
+      tokenOutCurrencyInfo,
+      tokensInfo,
+      blockNumber,
+      gasPrice,
+    };
   }
 
   /**
