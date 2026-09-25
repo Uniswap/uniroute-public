@@ -122,6 +122,50 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
   return {tokenToPools};
 };
 
+// A token pair to look up, both addresses already lowercased.
+export type LowercasedTokenPair = {tokenALower: string; tokenBLower: string};
+
+// For each pair, the highest-TVL pool containing both tokens whose lowercased
+// id is not in selectedPoolIdsLower, or undefined when none does. On equal TVL
+// the earliest pool in `pools` wins, and a non-finite TVL ranks below every
+// finite one. One pass answers every pair, for callers that look up a handful
+// of pairs in a full snapshot and would otherwise build a token index over it.
+export const findTopUnselectedPoolsForPairs = (
+  pools: UniPoolInfo[],
+  pairs: LowercasedTokenPair[],
+  selectedPoolIdsLower: Set<string>
+): (UniPoolInfo | undefined)[] => {
+  if (pairs.length === 0) {
+    return [];
+  }
+  const topMatches: ({pool: UniPoolInfo; tvl: number} | undefined)[] =
+    pairs.map(() => undefined);
+
+  for (const pool of pools) {
+    const token0Lower = pool.token0.id.toLowerCase();
+    const token1Lower = pool.token1.id.toLowerCase();
+    for (let pairIndex = 0; pairIndex < pairs.length; pairIndex++) {
+      const {tokenALower, tokenBLower} = pairs[pairIndex];
+      if (
+        (token0Lower !== tokenALower && token1Lower !== tokenALower) ||
+        (token0Lower !== tokenBLower && token1Lower !== tokenBLower) ||
+        selectedPoolIdsLower.has(pool.id.toLowerCase())
+      ) {
+        continue;
+      }
+
+      const rawTvl = getPoolTVL(pool);
+      const tvl = Number.isFinite(rawTvl) ? rawTvl : -Infinity;
+      const topMatch = topMatches[pairIndex];
+      if (topMatch === undefined || tvl > topMatch.tvl) {
+        topMatches[pairIndex] = {pool, tvl};
+      }
+    }
+  }
+
+  return topMatches.map(topMatch => topMatch?.pool);
+};
+
 // Worst-case pool count returned by manuallyGenerateDirectPairs across all
 // (protocol, chain) combos. V2 → 1, V3 → up to V3FeeAmountsBase.length (BASE
 // has the most fee tiers), V4 → canonical grid (8) + hookless registry (8) +

@@ -33,7 +33,8 @@ import {
   synthesizeErc4626WrapperPools,
 } from '../../../models/hooks/Erc4626WrapperHooks';
 import {
-  buildTokenPoolIndex,
+  findTopUnselectedPoolsForPairs,
+  LowercasedTokenPair,
   getPoolTVL,
   getOtherToken,
 } from '../../../core/pool-discovery/TopPoolsSelector';
@@ -729,11 +730,6 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       protocolPools[Protocol.V4]?.map(p => p.id.toLowerCase()) || []
     );
 
-    // Build token-to-pool indices for efficient lookups
-    const v2TokenIndex = buildTokenPoolIndex(allV2Pools);
-    const v3TokenIndex = buildTokenPoolIndex(allV3Pools);
-    const v4TokenIndex = buildTokenPoolIndex(allV4Pools);
-
     // Find cross-liquidity pools for V2
     if (
       protocols.includes(Protocol.V2) &&
@@ -742,7 +738,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       const v2CrossPools = this.findCrossProtocolMissingPools(
         tokenInAddressLower,
         tokenOutAddressLower,
-        v2TokenIndex,
+        allV2Pools,
         Protocol.V2,
         selectedV2PoolIds,
         protocolPools[Protocol.V3] || [],
@@ -757,7 +753,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       const v3CrossPools = this.findCrossProtocolMissingPools(
         tokenInAddressLower,
         tokenOutAddressLower,
-        v3TokenIndex,
+        allV3Pools,
         Protocol.V3,
         selectedV3PoolIds,
         protocolPools[Protocol.V2] || [],
@@ -775,7 +771,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       const v4CrossPools = this.findCrossProtocolMissingPools(
         tokenInAddressLower,
         tokenOutAddressLower,
-        v4TokenIndex,
+        allV4Pools,
         Protocol.V4,
         selectedV4PoolIds,
         protocolPools[Protocol.V2] || [],
@@ -801,9 +797,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
   private findCrossProtocolMissingPools(
     tokenInAddress: string,
     tokenOutAddress: string,
-    tokenIndex: {
-      tokenToPools: Map<string, UniPoolInfo[]>;
-    },
+    candidatePools: UniPoolInfo[],
     protocol: Protocol,
     selectedPoolIds: Set<string>,
     otherProtocolPools1: UniPoolInfo[],
@@ -852,68 +846,50 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       ? getOtherToken(topPoolByTvlWithTokenIn, tokenInAddress).toLowerCase()
       : null;
 
-    // Search for pools using token-to-pool index
+    // Both bridges are looked up in one pass over the snapshot: tokenOut with
+    // the token tokenIn's top pool trades against, and tokenIn with the token
+    // tokenOut's top pool trades against.
+    const lookups: {pair: LowercasedTokenPair; bridgedToken: string}[] = [];
     if (crossTokenAgainstTokenIn) {
-      // Look for pools that connect tokenOut with crossTokenAgainstTokenIn
-      const tokenOutPools = tokenIndex.tokenToPools.get(tokenOutAddress) || [];
-      const crossTokenPools =
-        tokenIndex.tokenToPools.get(crossTokenAgainstTokenIn) || [];
-
-      // Find intersection of pools containing both tokens
-      const crossTokenPoolIds = new Set(
-        crossTokenPools.map(p => p.id.toLowerCase())
-      );
-      const matchingPools = tokenOutPools
-        .filter(pool => {
-          const poolId = pool.id.toLowerCase();
-          return !selectedPoolIds.has(poolId) && crossTokenPoolIds.has(poolId);
-        })
-        .sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
-
-      if (matchingPools.length > 0) {
-        selectedPools.push(matchingPools[0]);
-        ctx.logger.debug(
-          `findCrossProtocolMissingPools${protocol}: Found cross-liquidity pool for tokenIn`,
-          {
-            poolId: matchingPools[0].id,
-            token0: matchingPools[0].token0.id,
-            token1: matchingPools[0].token1.id,
-            tvl: getPoolTVL(matchingPools[0]),
-          }
-        );
-      }
+      lookups.push({
+        pair: {
+          tokenALower: tokenOutAddress,
+          tokenBLower: crossTokenAgainstTokenIn,
+        },
+        bridgedToken: 'tokenIn',
+      });
+    }
+    if (crossTokenAgainstTokenOut) {
+      lookups.push({
+        pair: {
+          tokenALower: tokenInAddress,
+          tokenBLower: crossTokenAgainstTokenOut,
+        },
+        bridgedToken: 'tokenOut',
+      });
     }
 
-    if (crossTokenAgainstTokenOut && selectedPools.length < 2) {
-      // Look for pools that connect tokenIn with crossTokenAgainstTokenOut
-      const tokenInPools = tokenIndex.tokenToPools.get(tokenInAddress) || [];
-      const crossTokenPools =
-        tokenIndex.tokenToPools.get(crossTokenAgainstTokenOut) || [];
-
-      // Find intersection of pools containing both tokens
-      const crossTokenPoolIds = new Set(
-        crossTokenPools.map(p => p.id.toLowerCase())
-      );
-      const matchingPools = tokenInPools
-        .filter(pool => {
-          const poolId = pool.id.toLowerCase();
-          return !selectedPoolIds.has(poolId) && crossTokenPoolIds.has(poolId);
-        })
-        .sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
-
-      if (matchingPools.length > 0) {
-        selectedPools.push(matchingPools[0]);
-        ctx.logger.debug(
-          `findCrossProtocolMissingPools${protocol}: Found cross-liquidity pool for tokenOut`,
-          {
-            poolId: matchingPools[0].id,
-            token0: matchingPools[0].token0.id,
-            token1: matchingPools[0].token1.id,
-            tvl: getPoolTVL(matchingPools[0]),
-          }
-        );
+    const crossPools = findTopUnselectedPoolsForPairs(
+      candidatePools,
+      lookups.map(lookup => lookup.pair),
+      selectedPoolIds
+    );
+    lookups.forEach((lookup, lookupIndex) => {
+      const crossPool = crossPools[lookupIndex];
+      if (crossPool === undefined) {
+        return;
       }
-    }
+      selectedPools.push(crossPool);
+      ctx.logger.debug(
+        `findCrossProtocolMissingPools${protocol}: Found cross-liquidity pool for ${lookup.bridgedToken}`,
+        {
+          poolId: crossPool.id,
+          token0: crossPool.token0.id,
+          token1: crossPool.token1.id,
+          tvl: getPoolTVL(crossPool),
+        }
+      );
+    });
 
     return selectedPools;
   }

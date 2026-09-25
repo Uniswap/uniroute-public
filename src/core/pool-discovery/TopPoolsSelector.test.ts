@@ -12,6 +12,7 @@ import {
   BasicTopPoolsSelector,
   getPoolTVL,
   buildTokenPoolIndex,
+  findTopUnselectedPoolsForPairs,
   getMaxFilteredPoolCount,
   MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
   METRIC_NON_CANONICAL_POOL,
@@ -269,6 +270,222 @@ describe('BasicTopPoolsSelector', () => {
       expect(index.tokenToPools.get(token1Id)).toEqual([v2Pool, v4Pool]);
       expect(index.tokenToPools.get(token2Id)).toEqual([v2Pool, v3Pool]);
       expect(index.tokenToPools.get(token3Id)).toEqual([v3Pool, v4Pool]);
+    });
+  });
+
+  describe('findTopUnselectedPoolsForPairs', () => {
+    const tokenA = '0x000000000000000000000000000000000000000a';
+    const tokenB = '0x000000000000000000000000000000000000000b';
+    const tokenC = '0x000000000000000000000000000000000000000c';
+    const pairAB = {tokenALower: tokenA, tokenBLower: tokenB};
+
+    const v3PoolWith = (
+      id: string,
+      token0: string,
+      token1: string,
+      tvlUSD: number
+    ): V3PoolInfo => ({
+      ...mockV3Pool,
+      id,
+      token0: {id: token0},
+      token1: {id: token1},
+      tvlUSD,
+    });
+
+    it('returns the highest-TVL pool containing both tokens in either order', () => {
+      const low = v3PoolWith('0xa1', tokenA, tokenB, 100);
+      const high = v3PoolWith('0xa2', tokenB, tokenA, 500);
+      const otherPair = v3PoolWith('0xa3', tokenA, tokenC, 10_000);
+
+      expect(
+        findTopUnselectedPoolsForPairs(
+          [low, otherPair, high],
+          [pairAB],
+          new Set()
+        )
+      ).toStrictEqual([high]);
+    });
+
+    it('ranks V2 pools by reserveUSD', () => {
+      const low = {
+        ...mockV2Pool,
+        id: '0xb1',
+        token0: {id: tokenA},
+        token1: {id: tokenB},
+        reserveUSD: 100,
+      };
+      const high = {...low, id: '0xb2', reserveUSD: 900};
+
+      expect(
+        findTopUnselectedPoolsForPairs([low, high], [pairAB], new Set())
+      ).toStrictEqual([high]);
+    });
+
+    it('skips pools whose lowercased id is already selected', () => {
+      const selected = v3PoolWith('0xAbC1', tokenA, tokenB, 500);
+      const fallback = v3PoolWith('0xabc2', tokenA, tokenB, 100);
+
+      expect(
+        findTopUnselectedPoolsForPairs(
+          [selected, fallback],
+          [pairAB],
+          new Set(['0xabc1'])
+        )
+      ).toStrictEqual([fallback]);
+    });
+
+    it('matches checksummed pool token ids against lowercase query tokens', () => {
+      const checksummed = v3PoolWith(
+        '0xa1',
+        '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+        '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+        100
+      );
+
+      expect(
+        findTopUnselectedPoolsForPairs(
+          [checksummed],
+          [
+            {
+              tokenALower: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+              tokenBLower: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
+            },
+          ],
+          new Set()
+        )
+      ).toStrictEqual([checksummed]);
+    });
+
+    it('keeps the earliest pool on equal TVL', () => {
+      const first = v3PoolWith('0xa1', tokenA, tokenB, 100);
+      const second = v3PoolWith('0xa2', tokenA, tokenB, 100);
+
+      expect(
+        findTopUnselectedPoolsForPairs([first, second], [pairAB], new Set())
+      ).toStrictEqual([first]);
+    });
+
+    it('ranks a non-finite TVL below every finite one', () => {
+      const unpriced = v3PoolWith('0xa1', tokenA, tokenB, Number.NaN);
+      const priced = v3PoolWith('0xa2', tokenA, tokenB, 1);
+
+      expect(
+        findTopUnselectedPoolsForPairs([unpriced, priced], [pairAB], new Set())
+      ).toStrictEqual([priced]);
+      // Still selectable when it is the only match.
+      expect(
+        findTopUnselectedPoolsForPairs([unpriced], [pairAB], new Set())
+      ).toStrictEqual([unpriced]);
+    });
+
+    it('answers each pair independently in one call', () => {
+      const poolAB = v3PoolWith('0xa1', tokenA, tokenB, 100);
+      const poolAC = v3PoolWith('0xa2', tokenA, tokenC, 200);
+
+      expect(
+        findTopUnselectedPoolsForPairs(
+          [poolAB, poolAC],
+          [pairAB, {tokenALower: tokenC, tokenBLower: tokenA}, pairAB],
+          new Set()
+        )
+      ).toStrictEqual([poolAB, poolAC, poolAB]);
+    });
+
+    it('returns undefined for a pair no unselected pool contains', () => {
+      const onlyAC = v3PoolWith('0xa1', tokenA, tokenC, 100);
+      const selected = v3PoolWith('0xa2', tokenA, tokenB, 100);
+
+      expect(
+        findTopUnselectedPoolsForPairs(
+          [onlyAC, selected],
+          [pairAB],
+          new Set(['0xa2'])
+        )
+      ).toStrictEqual([undefined]);
+      expect(
+        findTopUnselectedPoolsForPairs([onlyAC], [], new Set())
+      ).toStrictEqual([]);
+    });
+
+    it('picks the same pools as intersecting a token index over the snapshot', () => {
+      // Deterministic 31-bit LCG. `Math.imul` keeps the product's low 32 bits
+      // exact (a float multiply loses them past 2^53), which is all a mod-2^31
+      // LCG needs. The high bits are used because a power-of-two LCG's low
+      // bits cycle with a short period.
+      let seed = 42;
+      const nextInt = (bound: number) => {
+        seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+        return (seed >>> 16) % bound;
+      };
+      // Random per-character casing, so the lowercase normalization on token
+      // and pool ids is exercised rather than passed through.
+      const randomlyCased = (hex: string) =>
+        hex.replace(/[a-f]/g, char =>
+          nextInt(2) === 0 ? char : char.toUpperCase()
+        );
+      const tokensLower = Array.from(
+        {length: 12},
+        (_, index) => `0x${(index + 0xa0).toString(16).padStart(40, 'c')}`
+      );
+      const pools = Array.from({length: 400}, (_, index) =>
+        v3PoolWith(
+          randomlyCased(`0x${(index + 0xabc).toString(16)}`),
+          randomlyCased(tokensLower[nextInt(tokensLower.length)]),
+          randomlyCased(tokensLower[nextInt(tokensLower.length)]),
+          // Few distinct TVLs so ties are exercised alongside ranking.
+          nextInt(8) * 100
+        )
+      );
+      // Guards the fixture itself: a degenerate generator would leave the
+      // ranking untested while the sweep still passed.
+      expect(new Set(pools.map(getPoolTVL)).size).toBe(8);
+      // Each side on its own: a degenerate token1 draw would otherwise hide
+      // behind a healthy token0 one.
+      expect(
+        new Set(pools.map(pool => pool.token0.id.toLowerCase())).size
+      ).toBe(tokensLower.length);
+      expect(
+        new Set(pools.map(pool => pool.token1.id.toLowerCase())).size
+      ).toBe(tokensLower.length);
+
+      const selectedPoolIdsLower = new Set(
+        pools
+          .filter((_, index) => index % 5 === 0)
+          .map(pool => pool.id.toLowerCase())
+      );
+      const index = buildTokenPoolIndex(pools);
+      // The removed algorithm: intersect the two tokens' pool lists by
+      // lowercased id, drop selected ids, stable-sort by TVL, take the first.
+      const expectedFor = (first: string, second: string) => {
+        const secondPoolIdsLower = new Set(
+          (index.tokenToPools.get(second) ?? []).map(pool =>
+            pool.id.toLowerCase()
+          )
+        );
+        return (index.tokenToPools.get(first) ?? [])
+          .filter(pool => {
+            const poolIdLower = pool.id.toLowerCase();
+            return (
+              !selectedPoolIdsLower.has(poolIdLower) &&
+              secondPoolIdsLower.has(poolIdLower)
+            );
+          })
+          .sort((a, b) => getPoolTVL(b) - getPoolTVL(a))[0];
+      };
+
+      const pairs = tokensLower.flatMap(first =>
+        tokensLower.map(second => ({tokenALower: first, tokenBLower: second}))
+      );
+      const expected = pairs.map(pair =>
+        expectedFor(pair.tokenALower, pair.tokenBLower)
+      );
+      expect(
+        expected.filter(pool => pool !== undefined).length
+      ).toBeGreaterThan(pairs.length / 2);
+      // Every pair answered in a single pass, as the caller does.
+      expect(
+        findTopUnselectedPoolsForPairs(pools, pairs, selectedPoolIdsLower)
+      ).toStrictEqual(expected);
     });
   });
 
