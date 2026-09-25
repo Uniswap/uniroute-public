@@ -146,12 +146,11 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         return [];
       }
 
-      // Convert stream to Buffer
-      const poolsBuffer = Buffer.from(await bodyStream.transformToByteArray());
+      const poolsBytes = await bodyStream.transformToByteArray();
 
       // Decompress and parse the data
       const before2 = Date.now();
-      const poolString = (await inflateAsync(poolsBuffer)).toString('utf-8');
+      const poolString = (await inflateAsync(poolsBytes)).toString('utf-8');
       const poolsData = JSON.parse(poolString) as TPoolData[];
       const after2 = Date.now();
 

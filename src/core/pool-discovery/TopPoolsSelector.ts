@@ -50,7 +50,6 @@ import {
 // Token-to-pool index for faster lookups
 interface TokenPoolIndex {
   tokenToPools: Map<string, UniPoolInfo[]>;
-  poolToTokens: Map<string, Set<string>>;
 }
 
 // Pair-independent selection state derived from one pool snapshot. Building
@@ -102,12 +101,10 @@ export const getOtherToken = (pool: UniPoolInfo, tokenId: string): string => {
 // Helper function to build token-to-pool index
 export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
   const tokenToPools = new Map<string, UniPoolInfo[]>();
-  const poolToTokens = new Map<string, Set<string>>();
 
   for (const pool of pools) {
     const token0Id = pool.token0.id.toLowerCase();
     const token1Id = pool.token1.id.toLowerCase();
-    const poolId = pool.id.toLowerCase();
 
     // Initialize token-to-pools mapping
     if (!tokenToPools.has(token0Id)) {
@@ -120,12 +117,9 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
     // Add pool to both tokens
     tokenToPools.get(token0Id)!.push(pool);
     tokenToPools.get(token1Id)!.push(pool);
-
-    // Initialize pool-to-tokens mapping
-    poolToTokens.set(poolId, new Set([token0Id, token1Id]));
   }
 
-  return {tokenToPools, poolToTokens};
+  return {tokenToPools};
 };
 
 // Worst-case pool count returned by manuallyGenerateDirectPairs across all

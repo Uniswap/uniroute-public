@@ -152,19 +152,12 @@ describe('BasicTopPoolsSelector', () => {
 
       const token0Id = mockV2Pool.token0.id.toLowerCase();
       const token1Id = mockV2Pool.token1.id.toLowerCase();
-      const poolId = mockV2Pool.id.toLowerCase();
 
       // Check token-to-pools mapping
       expect(index.tokenToPools.has(token0Id)).toBe(true);
       expect(index.tokenToPools.has(token1Id)).toBe(true);
       expect(index.tokenToPools.get(token0Id)).toEqual([mockV2Pool]);
       expect(index.tokenToPools.get(token1Id)).toEqual([mockV2Pool]);
-
-      // Check pool-to-tokens mapping
-      expect(index.poolToTokens.has(poolId)).toBe(true);
-      expect(index.poolToTokens.get(poolId)).toEqual(
-        new Set([token0Id, token1Id])
-      );
     });
 
     it('should build correct token-to-pool index for multiple pools', () => {
@@ -201,17 +194,6 @@ describe('BasicTopPoolsSelector', () => {
       expect(index.tokenToPools.get(token1Id)).toEqual([pool1, pool2]);
       expect(index.tokenToPools.get(token2Id)).toEqual([pool1, pool3]);
       expect(index.tokenToPools.get(token3Id)).toEqual([pool2, pool3]);
-
-      // Check pool-to-tokens mapping
-      expect(index.poolToTokens.get('0x123')).toEqual(
-        new Set([token1Id, token2Id])
-      );
-      expect(index.poolToTokens.get('0x456')).toEqual(
-        new Set([token1Id, token3Id])
-      );
-      expect(index.poolToTokens.get('0x789')).toEqual(
-        new Set([token2Id, token3Id])
-      );
     });
 
     it('should handle case-insensitive token addresses', () => {
@@ -234,7 +216,6 @@ describe('BasicTopPoolsSelector', () => {
       const index = buildTokenPoolIndex([]);
 
       expect(index.tokenToPools.size).toBe(0);
-      expect(index.poolToTokens.size).toBe(0);
     });
 
     it('should handle pools with duplicate tokens', () => {
@@ -288,17 +269,6 @@ describe('BasicTopPoolsSelector', () => {
       expect(index.tokenToPools.get(token1Id)).toEqual([v2Pool, v4Pool]);
       expect(index.tokenToPools.get(token2Id)).toEqual([v2Pool, v3Pool]);
       expect(index.tokenToPools.get(token3Id)).toEqual([v3Pool, v4Pool]);
-
-      // Check pool-to-tokens mapping
-      expect(index.poolToTokens.get('0x123')).toEqual(
-        new Set([token1Id, token2Id])
-      );
-      expect(index.poolToTokens.get('0x456')).toEqual(
-        new Set([token2Id, token3Id])
-      );
-      expect(index.poolToTokens.get('0x789')).toEqual(
-        new Set([token1Id, token3Id])
-      );
     });
   });
 

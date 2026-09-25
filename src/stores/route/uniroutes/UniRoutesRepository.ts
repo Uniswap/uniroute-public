@@ -803,7 +803,6 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     tokenOutAddress: string,
     tokenIndex: {
       tokenToPools: Map<string, UniPoolInfo[]>;
-      poolToTokens: Map<string, Set<string>>;
     },
     protocol: Protocol,
     selectedPoolIds: Set<string>,
