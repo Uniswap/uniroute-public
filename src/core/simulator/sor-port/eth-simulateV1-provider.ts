@@ -28,6 +28,7 @@ import {
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
+  withZeroGasSimulationResult,
 } from './simulation-provider';
 import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
 import {hasNativeToken} from '../../../lib/tokenUtils';
@@ -42,7 +43,10 @@ import {
   encodeGethStateOverrides,
   GethStateOverrideMap,
 } from './stateOverrideEncoders';
-import {breakDownSimulationError} from './simulationErrorBreakDown';
+import {
+  breakDownSimulationError,
+  describeSimulationException,
+} from './simulationErrorBreakDown';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {constants} from 'ethers';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
@@ -390,7 +394,12 @@ export class EthSimulateV1Simulator extends Simulator {
           );
         }
       } catch (e) {
-        ctx.logger.error(`Error simulating with ${this.rpcMethod}`, e);
+        const {status, logFields} = describeSimulationException(
+          e,
+          quoteSplit.swapInfo!.tokenInWrappedAddress,
+          quoteSplit.swapInfo!.tokenOutWrappedAddress
+        );
+        ctx.logger.error(`Error simulating with ${this.rpcMethod}`, logFields);
 
         await ctx.metrics.count(METRIC_UNIRPC_SIMULATION_REQUEST, 1, {
           tags: [
@@ -400,16 +409,13 @@ export class EthSimulateV1Simulator extends Simulator {
             ...swapStepsTags,
           ],
         });
-        return {
-          ...quoteSplit,
-          simulationResult: {
-            estimatedGasUsed: 0n,
-            estimatedGasUsedInQuoteToken: 0n,
-            estimatedGasUsedInUSD: 0,
-            status: SimulationStatus.FAILED,
-            description: `Error simulating transaction via ${this.rpcMethod}`,
-          },
-        };
+        return withZeroGasSimulationResult(
+          quoteSplit,
+          status,
+          status === SimulationStatus.SYSTEM_DOWN
+            ? `Simulation backend unavailable via ${this.rpcMethod}`
+            : `Error simulating transaction via ${this.rpcMethod}`
+        );
       }
     } else {
       throw new Error(`Unsupported swap type ${swapOptions}`);

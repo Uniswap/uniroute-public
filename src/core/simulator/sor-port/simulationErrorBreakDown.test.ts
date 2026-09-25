@@ -1,5 +1,20 @@
 import {describe, it, expect} from 'vitest';
-import {breakDownSimulationError} from './simulationErrorBreakDown';
+import {utils} from 'ethers';
+import {Contract} from 'ethers';
+import {JsonRpcProvider} from '@ethersproject/providers';
+import {
+  breakDownSimulationError,
+  classifySimulationException,
+  describeSimulationException,
+  isSimulationBackendUnavailable,
+} from './simulationErrorBreakDown';
+import {
+  captureEthersRpcError,
+  GATEWAY_BAD_GATEWAY,
+  NODE_HEADER_NOT_FOUND,
+  RpcErrorReply,
+  UNIRPC_ALL_PROVIDERS_FAILED,
+} from '../../../../tests/test-utils/ethersRpcErrors';
 import {SimulationStatus} from '../ISimulator';
 import {VIRTUAL_BASE} from '../../../lib/tokenUtils';
 
@@ -162,5 +177,252 @@ describe('breakDownSimulationError', () => {
         SimulationStatus.FAILED
       );
     });
+  });
+});
+
+const makeEthersError = (
+  message: string,
+  code: string,
+  details: Record<string, unknown> = {}
+): Error => Object.assign(new Error(message), {code, ...details});
+
+describe('classifySimulationException', () => {
+  it('classifies ethers timeouts as SYSTEM_DOWN', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError('timed out', utils.Logger.errors.TIMEOUT),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.SYSTEM_DOWN);
+  });
+
+  it('classifies ethers network errors as SYSTEM_DOWN', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError('network changed', utils.Logger.errors.NETWORK_ERROR),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.SYSTEM_DOWN);
+  });
+
+  it('classifies transport-level SERVER_ERROR responses as SYSTEM_DOWN', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError('bad gateway', utils.Logger.errors.SERVER_ERROR, {
+          status: 502,
+        }),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.SYSTEM_DOWN);
+  });
+
+  it('classifies a 5xx SERVER_ERROR as SYSTEM_DOWN even when the body carries a JSON-RPC error', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError(
+          'service unavailable',
+          utils.Logger.errors.SERVER_ERROR,
+          {
+            status: 503,
+            body: '{"jsonrpc":"2.0","error":{"code":-32603,"message":"upstream unavailable"}}',
+          }
+        ),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.SYSTEM_DOWN);
+  });
+
+  it('classifies a SERVER_ERROR with no response (connection refused) as SYSTEM_DOWN', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError('missing response', utils.Logger.errors.SERVER_ERROR, {
+          serverError: Object.assign(new Error('connect ECONNREFUSED'), {
+            code: 'ECONNREFUSED',
+          }),
+        }),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.SYSTEM_DOWN);
+  });
+
+  it('uses revert classification for SERVER_ERROR responses with JSON-RPC data', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError(
+          'execution reverted',
+          utils.Logger.errors.SERVER_ERROR,
+          {
+            error: {code: -32000, data: '0x8b063d73'},
+            body: '{"jsonrpc":"2.0","error":{"code":-32000,"data":"0x8b063d73"}}',
+          }
+        ),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.SLIPPAGE_TOO_LOW);
+  });
+
+  it('keeps JSON-RPC execution reverts without data as FAILED', () => {
+    expect(
+      classifySimulationException(
+        makeEthersError(
+          'execution reverted',
+          utils.Logger.errors.SERVER_ERROR,
+          {
+            error: {code: -32000, message: 'execution reverted'},
+          }
+        ),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.FAILED);
+  });
+
+  it('keeps local exceptions as FAILED', () => {
+    expect(
+      classifySimulationException(
+        new TypeError('cannot parse result'),
+        USDC_ADDRESS,
+        WETH_ADDRESS
+      )
+    ).toBe(SimulationStatus.FAILED);
+  });
+});
+
+const ERC20_BALANCE_OF_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+];
+
+type RpcCall = (provider: JsonRpcProvider) => Promise<unknown>;
+
+const simulateV1Call: RpcCall = provider =>
+  provider.send('eth_simulateV1', [{}]);
+const estimateGasCall: RpcCall = provider =>
+  provider.estimateGas({to: WETH_ADDRESS, from: WETH_ADDRESS, data: '0x'});
+const getBalanceCall: RpcCall = provider => provider.getBalance(WETH_ADDRESS);
+const balanceOfCall: RpcCall = provider =>
+  new Contract(USDC_ADDRESS, ERC20_BALANCE_OF_ABI, provider).balanceOf(
+    WETH_ADDRESS
+  );
+
+describe('classifySimulationException with errors thrown by ethers', () => {
+  const cases: Array<{
+    name: string;
+    reply: RpcErrorReply;
+    call: RpcCall;
+    expected: SimulationStatus;
+  }> = [
+    {
+      name: 'unirpc-go all-providers-failed via eth_simulateV1',
+      reply: UNIRPC_ALL_PROVIDERS_FAILED,
+      call: simulateV1Call,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'unirpc-go all-providers-failed via eth_estimateGas',
+      reply: UNIRPC_ALL_PROVIDERS_FAILED,
+      call: estimateGasCall,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'a 502 from the gateway via eth_simulateV1',
+      reply: GATEWAY_BAD_GATEWAY,
+      call: simulateV1Call,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'a node-side header-not-found via eth_simulateV1',
+      reply: NODE_HEADER_NOT_FOUND,
+      call: simulateV1Call,
+      expected: SimulationStatus.FAILED,
+    },
+    {
+      name: 'a node-side header-not-found via eth_estimateGas',
+      reply: NODE_HEADER_NOT_FOUND,
+      call: estimateGasCall,
+      expected: SimulationStatus.FAILED,
+    },
+  ];
+
+  it.each(cases)('$name → $expected', async ({reply, call, expected}) => {
+    const error = await captureEthersRpcError(reply, call);
+    expect(classifySimulationException(error, USDC_ADDRESS, WETH_ADDRESS)).toBe(
+      expected
+    );
+  });
+});
+
+describe('isSimulationBackendUnavailable with errors thrown by ethers', () => {
+  const cases: Array<{
+    name: string;
+    reply: RpcErrorReply;
+    call: RpcCall;
+    expected: boolean;
+  }> = [
+    {
+      name: 'unirpc-go all-providers-failed on getBalance',
+      reply: UNIRPC_ALL_PROVIDERS_FAILED,
+      call: getBalanceCall,
+      expected: true,
+    },
+    {
+      name: 'unirpc-go all-providers-failed on a contract balanceOf',
+      reply: UNIRPC_ALL_PROVIDERS_FAILED,
+      call: balanceOfCall,
+      expected: true,
+    },
+    {
+      name: 'a 502 from the gateway on a contract balanceOf',
+      reply: GATEWAY_BAD_GATEWAY,
+      call: balanceOfCall,
+      expected: true,
+    },
+    {
+      name: 'a node-side header-not-found on a contract balanceOf',
+      reply: NODE_HEADER_NOT_FOUND,
+      call: balanceOfCall,
+      expected: false,
+    },
+  ];
+
+  it.each(cases)('$name → $expected', async ({reply, call, expected}) => {
+    const error = await captureEthersRpcError(reply, call);
+    expect(isSimulationBackendUnavailable(error)).toBe(expected);
+  });
+});
+
+describe('describeSimulationException log fields', () => {
+  it('logs only the error name, code and upstream HTTP status for an outage', async () => {
+    const error = await captureEthersRpcError(
+      GATEWAY_BAD_GATEWAY,
+      simulateV1Call
+    );
+
+    expect(
+      describeSimulationException(error, USDC_ADDRESS, WETH_ADDRESS)
+    ).toEqual({
+      status: SimulationStatus.SYSTEM_DOWN,
+      logFields: {
+        errorName: 'Error',
+        errorCode: utils.Logger.errors.SERVER_ERROR,
+        upstreamStatus: GATEWAY_BAD_GATEWAY.httpStatus,
+      },
+    });
+  });
+
+  it('logs the raw error when the backend evaluated the transaction', async () => {
+    const error = await captureEthersRpcError(
+      NODE_HEADER_NOT_FOUND,
+      simulateV1Call
+    );
+
+    expect(
+      describeSimulationException(error, USDC_ADDRESS, WETH_ADDRESS)
+    ).toEqual({status: SimulationStatus.FAILED, logFields: {e: error}});
   });
 });

@@ -1,10 +1,9 @@
 import {describe, beforeEach, afterEach, it, expect, vi} from 'vitest';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {BigNumber} from '@ethersproject/bignumber';
-import {
-  EthEstimateGasSimulator,
-  extractRevertData,
-} from './eth-estimate-gas-provider';
+import {utils} from 'ethers';
+import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
+import {extractRevertData} from './simulationErrorBreakDown';
 import {SwapOptionsUniversalRouter, SwapType} from './simulation-provider';
 import {ChainId} from '../../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
@@ -285,6 +284,28 @@ describe('EthEstimateGasSimulator', () => {
 
       expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
       expect(result.simulationResult?.description).toBe('Error estimating gas');
+    });
+
+    it('returns SYSTEM_DOWN when estimateGas has a network error', async () => {
+      vi.mocked(provider.estimateGas).mockRejectedValue(
+        Object.assign(new Error('network changed'), {
+          code: utils.Logger.errors.NETWORK_ERROR,
+        })
+      );
+
+      const result = await simulator.ethEstimateGas(
+        USER_ADDRESS,
+        swapOptions,
+        createQuoteSplit(),
+        ctx
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.SYSTEM_DOWN
+      );
+      expect(result.simulationResult?.description).toBe(
+        'Simulation backend unavailable during eth_estimateGas'
+      );
     });
   });
 });

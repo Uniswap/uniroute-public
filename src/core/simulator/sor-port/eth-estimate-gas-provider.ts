@@ -5,6 +5,7 @@ import {
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
+  withZeroGasSimulationResult,
 } from './simulation-provider';
 import {Context} from '@uniswap/lib-uni/context';
 import {BEACON_CHAIN_DEPOSIT_ADDRESS} from '../../../lib/helpers';
@@ -14,51 +15,10 @@ import {GasConverter} from '../../gas/converter/GasConverter';
 import {BigNumber} from '@ethersproject/bignumber';
 import {SimulationStatus} from '../ISimulator';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
-import {breakDownSimulationError} from './simulationErrorBreakDown';
-
-const MAX_REVERT_DATA_SEARCH_DEPTH = 5;
-const REVERT_DATA_REGEX = /^0x[0-9a-f]{8,}$/i;
-
-/**
- * Digs the JSON-RPC revert data out of an ethers v5 estimateGas error.
- * Depending on how the provider wraps the failure, the data sits at
- * `e.data`, `e.error.data`, `e.error.error.data`, or inside the raw JSON
- * `body` string, so search those keys recursively (bounded).
- */
-export function extractRevertData(
-  value: unknown,
-  depth = 0
-): string | undefined {
-  if (
-    value === null ||
-    value === undefined ||
-    depth > MAX_REVERT_DATA_SEARCH_DEPTH
-  ) {
-    return undefined;
-  }
-  if (typeof value === 'string') {
-    try {
-      return extractRevertData(JSON.parse(value), depth + 1);
-    } catch {
-      return undefined;
-    }
-  }
-  if (typeof value !== 'object') {
-    return undefined;
-  }
-  const candidate = value as {data?: unknown; error?: unknown; body?: unknown};
-  if (
-    typeof candidate.data === 'string' &&
-    REVERT_DATA_REGEX.test(candidate.data)
-  ) {
-    return candidate.data;
-  }
-  return (
-    extractRevertData(candidate.data, depth + 1) ??
-    extractRevertData(candidate.error, depth + 1) ??
-    extractRevertData(candidate.body, depth + 1)
-  );
-}
+import {
+  describeSimulationException,
+  extractRevertData,
+} from './simulationErrorBreakDown';
 
 export class EthEstimateGasSimulator extends Simulator {
   private gasConverter: GasConverter;
@@ -114,27 +74,21 @@ export class EthEstimateGasSimulator extends Simulator {
         });
       } catch (e) {
         const revertData = extractRevertData(e);
-        ctx.logger.error('Error estimating gas', {e, revertData});
-        // Parity with the eth_simulateV1 path: map the revert data to a
-        // specific SimulationStatus (e.g. SLIPPAGE_TOO_LOW) instead of a
-        // generic FAILED, so callers can distinguish slippage from real
-        // failures.
-        return {
-          ...quoteSplit,
-          simulationResult: {
-            estimatedGasUsed: 0n,
-            estimatedGasUsedInQuoteToken: 0n,
-            estimatedGasUsedInUSD: 0,
-            status: breakDownSimulationError(
-              quoteSplit.swapInfo!.tokenInWrappedAddress,
-              quoteSplit.swapInfo!.tokenOutWrappedAddress,
-              revertData
-            ),
-            description: revertData
+        const {status, logFields} = describeSimulationException(
+          e,
+          quoteSplit.swapInfo!.tokenInWrappedAddress,
+          quoteSplit.swapInfo!.tokenOutWrappedAddress
+        );
+        ctx.logger.error('Error estimating gas', {...logFields, revertData});
+        return withZeroGasSimulationResult(
+          quoteSplit,
+          status,
+          status === SimulationStatus.SYSTEM_DOWN
+            ? 'Simulation backend unavailable during eth_estimateGas'
+            : revertData
               ? 'Transaction reverted during eth_estimateGas'
-              : 'Error estimating gas',
-          },
-        };
+              : 'Error estimating gas'
+        );
       }
     } else {
       throw new Error(`Unsupported swap type ${swapOptions}`);

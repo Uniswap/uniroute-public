@@ -16,7 +16,13 @@ import {Percent} from '@uniswap/sdk-core';
 import {CurrencyInfo} from '../../../models/currency/CurrencyInfo';
 import {Address} from '../../../models/address/Address';
 import {BigNumber} from '@ethersproject/bignumber';
+import {utils} from 'ethers';
 import {SimulationStatus} from '../ISimulator';
+import {Contract} from 'ethers';
+import {
+  captureEthersRpcError,
+  UNIRPC_ALL_PROVIDERS_FAILED,
+} from '../../../../tests/test-utils/ethersRpcErrors';
 
 // Mock the ERC20 and Permit2 factories
 vi.mock('../../../../abis/src/generated/contracts', () => ({
@@ -30,6 +36,12 @@ vi.mock('../../../../abis/src/generated/contracts', () => ({
 
 // Create a concrete implementation of Simulator for testing
 class TestSimulator extends Simulator {
+  private simulationException: Error | undefined;
+
+  public throwSimulationException(error: Error): void {
+    this.simulationException = error;
+  }
+
   protected async simulateTransaction(
     fromAddress: string,
     swapOptions: SwapOptionsUniversalRouter,
@@ -40,6 +52,9 @@ class TestSimulator extends Simulator {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     blockNumber?: number
   ): Promise<QuoteSplit> {
+    if (this.simulationException) {
+      throw this.simulationException;
+    }
     ctx.logger.info('Simulating transaction');
 
     // Check token approval
@@ -203,6 +218,35 @@ describe('Simulator', () => {
 
       expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
       expect(result.simulationResult?.estimatedGasUsed).toBe(100n);
+    });
+
+    it('returns SYSTEM_DOWN when the simulator times out', async () => {
+      vi.mocked(mockTokenContract.balanceOf).mockResolvedValue(
+        BigNumber.from(2000)
+      );
+      simulator.throwSimulationException(
+        Object.assign(new Error('timed out'), {
+          code: utils.Logger.errors.TIMEOUT,
+        })
+      );
+
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        ctx
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.SYSTEM_DOWN
+      );
+      expect(result.simulationResult?.description).toBe(
+        'Simulation backend unavailable'
+      );
     });
 
     it('should not simulate when user has insufficient balance', async () => {
@@ -558,6 +602,39 @@ describe('Simulator', () => {
       );
       // Live RPC should NOT have been consulted — override is authoritative.
       expect(balanceOfSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns SYSTEM_DOWN when the balance read cannot reach the RPC backend', async () => {
+      const balanceReadOutage = await captureEthersRpcError(
+        UNIRPC_ALL_PROVIDERS_FAILED,
+        rpcProvider =>
+          new Contract(
+            USDC_ADDRESS,
+            ['function balanceOf(address) view returns (uint256)'],
+            rpcProvider
+          ).balanceOf(USER_ADDRESS)
+      );
+      vi.mocked(mockTokenContract.balanceOf).mockRejectedValue(
+        balanceReadOutage
+      );
+
+      const result = await simulator.simulate(
+        USER_ADDRESS,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        1000n,
+        1000n,
+        ctx
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.SYSTEM_DOWN
+      );
+      expect(result.simulationResult?.description).toBe(
+        'Simulation backend unavailable during balance check'
+      );
     });
 
     it('should handle errors during balance check', async () => {

@@ -1,5 +1,6 @@
 import {describe, beforeEach, it, expect, vi, afterEach} from 'vitest';
 import {JsonRpcProvider} from '@ethersproject/providers';
+import {utils} from 'ethers';
 import {SwapOptionsUniversalRouter, SwapType} from './simulation-provider';
 import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
 import {ChainId} from '../../../lib/config';
@@ -36,11 +37,6 @@ vi.mock('../../../../abis/src/generated/contracts', () => ({
       encodeFunctionData: vi.fn(() => '0xapproveUniversalRouterCalldata'),
     })),
   },
-}));
-
-// Mock the breakDownSimulationError function
-vi.mock('./simulationErrorBreakDown', () => ({
-  breakDownSimulationError: vi.fn(() => SimulationStatus.FAILED),
 }));
 
 describe('eth-simulateV1-provider', () => {
@@ -542,7 +538,7 @@ describe('eth-simulateV1-provider', () => {
         );
         expect(ctx.logger.error).toHaveBeenCalledWith(
           'Error simulating with eth_simulateV1',
-          expect.any(Error)
+          {e: expect.any(Error)}
         );
         expect(ctx.metrics.count).toHaveBeenCalledWith(
           'UniRpcV2.Simulation.Request',
@@ -550,6 +546,36 @@ describe('eth-simulateV1-provider', () => {
           {
             tags: ['chain:1', 'status:failure', 'simType:eth_simulateV1'],
           }
+        );
+      });
+
+      it('returns SYSTEM_DOWN when the RPC backend returns a 502', async () => {
+        vi.mocked(provider.send).mockRejectedValue(
+          Object.assign(new Error('bad gateway'), {
+            code: utils.Logger.errors.SERVER_ERROR,
+            status: 502,
+          })
+        );
+
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(
+          SimulationStatus.SYSTEM_DOWN
+        );
+        expect(result.simulationResult?.description).toBe(
+          'Simulation backend unavailable via eth_simulateV1'
+        );
+        expect(ctx.logger.error).toHaveBeenCalledWith(
+          'Error simulating with eth_simulateV1',
+          expect.objectContaining({
+            errorCode: utils.Logger.errors.SERVER_ERROR,
+            errorName: 'Error',
+          })
         );
       });
 

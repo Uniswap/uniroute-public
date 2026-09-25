@@ -16,6 +16,11 @@ import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {ChainId} from '../../../lib/config';
 import {CurrencyInfo} from '../../../models/currency/CurrencyInfo';
 import {SimulationStatus} from '../ISimulator';
+import {
+  describeSimulationException,
+  isSimulationBackendUnavailable,
+  simulationExceptionLogFields,
+} from './simulationErrorBreakDown';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
 import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
 
@@ -36,6 +41,32 @@ export enum BalanceOverrideOutcome {
   Insufficient = 'override-insufficient',
   /** No matching balanceTarget; fall through to live RPC check. */
   NoAuthoritativeOverride = 'no-authoritative-override',
+}
+
+/** Outcome of the live RPC balance read in `checkUserBalance`. */
+export enum UserBalanceCheck {
+  Sufficient = 'sufficient',
+  Insufficient = 'insufficient',
+  /** The balance read never reached a node; the balance is unknown. */
+  BackendUnavailable = 'backend-unavailable',
+}
+
+/** The quote split with a simulation that produced no gas estimate. */
+export function withZeroGasSimulationResult(
+  quoteSplit: QuoteSplit,
+  status: SimulationStatus,
+  description: string
+): QuoteSplit {
+  return {
+    ...quoteSplit,
+    simulationResult: {
+      estimatedGasUsed: 0n,
+      estimatedGasUsedInQuoteToken: 0n,
+      estimatedGasUsedInUSD: 0,
+      status,
+      description,
+    },
+  };
 }
 
 // Swap options for Universal Router and Permit2.
@@ -123,59 +154,66 @@ export abstract class Simulator {
       });
     }
 
-    if (
+    const userBalance =
       balanceOverrideOutcome === BalanceOverrideOutcome.Sufficient ||
       // we assume we always have enough eth mainnet balance because we use beacon address later
-      (tokenInCurrencyInfo.isNative && this.chainId === ChainId.MAINNET) ||
-      (await this.userHasSufficientBalance(
-        fromAddress,
-        quoteSplit.swapInfo!.tradeType,
-        tokenInCurrencyInfo,
-        tokenOutCurrencyInfo,
-        inputAmount,
-        quoteAmount,
-        ctx
-      ))
-    ) {
-      ctx.logger.info(
-        'User has sufficient balance to simulate. Simulating transaction.'
+      (tokenInCurrencyInfo.isNative && this.chainId === ChainId.MAINNET)
+        ? UserBalanceCheck.Sufficient
+        : await this.checkUserBalance(
+            fromAddress,
+            quoteSplit.swapInfo!.tradeType,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            inputAmount,
+            quoteAmount,
+            ctx
+          );
+
+    if (userBalance === UserBalanceCheck.BackendUnavailable) {
+      return withZeroGasSimulationResult(
+        quoteSplit,
+        SimulationStatus.SYSTEM_DOWN,
+        'Simulation backend unavailable during balance check'
       );
-      try {
-        return await this.simulateTransaction(
-          fromAddress,
-          swapOptions,
-          quoteSplit,
-          ctx,
-          gasPrice,
-          blockNumber,
-          stateOverrides
-        );
-      } catch (e) {
-        ctx.logger.error('Error simulating transaction', {e});
-        return {
-          ...quoteSplit,
-          simulationResult: {
-            estimatedGasUsed: 0n,
-            estimatedGasUsedInQuoteToken: 0n,
-            estimatedGasUsedInUSD: 0,
-            status: SimulationStatus.FAILED,
-            description: 'Error simulating transaction',
-          },
-        };
-      }
-    } else {
+    }
+
+    if (userBalance === UserBalanceCheck.Insufficient) {
       // User-input issue (insufficient balance) surfaced to caller — log at warn, not error.
       ctx.logger.warn('User does not have sufficient balance to simulate.');
-      return {
-        ...quoteSplit,
-        simulationResult: {
-          estimatedGasUsed: 0n,
-          estimatedGasUsedInQuoteToken: 0n,
-          estimatedGasUsedInUSD: 0,
-          status: SimulationStatus.INSUFFICIENT_BALANCE,
-          description: 'User does not have sufficient balance to simulate.',
-        },
-      };
+      return withZeroGasSimulationResult(
+        quoteSplit,
+        SimulationStatus.INSUFFICIENT_BALANCE,
+        'User does not have sufficient balance to simulate.'
+      );
+    }
+
+    ctx.logger.info(
+      'User has sufficient balance to simulate. Simulating transaction.'
+    );
+    try {
+      return await this.simulateTransaction(
+        fromAddress,
+        swapOptions,
+        quoteSplit,
+        ctx,
+        gasPrice,
+        blockNumber,
+        stateOverrides
+      );
+    } catch (e) {
+      const {status, logFields} = describeSimulationException(
+        e,
+        quoteSplit.swapInfo!.tokenInWrappedAddress,
+        quoteSplit.swapInfo!.tokenOutWrappedAddress
+      );
+      ctx.logger.error('Error simulating transaction', logFields);
+      return withZeroGasSimulationResult(
+        quoteSplit,
+        status,
+        status === SimulationStatus.SYSTEM_DOWN
+          ? 'Simulation backend unavailable'
+          : 'Error simulating transaction'
+      );
     }
   }
 
@@ -246,7 +284,7 @@ export abstract class Simulator {
     return BalanceOverrideOutcome.NoAuthoritativeOverride;
   }
 
-  protected async userHasSufficientBalance(
+  protected async checkUserBalance(
     fromAddress: string,
     tradeType: TradeType,
     tokenInCurrencyInfo: CurrencyInfo,
@@ -254,7 +292,7 @@ export abstract class Simulator {
     inputAmount: bigint,
     quoteAmount: bigint,
     ctx: Context
-  ): Promise<boolean> {
+  ): Promise<UserBalanceCheck> {
     try {
       const neededBalanceIsNative = tokenInCurrencyInfo.isNative;
       const neededBalanceWrappedAddress =
@@ -280,10 +318,19 @@ export abstract class Simulator {
         neededAddress: neededBalanceWrappedAddress,
         hasBalance,
       });
-      return hasBalance;
+      return hasBalance
+        ? UserBalanceCheck.Sufficient
+        : UserBalanceCheck.Insufficient;
     } catch (e) {
+      if (isSimulationBackendUnavailable(e)) {
+        ctx.logger.error(
+          'Error while checking user balance',
+          simulationExceptionLogFields(e)
+        );
+        return UserBalanceCheck.BackendUnavailable;
+      }
       ctx.logger.error('Error while checking user balance', {e});
-      return false;
+      return UserBalanceCheck.Insufficient;
     }
   }
 

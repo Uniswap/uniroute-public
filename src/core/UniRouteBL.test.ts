@@ -291,8 +291,12 @@ class OnDemandGasEstimateProvider extends GasEstimateProvider {
   }
 }
 
-// Create a simulator that always fails simulation
+// Create a simulator that always fails simulation, with FAILED unless told otherwise
 class FailingSimulator implements ISimulator {
+  constructor(
+    private readonly status: SimulationStatus = SimulationStatus.FAILED
+  ) {}
+
   async simulate(
     chainId: ChainId,
 
@@ -317,7 +321,7 @@ class FailingSimulator implements ISimulator {
         estimatedGasUsed: 0n,
         estimatedGasUsedInQuoteToken: 0n,
         estimatedGasUsedInUSD: 0,
-        status: SimulationStatus.FAILED,
+        status: this.status,
         description: 'Simulation failed for testing',
       },
     };
@@ -3734,10 +3738,10 @@ describe('UniRouteBL', () => {
   });
 
   describe('simulation fallback behavior', () => {
-    it('should return populated quote with Failed status when all simulations fail', async () => {
-      // This test verifies that when simulation is enabled but all attempts fail,
-      // we still return a populated quote with Failed status and the swapInfo from the first attempt
-
+    const quoteWithSimulator = async (
+      simulator: ISimulator,
+      quoteCtx: Context
+    ) => {
       // Create a custom service config that enables simulation
       const simulationEnabledConfig = {
         ...serviceConfigAsync,
@@ -3780,7 +3784,6 @@ describe('UniRouteBL', () => {
       ]);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy(singleQuote);
-      const failingSimulator = new FailingSimulator();
 
       // Mock the buildTrade and buildSwapMethodParameters functions
       const buildTradeSpy = vi
@@ -3817,16 +3820,28 @@ describe('UniRouteBL', () => {
         cachedRoutesRepository,
         noRouteCacheRepository,
         mockedQuoteStrategy,
-        failingSimulator,
+        simulator,
         quoteRequestValidator,
         tokenProvider,
         mockedRpcProviderMap,
         stateOverrideResolver
       );
 
-      const response = await uniRouteBL.quote(ctx, request, {
-        universalRouterVersion: UniversalRouterVersion.V2_0,
-      });
+      try {
+        return await uniRouteBL.quote(quoteCtx, request, {
+          universalRouterVersion: UniversalRouterVersion.V2_0,
+        });
+      } finally {
+        swapOptionsSpy.mockRestore();
+        buildTradeSpy.mockRestore();
+        buildSwapMethodParametersSpy.mockRestore();
+      }
+    };
+
+    it('should return populated quote with Failed status when all simulations fail', async () => {
+      // When simulation is enabled but all attempts fail, we still return a
+      // populated quote with Failed status and the swapInfo from the first attempt
+      const response = await quoteWithSimulator(new FailingSimulator(), ctx);
 
       // Should return a successful response (not an error)
       expect(response.error).toBeUndefined();
@@ -3850,11 +3865,26 @@ describe('UniRouteBL', () => {
       expect(response.route).toBeDefined();
       expect(response.route.length).toBe(1);
       expect(response.route[0].pools.length).toBe(1);
+    });
 
-      // Clean up spies
-      swapOptionsSpy.mockRestore();
-      buildTradeSpy.mockRestore();
-      buildSwapMethodParametersSpy.mockRestore();
+    it('counts a SYSTEM_DOWN simulation as a failure, not a success', async () => {
+      const testCtx = buildTestContext();
+      const response = await quoteWithSimulator(
+        new FailingSimulator(SimulationStatus.SYSTEM_DOWN),
+        testCtx
+      );
+
+      expect(response.error).toBeUndefined();
+      expect(response.simulationStatus).equals(SimulationStatus.SYSTEM_DOWN);
+      expect(
+        testCtx.metrics.countStore[buildMetricKey('SimulationFailures')]
+      ).toBe(1);
+      expect(
+        testCtx.metrics.countStore[buildMetricKey('SimulationSuccesses')]
+      ).toBe(0);
+      expect(
+        testCtx.metrics.countStore[buildMetricKey('SimulationAttempts')]
+      ).toBe(1);
     });
 
     it('should return 404 error when buildTrade fails and no firstSwapInfo is available', async () => {

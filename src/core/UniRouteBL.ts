@@ -1967,9 +1967,9 @@ export class UniRouteBL implements IUniRoutedBL {
   /**
    * Refreshes the best quote's pool details when the response contract
    * requires up-to-date pools AND simulation didn't already refresh them.
-   * Simulation (when it ran with status SUCCESS or FAILED) already calls
-   * `updateQuoteSplitWithFreshPoolDetails` internally, so a second refresh
-   * here would be redundant.
+   * Any simulation status other than UNATTEMPTED comes from the simulation
+   * loop, which calls `updateQuoteSplitWithFreshPoolDetails` before
+   * simulating each candidate, so a second refresh here would be redundant.
    */
   private async refreshBestQuotePoolDetailsIfNeeded(
     ctx: Context,
@@ -3588,7 +3588,13 @@ export class UniRouteBL implements IUniRoutedBL {
             swapSteps: universalRouterSwapsteps,
           });
         } else {
-          simulationSuccesses++;
+          // SYSTEM_DOWN counts as a failure but still ends the loop: further
+          // candidates would hit the same unavailable backend.
+          if (simulationStatus === SimulationStatus.SYSTEM_DOWN) {
+            simulationFailures++;
+          } else {
+            simulationSuccesses++;
+          }
           bestQuote = simulatedQuote;
           break;
         }
