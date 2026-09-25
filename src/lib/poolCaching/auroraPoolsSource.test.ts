@@ -16,6 +16,7 @@ import {
   resetAuroraPoolCountBaselinesForTesting,
   resolveAuroraMode,
   resolveAuroraModeWithPrimaryFloor,
+  settlePendingAuroraShadowsForTesting,
   targetKey,
   poolCachingAuroraStatementTimeoutMsFromEnv,
 } from './auroraPoolsSource';
@@ -79,6 +80,26 @@ function fakeProvider<TPool>(
       if (response instanceof Error) throw response;
       return response as TPool[];
     },
+  };
+}
+
+// A provider whose single getPools call settles when the test says so, to
+// model an Aurora read still queued or running after the subgraph returns.
+function deferredProvider<TPool>(): ISubgraphProvider<TPool> & {
+  resolve(pools: TPool[]): void;
+  reject(err: Error): void;
+} {
+  let settle: {resolve(pools: TPool[]): void; reject(err: Error): void} = {
+    resolve: () => {},
+    reject: () => {},
+  };
+  const result = new Promise<TPool[]>((resolve, reject) => {
+    settle = {resolve, reject};
+  });
+  return {
+    getPools: () => result,
+    resolve: pools => settle.resolve(pools),
+    reject: err => settle.reject(err),
   };
 }
 
@@ -387,6 +408,32 @@ describe('AsyncSemaphore', () => {
     await expect(queued).resolves.toBe('ok');
     expect(queuedRan).toBe(true);
   });
+
+  it('grants a freed slot to a normal waiter before an earlier low-priority waiter', async () => {
+    const semaphore = new AsyncSemaphore(1);
+    const releaseHolder = await semaphore.acquire();
+    const order: string[] = [];
+    const lowPriority = semaphore.lowPriority().run(async () => {
+      order.push('shadow');
+    });
+    const normal = semaphore.run(async () => {
+      order.push('registry');
+    });
+
+    releaseHolder();
+    await Promise.all([lowPriority, normal]);
+    expect(order).toEqual(['registry', 'shadow']);
+  });
+
+  it('runs low-priority work immediately when a slot is free', async () => {
+    const semaphore = new AsyncSemaphore(1);
+    await expect(semaphore.lowPriority().run(async () => 'ran')).resolves.toBe(
+      'ran'
+    );
+    // The low-priority run released its slot: a normal acquire must not hang.
+    const release = await semaphore.acquire();
+    release();
+  });
 });
 
 describe('computePoolParity', () => {
@@ -586,12 +633,15 @@ describe('AuroraSourcedProvider shadow mode', () => {
       metric
     );
 
+  afterEach(settlePendingAuroraShadowsForTesting);
+
   it('returns the subgraph result and emits parity metrics', async () => {
     const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
     const subgraph = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
     const metric = new FakeMetric();
 
     const pools = await mk(aurora, subgraph, metric).getPools();
+    await settlePendingAuroraShadowsForTesting();
     expect(pools).toHaveLength(2);
     expect(metric.byKey('CachePools.parity.subgraph_count')[0]!.value).toBe(2);
     expect(metric.byKey('CachePools.parity.aurora_count')[0]!.value).toBe(1);
@@ -604,8 +654,83 @@ describe('AuroraSourcedProvider shadow mode', () => {
     const metric = new FakeMetric();
 
     const pools = await mk(aurora, subgraph, metric).getPools();
+    await settlePendingAuroraShadowsForTesting();
     expect(pools.map(p => p.id)).toEqual(['0x2']);
     expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(1);
+    expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
+  });
+
+  it('returns the subgraph result without waiting for a slow Aurora fetch', async () => {
+    const aurora = deferredProvider<V3SubgraphPool>();
+    const subgraph = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
+    const metric = new FakeMetric();
+
+    const pools = await mk(aurora, subgraph, metric).getPools();
+    expect(pools).toHaveLength(2);
+    expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
+
+    aurora.resolve([v3Pool('0x1', 100)]);
+    await settlePendingAuroraShadowsForTesting();
+    expect(metric.byKey('CachePools.parity.subgraph_count')[0]!.value).toBe(2);
+    expect(metric.byKey('CachePools.parity.aurora_count')[0]!.value).toBe(1);
+  });
+
+  it('counts an Aurora failure that lands after the job returned', async () => {
+    const aurora = deferredProvider<V3SubgraphPool>();
+    const subgraph = fakeProvider([[v3Pool('0x2', 50)]]);
+    const metric = new FakeMetric();
+
+    await mk(aurora, subgraph, metric).getPools();
+    aurora.reject(new Error('canceling statement due to statement timeout'));
+    await settlePendingAuroraShadowsForTesting();
+    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(1);
+  });
+
+  it('skips a combo whose previous shadow comparison is still pending, across provider instances', async () => {
+    const slowAurora = deferredProvider<V3SubgraphPool>();
+    const metric = new FakeMetric();
+    await mk(slowAurora, fakeProvider([[v3Pool('0x1', 1)]]), metric).getPools();
+
+    // The next tick rebuilds the provider; the combo's earlier read is still
+    // queued, so this tick must not add a second one behind it.
+    const nextAurora = fakeProvider([[v3Pool('0x1', 1)]]);
+    const pools = await mk(
+      nextAurora,
+      fakeProvider([[v3Pool('0x9', 1)]]),
+      metric
+    ).getPools();
+    expect(pools.map(p => p.id)).toEqual(['0x9']);
+    expect(nextAurora.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.shadow_skipped')).toEqual([
+      {
+        key: 'CachePools.aurora.shadow_skipped',
+        value: 1,
+        tags: {
+          chainId: '1',
+          protocol: String(Protocol.V3),
+          mode: 'shadow',
+          reason: 'previous_pending',
+        },
+      },
+    ]);
+
+    // Once the earlier comparison settles, the combo shadows again.
+    slowAurora.resolve([v3Pool('0x1', 1)]);
+    await settlePendingAuroraShadowsForTesting();
+    await mk(nextAurora, fakeProvider([[v3Pool('0x9', 1)]]), metric).getPools();
+    expect(nextAurora.calls).toBe(1);
+  });
+
+  it('rejects with the subgraph error and emits no shadow metrics', async () => {
+    const aurora = fakeProvider([[v3Pool('0x1', 1)]]);
+    const subgraph = fakeProvider<V3SubgraphPool>([new Error('subgraph 502')]);
+    const metric = new FakeMetric();
+
+    await expect(mk(aurora, subgraph, metric).getPools()).rejects.toThrow(
+      'subgraph 502'
+    );
+    await settlePendingAuroraShadowsForTesting();
+    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(0);
     expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
   });
 });

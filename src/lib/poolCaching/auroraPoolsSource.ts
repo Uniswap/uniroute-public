@@ -586,37 +586,58 @@ export interface AuroraProviderDeps<
   // Absent on scoped runs (the 2-minute Robinhood job caches 1-2 combos and
   // must never queue behind the all-chains sweep — the pool holds a spare
   // connection precisely for it). Set to the shared semaphore on the sweep.
-  fetchSemaphore?: AsyncSemaphore;
+  fetchSemaphore?: FetchSlots;
+}
+
+export interface FetchSlots {
+  run<T>(work: () => Promise<T>): Promise<T>;
 }
 
 // poolCachingBatchSize is 50 but Aurora's shared Kysely pool is deliberately
 // small. Limit full-set reads to three, below the pool's four connections, so
 // Robinhood's fast job keeps a checkout even during the all-chains sweep.
-export class AsyncSemaphore {
+// A freed slot goes to the oldest normal waiter first; low-priority waiters
+// only get a slot when no normal waiter is queued.
+export class AsyncSemaphore implements FetchSlots {
   private inFlight = 0;
   private readonly waiters: Array<() => void> = [];
+  private readonly lowPriorityWaiters: Array<() => void> = [];
 
   constructor(private readonly concurrency: number) {}
 
-  async acquire(): Promise<() => void> {
+  async acquire(lowPriority = false): Promise<() => void> {
     if (this.inFlight < this.concurrency) {
       this.inFlight++;
     } else {
-      await new Promise<void>(resolve => this.waiters.push(resolve));
+      const queue = lowPriority ? this.lowPriorityWaiters : this.waiters;
+      await new Promise<void>(resolve => queue.push(resolve));
     }
 
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const next = this.waiters.shift();
+      const next = this.waiters.shift() ?? this.lowPriorityWaiters.shift();
       if (next) next();
       else this.inFlight--;
     };
   }
 
   async run<T>(work: () => Promise<T>): Promise<T> {
-    const release = await this.acquire();
+    return this.runAcquired(await this.acquire(), work);
+  }
+
+  /** The same slots, queued behind every normal-priority waiter. */
+  lowPriority(): FetchSlots {
+    return {
+      run: async work => this.runAcquired(await this.acquire(true), work),
+    };
+  }
+
+  private async runAcquired<T>(
+    release: () => void,
+    work: () => Promise<T>
+  ): Promise<T> {
     try {
       return await work();
     } finally {
@@ -631,6 +652,11 @@ export class AsyncSemaphore {
 // connection and starve the fast Robinhood job, review round on #12440).
 // Scoped fast-job runs bypass it entirely (fetchSemaphore left unset).
 export const AURORA_FETCH_SEMAPHORE = new AsyncSemaphore(3);
+
+// Shadow comparisons settle after their cron job has returned, so a sweep's
+// shadow reads can still be queued when the registry step, or the next
+// sweep's primary reads, need a slot. Low priority lets those go first.
+const AURORA_SHADOW_FETCH_SLOTS = AURORA_FETCH_SEMAPHORE.lowPriority();
 
 export interface AuroraV4AdmissionDeps {
   permissionedHookAddresses(chainId: number): Iterable<string>;
@@ -1307,6 +1333,16 @@ export function resetAuroraPoolCountBaselinesForTesting(): void {
   lastAuroraPoolCountByTarget.clear();
 }
 
+// In-flight shadow comparisons, keyed by targetKey. Module level for the same
+// reason as the baselines: providers are rebuilt every tick, and the bound
+// has to hold across ticks. One entry per combo caps the background backlog
+// at one sweep's worth of shadow reads.
+const pendingAuroraShadowByTarget = new Map<string, Promise<void>>();
+
+export async function settlePendingAuroraShadowsForTesting(): Promise<void> {
+  await Promise.all(pendingAuroraShadowByTarget.values());
+}
+
 export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
   implements ISubgraphProvider<TPool>
 {
@@ -1390,18 +1426,49 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     return this.subgraph.getPools(...args);
   }
 
-  private async getPoolsShadow(
+  // Resolves with the subgraph result without waiting for Aurora: the shadow
+  // read queues on the sweep's fetch slots and can run past the subgraph
+  // fetch, and the per-job timeout that bounds this call would otherwise
+  // drop the job's S3 write over a comparison that never affects serving.
+  // The parity comparison settles in the background.
+  private getPoolsShadow(
     ...args: Parameters<ISubgraphProvider<TPool>['getPools']>
   ): Promise<TPool[]> {
-    // Kick off Aurora concurrently; the subgraph result stays authoritative.
-    const auroraPromise = this.aurora.getPools(...args);
-    // A rejected shadow fetch must never become an unhandled rejection.
-    auroraPromise.catch(() => {});
+    const key = targetKey(this.chainId, this.protocol);
+    if (pendingAuroraShadowByTarget.has(key)) {
+      this.metric.putMetric(
+        'CachePools.aurora.shadow_skipped',
+        1,
+        MetricLoggerUnit.Count,
+        {...this.tags, reason: 'previous_pending'}
+      );
+      return this.subgraph.getPools(...args);
+    }
 
-    const subgraphPools = await this.subgraph.getPools(...args);
+    const auroraPromise = this.aurora.getPools(...args);
+    const subgraphPromise = this.subgraph.getPools(...args);
+    const comparison = this.compareShadow(subgraphPromise, auroraPromise);
+    pendingAuroraShadowByTarget.set(key, comparison);
+    void comparison.finally(() => pendingAuroraShadowByTarget.delete(key));
+    return subgraphPromise;
+  }
+
+  // Never rejects: a subgraph failure is the caller's to report, and an
+  // Aurora failure is counted as shadow_error.
+  private async compareShadow(
+    subgraphPromise: Promise<TPool[]>,
+    auroraPromise: Promise<TPool[]>
+  ): Promise<void> {
+    const [subgraphResult, auroraResult] = await Promise.allSettled([
+      subgraphPromise,
+      auroraPromise,
+    ]);
+    if (subgraphResult.status === 'rejected') return;
+    const subgraphPools = subgraphResult.value;
 
     try {
-      const auroraPools = await auroraPromise;
+      if (auroraResult.status === 'rejected') throw auroraResult.reason;
+      const auroraPools = auroraResult.value;
       const parity = computePoolParity(subgraphPools, auroraPools);
       this.metric.putMetric(
         'CachePools.parity.subgraph_count',
@@ -1521,7 +1588,6 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    return subgraphPools;
   }
 }
 
@@ -1587,6 +1653,10 @@ export function applyAuroraPoolSources<
     metric,
     fetchSemaphore: options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE,
   };
+  const shadowDeps: AuroraProviderDeps<keyof RoutablePoolsService> = {
+    ...deps,
+    fetchSemaphore: options?.scopedRun ? undefined : AURORA_SHADOW_FETCH_SLOTS,
+  };
 
   for (const chainProtocol of chainProtocols) {
     const {chainId, protocol} = chainProtocol;
@@ -1612,6 +1682,8 @@ export function applyAuroraPoolSources<
       continue;
     }
 
+    const providerDeps = mode === 'shadow' ? shadowDeps : deps;
+
     // Per-protocol provider dispatch. A combo added to
     // AURORA_SUPPORTED_TARGETS must have a protocol-shaped provider branch
     // here — never map one protocol's pools through another's row shape.
@@ -1621,7 +1693,7 @@ export function applyAuroraPoolSources<
         new AuroraV4PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
-          deps
+          providerDeps
         ),
         chainProtocol.provider as ISubgraphProvider<V4SubgraphPool>,
         chainId,
@@ -1637,7 +1709,7 @@ export function applyAuroraPoolSources<
         new AuroraV3PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
-          deps
+          providerDeps
         ),
         chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
         chainId,
@@ -1654,7 +1726,7 @@ export function applyAuroraPoolSources<
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
           thresholds.untrackedUsdThresholdFor(protocol, chainId),
-          deps
+          providerDeps
         ),
         chainProtocol.provider as ISubgraphProvider<V2SubgraphPool>,
         chainId,
