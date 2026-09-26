@@ -268,8 +268,12 @@ export function createChainProtocols(
   subgraphFetchFactory?: SubgraphFetchFactory
 ): ChainProtocol[] {
   // Build an ethers provider for chains that need on-chain pseudoTotalValueLocked calls.
-  // Uses the same UNI_RPC_ENDPOINT pattern as the main service (see dependencies.ts).
-  const uniRpcEndpoint = process.env.UNI_RPC_ENDPOINT;
+  // Prefers the v2-internal gateway, like cronService's CCA reads and
+  // DynamicZlcaHooksRefresher: UNI_RPC_ENDPOINT's hostname does not resolve
+  // from the cron container (getaddrinfo ENOTFOUND on every pseudoTVL read
+  // since 2026-06-16, ROUTE-2067).
+  const uniRpcEndpoint =
+    process.env.UNI_RPC_V2_INTERNAL_ENDPOINT || process.env.UNI_RPC_ENDPOINT;
   const mainnetEthersProvider = uniRpcEndpoint
     ? new ethers.providers.StaticJsonRpcProvider(
         `${uniRpcEndpoint}/rpc/${ChainId.MAINNET}`,

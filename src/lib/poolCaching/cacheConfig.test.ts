@@ -83,6 +83,56 @@ describe('cacheConfig', () => {
       expect(v4Base?.eulerHooksProvider).toBeUndefined();
     });
 
+    it('agg hooks providers read pseudoTVL through UNI_RPC_V2_INTERNAL_ENDPOINT when set', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://unresolvable.example');
+      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', 'https://v2-internal.example');
+      try {
+        const protocols = createChainProtocols(mockLogger, mockMetric);
+        const urls = protocols
+          .filter(p => p.aggHooksProvider !== undefined)
+          .map(
+            p =>
+              (
+                p.aggHooksProvider as unknown as {
+                  ethersProvider: {connection: {url: string}};
+                }
+              ).ethersProvider.connection.url
+          );
+        expect(urls).toEqual(
+          expect.arrayContaining([
+            `https://v2-internal.example/rpc/${ChainId.MAINNET}`,
+            `https://v2-internal.example/rpc/${ChainId.BASE}`,
+          ])
+        );
+        expect(urls).toHaveLength(3);
+        for (const url of urls) {
+          expect(url.startsWith('https://v2-internal.example/rpc/')).toBe(true);
+        }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('agg hooks providers fall back to UNI_RPC_ENDPOINT', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://uni-rpc.example');
+      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', '');
+      try {
+        const protocols = createChainProtocols(mockLogger, mockMetric);
+        const mainnet = protocols.find(
+          p => p.protocol === Protocol.V4 && p.chainId === ChainId.MAINNET
+        );
+        expect(
+          (
+            mainnet?.aggHooksProvider as unknown as {
+              ethersProvider: {connection: {url: string}};
+            }
+          ).ethersProvider.connection.url
+        ).toBe(`https://uni-rpc.example/rpc/${ChainId.MAINNET}`);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('all providers have a getPools method', () => {
       const protocols = createChainProtocols(mockLogger, mockMetric);
       for (const entry of protocols) {
