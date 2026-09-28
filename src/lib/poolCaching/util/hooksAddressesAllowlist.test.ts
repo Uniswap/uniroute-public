@@ -14,6 +14,12 @@ import {
   LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
   NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
   SLIPSTREAM_AGG_HOOK_ON_BASE,
+  WETH_HOOKS_ADDRESS_ON_ARBITRUM,
+  WETH_HOOKS_ADDRESS_ON_BASE,
+  WETH_HOOKS_ADDRESS_ON_MAINNET,
+  WETH_HOOKS_ADDRESS_ON_MONAD,
+  WETH_HOOKS_ADDRESS_ON_OP_MAINNET,
+  WETH_HOOKS_ADDRESS_ON_UNICHAIN,
   ZERO_MEASURED_TVL_HOOKS_PER_CHAIN,
   ZLCA_HOOKS_PER_CHAIN,
 } from './hooksAddressesAllowlist';
@@ -304,7 +310,24 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     for (const hook of ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[4663] ?? []) {
       expect(robinhood?.has(hook.toLowerCase())).toBe(true);
     }
-    expect(getTvlBypassHookAddresses(ChainId.OPTIMISM)).toBeUndefined();
+    expect(getTvlBypassHookAddresses(ChainId.POLYGON)).toBeUndefined();
+  });
+
+  it('bypasses the TVL floor for every WETH wrapper hook', () => {
+    const wrapperHooks: Array<[number, string]> = [
+      [ChainId.MAINNET, WETH_HOOKS_ADDRESS_ON_MAINNET],
+      [ChainId.OPTIMISM, WETH_HOOKS_ADDRESS_ON_OP_MAINNET],
+      [ChainId.ARBITRUM_ONE, WETH_HOOKS_ADDRESS_ON_ARBITRUM],
+      [ChainId.BASE, WETH_HOOKS_ADDRESS_ON_BASE],
+      [ChainId.UNICHAIN, WETH_HOOKS_ADDRESS_ON_UNICHAIN],
+      [ChainId.MONAD, WETH_HOOKS_ADDRESS_ON_MONAD],
+    ];
+    for (const [chainId, hook] of wrapperHooks) {
+      expect(
+        getTvlBypassHookAddresses(chainId)?.has(hook.toLowerCase()),
+        `WETH wrapper hook ${hook} is not TVL-bypass on chain ${chainId}`
+      ).toBe(true);
+    }
   });
 });
 
@@ -326,9 +349,9 @@ describe('getTvlBypassHookAddresses dynamic ZLCA overlay', () => {
   });
 
   it('returns dynamic-only hooks on chains with no static registry entries', () => {
-    expect(getTvlBypassHookAddresses(ChainId.OPTIMISM)).toBeUndefined();
-    setDynamicZlcaHooks(ChainId.OPTIMISM, new Map([[DYNAMIC_HOOK, 500_000n]]));
-    expect(getTvlBypassHookAddresses(ChainId.OPTIMISM)?.has(DYNAMIC_HOOK)).toBe(
+    expect(getTvlBypassHookAddresses(ChainId.POLYGON)).toBeUndefined();
+    setDynamicZlcaHooks(ChainId.POLYGON, new Map([[DYNAMIC_HOOK, 500_000n]]));
+    expect(getTvlBypassHookAddresses(ChainId.POLYGON)?.has(DYNAMIC_HOOK)).toBe(
       true
     );
   });

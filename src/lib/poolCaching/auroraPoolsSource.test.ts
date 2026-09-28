@@ -872,6 +872,50 @@ describe('AuroraV4PoolsProvider', () => {
     );
   });
 
+  it('admits the zero-TVL ETH/WETH pool under a WETH wrapper hook, as Aurora stores it', async () => {
+    const ARBITRUM = 42161;
+    const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(ARBITRUM)!;
+    // Prod v4_pool_metadata row for Arbitrum's ETH/WETH wrapper pool
+    // (0xc1c77784…, 2026-09-28): checksummed hooks_address, zero PoolManager
+    // liquidity and zero measured TVL, because the hook wraps 1:1.
+    const rows = [
+      v4Row({
+        poolId:
+          '0xc1c777843809a8e77a398fd79ecddcefbdad6a5676003ae2eedf3a33a56589e9',
+        tvlUsd: 0,
+        liquidity: '0',
+        hooksAddress: '0x2A4aDf825Bd96598487dBb6b2d8D882A4EB86888',
+      }),
+      // Same zero state without the hook: nothing admits it.
+      v4Row({poolId: '0xb1', tvlUsd: 0, liquidity: '0', hooksAddress: null}),
+    ];
+    const provider = new AuroraV4PoolsProvider(ARBITRUM, 0.01, {
+      routablePools: {listAllV4RoutablePools: async () => rows},
+      prices: {
+        batchGet: async () =>
+          new Map([
+            [
+              `${ARBITRUM}_${wrappedNative.toLowerCase()}`,
+              {
+                chainId: ARBITRUM,
+                tokenAddress: undefined as never,
+                priceUsd: 2000,
+                timestamp: new Date(),
+                updatedAt: new Date(),
+              },
+            ],
+          ]),
+      },
+      logger: noopLogger,
+      metric: new FakeMetric(),
+    });
+
+    const pools = await provider.getPools();
+    expect(pools.map(p => p.id)).toEqual([
+      '0xc1c777843809a8e77a398fd79ecddcefbdad6a5676003ae2eedf3a33a56589e9',
+    ]);
+  });
+
   it('admits only bounded canonical permissioned-hook pairs', async () => {
     const chainId = 1;
     const hook = '0x0000000000000000000000000000000000000abc';

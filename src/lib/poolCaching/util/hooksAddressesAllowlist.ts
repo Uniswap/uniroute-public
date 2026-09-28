@@ -1232,12 +1232,22 @@ export const FLOWSTATE_C1_HOOK_ON_ROBINHOOD =
  * (but with no per-hop gas overhead). Every address must also appear in
  * `HOOKS_ADDRESSES_ALLOWLIST`; remove an entry once its pool clears the
  * floor on its own.
+ *
+ * The WETH wrapper hooks convert ETH<->WETH 1:1 inside the hook, so their
+ * ETH/WETH pools hold no PoolManager liquidity and always measure zero TVL
+ * from pool state, however much the hook can wrap. They never clear the floor
+ * on their own.
  */
 export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
   Record<ChainId, string[]>
 > &
   Record<number, string[]> = {
-  [ChainId.MAINNET]: [NFTX_V4_HOOK_ON_MAINNET_2],
+  [ChainId.MAINNET]: [NFTX_V4_HOOK_ON_MAINNET_2, WETH_HOOKS_ADDRESS_ON_MAINNET],
+  [ChainId.OPTIMISM]: [WETH_HOOKS_ADDRESS_ON_OP_MAINNET],
+  [ChainId.ARBITRUM_ONE]: [WETH_HOOKS_ADDRESS_ON_ARBITRUM],
+  [ChainId.BASE]: [WETH_HOOKS_ADDRESS_ON_BASE],
+  [ChainId.UNICHAIN]: [WETH_HOOKS_ADDRESS_ON_UNICHAIN],
+  [ChainId.MONAD]: [WETH_HOOKS_ADDRESS_ON_MONAD],
   [ChainId.ROBINHOOD]: [
     INDEX_FEE_HOOK_ON_ROBINHOOD,
     PENSION_TAX_HOOK_ON_ROBINHOOD,

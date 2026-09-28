@@ -175,8 +175,8 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
       h.toLowerCase()
     );
     // ZLCA registry (ZLCA_HOOKS_PER_CHAIN) contributes the LitePSM and
-    // dualpool hooks. Mainnet has no ZERO_MEASURED_TVL_HOOKS_PER_CHAIN
-    // entries, so the bypass set is exactly these three.
+    // dualpool hooks; ZERO_MEASURED_TVL_HOOKS_PER_CHAIN adds the NFTX and
+    // WETH wrapper hooks.
     expect(tvlBypassHooks).toContain(
       '0x958a0904940f744f8c6b72c043ceee3ea34ae888'
     ); // LitePSM USDS
@@ -186,6 +186,9 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     expect(tvlBypassHooks).toContain(
       '0x00000078bd49d5279a99b5f4011a5c61ee8caac0'
     ); // dualpool
+    expect(tvlBypassHooks).toContain(
+      '0x57991106cb7aa27e2771beda0d6522f68524a888'
+    ); // WETH wrapper
   });
 
   it('fetches the Robinhood zero-measured-TVL hooks by address', async () => {
@@ -211,8 +214,8 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     }
   });
 
-  it('omits the TVL-bypass Hook query for a chain with none configured (Optimism)', async () => {
-    const {provider, queries} = makeRecordingProvider(ChainId.OPTIMISM);
+  it('omits the TVL-bypass Hook query for a chain with none configured (Polygon)', async () => {
+    const {provider, queries} = makeRecordingProvider(ChainId.POLYGON);
     await provider.getPools();
 
     expect(queries.some(q => q.includes('getV4TvlBypassHookPools'))).toBe(
