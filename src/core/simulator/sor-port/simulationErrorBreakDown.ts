@@ -82,6 +82,13 @@ const HTTP_SERVER_ERROR_MIN_STATUS = 500;
 // not found), so the message has to match exactly as well.
 const UNIRPC_UPSTREAM_FAILURE_CODE = -32000;
 const UNIRPC_UPSTREAM_FAILURE_MESSAGE = 'upstream request failed';
+// EIP-1474 "Limit exceeded": the provider refused the request (rate or quota
+// limit) without evaluating it. Some vendors send it with HTTP 200, which
+// unirpc-go forwards as a final answer. The execution-API spec also uses
+// -32005 for a fee cap below the base fee, which a node did evaluate, so
+// messages about fees or gas are excluded.
+const JSON_RPC_LIMIT_EXCEEDED_CODE = -32005;
+const EVALUATED_LIMIT_EXCEEDED_MESSAGE = /fee|gas/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -120,16 +127,15 @@ export function extractRevertData(
   );
 }
 
+// JSON-RPC error codes are numbers. A nested error with a string code is an
+// ethers error of its own (an unparseable body, a malformed result), not a
+// node's answer.
 function findJsonRpcError(value: unknown): Record<string, unknown> | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
   const nestedError = value.error;
-  if (
-    isRecord(nestedError) &&
-    (typeof nestedError.code === 'number' ||
-      typeof nestedError.message === 'string')
-  ) {
+  if (isRecord(nestedError) && typeof nestedError.code === 'number') {
     return nestedError;
   }
   if (typeof value.body !== 'string') {
@@ -147,17 +153,29 @@ function hasEthersErrorCode(value: unknown, code: string): boolean {
   return isRecord(value) && value.code === code;
 }
 
-function isUniRpcUpstreamFailure(jsonRpcError: Record<string, unknown>) {
+function isProviderLimitRefusal(jsonRpcError: Record<string, unknown>) {
   return (
-    jsonRpcError.code === UNIRPC_UPSTREAM_FAILURE_CODE &&
-    jsonRpcError.message === UNIRPC_UPSTREAM_FAILURE_MESSAGE
+    jsonRpcError.code === JSON_RPC_LIMIT_EXCEEDED_CODE &&
+    !(
+      typeof jsonRpcError.message === 'string' &&
+      EVALUATED_LIMIT_EXCEEDED_MESSAGE.test(jsonRpcError.message)
+    )
+  );
+}
+
+function isUnevaluatedJsonRpcError(jsonRpcError: Record<string, unknown>) {
+  return (
+    isProviderLimitRefusal(jsonRpcError) ||
+    (jsonRpcError.code === UNIRPC_UPSTREAM_FAILURE_CODE &&
+      jsonRpcError.message === UNIRPC_UPSTREAM_FAILURE_MESSAGE)
   );
 }
 
 // ethers wraps both HTTP-level failures and JSON-RPC error responses as
-// SERVER_ERROR. A 5xx status, a missing JSON-RPC error object, or unirpc-go's
-// all-providers-failed error means the backend never evaluated the
-// transaction; any other JSON-RPC error means it did.
+// SERVER_ERROR. A 5xx status, a missing or unparseable JSON-RPC error object,
+// unirpc-go's all-providers-failed error, or a limit-exceeded refusal means
+// the backend never evaluated the transaction; any other JSON-RPC error means
+// it did.
 function isTransportServerError(value: unknown): boolean {
   if (!hasEthersErrorCode(value, utils.Logger.errors.SERVER_ERROR)) {
     return false;
@@ -170,7 +188,14 @@ function isTransportServerError(value: unknown): boolean {
     return true;
   }
   const jsonRpcError = findJsonRpcError(value);
-  return jsonRpcError === undefined || isUniRpcUpstreamFailure(jsonRpcError);
+  return jsonRpcError === undefined || isUnevaluatedJsonRpcError(jsonRpcError);
+}
+
+function unwrapCallException(error: unknown): unknown {
+  return hasEthersErrorCode(error, utils.Logger.errors.CALL_EXCEPTION) &&
+    isRecord(error)
+    ? error.error
+    : error;
 }
 
 /**
@@ -180,11 +205,7 @@ function isTransportServerError(value: unknown): boolean {
  * failures wrapped in a CALL_EXCEPTION, which is unwrapped one level.
  */
 export function isSimulationBackendUnavailable(error: unknown): boolean {
-  const transportError =
-    hasEthersErrorCode(error, utils.Logger.errors.CALL_EXCEPTION) &&
-    isRecord(error)
-      ? error.error
-      : error;
+  const transportError = unwrapCallException(error);
   return (
     hasEthersErrorCode(transportError, utils.Logger.errors.TIMEOUT) ||
     hasEthersErrorCode(transportError, utils.Logger.errors.NETWORK_ERROR) ||
@@ -199,11 +220,13 @@ type SimulationExceptionLogFields = {
 };
 
 // Outage errors carry the request body and URL, so only these fields are
-// logged. The HTTP status is named upstreamStatus because Datadog remaps a
-// numeric `status` attribute to the log's severity.
+// logged, taken from the transport error inside a contract read's
+// CALL_EXCEPTION. The HTTP status is named upstreamStatus because Datadog
+// remaps a numeric `status` attribute to the log's severity.
 export function simulationExceptionLogFields(
-  error: unknown
+  thrownError: unknown
 ): SimulationExceptionLogFields {
+  const error = unwrapCallException(thrownError);
   if (!isRecord(error)) {
     return {errorName: 'UnknownError'};
   }

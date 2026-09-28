@@ -10,10 +10,14 @@ import {
 } from './simulationErrorBreakDown';
 import {
   captureEthersRpcError,
+  FEE_CAP_BELOW_BASE_FEE,
   GATEWAY_BAD_GATEWAY,
+  HTML_ERROR_PAGE,
+  MALFORMED_RESULT,
   NODE_HEADER_NOT_FOUND,
   RpcErrorReply,
   UNIRPC_ALL_PROVIDERS_FAILED,
+  VENDOR_RATE_LIMITED,
 } from '../../../../tests/test-utils/ethersRpcErrors';
 import {SimulationStatus} from '../ISimulator';
 import {VIRTUAL_BASE} from '../../../lib/tokenUtils';
@@ -347,6 +351,42 @@ describe('classifySimulationException with errors thrown by ethers', () => {
       call: estimateGasCall,
       expected: SimulationStatus.FAILED,
     },
+    {
+      name: 'a vendor rate-limit refusal via eth_simulateV1',
+      reply: VENDOR_RATE_LIMITED,
+      call: simulateV1Call,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'a vendor rate-limit refusal via eth_estimateGas',
+      reply: VENDOR_RATE_LIMITED,
+      call: estimateGasCall,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'a node rejecting a fee cap below the base fee via eth_simulateV1',
+      reply: FEE_CAP_BELOW_BASE_FEE,
+      call: simulateV1Call,
+      expected: SimulationStatus.FAILED,
+    },
+    {
+      name: 'an HTML error page via eth_simulateV1',
+      reply: HTML_ERROR_PAGE,
+      call: simulateV1Call,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'an HTML error page via eth_estimateGas',
+      reply: HTML_ERROR_PAGE,
+      call: estimateGasCall,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
+    {
+      name: 'a malformed eth_estimateGas result',
+      reply: MALFORMED_RESULT,
+      call: estimateGasCall,
+      expected: SimulationStatus.SYSTEM_DOWN,
+    },
   ];
 
   it.each(cases)('$name → $expected', async ({reply, call, expected}) => {
@@ -388,6 +428,18 @@ describe('isSimulationBackendUnavailable with errors thrown by ethers', () => {
       call: balanceOfCall,
       expected: false,
     },
+    {
+      name: 'a vendor rate-limit refusal on a contract balanceOf',
+      reply: VENDOR_RATE_LIMITED,
+      call: balanceOfCall,
+      expected: true,
+    },
+    {
+      name: 'an HTML error page on a contract balanceOf',
+      reply: HTML_ERROR_PAGE,
+      call: balanceOfCall,
+      expected: true,
+    },
   ];
 
   it.each(cases)('$name → $expected', async ({reply, call, expected}) => {
@@ -401,6 +453,24 @@ describe('describeSimulationException log fields', () => {
     const error = await captureEthersRpcError(
       GATEWAY_BAD_GATEWAY,
       simulateV1Call
+    );
+
+    expect(
+      describeSimulationException(error, USDC_ADDRESS, WETH_ADDRESS)
+    ).toEqual({
+      status: SimulationStatus.SYSTEM_DOWN,
+      logFields: {
+        errorName: 'Error',
+        errorCode: utils.Logger.errors.SERVER_ERROR,
+        upstreamStatus: GATEWAY_BAD_GATEWAY.httpStatus,
+      },
+    });
+  });
+
+  it('logs the upstream HTTP status from inside a contract read', async () => {
+    const error = await captureEthersRpcError(
+      GATEWAY_BAD_GATEWAY,
+      balanceOfCall
     );
 
     expect(
