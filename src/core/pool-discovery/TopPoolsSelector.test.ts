@@ -278,6 +278,7 @@ describe('BasicTopPoolsSelector', () => {
     const tokenB = '0x000000000000000000000000000000000000000b';
     const tokenC = '0x000000000000000000000000000000000000000c';
     const pairAB = {tokenALower: tokenA, tokenBLower: tokenB};
+    const admitAll = () => true;
 
     const v3PoolWith = (
       id: string,
@@ -301,7 +302,8 @@ describe('BasicTopPoolsSelector', () => {
         findTopUnselectedPoolsForPairs(
           [low, otherPair, high],
           [pairAB],
-          new Set()
+          new Set(),
+          admitAll
         )
       ).toStrictEqual([high]);
     });
@@ -317,7 +319,12 @@ describe('BasicTopPoolsSelector', () => {
       const high = {...low, id: '0xb2', reserveUSD: 900};
 
       expect(
-        findTopUnselectedPoolsForPairs([low, high], [pairAB], new Set())
+        findTopUnselectedPoolsForPairs(
+          [low, high],
+          [pairAB],
+          new Set(),
+          admitAll
+        )
       ).toStrictEqual([high]);
     });
 
@@ -329,7 +336,8 @@ describe('BasicTopPoolsSelector', () => {
         findTopUnselectedPoolsForPairs(
           [selected, fallback],
           [pairAB],
-          new Set(['0xabc1'])
+          new Set(['0xabc1']),
+          admitAll
         )
       ).toStrictEqual([fallback]);
     });
@@ -351,7 +359,8 @@ describe('BasicTopPoolsSelector', () => {
               tokenBLower: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
             },
           ],
-          new Set()
+          new Set(),
+          admitAll
         )
       ).toStrictEqual([checksummed]);
     });
@@ -361,7 +370,12 @@ describe('BasicTopPoolsSelector', () => {
       const second = v3PoolWith('0xa2', tokenA, tokenB, 100);
 
       expect(
-        findTopUnselectedPoolsForPairs([first, second], [pairAB], new Set())
+        findTopUnselectedPoolsForPairs(
+          [first, second],
+          [pairAB],
+          new Set(),
+          admitAll
+        )
       ).toStrictEqual([first]);
     });
 
@@ -370,11 +384,21 @@ describe('BasicTopPoolsSelector', () => {
       const priced = v3PoolWith('0xa2', tokenA, tokenB, 1);
 
       expect(
-        findTopUnselectedPoolsForPairs([unpriced, priced], [pairAB], new Set())
+        findTopUnselectedPoolsForPairs(
+          [unpriced, priced],
+          [pairAB],
+          new Set(),
+          admitAll
+        )
       ).toStrictEqual([priced]);
       // Still selectable when it is the only match.
       expect(
-        findTopUnselectedPoolsForPairs([unpriced], [pairAB], new Set())
+        findTopUnselectedPoolsForPairs(
+          [unpriced],
+          [pairAB],
+          new Set(),
+          admitAll
+        )
       ).toStrictEqual([unpriced]);
     });
 
@@ -386,7 +410,8 @@ describe('BasicTopPoolsSelector', () => {
         findTopUnselectedPoolsForPairs(
           [poolAB, poolAC],
           [pairAB, {tokenALower: tokenC, tokenBLower: tokenA}, pairAB],
-          new Set()
+          new Set(),
+          admitAll
         )
       ).toStrictEqual([poolAB, poolAC, poolAB]);
     });
@@ -399,12 +424,47 @@ describe('BasicTopPoolsSelector', () => {
         findTopUnselectedPoolsForPairs(
           [onlyAC, selected],
           [pairAB],
-          new Set(['0xa2'])
+          new Set(['0xa2']),
+          admitAll
         )
       ).toStrictEqual([undefined]);
       expect(
-        findTopUnselectedPoolsForPairs([onlyAC], [], new Set())
+        findTopUnselectedPoolsForPairs([onlyAC], [], new Set(), admitAll)
       ).toStrictEqual([]);
+    });
+
+    it('skips pools the eligibility check rejects', () => {
+      const higherRejected = v3PoolWith('0xa1', tokenA, tokenB, 500);
+      const lowerAdmitted = v3PoolWith('0xa2', tokenA, tokenB, 100);
+
+      expect(
+        findTopUnselectedPoolsForPairs(
+          [higherRejected, lowerAdmitted],
+          [pairAB],
+          new Set(),
+          pool => pool !== higherRejected
+        )
+      ).toStrictEqual([lowerAdmitted]);
+    });
+
+    it('checks eligibility only for matching unselected pools, once each', () => {
+      const matchesBothPairs = v3PoolWith('0xa1', tokenA, tokenB, 100);
+      const matchesNeither = v3PoolWith('0xa2', tokenA, tokenC, 100);
+      const selected = v3PoolWith('0xa3', tokenA, tokenB, 900);
+      const checked: string[] = [];
+
+      findTopUnselectedPoolsForPairs(
+        [matchesBothPairs, matchesNeither, selected],
+        // The same pair twice: one pool answering two lookups.
+        [pairAB, {tokenALower: tokenB, tokenBLower: tokenA}],
+        new Set(['0xa3']),
+        pool => {
+          checked.push(pool.id);
+          return true;
+        }
+      );
+
+      expect(checked).toStrictEqual(['0xa1']);
     });
 
     it('picks the same pools as intersecting a token index over the snapshot', () => {
@@ -484,7 +544,12 @@ describe('BasicTopPoolsSelector', () => {
       ).toBeGreaterThan(pairs.length / 2);
       // Every pair answered in a single pass, as the caller does.
       expect(
-        findTopUnselectedPoolsForPairs(pools, pairs, selectedPoolIdsLower)
+        findTopUnselectedPoolsForPairs(
+          pools,
+          pairs,
+          selectedPoolIdsLower,
+          admitAll
+        )
       ).toStrictEqual(expected);
     });
   });

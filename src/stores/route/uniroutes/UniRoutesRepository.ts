@@ -25,7 +25,6 @@ import {
 } from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
-import {maybeDropPermissionedPools} from '../../../models/hooks/PermissionedHooks';
 import {maybeDropErc4626Pools} from '../../../models/hooks/Erc4626WrapperHooks';
 import {
   getErc4626WrapperDiscoveryPairs,
@@ -38,11 +37,9 @@ import {
   getPoolTVL,
   getOtherToken,
 } from '../../../core/pool-discovery/TopPoolsSelector';
-import {
-  applyDynamicFeeIfNeeded,
-  matchesHooksOptions,
-} from '../../../lib/poolUtils';
+import {applyDynamicFeeIfNeeded} from '../../../lib/poolUtils';
 import {BaseRoutesRepository} from '../BaseRoutesRepository';
+import {CrossLiquidityPoolAdmission} from '../../../core/pool-discovery/CrossLiquidityPoolAdmission';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
 import {getProtocolForAggHookAddress} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
@@ -653,68 +650,19 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       allPoolsPromises.push(Promise.resolve([]));
     }
 
-    let [allV2Pools, allV3Pools, rawAllV4Pools] =
+    const [allV2Pools, allV3Pools, allV4Pools] =
       await Promise.all(allPoolsPromises);
-    if (nsCtx.erc4626Snapshot) {
-      const snapshot = nsCtx.erc4626Snapshot;
-      const [v2Result, v3Result, v4Result] = await Promise.all([
-        maybeDropErc4626Pools(
-          allV2Pools,
-          snapshot,
-          tokenInAddress,
-          tokenOutAddress,
-          ctx,
-          buildMetricKey('CrossLiquidity.Erc4626WrapperHooks.poolDropped')
-        ),
-        maybeDropErc4626Pools(
-          allV3Pools,
-          snapshot,
-          tokenInAddress,
-          tokenOutAddress,
-          ctx,
-          buildMetricKey('CrossLiquidity.Erc4626WrapperHooks.poolDropped')
-        ),
-        maybeDropErc4626Pools(
-          rawAllV4Pools,
-          snapshot,
-          tokenInAddress,
-          tokenOutAddress,
-          ctx,
-          buildMetricKey('CrossLiquidity.Erc4626WrapperHooks.poolDropped')
-        ),
-      ]);
-      allV2Pools = v2Result.filteredPools;
-      allV3Pools = v3Result.filteredPools;
-      rawAllV4Pools = v4Result.filteredPools;
-    }
-
-    // Exclude agg hook pools whose protocol was NOT explicitly requested.
-    // If the caller includes an external protocol (e.g. a Curve or Fluid hook),
-    // those pools are valid cross-liquidity candidates and must be kept.
-    // Pools with unrecognized hooks (regular V4) are always kept.
-    const protocolFilteredV4Pools = rawAllV4Pools.filter(pool => {
-      const hookProtocol = getProtocolForAggHookAddress(
-        (pool as V4PoolInfo).hooks,
-        chain.chainId
-      );
-      return (
-        (hookProtocol === undefined ||
-          protocols.includes(hookProtocol as Protocol)) &&
-        matchesHooksOptions(pool, Protocol.V4, hooksOptions)
-      );
-    });
-    // UniRoutesRepository does not write to the namespace-independent
-    // POOLSFORTOKENS cache, so the shouldCache signal is irrelevant here —
-    // only filteredPools matters.
-    const {filteredPools: allV4Pools} = await maybeDropPermissionedPools(
-      protocolFilteredV4Pools as V4PoolInfo[],
+    // The ERC-4626, aggregator-hook, hooksOptions and permissioned-hook rules
+    // run inside the pair scans, only on pools that already match a bridge
+    // pair, rather than as filters that copy each whole snapshot per request.
+    const admission = new CrossLiquidityPoolAdmission({
       chain,
+      protocols,
+      hooksOptions,
       nsCtx,
-      tokenInAddress,
-      tokenOutAddress,
-      ctx,
-      buildMetricKey('CrossLiquidity.PermissionedPoolDropped')
-    );
+      tokenIn: tokenInAddress,
+      tokenOut: tokenOutAddress,
+    });
 
     const tokenInAddressLower = tokenInAddress.address.toLowerCase();
     const tokenOutAddressLower = tokenOutAddress.address.toLowerCase();
@@ -730,55 +678,63 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       protocolPools[Protocol.V4]?.map(p => p.id.toLowerCase()) || []
     );
 
-    // Find cross-liquidity pools for V2
-    if (
-      protocols.includes(Protocol.V2) &&
-      V2_SUPPORTED.includes(chain.chainId)
-    ) {
-      const v2CrossPools = this.findCrossProtocolMissingPools(
-        tokenInAddressLower,
-        tokenOutAddressLower,
-        allV2Pools,
-        Protocol.V2,
-        selectedV2PoolIds,
-        protocolPools[Protocol.V3] || [],
-        protocolPools[Protocol.V4] || [],
-        ctx
-      );
-      result.v2Pools.push(...(v2CrossPools as V2PoolInfo[]));
-    }
+    // Drops recorded before a later scan throws are still emitted.
+    try {
+      // Find cross-liquidity pools for V2
+      if (
+        protocols.includes(Protocol.V2) &&
+        V2_SUPPORTED.includes(chain.chainId)
+      ) {
+        const v2CrossPools = this.findCrossProtocolMissingPools(
+          tokenInAddressLower,
+          tokenOutAddressLower,
+          allV2Pools,
+          Protocol.V2,
+          selectedV2PoolIds,
+          pool => admission.admits(pool, Protocol.V2),
+          protocolPools[Protocol.V3] || [],
+          protocolPools[Protocol.V4] || [],
+          ctx
+        );
+        result.v2Pools.push(...(v2CrossPools as V2PoolInfo[]));
+      }
 
-    // Find cross-liquidity pools for V3
-    if (protocols.includes(Protocol.V3)) {
-      const v3CrossPools = this.findCrossProtocolMissingPools(
-        tokenInAddressLower,
-        tokenOutAddressLower,
-        allV3Pools,
-        Protocol.V3,
-        selectedV3PoolIds,
-        protocolPools[Protocol.V2] || [],
-        protocolPools[Protocol.V4] || [],
-        ctx
-      );
-      result.v3Pools.push(...(v3CrossPools as V3PoolInfo[]));
-    }
+      // Find cross-liquidity pools for V3
+      if (protocols.includes(Protocol.V3)) {
+        const v3CrossPools = this.findCrossProtocolMissingPools(
+          tokenInAddressLower,
+          tokenOutAddressLower,
+          allV3Pools,
+          Protocol.V3,
+          selectedV3PoolIds,
+          pool => admission.admits(pool, Protocol.V3),
+          protocolPools[Protocol.V2] || [],
+          protocolPools[Protocol.V4] || [],
+          ctx
+        );
+        result.v3Pools.push(...(v3CrossPools as V3PoolInfo[]));
+      }
 
-    // Find cross-liquidity pools for V4
-    if (
-      protocols.includes(Protocol.V4) &&
-      V4_SUPPORTED.includes(chain.chainId)
-    ) {
-      const v4CrossPools = this.findCrossProtocolMissingPools(
-        tokenInAddressLower,
-        tokenOutAddressLower,
-        allV4Pools,
-        Protocol.V4,
-        selectedV4PoolIds,
-        protocolPools[Protocol.V2] || [],
-        protocolPools[Protocol.V3] || [],
-        ctx
-      );
-      result.v4Pools.push(...(v4CrossPools as V4PoolInfo[]));
+      // Find cross-liquidity pools for V4
+      if (
+        protocols.includes(Protocol.V4) &&
+        V4_SUPPORTED.includes(chain.chainId)
+      ) {
+        const v4CrossPools = this.findCrossProtocolMissingPools(
+          tokenInAddressLower,
+          tokenOutAddressLower,
+          allV4Pools,
+          Protocol.V4,
+          selectedV4PoolIds,
+          pool => admission.admits(pool, Protocol.V4),
+          protocolPools[Protocol.V2] || [],
+          protocolPools[Protocol.V3] || [],
+          ctx
+        );
+        result.v4Pools.push(...(v4CrossPools as V4PoolInfo[]));
+      }
+    } finally {
+      await admission.emitDropMetrics(ctx);
     }
 
     ctx.logger.debug('Cross-liquidity candidate pools found', {
@@ -800,6 +756,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     candidatePools: UniPoolInfo[],
     protocol: Protocol,
     selectedPoolIds: Set<string>,
+    isEligible: (pool: UniPoolInfo) => boolean,
     otherProtocolPools1: UniPoolInfo[],
     otherProtocolPools2: UniPoolInfo[],
     ctx: UniContext
@@ -872,7 +829,8 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     const crossPools = findTopUnselectedPoolsForPairs(
       candidatePools,
       lookups.map(lookup => lookup.pair),
-      selectedPoolIds
+      selectedPoolIds,
+      isEligible
     );
     lookups.forEach((lookup, lookupIndex) => {
       const crossPool = crossPools[lookupIndex];

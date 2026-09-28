@@ -126,14 +126,18 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
 export type LowercasedTokenPair = {tokenALower: string; tokenBLower: string};
 
 // For each pair, the highest-TVL pool containing both tokens whose lowercased
-// id is not in selectedPoolIdsLower, or undefined when none does. On equal TVL
-// the earliest pool in `pools` wins, and a non-finite TVL ranks below every
-// finite one. One pass answers every pair, for callers that look up a handful
-// of pairs in a full snapshot and would otherwise build a token index over it.
+// id is not in selectedPoolIdsLower and that `isEligible` accepts, or
+// undefined when none does. On equal TVL the earliest pool in `pools` wins,
+// and a non-finite TVL ranks below every finite one. One pass answers every
+// pair, for callers that look up a handful of pairs in a full snapshot and
+// would otherwise build a token index over it. `isEligible` runs only for
+// pools that match a pair and are unselected, at most once per pool, so a
+// per-pool admission rule costs nothing for the rest of the snapshot.
 export const findTopUnselectedPoolsForPairs = (
   pools: UniPoolInfo[],
   pairs: LowercasedTokenPair[],
-  selectedPoolIdsLower: Set<string>
+  selectedPoolIdsLower: Set<string>,
+  isEligible: (pool: UniPoolInfo) => boolean
 ): (UniPoolInfo | undefined)[] => {
   if (pairs.length === 0) {
     return [];
@@ -144,6 +148,7 @@ export const findTopUnselectedPoolsForPairs = (
   for (const pool of pools) {
     const token0Lower = pool.token0.id.toLowerCase();
     const token1Lower = pool.token1.id.toLowerCase();
+    let eligible: boolean | undefined;
     for (let pairIndex = 0; pairIndex < pairs.length; pairIndex++) {
       const {tokenALower, tokenBLower} = pairs[pairIndex];
       if (
@@ -151,6 +156,10 @@ export const findTopUnselectedPoolsForPairs = (
         (token0Lower !== tokenBLower && token1Lower !== tokenBLower) ||
         selectedPoolIdsLower.has(pool.id.toLowerCase())
       ) {
+        continue;
+      }
+      eligible ??= isEligible(pool);
+      if (!eligible) {
         continue;
       }
 
