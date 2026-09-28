@@ -1088,11 +1088,18 @@ export class AuroraV2PoolsProvider
     for (const pool of pools) {
       const token0 = pool.token0Address.toLowerCase();
       const token1 = pool.token1Address.toLowerCase();
-      // The V2 subgraph's trackedReserveETH DOUBLES the tracked side when only
+      // The V2 subgraph carries two TVL numbers and V2SubgraphProvider uses
+      // each for one job. trackedReserveETH DOUBLES the tracked side when only
       // one side is whitelisted (both sides of a constant-product pair are
-      // value-equal at spot). Aurora's analog of "whitelisted" is "has a fresh
-      // price row": both sides priced → the sum is already two-sided; one side
-      // priced → the sum holds only that side, so double it; neither → 0.
+      // value-equal at spot); it gates the tracked family and becomes
+      // `reserve`. reserveUSD is the untracked per-side sum with no doubling;
+      // it gates the untracked family and becomes `reserveUSD`, the field
+      // TopPoolsSelector ranks across protocols. Aurora's analog of
+      // "whitelisted" is "has a fresh price row": both sides priced → the sum
+      // is already two-sided; one side priced → double it for the tracked
+      // number only; neither → 0. Exporting the doubled value as reserveUSD
+      // ranked one-side-priced V2 pools ~2x against V3/V4, whose TVL is a
+      // priced-side sum on both sources.
       const bothSidesPriced =
         pool.token0PriceUsd !== null && pool.token1PriceUsd !== null;
       const oneSidePriced =
@@ -1103,6 +1110,7 @@ export class AuroraV2PoolsProvider
           ? 2 * pool.tvlUsd
           : 0;
       const tvlNative = trackedUsd / nativePrice;
+      const untrackedUsd = pool.tvlUsd;
       let family: V2AdmissionFamily | undefined;
       if (token0 === fei || token1 === fei) {
         family = 'fei';
@@ -1113,7 +1121,7 @@ export class AuroraV2PoolsProvider
         family = 'virtual';
       } else if (tvlNative > this.trackedEthThreshold) {
         family = 'tracked_reserve';
-      } else if (trackedUsd > this.untrackedUsdThreshold) {
+      } else if (untrackedUsd > this.untrackedUsdThreshold) {
         family = 'untracked_usd';
       }
       if (!family) continue;
@@ -1128,7 +1136,7 @@ export class AuroraV2PoolsProvider
         // serialization, so one malformed row cannot fail the whole fetch.
         supply: Number(pool.totalSupply) / 1e18,
         reserve: tvlNative,
-        reserveUSD: trackedUsd,
+        reserveUSD: untrackedUsd,
       });
     }
     for (const [family, count] of Object.entries(admittedByFamily)) {

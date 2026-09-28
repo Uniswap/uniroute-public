@@ -1602,10 +1602,13 @@ describe('AuroraV2PoolsProvider', () => {
     );
   });
 
-  it('doubles a one-priced-side pool and zeroes an unpriced one, like trackedReserveETH', async () => {
+  it('doubles a one-priced-side pool for admission and reserve, like trackedReserveETH, but exports the priced-side sum as reserveUSD', async () => {
     // Threshold $50-native-equivalent (0.025 * $2000). A $30 one-sided pool
     // doubles to $60 tracked and is admitted; the same value with both sides
-    // priced stays $30 and is rejected; an unpriced pool tracks $0.
+    // priced stays $30 and is rejected; an unpriced pool tracks $0. The
+    // doubling stops at admission and `reserve`: `reserveUSD` is what
+    // TopPoolsSelector ranks against V3/V4, and V2SubgraphProvider fills it
+    // from the subgraph's undoubled reserveUSD.
     const pools = await provider(CHAIN_ID_ROBINHOOD, [
       v2Row({
         pairAddress: '0xONESIDED',
@@ -1622,8 +1625,37 @@ describe('AuroraV2PoolsProvider', () => {
     ]).getPools();
 
     expect(pools.map(pool => pool.id)).toEqual(['0xonesided']);
-    expect(pools[0]!.reserveUSD).toBe(60);
     expect(pools[0]!.reserve).toBeCloseTo(60 / 2000, 9);
+    expect(pools[0]!.reserveUSD).toBe(30);
+  });
+
+  it('judges the untracked family on the undoubled sum, like reserveUSD_gt on the subgraph', async () => {
+    // Tracked threshold out of reach (1 native = $2000), untracked threshold
+    // $100. A one-sided $60 pool doubles to $120 tracked, which must not
+    // sneak it past the $100 untracked bar the subgraph applies to the
+    // undoubled reserveUSD; a both-sides $101 pool passes it.
+    const metric = new FakeMetric();
+    const pools = await provider(
+      CHAIN_ID_ROBINHOOD,
+      [
+        v2Row({pairAddress: '0xONESIDED', tvlUsd: 60, token1PriceUsd: null}),
+        v2Row({pairAddress: '0xBOTHSIDES', tvlUsd: 101}),
+      ],
+      1,
+      100,
+      metric
+    ).getPools();
+
+    expect(pools.map(pool => pool.id)).toEqual(['0xbothsides']);
+    expect(pools[0]!.reserveUSD).toBe(101);
+    expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'untracked_usd'}),
+        }),
+      ])
+    );
   });
 });
 
