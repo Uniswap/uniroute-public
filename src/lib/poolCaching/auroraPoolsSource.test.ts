@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {Protocol} from '@uniswap/router-sdk';
+import {ADDRESS_ZERO, Protocol} from '@uniswap/router-sdk';
 
 import {
   AURORA_SUPPORTED_TARGETS,
@@ -28,6 +28,7 @@ import {
 } from './util/dynamicZlcaHooks';
 import {
   ISubgraphProvider,
+  V2SubgraphPool,
   V3SubgraphPool,
   V4SubgraphPool,
 } from './sor-providers';
@@ -110,6 +111,25 @@ function v3Pool(id: string, tvlUSD: number): V3SubgraphPool {
     liquidity: '1',
     token0: {id: '0xa'},
     token1: {id: '0xb'},
+    tvlETH: tvlUSD / 2000,
+    tvlUSD,
+  };
+}
+
+function v4Pool(
+  id: string,
+  tvlUSD: number,
+  hooks: string,
+  liquidity: string
+): V4SubgraphPool {
+  return {
+    id,
+    feeTier: '3000',
+    tickSpacing: '60',
+    hooks,
+    liquidity,
+    token0: {id: '0xa', decimals: '18'},
+    token1: {id: '0xb', decimals: '18'},
     tvlETH: tvlUSD / 2000,
     tvlUSD,
   };
@@ -449,7 +469,7 @@ describe('computePoolParity', () => {
       v3Pool('0xa4', 5),
     ];
 
-    const parity = computePoolParity(subgraph, aurora);
+    const parity = computePoolParity(subgraph, aurora, undefined);
     expect(parity.subgraphCount).toBe(3);
     expect(parity.auroraCount).toBe(3);
     // intersection {a1, a2} = 2, union = 4
@@ -467,9 +487,83 @@ describe('computePoolParity', () => {
   });
 
   it('handles empty results', () => {
-    const parity = computePoolParity([], []);
+    const parity = computePoolParity([], [], undefined);
     expect(parity.jaccardBps).toBe(0);
     expect(parity.missingTop100).toBe(0);
+    expect(parity.missingTop100Live).toBe(0);
+  });
+
+  it('excludes emptied pools from the live top-100 gap and its sample', () => {
+    // The subgraph keeps ranking a drained pool by stale TVL, as it does for
+    // Mainnet V3 WETH/TRUMP (0x1b942ce8…, on-chain liquidity 0).
+    const drained = {...v3Pool('0xDEAD', 50_000), liquidity: '0'};
+    const liveMissing = v3Pool('0xb2', 900);
+    const subgraph = [drained, liveMissing, v3Pool('0xb1', 1000)];
+    const aurora = [v3Pool('0xb1', 1000)];
+
+    const parity = computePoolParity(subgraph, aurora, undefined);
+    expect(parity.missingTop100).toBe(2);
+    expect(parity.missingTop100Live).toBe(1);
+    expect(parity.missingSample).toEqual(['0xdead', '0xb2']);
+    expect(parity.missingLiveSample).toEqual(['0xb2']);
+  });
+
+  it('counts a zero-liquidity TVL-bypass hook pool as live', () => {
+    // A wrapper hook keeps its liquidity outside the PoolManager, so the
+    // pool reads liquidity 0 however much the hook holds. The registry is
+    // lowercase; the pool carries the checksummed form.
+    const bypassHook = '0xB0B0000000000000000000000000000000000001';
+    const bypassPool = v4Pool('0xd1', 0, bypassHook, '0');
+    const drainedHookless = v4Pool('0xd2', 800, ADDRESS_ZERO, '0');
+    const subgraph = [
+      drainedHookless,
+      bypassPool,
+      v4Pool('0xd3', 900, ADDRESS_ZERO, '5'),
+    ];
+    const aurora = [v4Pool('0xd3', 900, ADDRESS_ZERO, '5')];
+
+    const parity = computePoolParity(
+      subgraph,
+      aurora,
+      new Set([bypassHook.toLowerCase()])
+    );
+    expect(parity.missingTop100).toBe(2);
+    expect(parity.missingTop100Live).toBe(1);
+    expect(parity.missingLiveSample).toEqual(['0xd1']);
+  });
+
+  it('treats a zero-liquidity hooked pool as not live when its hook is not a TVL-bypass hook', () => {
+    const hooked = v4Pool(
+      '0xe1',
+      50,
+      '0xB0B0000000000000000000000000000000000002',
+      '0'
+    );
+    const parity = computePoolParity(
+      [hooked],
+      [],
+      new Set(['0xb0b0000000000000000000000000000000000001'])
+    );
+    expect(parity.missingTop100).toBe(1);
+    expect(parity.missingTop100Live).toBe(0);
+  });
+
+  it('counts every V2 pool as live (V2 carries no liquidity field)', () => {
+    const v2Pool = (id: string, reserveUSD: number): V2SubgraphPool => ({
+      id,
+      token0: {id: '0xa'},
+      token1: {id: '0xb'},
+      supply: 1,
+      reserve: reserveUSD / 2000,
+      reserveUSD,
+    });
+    const parity = computePoolParity(
+      [v2Pool('0xc1', 500), v2Pool('0xc2', 400)],
+      [v2Pool('0xc1', 500)],
+      undefined
+    );
+    expect(parity.missingTop100).toBe(1);
+    expect(parity.missingTop100Live).toBe(1);
   });
 });
 
@@ -646,6 +740,54 @@ describe('AuroraSourcedProvider shadow mode', () => {
     expect(metric.byKey('CachePools.parity.subgraph_count')[0]!.value).toBe(2);
     expect(metric.byKey('CachePools.parity.aurora_count')[0]!.value).toBe(1);
     expect(metric.byKey('CachePools.parity.jaccard_bps')[0]!.value).toBe(5000);
+  });
+
+  it('emits the live top-100 gap next to the raw one', async () => {
+    const drained = {...v3Pool('0x9', 5000), liquidity: '0'};
+    const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
+    const subgraph = fakeProvider([[drained, v3Pool('0x1', 100)]]);
+    const metric = new FakeMetric();
+
+    await mk(aurora, subgraph, metric).getPools();
+    await settlePendingAuroraShadowsForTesting();
+    expect(metric.byKey('CachePools.parity.missing_top100')[0]!.value).toBe(1);
+    expect(metric.byKey('CachePools.parity.missing_top100_live')).toEqual([
+      {
+        key: 'CachePools.parity.missing_top100_live',
+        value: 0,
+        tags: {chainId: '1', protocol: String(Protocol.V3), mode: 'shadow'},
+      },
+    ]);
+  });
+
+  it('counts a zero-liquidity pool of a registered TVL-bypass hook in the live gap', async () => {
+    const robinhood = 4663;
+    const bypassHook = [...getTvlBypassHookAddresses(robinhood)!][0]!;
+    const hookPool = v4Pool(
+      '0xf1',
+      0,
+      bypassHook.toUpperCase().replace('0X', '0x'),
+      '0'
+    );
+    const shared = v4Pool('0xf2', 100, ADDRESS_ZERO, '7');
+    const metric = new FakeMetric();
+    const provider = new AuroraSourcedProvider(
+      'shadow',
+      fakeProvider([[shared]]),
+      fakeProvider([[hookPool, shared]]),
+      robinhood,
+      Protocol.V4,
+      0.5,
+      0,
+      noopLogger,
+      metric
+    );
+
+    await provider.getPools();
+    await settlePendingAuroraShadowsForTesting();
+    expect(
+      metric.byKey('CachePools.parity.missing_top100_live')[0]!.value
+    ).toBe(1);
   });
 
   it('still returns the subgraph result when the Aurora fetch fails', async () => {

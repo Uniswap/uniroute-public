@@ -1246,6 +1246,17 @@ export interface PoolParity {
   auroraCount: number;
   jaccardBps: number;
   missingTop100: number;
+  // missingTop100 over the subgraph pools that hold liquidity. The subgraph
+  // keeps reporting TVL for pools emptied long ago and ranks them by it, so
+  // missingTop100 also counts pools with nothing to route through. V2 pools
+  // carry no liquidity field and all count as live, and so do pools of a
+  // TVL-bypass hook, whose liquidity sits outside the PoolManager and reads 0
+  // however much the hook holds.
+  // Blind spots: `liquidity` is in-range liquidity, so a pool whose positions
+  // are all out of range counts as not live even when it holds two-sided
+  // value, and a pool drained to dust stays live. missingTop100 keeps the
+  // unfiltered view next to it.
+  missingTop100Live: number;
   missingInAurora: number;
   extraInAurora: number;
   tvlDriftBpsP50: number;
@@ -1253,13 +1264,25 @@ export interface PoolParity {
   // top-TVL pool ids the subgraph has but Aurora lacks / vice versa, and
   // median-drift matched pools with both TVLs (id:subgraphTvl:auroraTvl).
   missingSample: string[];
+  missingLiveSample: string[];
   extraSample: string[];
   driftSample: string[];
 }
 
+function holdsLiquidity(
+  pool: AnySubgraphPool,
+  tvlBypassHooks: ReadonlySet<string> | undefined
+): boolean {
+  if ('hooks' in pool && tvlBypassHooks?.has(pool.hooks.toLowerCase())) {
+    return true;
+  }
+  return 'liquidity' in pool ? parsePositiveLiquidity(pool.liquidity) : true;
+}
+
 export function computePoolParity(
   subgraphPools: AnySubgraphPool[],
-  auroraPools: AnySubgraphPool[]
+  auroraPools: AnySubgraphPool[],
+  tvlBypassHooks: ReadonlySet<string> | undefined
 ): PoolParity {
   const subgraphById = new Map(
     subgraphPools.map(pool => [pool.id.toLowerCase(), pool])
@@ -1287,12 +1310,16 @@ export function computePoolParity(
   }
   const unionSize = subgraphById.size + auroraById.size - intersection || 1;
 
-  const top100 = [...subgraphById.values()]
-    .sort((a, b) => poolTvlUsd(b) - poolTvlUsd(a))
-    .slice(0, 100);
-  const missingTop100 = top100.filter(
-    pool => !auroraById.has(pool.id.toLowerCase())
-  ).length;
+  const subgraphByTvlDesc = [...subgraphById.values()].sort(
+    (a, b) => poolTvlUsd(b) - poolTvlUsd(a)
+  );
+  const liveSubgraphByTvlDesc = subgraphByTvlDesc.filter(pool =>
+    holdsLiquidity(pool, tvlBypassHooks)
+  );
+  const countMissing = (pools: AnySubgraphPool[]) =>
+    pools.filter(pool => !auroraById.has(pool.id.toLowerCase())).length;
+  const missingTop100 = countMissing(subgraphByTvlDesc.slice(0, 100));
+  const missingTop100Live = countMissing(liveSubgraphByTvlDesc.slice(0, 100));
 
   driftsBps.sort((a, b) => a.bps - b.bps);
   const medianIdx = Math.floor(driftsBps.length / 2);
@@ -1316,10 +1343,12 @@ export function computePoolParity(
     auroraCount: auroraById.size,
     jaccardBps: Math.round((intersection / unionSize) * 10000),
     missingTop100,
+    missingTop100Live,
     missingInAurora: subgraphById.size - intersection,
     extraInAurora: auroraById.size - intersection,
     tvlDriftBpsP50: Math.round(tvlDriftBpsP50),
     missingSample: topTvlSample(subgraphById.values(), auroraById),
+    missingLiveSample: topTvlSample(liveSubgraphByTvlDesc, auroraById),
     extraSample: topTvlSample(auroraById.values(), subgraphById),
     driftSample,
   };
@@ -1477,7 +1506,11 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     try {
       if (auroraResult.status === 'rejected') throw auroraResult.reason;
       const auroraPools = auroraResult.value;
-      const parity = computePoolParity(subgraphPools, auroraPools);
+      const parity = computePoolParity(
+        subgraphPools,
+        auroraPools,
+        getTvlBypassHookAddresses(this.chainId)
+      );
       this.metric.putMetric(
         'CachePools.parity.subgraph_count',
         parity.subgraphCount,
@@ -1503,6 +1536,12 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
         this.tags
       );
       this.metric.putMetric(
+        'CachePools.parity.missing_top100_live',
+        parity.missingTop100Live,
+        MetricLoggerUnit.Count,
+        this.tags
+      );
+      this.metric.putMetric(
         'CachePools.parity.extra_in_aurora',
         parity.extraInAurora,
         MetricLoggerUnit.Count,
@@ -1518,11 +1557,12 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
         `Aurora shadow parity ${targetKey(this.chainId, this.protocol)}: ` +
           `subgraph=${parity.subgraphCount} aurora=${parity.auroraCount} ` +
           `jaccardBps=${parity.jaccardBps} missingTop100=${parity.missingTop100} ` +
-          `tvlDriftBpsP50=${parity.tvlDriftBpsP50}`,
+          `tvlDriftBpsP50=${parity.tvlDriftBpsP50} missingTop100Live=${parity.missingTop100Live}`,
         {
           missingInAurora: parity.missingInAurora,
           extraInAurora: parity.extraInAurora,
           missingSample: parity.missingSample,
+          missingLiveSample: parity.missingLiveSample,
           extraSample: parity.extraSample,
           driftSample: parity.driftSample,
         }
@@ -1552,7 +1592,11 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
           NOOP_METRIC,
           dynamicHooks
         );
-        const servable = computePoolParity(servableSubgraph, servableAurora);
+        const servable = computePoolParity(
+          servableSubgraph,
+          servableAurora,
+          getTvlBypassHookAddresses(this.chainId)
+        );
         this.metric.putMetric(
           'CachePools.parity.servable_missing',
           servable.missingInAurora,
@@ -1575,11 +1619,12 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
           `Aurora servable parity ${targetKey(this.chainId, this.protocol)}: ` +
             `subgraph=${servable.subgraphCount} aurora=${servable.auroraCount} ` +
             `jaccardBps=${servable.jaccardBps} missingTop100=${servable.missingTop100} ` +
-            `tvlDriftBpsP50=${servable.tvlDriftBpsP50}`,
+            `tvlDriftBpsP50=${servable.tvlDriftBpsP50} missingTop100Live=${servable.missingTop100Live}`,
           {
             missingInAurora: servable.missingInAurora,
             extraInAurora: servable.extraInAurora,
             missingSample: servable.missingSample,
+            missingLiveSample: servable.missingLiveSample,
             extraSample: servable.extraSample,
             driftSample: servable.driftSample,
           }
