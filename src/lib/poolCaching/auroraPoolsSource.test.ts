@@ -49,6 +49,9 @@ class FakeMetric extends IMetric {
     value: number;
     tags?: Record<string, string>;
   }> = [];
+  // Which call emitted each key, so a test can pin the emission type.
+  readonly gaugeKeys = new Set<string>();
+  readonly putMetricKeys = new Set<string>();
 
   putDimensions(): void {}
   putProperties(): void {}
@@ -58,6 +61,15 @@ class FakeMetric extends IMetric {
     _unit?: MetricLoggerUnit,
     tags?: Record<string, string>
   ): void {
+    this.putMetricKeys.add(key);
+    this.emitted.push({key, value, tags});
+  }
+  override putGauge(
+    key: string,
+    value: number,
+    tags?: Record<string, string>
+  ): void {
+    this.gaugeKeys.add(key);
     this.emitted.push({key, value, tags});
   }
   setProperty(): void {}
@@ -565,6 +577,101 @@ describe('computePoolParity', () => {
     expect(parity.missingTop100).toBe(1);
     expect(parity.missingTop100Live).toBe(1);
   });
+
+  it('counts a junk-priced Aurora-only pool at the top in extraTop100 while missingTop100 stays 0', () => {
+    // The Arc V3 shape: Aurora admits a fake-USDC pool the subgraph never
+    // serves and values it at $27.6B, above every real pool.
+    const junk = v3Pool('0x70CDF71E240CC073DB471A94B9514A0AD54B0C48', 27.6e9);
+    const subgraph = [v3Pool('0xe1', 1000), v3Pool('0xe2', 900)];
+    const aurora = [junk, v3Pool('0xE1', 1000), v3Pool('0xe2', 900)];
+
+    const parity = computePoolParity(subgraph, aurora, undefined);
+    expect(parity.missingTop100).toBe(0);
+    expect(parity.extraTop100).toBe(1);
+    expect(parity.extraSample).toEqual([
+      '0x70cdf71e240cc073db471a94b9514a0ad54b0c48',
+    ]);
+  });
+
+  it('only counts Aurora extras inside its own top 100 by TVL', () => {
+    const shared = Array.from({length: 100}, (_, i) =>
+      v3Pool(`0xf${i}`, 1000 - i)
+    );
+    const extraAtRank101 = v3Pool('0xextra', 1);
+    expect(
+      computePoolParity(shared, [...shared, extraAtRank101], undefined)
+        .extraTop100
+    ).toBe(0);
+    const extraAtRank100 = v3Pool('0xextra', 850);
+    expect(
+      computePoolParity(
+        shared,
+        [...shared.slice(0, 99), extraAtRank100],
+        undefined
+      ).extraTop100
+    ).toBe(1);
+  });
+
+  it('reports the top-100 drift apart from a dust-dominated median', () => {
+    // 150 large pools that agree exactly and 150 dust pools Aurora values at
+    // half: the full median lands on dust, the top 100 are all large pools.
+    const large = Array.from({length: 150}, (_, i) =>
+      v3Pool(`0xa${i}`, 1_000_000 + i)
+    );
+    const dustSubgraph = Array.from({length: 150}, (_, i) =>
+      v3Pool(`0xd${i}`, 0.5)
+    );
+    const dustAurora = dustSubgraph.map(pool => v3Pool(pool.id, 0.25));
+
+    const parity = computePoolParity(
+      [...large, ...dustSubgraph],
+      [...large, ...dustAurora],
+      undefined
+    );
+    expect(parity.tvlDriftBpsP50).toBe(5000);
+    expect(parity.tvlDriftBpsTop100P50).toBe(0);
+  });
+
+  it('reports no top-100 drift, not 0, on empty inputs', () => {
+    const parity = computePoolParity([], [], undefined);
+    expect(parity.extraTop100).toBe(0);
+    expect(parity.tvlDriftBpsTop100P50).toBeUndefined();
+  });
+
+  it('reports no top-100 drift when no top-100 pool has a drift sample', () => {
+    // A shared pool the subgraph values at $0 has no drift sample, however
+    // far Aurora is from it. That must not read as perfect agreement.
+    const parity = computePoolParity(
+      [v3Pool('0xe1', 0)],
+      [v3Pool('0xe1', 1e9)],
+      undefined
+    );
+    expect(parity.missingTop100).toBe(0);
+    expect(parity.extraTop100).toBe(0);
+    expect(parity.tvlDriftBpsTop100P50).toBeUndefined();
+  });
+
+  it('counts equal-TVL pools at the cutoff the same way in any input order', () => {
+    // 100 shared pools and one Aurora-only pool, all at the same TVL: which
+    // one falls off at rank 101 must not depend on the source's row order.
+    const shared = Array.from({length: 100}, (_, i) =>
+      v3Pool(`0xb${String(i).padStart(3, '0')}`, 500)
+    );
+    const extra = v3Pool('0xa000', 500);
+    const extraFirst = computePoolParity(
+      shared,
+      [extra, ...shared],
+      undefined
+    ).extraTop100;
+    const extraLast = computePoolParity(
+      shared,
+      [...shared, extra],
+      undefined
+    ).extraTop100;
+    expect(extraFirst).toBe(extraLast);
+    // '0xa000' sorts before every '0xb…' id, so it keeps its top-100 place.
+    expect(extraFirst).toBe(1);
+  });
 });
 
 describe('AuroraSourcedProvider primary mode', () => {
@@ -758,6 +865,44 @@ describe('AuroraSourcedProvider shadow mode', () => {
         tags: {chainId: '1', protocol: String(Protocol.V3), mode: 'shadow'},
       },
     ]);
+  });
+
+  it('emits the reverse top-100 gap and the top-100 drift with the shadow tags', async () => {
+    const junk = v3Pool('0xjunk', 27.6e9);
+    const aurora = fakeProvider([[junk, v3Pool('0x1', 50)]]);
+    const subgraph = fakeProvider([[v3Pool('0x1', 100)]]);
+    const metric = new FakeMetric();
+
+    await mk(aurora, subgraph, metric).getPools();
+    await settlePendingAuroraShadowsForTesting();
+    const tags = {chainId: '1', protocol: String(Protocol.V3), mode: 'shadow'};
+    expect(metric.byKey('CachePools.parity.missing_top100')[0]!.value).toBe(0);
+    expect(metric.byKey('CachePools.parity.extra_top100')).toEqual([
+      {key: 'CachePools.parity.extra_top100', value: 1, tags},
+    ]);
+    expect(metric.byKey('CachePools.parity.tvl_drift_bps_top100_p50')).toEqual([
+      {key: 'CachePools.parity.tvl_drift_bps_top100_p50', value: 5000, tags},
+    ]);
+    // A gauge: a unit-less putMetric would land as an unallowlisted `.dist`.
+    expect(
+      metric.gaugeKeys.has('CachePools.parity.tvl_drift_bps_top100_p50')
+    ).toBe(true);
+    expect(
+      metric.putMetricKeys.has('CachePools.parity.tvl_drift_bps_top100_p50')
+    ).toBe(false);
+  });
+
+  it('does not emit the top-100 drift gauge without a drift sample', async () => {
+    const aurora = fakeProvider([[v3Pool('0x1', 1e9)]]);
+    const subgraph = fakeProvider([[v3Pool('0x1', 0)]]);
+    const metric = new FakeMetric();
+
+    await mk(aurora, subgraph, metric).getPools();
+    await settlePendingAuroraShadowsForTesting();
+    expect(metric.byKey('CachePools.parity.extra_top100')).toHaveLength(1);
+    expect(
+      metric.byKey('CachePools.parity.tvl_drift_bps_top100_p50')
+    ).toHaveLength(0);
   });
 
   it('counts a zero-liquidity pool of a registered TVL-bypass hook in the live gap', async () => {

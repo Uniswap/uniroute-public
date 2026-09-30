@@ -1289,7 +1289,20 @@ export interface PoolParity {
   missingTop100Live: number;
   missingInAurora: number;
   extraInAurora: number;
+  // The reverse of missingTop100: how many of Aurora's top 100 pools by TVL
+  // the subgraph set does not contain. missingTop100 cannot see a pool that
+  // only Aurora admits, so a junk-priced Aurora-only pool at the top of the
+  // ranking leaves it at 0. Blind spot: a pool both sources hold but that
+  // Aurora ranks far higher (a mispriced shared pool) counts in neither.
+  extraTop100: number;
   tvlDriftBpsP50: number;
+  // tvlDriftBpsP50 over the matched pools in the subgraph's top 100 by TVL.
+  // On a chain with a large long tail, dust pools set the full median, so it
+  // says little about the pools that ranking picks. Blind spots: it ranks by
+  // the subgraph's TVL, so a pool Aurora alone ranks high is not in it (see
+  // extraTop100). Undefined when no top-100 pool has a drift sample (no
+  // match, or a subgraph TVL of 0), so an empty sample never reads as parity.
+  tvlDriftBpsTop100P50: number | undefined;
   // Diagnostic samples so a parity gap is classifiable from logs alone:
   // top-TVL pool ids the subgraph has but Aurora lacks / vice versa, and
   // median-drift matched pools with both TVLs (id:subgraphTvl:auroraTvl).
@@ -1350,10 +1363,30 @@ export function computePoolParity(
     pools.filter(pool => !auroraById.has(pool.id.toLowerCase())).length;
   const missingTop100 = countMissing(subgraphByTvlDesc.slice(0, 100));
   const missingTop100Live = countMissing(liveSubgraphByTvlDesc.slice(0, 100));
+  // Ties break on the lowercase id, so equal-TVL pools at the cutoff give the
+  // same count on every sweep whatever order the source returned them in.
+  const auroraTop100 = [...auroraById.entries()]
+    .sort(
+      ([idA, a], [idB, b]) =>
+        poolTvlUsd(b) - poolTvlUsd(a) || (idA < idB ? -1 : idA > idB ? 1 : 0)
+    )
+    .slice(0, 100)
+    .map(([, pool]) => pool);
+  const extraTop100 = auroraTop100.filter(
+    pool => !subgraphById.has(pool.id.toLowerCase())
+  ).length;
 
   driftsBps.sort((a, b) => a.bps - b.bps);
   const medianIdx = Math.floor(driftsBps.length / 2);
-  const tvlDriftBpsP50 = driftsBps.length > 0 ? driftsBps[medianIdx]!.bps : 0;
+  const tvlDriftBpsP50 = upperMedianBps(driftsBps);
+  const subgraphTop100Ids = new Set(
+    subgraphByTvlDesc.slice(0, 100).map(pool => pool.id.toLowerCase())
+  );
+  const top100Drifts = driftsBps.filter(drift =>
+    subgraphTop100Ids.has(drift.id)
+  );
+  const tvlDriftBpsTop100P50 =
+    top100Drifts.length > 0 ? upperMedianBps(top100Drifts) : undefined;
 
   const topTvlSample = (
     pools: Iterable<AnySubgraphPool>,
@@ -1376,7 +1409,12 @@ export function computePoolParity(
     missingTop100Live,
     missingInAurora: subgraphById.size - intersection,
     extraInAurora: auroraById.size - intersection,
+    extraTop100,
     tvlDriftBpsP50: Math.round(tvlDriftBpsP50),
+    tvlDriftBpsTop100P50:
+      tvlDriftBpsTop100P50 === undefined
+        ? undefined
+        : Math.round(tvlDriftBpsTop100P50),
     missingSample: topTvlSample(subgraphById.values(), auroraById),
     missingLiveSample: topTvlSample(liveSubgraphByTvlDesc, auroraById),
     extraSample: topTvlSample(auroraById.values(), subgraphById),
@@ -1387,6 +1425,11 @@ export function computePoolParity(
 // Ids per diagnostic sample in the parity result/log — enough to classify a
 // gap against the DB by hand, small enough to keep the log line bounded.
 const SAMPLE_SIZE = 5;
+
+// Upper median of drifts already sorted ascending; 0 when there are none.
+function upperMedianBps(sortedDrifts: ReadonlyArray<{bps: number}>): number {
+  return sortedDrifts[Math.floor(sortedDrifts.length / 2)]?.bps ?? 0;
+}
 
 // --- Wrapper provider (the seam installed into ChainProtocol.provider) ---
 
@@ -1583,11 +1626,28 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
         MetricLoggerUnit.None,
         this.tags
       );
+      this.metric.putMetric(
+        'CachePools.parity.extra_top100',
+        parity.extraTop100,
+        MetricLoggerUnit.Count,
+        this.tags
+      );
+      // A gauge, not putMetric: a unit-less putMetric lands as an
+      // allowlist-gated `.dist`, and this is one level per sweep. Not emitted
+      // without a sample, so the series shows a gap rather than a false 0.
+      if (parity.tvlDriftBpsTop100P50 !== undefined) {
+        this.metric.putGauge(
+          'CachePools.parity.tvl_drift_bps_top100_p50',
+          parity.tvlDriftBpsTop100P50,
+          this.tags
+        );
+      }
       this.logger.info(
         `Aurora shadow parity ${targetKey(this.chainId, this.protocol)}: ` +
           `subgraph=${parity.subgraphCount} aurora=${parity.auroraCount} ` +
           `jaccardBps=${parity.jaccardBps} missingTop100=${parity.missingTop100} ` +
-          `tvlDriftBpsP50=${parity.tvlDriftBpsP50} missingTop100Live=${parity.missingTop100Live}`,
+          `tvlDriftBpsP50=${parity.tvlDriftBpsP50} missingTop100Live=${parity.missingTop100Live} ` +
+          `extraTop100=${parity.extraTop100} tvlDriftBpsTop100P50=${parity.tvlDriftBpsTop100P50 ?? 'n/a'}`,
         {
           missingInAurora: parity.missingInAurora,
           extraInAurora: parity.extraInAurora,
@@ -1649,7 +1709,8 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
           `Aurora servable parity ${targetKey(this.chainId, this.protocol)}: ` +
             `subgraph=${servable.subgraphCount} aurora=${servable.auroraCount} ` +
             `jaccardBps=${servable.jaccardBps} missingTop100=${servable.missingTop100} ` +
-            `tvlDriftBpsP50=${servable.tvlDriftBpsP50} missingTop100Live=${servable.missingTop100Live}`,
+            `tvlDriftBpsP50=${servable.tvlDriftBpsP50} missingTop100Live=${servable.missingTop100Live} ` +
+            `extraTop100=${servable.extraTop100} tvlDriftBpsTop100P50=${servable.tvlDriftBpsTop100P50 ?? 'n/a'}`,
           {
             missingInAurora: servable.missingInAurora,
             extraInAurora: servable.extraInAurora,
