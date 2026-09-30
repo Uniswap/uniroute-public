@@ -802,6 +802,39 @@ describe('AuroraSourcedProvider shadow mode', () => {
     expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
   });
 
+  it('names the failing combo in the shadow fetch failure log', async () => {
+    const warnings: Array<{message: string; fields: unknown}> = [];
+    const logger: Logger = {
+      ...noopLogger,
+      warn: (message, fields) => warnings.push({message, fields}),
+    };
+    const provider = new AuroraSourcedProvider(
+      'shadow',
+      fakeProvider<V3SubgraphPool>([
+        new Error('canceling statement due to statement timeout'),
+      ]),
+      fakeProvider([[v3Pool('0x2', 50)]]),
+      42161,
+      Protocol.V3,
+      0.5,
+      0,
+      logger,
+      new FakeMetric()
+    );
+
+    await provider.getPools();
+    await settlePendingAuroraShadowsForTesting();
+    expect(warnings).toEqual([
+      {
+        message: 'Aurora shadow fetch failed',
+        fields: {
+          target: '42161:V3',
+          error: 'canceling statement due to statement timeout',
+        },
+      },
+    ]);
+  });
+
   it('returns the subgraph result without waiting for a slow Aurora fetch', async () => {
     const aurora = deferredProvider<V3SubgraphPool>();
     const subgraph = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
@@ -1852,6 +1885,7 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
     const CHAIN_ID_BASE = 8453;
     const CHAIN_ID_INK = 57073;
     const CHAIN_ID_MONAD_TESTNET = 10143;
+    const UNICHAIN_V2 = targetKey(130, Protocol.V2);
     const expected = new Set(
       createChainProtocols(noopLogger, new FakeMetric())
         .filter(cp =>
@@ -1864,6 +1898,7 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
             cp.chainId !== CHAIN_ID_MONAD_TESTNET
         )
         .map(cp => targetKey(cp.chainId, cp.protocol))
+        .filter(key => key !== UNICHAIN_V2)
     );
     expect(new Set(AURORA_SUPPORTED_TARGETS)).toEqual(expected);
     for (const key of [
@@ -1874,6 +1909,7 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
       '57073:V3',
       '57073:V2',
       '10143:V2',
+      '130:V2',
     ]) {
       expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(false);
     }

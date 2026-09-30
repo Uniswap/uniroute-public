@@ -175,16 +175,17 @@ const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
 // This mirrors createChainProtocols' V2/V3/V4 matrix. Base's 15.2M-row full
 // fetch needs SQL admission pushdown first; Ink and Monad testnet have no
-// Aurora pool rows yet. Unichain V2 is the largest supported fetch (~1.05M
-// rows), so shadow-mode RSS needs watching before any primary flip.
+// Aurora pool rows yet. Unichain V2 is left out for the same reason as Base:
+// its ~1.05M pairs, all but ~100 of them empty spam, make the full read
+// exceed the cron's 30s statement timeout on most sweeps.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
   readonly [Protocol, readonly number[]]
 > = [
   [
     Protocol.V2,
     [
-      1, 42161, 137, 10, 56, 43114, 81457, 480, 130, 1868, 143, 4217, 196,
-      59144, 4326, 4663, 5042,
+      1, 42161, 137, 10, 56, 43114, 81457, 480, 1868, 143, 4217, 196, 59144,
+      4326, 4663, 5042,
     ],
   ],
   [
@@ -1638,6 +1639,7 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
         this.tags
       );
       this.logger.warn('Aurora shadow fetch failed', {
+        target: targetKey(this.chainId, this.protocol),
         error: err instanceof Error ? err.message : String(err),
       });
     }
