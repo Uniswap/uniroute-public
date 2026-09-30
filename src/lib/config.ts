@@ -172,6 +172,15 @@ export interface IUniRouteServiceConfig {
 
     PoolsCacheEntryTtlSecondsByChain?: Record<number, number>;
   };
+  FeeProbe: {
+
+    // per token, so the on-chain fee detector runs at most once per token
+    // per TTL.
+    CacheTtlSeconds: number;
+    // Milliseconds a cache-miss token fetch waits for one probe before the
+    // token is served without a fee.
+    DeadlineMs: number;
+  };
   PoolDiscovery: {
     // Cache NO_HOOKS pool lists under distinct keys instead of bypassing the
     // pools-for-tokens cache (NO_HOOKS only — HOOKS_ONLY lists are
@@ -370,6 +379,10 @@ export const getUniRouteSyncConfig = (
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
     },
+    FeeProbe: {
+      CacheTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      DeadlineMs: __PLACEHOLDER__,
+    },
     PoolDiscovery: {
       PoolsForTokensHooksVariantCacheEnabled:
         getPoolsForTokensHooksVariantCacheEnabled(),
@@ -486,6 +499,10 @@ export const getQuickRouteSyncConfig = (
       AllPoolsCacheEntryTtlSeconds: allPoolsCacheEntryTtlSeconds,
       TokenInOutPoolsCacheEntryTtlSeconds: tokenInOutPoolsCacheEntryTtlSeconds,
       PoolsCacheEntryTtlSecondsByChain: poolsCacheEntryTtlSecondsByChain,
+    },
+    FeeProbe: {
+      CacheTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      DeadlineMs: __PLACEHOLDER__,
     },
     PoolDiscovery: {
       PoolsForTokensHooksVariantCacheEnabled:
