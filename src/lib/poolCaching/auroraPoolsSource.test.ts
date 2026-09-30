@@ -1695,6 +1695,8 @@ describe('AuroraV2PoolsProvider', () => {
       tvlUsd: number;
       token0PriceUsd: number | null;
       token1PriceUsd: number | null;
+      token0HasStalePrice: boolean;
+      token1HasStalePrice: boolean;
     }> = {}
   ) {
     return {
@@ -1712,6 +1714,8 @@ describe('AuroraV2PoolsProvider', () => {
           : overrides.token0PriceUsd,
       token1PriceUsd:
         overrides.token1PriceUsd === undefined ? 1 : overrides.token1PriceUsd,
+      token0HasStalePrice: overrides.token0HasStalePrice ?? false,
+      token1HasStalePrice: overrides.token1HasStalePrice ?? false,
       token0Decimals: 18,
       token1Decimals: 6,
       token0Symbol: 'WNATIVE',
@@ -1867,6 +1871,194 @@ describe('AuroraV2PoolsProvider', () => {
 
     expect(pools.map(pool => pool.id)).toEqual(['0xbothsides']);
     expect(pools[0]!.reserveUSD).toBe(101);
+    expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'untracked_usd'}),
+        }),
+      ])
+    );
+  });
+});
+
+describe('AuroraV2PoolsProvider stale-price side', () => {
+  const CHAIN_ID_TEMPO = 4217;
+  // Tempo TIMECOIN/USDC.e as prod Aurora stored it on 2026-09-30: TIMECOIN's
+  // price row is 29.7h old, USDC.e is fresh, and the fresh side holds $12,549.
+  // The subgraph reported this pair's reserveUSD as 25,098.70.
+  const TIMECOIN = '0x20C00000000000000000000000000000000000A1';
+  const USDC_E = '0x20C000000000000000000000B9537d11c60E8b50';
+
+  function tempoRow(
+    overrides: Partial<{
+      pairAddress: string;
+      tvlUsd: number;
+      token0PriceUsd: number | null;
+      token1PriceUsd: number | null;
+      token0HasStalePrice: boolean;
+      token1HasStalePrice: boolean;
+      reserve0: string;
+    }> = {}
+  ) {
+    return {
+      pairAddress:
+        overrides.pairAddress ?? '0x88EfeFDDEB6925b53A8D959DaD64D952d2045779',
+      token0Address: TIMECOIN,
+      token1Address: USDC_E,
+      reserve0: overrides.reserve0 ?? '338578000000000000000000000',
+      reserve1: '12549000000',
+      totalSupply: '1000000000000000000',
+      tvlUsd: overrides.tvlUsd ?? 12549,
+      token0PriceUsd:
+        overrides.token0PriceUsd === undefined
+          ? null
+          : overrides.token0PriceUsd,
+      token1PriceUsd:
+        overrides.token1PriceUsd === undefined ? 1 : overrides.token1PriceUsd,
+      token0HasStalePrice: overrides.token0HasStalePrice ?? true,
+      token1HasStalePrice: overrides.token1HasStalePrice ?? false,
+      token0Decimals: 18,
+      token1Decimals: 6,
+      token0Symbol: 'TIMECOIN',
+      token1Symbol: 'USDC.e',
+      token0Name: 'TIMECOIN',
+      token1Name: 'USDC.e',
+      stateAsOfTimestamp: new Date(),
+    };
+  }
+
+  function tempoProvider(
+    rows: ReturnType<typeof tempoRow>[],
+    trackedEthThreshold: number,
+    untrackedUsdThreshold: number,
+    metric = new FakeMetric()
+  ) {
+    const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(CHAIN_ID_TEMPO)!;
+    return new AuroraV2PoolsProvider(
+      CHAIN_ID_TEMPO,
+      trackedEthThreshold,
+      untrackedUsdThreshold,
+      {
+        routablePools: {listAllV2RoutablePools: async () => rows},
+        prices: {
+          batchGet: async () =>
+            new Map([
+              [
+                `${CHAIN_ID_TEMPO}_${wrappedNative}`,
+                {
+                  chainId: CHAIN_ID_TEMPO,
+                  tokenAddress: undefined as never,
+                  priceUsd: 1,
+                  timestamp: new Date(),
+                  updatedAt: new Date(),
+                },
+              ],
+            ]),
+        },
+        logger: noopLogger,
+        metric,
+      }
+    );
+  }
+
+  it('values an idle side at the fresh side, restoring the subgraph reserveUSD', async () => {
+    const metric = new FakeMetric();
+    const pools = await tempoProvider(
+      [tempoRow()],
+      0,
+      Number.MAX_VALUE,
+      metric
+    ).getPools();
+
+    expect(pools).toHaveLength(1);
+    expect(pools[0]!.id).toBe('0x88efefddeb6925b53a8d959dad64d952d2045779');
+    expect(pools[0]!.token0.id).toBe(TIMECOIN.toLowerCase());
+    expect(pools[0]!.reserveUSD).toBe(25098);
+    // The tracked number already doubled a one-sided pool; it does not change.
+    expect(pools[0]!.reserve).toBe(25098);
+    expect(metric.byKey('CachePools.aurora.implied_stale_side')).toEqual([
+      {
+        key: 'CachePools.aurora.implied_stale_side',
+        value: 1,
+        tags: {chainId: String(CHAIN_ID_TEMPO), protocol: String(Protocol.V2)},
+      },
+    ]);
+  });
+
+  it('keeps an idle side with a zero reserve at 0, whatever its old price row says', async () => {
+    const metric = new FakeMetric();
+    const pools = await tempoProvider(
+      [tempoRow({reserve0: '0'})],
+      0,
+      Number.MAX_VALUE,
+      metric
+    ).getPools();
+
+    expect(pools[0]!.reserveUSD).toBe(12549);
+    expect(metric.byKey('CachePools.aurora.implied_stale_side')).toEqual([]);
+  });
+
+  it('keeps a never-priced side at 0, so the one-sided sum is not doubled', async () => {
+    const metric = new FakeMetric();
+    const pools = await tempoProvider(
+      [tempoRow({token0HasStalePrice: false})],
+      0,
+      Number.MAX_VALUE,
+      metric
+    ).getPools();
+
+    expect(pools[0]!.reserveUSD).toBe(12549);
+    expect(metric.byKey('CachePools.aurora.implied_stale_side')).toEqual([]);
+  });
+
+  it('leaves a pair with both sides fresh unchanged', async () => {
+    const pools = await tempoProvider(
+      [
+        tempoRow({
+          token0PriceUsd: 0.00003706,
+          token0HasStalePrice: false,
+          tvlUsd: 25098,
+        }),
+      ],
+      0,
+      Number.MAX_VALUE
+    ).getPools();
+
+    expect(pools[0]!.reserveUSD).toBe(25098);
+  });
+
+  it('implies nothing when neither side is fresh: there is no anchor to copy', async () => {
+    const metric = new FakeMetric();
+    const pools = await tempoProvider(
+      [tempoRow({token1PriceUsd: null, token1HasStalePrice: true, tvlUsd: 0})],
+      -1,
+      -1,
+      metric
+    ).getPools();
+
+    expect(pools[0]!.reserveUSD).toBe(0);
+    expect(metric.byKey('CachePools.aurora.implied_stale_side')).toEqual([]);
+  });
+
+  it('admits an idle pair through the untracked family on the implied value only', async () => {
+    // Tracked threshold out of reach; untracked bar at $20,000. The implied
+    // $25,098 clears it. The same pair with a never-priced side ($12,549)
+    // does not.
+    const metric = new FakeMetric();
+    const pools = await tempoProvider(
+      [
+        tempoRow(),
+        tempoRow({pairAddress: '0xNEVERPRICED', token0HasStalePrice: false}),
+      ],
+      Number.MAX_VALUE,
+      20000,
+      metric
+    ).getPools();
+
+    expect(pools.map(pool => pool.id)).toEqual([
+      '0x88efefddeb6925b53a8d959dad64d952d2045779',
+    ]);
     expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

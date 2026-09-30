@@ -1086,6 +1086,7 @@ export class AuroraV2PoolsProvider
       untracked_usd: 0,
     };
     const result: V2SubgraphPool[] = [];
+    let impliedStaleSide = 0;
     for (const pool of pools) {
       const token0 = pool.token0Address.toLowerCase();
       const token1 = pool.token1Address.toLowerCase();
@@ -1111,7 +1112,26 @@ export class AuroraV2PoolsProvider
           ? 2 * pool.tvlUsd
           : 0;
       const tvlNative = trackedUsd / nativePrice;
-      const untrackedUsd = pool.tvlUsd;
+      // A side whose token went idle has a price row older than the
+      // freshness window, so Aurora prices it at 0 while the subgraph keeps
+      // its last derived price and counts it in reserveUSD. Both sides of a
+      // constant-product pair hold equal value at spot, so value that side at
+      // the fresh side's USD value. A token with no price row at all stays at
+      // 0: the subgraph cannot price it either, so its reserveUSD is the
+      // one-sided sum. The tracked number above already doubles every
+      // one-sided pool, so only the untracked number changes. The equal-value
+      // argument needs a nonzero reserve on the idle side: a side drained to 0
+      // holds nothing, whatever its old price row says.
+      const staleSideImplied =
+        (pool.token0PriceUsd !== null &&
+          pool.token1PriceUsd === null &&
+          pool.token1HasStalePrice &&
+          parsePositiveLiquidity(pool.reserve1)) ||
+        (pool.token1PriceUsd !== null &&
+          pool.token0PriceUsd === null &&
+          pool.token0HasStalePrice &&
+          parsePositiveLiquidity(pool.reserve0));
+      const untrackedUsd = staleSideImplied ? 2 * pool.tvlUsd : pool.tvlUsd;
       let family: V2AdmissionFamily | undefined;
       if (token0 === fei || token1 === fei) {
         family = 'fei';
@@ -1127,6 +1147,7 @@ export class AuroraV2PoolsProvider
       }
       if (!family) continue;
       admittedByFamily[family]++;
+      if (staleSideImplied) impliedStaleSide++;
       result.push({
         id: pool.pairAddress.toLowerCase(),
         token0: {id: token0},
@@ -1146,6 +1167,14 @@ export class AuroraV2PoolsProvider
         count,
         MetricLoggerUnit.Count,
         {chainId: String(this.chainId), protocol: String(Protocol.V2), family}
+      );
+    }
+    if (impliedStaleSide > 0) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.implied_stale_side',
+        impliedStaleSide,
+        MetricLoggerUnit.Count,
+        {chainId: String(this.chainId), protocol: String(Protocol.V2)}
       );
     }
     return result;
