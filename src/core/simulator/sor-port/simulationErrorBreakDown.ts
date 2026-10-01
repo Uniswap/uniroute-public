@@ -20,19 +20,19 @@ const SLIPPAGE_ERROR_SELECTORS = new Set([
 
 const INSUFFICIENT_TOKEN_SELECTOR = '0x675cae38'; // InsufficientToken()
 
-// Error(string) payloads (selector 0x08c379a0) matched on the full
-// ABI-encoded blob since the revert string carries the classification.
-const ERROR_STRING_PAYLOAD_STATUSES: Record<string, SimulationStatus> = {
-  // UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT
-  '0x08c379a000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000025556e697377617056323a20494e53554646494349454e545f4f55545055545f414d4f554e54000000000000000000000000000000000000000000000000000000':
-    SimulationStatus.SLIPPAGE_TOO_LOW,
-  // IIA
-  '0x08c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000034949410000000000000000000000000000000000000000000000000000000000':
-    SimulationStatus.SLIPPAGE_TOO_LOW,
-  // TRANSFER_FROM_FAILED
-  '0x08c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000145452414e534645525f46524f4d5f4641494c4544000000000000000000000000':
-    SimulationStatus.TRANSFER_FROM_FAILED,
-};
+const ERROR_STRING_SELECTOR = '0x08c379a0';
+
+function decodeErrorString(revertData: string): string | undefined {
+  try {
+    const [message] = utils.defaultAbiCoder.decode(
+      ['string'],
+      `0x${revertData.slice(10)}`
+    );
+    return typeof message === 'string' ? message : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function breakDownSimulationError(
   tokenInAddress: string,
@@ -45,12 +45,24 @@ export function breakDownSimulationError(
 
   const revertData = data.toLowerCase();
 
-  const errorStringStatus = ERROR_STRING_PAYLOAD_STATUSES[revertData];
-  if (errorStringStatus) {
-    return errorStringStatus;
-  }
-
   const selector = revertData.slice(0, 10);
+
+  if (selector === ERROR_STRING_SELECTOR) {
+    const message = decodeErrorString(revertData);
+    if (!message) {
+      return SimulationStatus.FAILED;
+    }
+    if (message.includes('TRANSFER_FROM_FAILED') || message === 'STF') {
+      return SimulationStatus.TRANSFER_FROM_FAILED;
+    }
+    if (
+      message === 'UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT' ||
+      message === 'IIA'
+    ) {
+      return SimulationStatus.SLIPPAGE_TOO_LOW;
+    }
+    return SimulationStatus.FAILED;
+  }
 
   if (SLIPPAGE_ERROR_SELECTORS.has(selector)) {
     return SimulationStatus.SLIPPAGE_TOO_LOW;

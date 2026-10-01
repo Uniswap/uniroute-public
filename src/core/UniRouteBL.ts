@@ -85,7 +85,11 @@ import {getGasToken} from '../lib/tokenUtils';
 import {usdGasTokensByChain} from './gas/gas-helpers';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
-import {ISimulator, SimulationStatus} from './simulator/ISimulator';
+import {
+  isSimulationError,
+  ISimulator,
+  SimulationStatus,
+} from './simulator/ISimulator';
 import {ResolvedStateOverride} from './simulator/ResolvedStateOverride';
 import {
   StateOverrideResolver,
@@ -3014,8 +3018,7 @@ export class UniRouteBL implements IUniRoutedBL {
       debugInfo: debugInfo,
       routeCandidates,
       simulationStatus: quoteSplit.simulationResult?.status.toString(),
-      simulationError:
-        quoteSplit.simulationResult?.status === SimulationStatus.FAILED,
+      simulationError: isSimulationError(quoteSplit.simulationResult?.status),
       simulationDescription: quoteSplit.simulationResult?.description,
       methodParameters: new MethodParameters({
         to: quoteSplit.swapInfo?.methodParameters?.to,
