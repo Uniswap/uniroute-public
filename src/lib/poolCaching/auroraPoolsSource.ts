@@ -214,11 +214,20 @@ export const AURORA_SUPPORTED_TARGETS: ReadonlySet<string> = new Set(
 
 export type AuroraTargetMode = 'shadow' | 'primary';
 
+// Why a `*` in the guard targets was rejected: the environment says prod, or
+// no environment source is set at all.
+export type TvlGuardWildcardRejection =
+  | 'wildcard_in_prod'
+  | 'wildcard_unknown_environment';
+
 export interface AuroraPoolsSourceConfig {
   // 'all' (env value "*") or a set of `${chainId}:${PROTOCOL}` keys.
   shadowTargets: 'all' | ReadonlySet<string>;
   primaryTargets: 'all' | ReadonlySet<string>;
   tvlGuardTargets: 'all' | ReadonlySet<string>;
+  // Prod enables the guard per combo after its shadow soak; rejecting `*`
+  // keeps an all-combo typo in shadow everywhere and makes it observable.
+  tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
   minPoolCountRatio: number;
   // Absolute per-target pool-count floor for PRIMARY mode, keyed by
   // targetKey(). A primary result below its floor falls back to the subgraph
@@ -297,9 +306,13 @@ export function parseMinPoolCountByTarget(raw: string | undefined): {
 
 // Returns undefined when neither target env is set — the feature is fully off
 // and no Aurora client is created.
-export function auroraPoolsSourceConfigFromEnv():
-  | AuroraPoolsSourceConfig
-  | undefined {
+export function auroraPoolsSourceConfigFromEnv(
+  environments: readonly (string | undefined)[] = [
+    process.env.DD_ENV,
+    process.env.ENVIRONMENT,
+    process.env.ENV,
+  ]
+): AuroraPoolsSourceConfig | undefined {
   const shadowRaw = process.env.POOL_CACHING_AURORA_SHADOW_TARGETS;
   const primaryRaw = process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
   if (!shadowRaw && !primaryRaw) return undefined;
@@ -309,12 +322,34 @@ export function auroraPoolsSourceConfigFromEnv():
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET
   );
   const parsedRatio = ratioRaw ? Number(ratioRaw) : NaN;
+  const tvlGuardRaw = process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS;
+  const parsedTvlGuardTargets = tvlGuardRaw
+    ?.split(',')
+    .some(entry => entry.trim() === '*')
+    ? 'all'
+    : parseTargets(tvlGuardRaw);
+  const setEnvironments = environments
+    .map(value => value?.trim().toLowerCase())
+    .filter((value): value is string => Boolean(value));
+  // This safety gate keeps a wildcard in shadow when the environment is
+  // unknown or any source says prod, including conflicting env values.
+  const tvlGuardTargetsWildcardRejection:
+    | TvlGuardWildcardRejection
+    | undefined =
+    parsedTvlGuardTargets !== 'all'
+      ? undefined
+      : setEnvironments.includes('prod')
+        ? 'wildcard_in_prod'
+        : setEnvironments.length === 0
+          ? 'wildcard_unknown_environment'
+          : undefined;
   return {
     shadowTargets: parseTargets(shadowRaw),
     primaryTargets: parseTargets(primaryRaw),
-    tvlGuardTargets: parseTargets(
-      process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS
-    ),
+    tvlGuardTargets: tvlGuardTargetsWildcardRejection
+      ? new Set()
+      : parsedTvlGuardTargets,
+    tvlGuardTargetsWildcardRejection,
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
         ? parsedRatio
@@ -748,6 +783,7 @@ abstract class BaseAuroraPoolsProvider<
   protected emitTvlGuarded(
     protocol: Protocol,
     guardedByReason: Record<TvlGuardReason, number>,
+    trustedBothAnchor: number,
     anchorTokens: ReadonlySet<string> | undefined,
     rankedPools: Array<{id: string; raw: number; guarded: number}>
   ): void {
@@ -761,6 +797,19 @@ abstract class BaseAuroraPoolsProvider<
           chainId: String(this.chainId),
           protocol: String(protocol),
           reason,
+          applied: String(this.applyTvlGuard),
+        }
+      );
+    }
+    if (trustedBothAnchor > 0) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.tvl_guard_trusted',
+        trustedBothAnchor,
+        MetricLoggerUnit.Count,
+        {
+          chainId: String(this.chainId),
+          protocol: String(protocol),
+          reason: 'both_anchor',
           applied: String(this.applyTvlGuard),
         }
       );
@@ -929,6 +978,7 @@ export class AuroraV4PoolsProvider
       side_imbalance: 0,
       unanchored_one_side: 0,
     };
+    let trustedBothAnchor = 0;
     for (const pool of pools) {
       const hooks = (pool.hooksAddress ?? ZERO_ADDRESS).toLowerCase();
       const token0 = pool.token0Address.toLowerCase();
@@ -941,6 +991,7 @@ export class AuroraV4PoolsProvider
         capUsd
       );
       if (guarded.reason) guardedByReason[guarded.reason]++;
+      if (guarded.trusted === 'both_anchor') trustedBothAnchor++;
       // SQL tvlUsd counts only sides with a fresh price row. Fresh launchpad
       // tokens have none, so their pools (whole token supply vs a near-empty
       // quote side) would compute ≈$0 and fail admission even though the
@@ -1051,6 +1102,7 @@ export class AuroraV4PoolsProvider
     this.emitTvlGuarded(
       Protocol.V4,
       guardedByReason,
+      trustedBothAnchor,
       anchorTokens,
       rankedPools
     );
@@ -1105,6 +1157,7 @@ export class AuroraV3PoolsProvider
       side_imbalance: 0,
       unanchored_one_side: 0,
     };
+    let trustedBothAnchor = 0;
     for (const pool of pools) {
       // Same order as V4: guard the priced-side TVL, then add the capped
       // implied top-up for an unpriced side.
@@ -1114,6 +1167,7 @@ export class AuroraV3PoolsProvider
         capUsd
       );
       if (guarded.reason) guardedByReason[guarded.reason]++;
+      if (guarded.trusted === 'both_anchor') trustedBothAnchor++;
       const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
       if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
       const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
@@ -1189,6 +1243,7 @@ export class AuroraV3PoolsProvider
     this.emitTvlGuarded(
       Protocol.V3,
       guardedByReason,
+      trustedBothAnchor,
       anchorTokens,
       rankedPools
     );
@@ -1248,6 +1303,7 @@ export class AuroraV2PoolsProvider
       side_imbalance: 0,
       unanchored_one_side: 0,
     };
+    let trustedBothAnchor = 0;
     for (const pool of pools) {
       const token0 = pool.token0Address.toLowerCase();
       const token1 = pool.token1Address.toLowerCase();
@@ -1257,6 +1313,7 @@ export class AuroraV2PoolsProvider
         capUsd
       );
       if (guarded.reason) guardedByReason[guarded.reason]++;
+      if (guarded.trusted === 'both_anchor') trustedBothAnchor++;
       const pricedTvlUsd = this.applyTvlGuard ? guarded.tvlUsd : pool.tvlUsd;
       // The V2 subgraph carries two TVL numbers and V2SubgraphProvider uses
       // each for one job. trackedReserveETH DOUBLES the tracked side when only
@@ -1359,6 +1416,7 @@ export class AuroraV2PoolsProvider
     this.emitTvlGuarded(
       Protocol.V2,
       guardedByReason,
+      trustedBothAnchor,
       anchorTokens,
       rankedPools
     );
@@ -1484,21 +1542,43 @@ export type TvlGuardInput = {
   tvlUsd: number;
 };
 
+// The guard trusts an anchor's fresh price outright. Each address must be
+// the canonical token holding the chain's real liquidity for that symbol,
+// never a same-symbol look-alike (Polygon canonical_tokens has many fake
+// "USDT" entries).
+export const TVL_GUARD_EXTRA_ANCHOR_TOKENS_BY_CHAIN: {
+  [chainId: number]: ReadonlySet<string>;
+} = {
+  [SdkChainId.OPTIMISM]: new Set([
+    '0xd4dd9e2f021bb459d5a5f6c24c12fe09c5d45553', // ZCHF (Frankencoin)
+  ]),
+  [SdkChainId.POLYGON]: new Set([
+    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f', // USDT0
+  ]),
+  [SdkChainId.CELO]: new Set([
+    '0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73', // EURm (Mento Euro)
+    '0xe8537a3d056da446677b9e9d6c5db704eaab4787', // BRLm (Mento Brazilian Real)
+    '0x456a3d042c0dbd3db53d5489e98dfb038553b0d0', // KESm (Mento Kenyan Shilling)
+  ]),
+};
+
 /**
  * Tokens whose fresh price the guard trusts on its own: the chain's major
- * tokens (`getMajorTokens`), its wrapped native and the zero address. Returns
- * undefined when the chain has no major-token entry; the guard then skips
- * only its one-side check, which is the one that needs anchors.
+ * tokens (`getMajorTokens`), canonical guard-only anchors, its wrapped native
+ * and the zero address. Returns undefined when the chain has neither majors
+ * nor guard-only anchors; the guard then skips only its one-side check.
  */
 export function tvlGuardAnchorTokens(
   chainId: number,
   majorTokens: (chainId: number) => Iterable<string> = getMajorTokens
 ): ReadonlySet<string> | undefined {
   const majors = [...majorTokens(chainId)].map(token => token.toLowerCase());
-  if (majors.length === 0) return undefined;
+  const extras = TVL_GUARD_EXTRA_ANCHOR_TOKENS_BY_CHAIN[chainId];
+  if (majors.length === 0 && !extras?.size) return undefined;
   const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(chainId);
   return new Set([
     ...majors,
+    ...[...(extras ?? [])].map(token => token.toLowerCase()),
     ZERO_ADDRESS,
     ...(wrappedNative ? [wrappedNative] : []),
   ]);
@@ -1509,10 +1589,13 @@ export function tvlGuardAnchorTokens(
  * shadow to measure its effect while serving raw TVL.
  *
  * A side counts as priced only when its computed value is at least $1. With
- * two priced sides, cap raw TVL at eleven times the smaller side, but never
- * below min(raw TVL, capUsd). With one priced side, cap at capUsd only when
- * anchor tokens are known and that side is not an anchor. With neither side
- * priced, leave raw TVL unchanged. Report a reason only when TVL falls.
+ * two priced sides, trust the raw TVL when both tokens are anchors: two
+ * trusted prices can describe a real out-of-range pool. Report that trust
+ * when raw TVL exceeds the imbalance threshold. Otherwise cap raw
+ * TVL at eleven times the smaller side, but never below min(raw TVL, capUsd).
+ * With one priced side, cap at capUsd only when anchor tokens are known and
+ * that side is not an anchor. With neither side priced, leave raw TVL
+ * unchanged. Report a reason only when TVL falls.
  *
  * A malformed or non-finite side counts as $0. Providers set capUsd to at
  * least $2,500 and above their native-unit admission floor, so a guard cannot
@@ -1522,7 +1605,11 @@ export function guardPricedTvlUsd(
   pool: TvlGuardInput,
   anchorTokens: ReadonlySet<string> | undefined,
   capUsd: number
-): {tvlUsd: number; reason: TvlGuardReason | undefined} {
+): {
+  tvlUsd: number;
+  reason: TvlGuardReason | undefined;
+  trusted?: 'both_anchor';
+} {
   const sideUsd = (
     amount: string,
     decimals: number | null,
@@ -1538,6 +1625,15 @@ export function guardPricedTvlUsd(
   const priced0 = usd0 !== undefined && usd0 >= MIN_PRICED_SIDE_USD;
   const priced1 = usd1 !== undefined && usd1 >= MIN_PRICED_SIDE_USD;
   if (priced0 && priced1) {
+    if (
+      anchorTokens?.has(pool.token0Address.toLowerCase()) &&
+      anchorTokens.has(pool.token1Address.toLowerCase())
+    ) {
+      return pool.tvlUsd >
+        (1 + MAX_PRICED_SIDE_VALUE_RATIO) * Math.min(usd0, usd1)
+        ? {tvlUsd: pool.tvlUsd, reason: undefined, trusted: 'both_anchor'}
+        : {tvlUsd: pool.tvlUsd, reason: undefined};
+    }
     const cap = Math.max(
       (1 + MAX_PRICED_SIDE_VALUE_RATIO) * Math.min(usd0, usd1),
       Math.min(pool.tvlUsd, capUsd)
@@ -2085,6 +2181,18 @@ export function applyAuroraPoolSources<
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
   if (!config) return;
+  if (config.tvlGuardTargetsWildcardRejection) {
+    metric.putMetric(
+      'CachePools.aurora.tvl_guard_config_rejected',
+      1,
+      MetricLoggerUnit.Count,
+      {reason: config.tvlGuardTargetsWildcardRejection}
+    );
+    logger.warn(
+      'Aurora TVL guard targets "*" rejected — guard stays in shadow everywhere',
+      {reason: config.tvlGuardTargetsWildcardRejection}
+    );
+  }
 
   let deps = options?.providerDeps;
   if (!deps) {

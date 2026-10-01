@@ -9,6 +9,7 @@ import {
   AuroraV3PoolsProvider,
   AuroraV4PoolsProvider,
   IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN,
+  TVL_GUARD_EXTRA_ANCHOR_TOKENS_BY_CHAIN,
   WRAPPED_NATIVE_BY_CHAIN,
   applyAuroraPoolSources,
   auroraPoolsSourceConfigFromEnv,
@@ -22,6 +23,7 @@ import {
   targetKey,
   tvlGuardAnchorTokens,
   poolCachingAuroraStatementTimeoutMsFromEnv,
+  type TvlGuardWildcardRejection,
 } from './auroraPoolsSource';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
 import {createChainProtocols} from './cacheConfig';
@@ -197,6 +199,9 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
+    'DD_ENV',
+    'ENVIRONMENT',
+    'ENV',
   ];
   const saved: Record<string, string | undefined> = {};
 
@@ -222,6 +227,7 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
 
   it('parses guard targets independently of source targets', () => {
     process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    process.env.DD_ENV = 'dev';
     const unset = auroraPoolsSourceConfigFromEnv();
     expect(unset?.tvlGuardTargets).toEqual(new Set());
     process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '4663:v4,10:V3';
@@ -230,6 +236,89 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     );
     process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
     expect(auroraPoolsSourceConfigFromEnv()?.tvlGuardTargets).toBe('all');
+  });
+
+  it('rejects a guard wildcard in prod without changing shadow or primary targets', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
+    const config = auroraPoolsSourceConfigFromEnv(['prod']);
+    expect(config?.tvlGuardTargets).toEqual(new Set());
+    expect(config?.tvlGuardTargetsWildcardRejection).toBe('wildcard_in_prod');
+    expect(config?.shadowTargets).toBe('all');
+    expect(config?.primaryTargets).toEqual(new Set(['4663:V4']));
+  });
+
+  it('accepts a guard wildcard outside prod and explicit prod targets', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
+    expect(auroraPoolsSourceConfigFromEnv(['dev'])).toMatchObject({
+      tvlGuardTargets: 'all',
+      tvlGuardTargetsWildcardRejection: undefined,
+    });
+    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '4663:v4,10:V3';
+    const config = auroraPoolsSourceConfigFromEnv(['prod']);
+    expect(config?.tvlGuardTargets).toEqual(new Set(['4663:V4', '10:V3']));
+    expect(config?.tvlGuardTargetsWildcardRejection).toBeUndefined();
+  });
+
+  it('rejects wildcards for prod in any environment source or an unknown environment', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
+    const rejected: Array<
+      [Array<string | undefined>, TvlGuardWildcardRejection]
+    > = [
+      [['Prod'], 'wildcard_in_prod'],
+      [[' PROD '], 'wildcard_in_prod'],
+      [['dev', 'prod'], 'wildcard_in_prod'],
+      [[undefined, undefined, undefined], 'wildcard_unknown_environment'],
+    ];
+    for (const [environments, rejection] of rejected) {
+      expect(auroraPoolsSourceConfigFromEnv(environments)).toMatchObject({
+        tvlGuardTargets: new Set(),
+        tvlGuardTargetsWildcardRejection: rejection,
+      });
+    }
+    for (const environments of [['dev'], [undefined, 'staging']]) {
+      expect(auroraPoolsSourceConfigFromEnv(environments)).toMatchObject({
+        tvlGuardTargets: 'all',
+        tvlGuardTargetsWildcardRejection: undefined,
+      });
+    }
+    process.env.DD_ENV = 'dev';
+    process.env.ENVIRONMENT = 'prod';
+    expect(auroraPoolsSourceConfigFromEnv()?.tvlGuardTargets).toEqual(
+      new Set()
+    );
+    delete process.env.ENVIRONMENT;
+    expect(auroraPoolsSourceConfigFromEnv()?.tvlGuardTargets).toBe('all');
+    delete process.env.DD_ENV;
+    process.env.ENVIRONMENT = 'staging';
+    expect(auroraPoolsSourceConfigFromEnv()?.tvlGuardTargets).toBe('all');
+    delete process.env.ENVIRONMENT;
+    expect(auroraPoolsSourceConfigFromEnv()?.tvlGuardTargets).toEqual(
+      new Set()
+    );
+  });
+
+  it('treats a wildcard anywhere in guard targets as all while preserving primary parsing', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '10:V3';
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '*,10:V3';
+    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*,10:v3';
+    const prod = auroraPoolsSourceConfigFromEnv(['prod']);
+    if (!prod) throw new Error('Expected Aurora config');
+    expect(prod.tvlGuardTargets).toEqual(new Set());
+    expect(prod.tvlGuardTargetsWildcardRejection).toBe('wildcard_in_prod');
+    expect(prod.primaryTargets).toEqual(new Set(['*', '10:V3']));
+    expect(resolveAuroraMode(prod, 10, Protocol.V3)).toBe('primary');
+    expect(resolveAuroraMode(prod, 1, Protocol.V3)).toBeUndefined();
+    expect(auroraPoolsSourceConfigFromEnv(['dev'])?.tvlGuardTargets).toBe(
+      'all'
+    );
+    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '10:V3, *';
+    expect(auroraPoolsSourceConfigFromEnv(['dev'])?.tvlGuardTargets).toBe(
+      'all'
+    );
   });
 
   it('parses comma-separated targets case-insensitively', () => {
@@ -347,6 +436,7 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       shadowTargets: new Set<string>(),
       primaryTargets: new Set([targetKey(1, Protocol.V3)]),
       tvlGuardTargets: new Set<string>(),
+      tvlGuardTargetsWildcardRejection: undefined,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -379,6 +469,7 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
         targetKey(1, Protocol.V3),
       ]),
       tvlGuardTargets: new Set<string>(),
+      tvlGuardTargetsWildcardRejection: undefined,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set([targetKey(4663, Protocol.V4)]),
@@ -419,6 +510,7 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       shadowTargets: new Set<string>(),
       primaryTargets: new Set([targetKey(4663, Protocol.V4)]),
       tvlGuardTargets: new Set<string>(),
+      tvlGuardTargetsWildcardRejection: undefined,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -444,6 +536,7 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       shadowTargets: new Set<string>(),
       primaryTargets: new Set([targetKey(4663, Protocol.V4)]),
       tvlGuardTargets: new Set<string>(),
+      tvlGuardTargetsWildcardRejection: undefined,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map([[targetKey(4663, Protocol.V4), 40000]]),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -802,6 +895,125 @@ describe('guardPricedTvlUsd', () => {
     expect(guarded.tvlUsd).toBeCloseTo(11 * 3555, 6);
   });
 
+  it('trusts a lopsided pair only when both priced tokens are anchors', () => {
+    const weth = '0x4200000000000000000000000000000000000006';
+    const wbtc = '0x927b51f251480a681271180da4de28d44ec4afb8';
+    const pool = row({
+      token0Address: weth,
+      token1Address: '0x927B51f251480a681271180DA4de28D44EC4AfB8',
+      amount0: ONE_TOKEN,
+      amount1: ONE_TOKEN,
+      token0PriceUsd: 5900,
+      token1PriceUsd: 87700,
+      tvlUsd: 93600,
+    });
+    const anchors = tvlGuardAnchorTokens(130);
+    expect(anchors?.has(weth)).toBe(true);
+    expect(anchors?.has(wbtc)).toBe(true);
+    expect(guardPricedTvlUsd(pool, anchors, 2500)).toEqual({
+      tvlUsd: 93600,
+      reason: undefined,
+      trusted: 'both_anchor',
+    });
+    const imbalanced = {tvlUsd: 64900, reason: 'side_imbalance'};
+    expect(guardPricedTvlUsd(pool, undefined, 2500)).toEqual(imbalanced);
+    expect(guardPricedTvlUsd(pool, new Set([weth]), 2500)).toEqual(imbalanced);
+    expect(guardPricedTvlUsd(pool, new Set<string>(), 2500)).toEqual(
+      imbalanced
+    );
+  });
+
+  it('trusts real Optimism and Celo anchor pairs with lopsided priced sides', () => {
+    const cases = [
+      {
+        chainId: 10,
+        token0: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', // native USDC
+        token1: '0xd4dd9e2f021bb459d5a5f6c24c12fe09c5d45553', // ZCHF
+        usd0: 2,
+        usd1: 378103,
+      },
+      {
+        chainId: 42220,
+        token0: '0x765DE816845861e75A25fCA122bb6898B8B1282a', // USDm
+        token1: '0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73', // EURm
+        usd0: 90,
+        usd1: 47722,
+      },
+      {
+        chainId: 42220,
+        token0: '0x456a3D042C0DbD3db53D5489e98dFb038553B0d0', // KESm
+        token1: '0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73', // EURm
+        usd0: 125,
+        usd1: 20996,
+      },
+    ];
+    for (const {chainId, token0, token1, usd0, usd1} of cases) {
+      expect(
+        guardPricedTvlUsd(
+          row({
+            token0Address: token0,
+            token1Address: token1,
+            amount0: ONE_TOKEN,
+            amount1: ONE_TOKEN,
+            token0PriceUsd: usd0,
+            token1PriceUsd: usd1,
+            tvlUsd: usd0 + usd1,
+          }),
+          tvlGuardAnchorTokens(chainId),
+          2500
+        )
+      ).toEqual({
+        tvlUsd: usd0 + usd1,
+        reason: undefined,
+        trusted: 'both_anchor',
+      });
+    }
+  });
+
+  it('reports trust of a corrupted fresh anchor price without lowering TVL', () => {
+    const guarded = guardPricedTvlUsd(
+      row({
+        token0Address: '0x4200000000000000000000000000000000000006',
+        token1Address: '0x0b2c639c533813f4aa9d7837caf62653d097ff85',
+        amount0: ONE_TOKEN,
+        amount1: ONE_TOKEN,
+        token0PriceUsd: 1_000_000_000,
+        token1PriceUsd: 2000,
+        tvlUsd: 1_000_002_000,
+      }),
+      tvlGuardAnchorTokens(10),
+      2500
+    );
+    expect(guarded).toEqual({
+      tvlUsd: 1_000_002_000,
+      reason: undefined,
+      trusted: 'both_anchor',
+    });
+  });
+
+  it('trusts canonical Polygon USDT0 but caps a same-symbol fake as the lone priced side', () => {
+    const usdt0 = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f';
+    const fakeUsdt = '0x3553f861dec0257bada9f8ed268bf0d74e45e89c';
+    const pool = row({
+      token0Address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
+      token1Address: '0x0000000000000000000000000000000000000bad',
+      amount0: ONE_TOKEN,
+      amount1: '0',
+      token0PriceUsd: 40000,
+      token1PriceUsd: null,
+      tvlUsd: 40000,
+    });
+    expect(pool.token0Address.toLowerCase()).toBe(usdt0);
+    const anchors = tvlGuardAnchorTokens(POLYGON);
+    expect(guardPricedTvlUsd(pool, anchors, 2500)).toEqual({
+      tvlUsd: 40000,
+      reason: undefined,
+    });
+    expect(
+      guardPricedTvlUsd({...pool, token0Address: fakeUsdt}, anchors, 2500)
+    ).toEqual({tvlUsd: 2500, reason: 'unanchored_one_side'});
+  });
+
   it('collapses a fake stablecoin against an empty real one (Arc V3 USDC/"USDC")', () => {
     expect(
       guardPricedTvlUsd(
@@ -1075,6 +1287,56 @@ describe('tvlGuardAnchorTokens', () => {
         `chain ${chainId}`
       ).toBe(true);
     }
+  });
+
+  it('unions canonical guard-only anchors with majors, wrapped native and zero', () => {
+    for (const {chainId, major, extras} of [
+      {
+        chainId: 10,
+        major: '0x0b2c639c533813f4aa9d7837caf62653d097ff85',
+        extras: ['0xd4dd9e2f021bb459d5a5f6c24c12fe09c5d45553'],
+      },
+      {
+        chainId: 137,
+        major: '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270',
+        extras: ['0xc2132d05d31c914a87c6611c10748aeb04b58e8f'],
+      },
+      {
+        chainId: 42220,
+        major: '0x765de816845861e75a25fca122bb6898b8b1282a',
+        extras: [
+          '0xd8763cba276a3738e6de85b4b3bf5fded6d6ca73',
+          '0xe8537a3d056da446677b9e9d6c5db704eaab4787',
+          '0x456a3d042c0dbd3db53d5489e98dfb038553b0d0',
+        ],
+      },
+    ]) {
+      const anchors = tvlGuardAnchorTokens(chainId);
+      expect(TVL_GUARD_EXTRA_ANCHOR_TOKENS_BY_CHAIN[chainId]).toEqual(
+        new Set(extras)
+      );
+      for (const token of [
+        major,
+        ...extras,
+        WRAPPED_NATIVE_BY_CHAIN.get(chainId),
+        ADDRESS_ZERO.toLowerCase(),
+      ]) {
+        expect(anchors?.has(token ?? ''), `chain ${chainId}: ${token}`).toBe(
+          true
+        );
+      }
+      expect(
+        [...(anchors ?? [])].every(token => token === token.toLowerCase())
+      ).toBe(true);
+    }
+  });
+
+  it('returns undefined only when neither majors nor guard-only anchors exist', () => {
+    expect(tvlGuardAnchorTokens(999999, () => [])).toBeUndefined();
+    const extrasOnly = tvlGuardAnchorTokens(10, () => []);
+    expect(extrasOnly?.has('0xd4dd9e2f021bb459d5a5f6c24c12fe09c5d45553')).toBe(
+      true
+    );
   });
 });
 
@@ -1538,6 +1800,83 @@ describe('AuroraV4PoolsProvider', () => {
   }
 
   it.each([false, true])(
+    'counts imbalanced both-anchor pools once per V4 fetch with apply=%s',
+    async apply => {
+      const trusted = v4Row({
+        poolId: '0xtrusted',
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        token1Address: ADDRESS_ZERO,
+        tvlToken0: '1000000000000000000',
+        tvlToken1: '2000000000',
+        token0PriceUsd: 1_000_000_000,
+        token1PriceUsd: 1,
+        tvlUsd: 1_000_002_000,
+      });
+      const balanced = v4Row({
+        poolId: '0xbalanced',
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        token1Address: ADDRESS_ZERO,
+        tvlToken0: '1000000000000000000',
+        tvlToken1: '2000000000',
+        token0PriceUsd: 2000,
+        token1PriceUsd: 1,
+        tvlUsd: 4000,
+      });
+      const metric = new FakeMetric();
+      const deps = {
+        prices: freshPrices(),
+        logger: noopLogger,
+        metric,
+      };
+      const pools = await new AuroraV4PoolsProvider(
+        ROBINHOOD,
+        0.01,
+        {
+          ...deps,
+          routablePools: new FakeV4RoutablePools([
+            trusted,
+            {...trusted, poolId: '0xtrusted2'},
+            balanced,
+          ]),
+        },
+        undefined,
+        apply
+      ).getPools();
+      expect(pools.map(pool => pool.tvlUSD)).toEqual([
+        1_000_002_000, 1_000_002_000, 4000,
+      ]);
+      expect(metric.byKey('CachePools.aurora.tvl_guarded')).toEqual([]);
+      expect(metric.byKey('CachePools.aurora.tvl_guard_trusted')).toEqual([
+        {
+          key: 'CachePools.aurora.tvl_guard_trusted',
+          value: 2,
+          tags: {
+            chainId: String(ROBINHOOD),
+            protocol: String(Protocol.V4),
+            reason: 'both_anchor',
+            applied: String(apply),
+          },
+        },
+      ]);
+      const balancedMetric = new FakeMetric();
+      await new AuroraV4PoolsProvider(
+        ROBINHOOD,
+        0.01,
+        {
+          ...deps,
+          metric: balancedMetric,
+          routablePools: new FakeV4RoutablePools([balanced]),
+        },
+        undefined,
+        apply
+      ).getPools();
+      expect(
+        balancedMetric.byKey('CachePools.aurora.tvl_guard_trusted')
+      ).toEqual([]);
+    }
+  );
+
+  it.each([false, true])(
     'serves V4 junk TVL with apply=%s, including malformed empty sides',
     async apply => {
       const metric = new FakeMetric();
@@ -1712,13 +2051,18 @@ describe('AuroraV4PoolsProvider', () => {
     }
   });
 
-  it('serves raw values from every wrapped protocol when guard targets are unset', async () => {
+  it('rejects a prod guard wildcard on every wrapped protocol and applies it in dev', async () => {
     const keys = [
       'POOL_CACHING_AURORA_PRIMARY_TARGETS',
       'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
       'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
+      'DD_ENV',
+      'ENVIRONMENT',
+      'ENV',
     ];
     const saved = new Map(keys.map(key => [key, process.env[key]]));
+    delete process.env.ENVIRONMENT;
+    delete process.env.ENV;
     const junk = v4Row({
       poolId: '0xv4',
       token0Address: ROBINHOOD_WRAPPED_NATIVE,
@@ -1774,49 +2118,106 @@ describe('AuroraV4PoolsProvider', () => {
         '4663:V2,4663:V3,4663:V4';
       process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
         '{"4663:V2":1,"4663:V3":1,"4663:V4":1}';
-      delete process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS;
-      resetAuroraPoolCountBaselinesForTesting();
       const metric = new FakeMetric();
-      const v2Target = {
-        chainId: ROBINHOOD,
-        protocol: Protocol.V2,
-        provider: fakeProvider<V2SubgraphPool>([[]]),
+      const warnings: string[] = [];
+      const logger: Logger = {
+        ...noopLogger,
+        warn: message => warnings.push(message),
       };
-      const v3Target = {
-        chainId: ROBINHOOD,
-        protocol: Protocol.V3,
-        provider: fakeProvider<V3SubgraphPool>([[]]),
-      };
-      const v4Target = {
-        chainId: ROBINHOOD,
-        protocol: Protocol.V4,
-        provider: fakeProvider<V4SubgraphPool>([[]]),
-      };
-      const chainProtocols = [v2Target, v3Target, v4Target];
-      applyAuroraPoolSources(
-        chainProtocols,
-        {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
-        noopLogger,
-        metric,
+      for (const {targets, environment, expectedTvl, rejectedRuns} of [
         {
-          scopedRun: true,
-          providerDeps: {
-            routablePools: new FakeRoutablePools(),
-            prices: freshPrices(),
-            logger: noopLogger,
-            metric,
-          },
+          targets: undefined,
+          environment: 'prod',
+          expectedTvl: 40000,
+          rejectedRuns: 0,
+        },
+        {
+          targets: '*',
+          environment: 'prod',
+          expectedTvl: 40000,
+          rejectedRuns: 1,
+        },
+        {
+          targets: '*,10:v3',
+          environment: 'prod',
+          expectedTvl: 40000,
+          rejectedRuns: 2,
+        },
+        {
+          targets: '*',
+          environment: 'prod',
+          expectedTvl: 40000,
+          rejectedRuns: 3,
+        },
+        {targets: '*', environment: 'dev', expectedTvl: 2500, rejectedRuns: 3},
+      ]) {
+        if (targets === undefined) {
+          delete process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS;
+        } else {
+          process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = targets;
         }
-      );
-      const v2Pools = await v2Target.provider.getPools();
-      const v3Pools = await v3Target.provider.getPools();
-      const v4Pools = await v4Target.provider.getPools();
-      expect(v2Pools[0]?.reserveUSD).toBe(40000);
-      expect(v2Pools[0]?.reserve).toBe(20);
-      expect(v3Pools[0]?.tvlUSD).toBe(40000);
-      expect(v3Pools[0]?.tvlETH).toBe(20);
-      expect(v4Pools[0]?.tvlUSD).toBe(40000);
-      expect(v4Pools[0]?.tvlETH).toBe(20);
+        process.env.DD_ENV = environment;
+        resetAuroraPoolCountBaselinesForTesting();
+        const v2Target = {
+          chainId: ROBINHOOD,
+          protocol: Protocol.V2,
+          provider: fakeProvider<V2SubgraphPool>([[]]),
+        };
+        const v3Target = {
+          chainId: ROBINHOOD,
+          protocol: Protocol.V3,
+          provider: fakeProvider<V3SubgraphPool>([[]]),
+        };
+        const v4Target = {
+          chainId: ROBINHOOD,
+          protocol: Protocol.V4,
+          provider: fakeProvider<V4SubgraphPool>([[]]),
+        };
+        applyAuroraPoolSources(
+          [v2Target, v3Target, v4Target],
+          {
+            trackedEthThresholdFor: () => 0.01,
+            untrackedUsdThresholdFor: () => 0,
+          },
+          logger,
+          metric,
+          {
+            scopedRun: true,
+            providerDeps: {
+              routablePools: new FakeRoutablePools(),
+              prices: freshPrices(),
+              logger,
+              metric,
+            },
+          }
+        );
+        const v2Pools = await v2Target.provider.getPools();
+        const v3Pools = await v3Target.provider.getPools();
+        const v4Pools = await v4Target.provider.getPools();
+        expect(v2Pools[0]?.reserveUSD).toBe(expectedTvl);
+        expect(v3Pools[0]?.tvlUSD).toBe(expectedTvl);
+        expect(v4Pools[0]?.tvlUSD).toBe(expectedTvl);
+        if (expectedTvl === 40000) {
+          expect(v2Pools[0]?.reserve).toBe(20);
+          expect(v3Pools[0]?.tvlETH).toBe(20);
+          expect(v4Pools[0]?.tvlETH).toBe(20);
+        }
+        expect(
+          metric.byKey('CachePools.aurora.tvl_guard_config_rejected')
+        ).toEqual(
+          Array.from({length: rejectedRuns}, () => ({
+            key: 'CachePools.aurora.tvl_guard_config_rejected',
+            value: 1,
+            tags: {reason: 'wildcard_in_prod'},
+          }))
+        );
+        expect(warnings).toHaveLength(rejectedRuns);
+        for (const warning of warnings) {
+          expect(warning).toContain(
+            'Aurora TVL guard targets "*" rejected — guard stays in shadow everywhere'
+          );
+        }
+      }
     } finally {
       for (const key of keys) {
         const value = saved.get(key);
