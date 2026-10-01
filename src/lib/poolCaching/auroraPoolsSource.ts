@@ -218,6 +218,7 @@ export interface AuroraPoolsSourceConfig {
   // 'all' (env value "*") or a set of `${chainId}:${PROTOCOL}` keys.
   shadowTargets: 'all' | ReadonlySet<string>;
   primaryTargets: 'all' | ReadonlySet<string>;
+  tvlGuardTargets: 'all' | ReadonlySet<string>;
   minPoolCountRatio: number;
   // Absolute per-target pool-count floor for PRIMARY mode, keyed by
   // targetKey(). A primary result below its floor falls back to the subgraph
@@ -311,6 +312,9 @@ export function auroraPoolsSourceConfigFromEnv():
   return {
     shadowTargets: parseTargets(shadowRaw),
     primaryTargets: parseTargets(primaryRaw),
+    tvlGuardTargets: parseTargets(
+      process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS
+    ),
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
         ? parsedRatio
@@ -590,6 +594,11 @@ export interface AuroraProviderDeps<
   fetchSemaphore?: FetchSlots;
 }
 
+type AuroraPoolListMethod =
+  | 'listAllV2RoutablePools'
+  | 'listAllV3RoutablePools'
+  | 'listAllV4RoutablePools';
+
 export interface FetchSlots {
   run<T>(work: () => Promise<T>): Promise<T>;
 }
@@ -682,7 +691,8 @@ abstract class BaseAuroraPoolsProvider<
   constructor(
     protected readonly chainId: number,
     protected readonly trackedEthThreshold: number,
-    protected readonly deps: AuroraProviderDeps<TListMethod>
+    protected readonly deps: AuroraProviderDeps<TListMethod>,
+    protected readonly applyTvlGuard = false
   ) {}
 
   protected withFetchSlot<T>(work: () => Promise<T>): Promise<T> {
@@ -723,6 +733,74 @@ abstract class BaseAuroraPoolsProvider<
     }
     return price;
   }
+
+  // The guard's cap for this fetch: at least the USD constant, and always
+  // above this provider's native-unit admission floor.
+  protected tvlGuardCapUsd(nativePrice: number): number {
+    return Math.max(
+      UNANCHORED_ONE_SIDE_TVL_CAP_USD,
+      GUARD_ADMISSION_FLOOR_MARGIN * this.trackedEthThreshold * nativePrice
+    );
+  }
+
+  // One count per guard reason that fired this fetch; a chain without anchor
+  // tokens also reports that its one-side check was skipped.
+  protected emitTvlGuarded(
+    protocol: Protocol,
+    guardedByReason: Record<TvlGuardReason, number>,
+    anchorTokens: ReadonlySet<string> | undefined,
+    rankedPools: Array<{id: string; raw: number; guarded: number}>
+  ): void {
+    for (const [reason, count] of Object.entries(guardedByReason)) {
+      if (count === 0) continue;
+      this.deps.metric.putMetric(
+        'CachePools.aurora.tvl_guarded',
+        count,
+        MetricLoggerUnit.Count,
+        {
+          chainId: String(this.chainId),
+          protocol: String(protocol),
+          reason,
+          applied: String(this.applyTvlGuard),
+        }
+      );
+    }
+    if (Object.values(guardedByReason).some(count => count > 0)) {
+      const topIds = (value: 'raw' | 'guarded') =>
+        new Set(
+          [...rankedPools]
+            // TopPoolsSelector keeps provider order when ranked values tie.
+            .sort((a, b) => b[value] - a[value])
+            .slice(0, 100)
+            .map(pool => pool.id)
+        );
+      const rawTop = topIds('raw');
+      const guardedTop = topIds('guarded');
+      const displaced = [...rawTop].filter(id => !guardedTop.has(id)).length;
+      this.deps.metric.putMetric(
+        'CachePools.aurora.tvl_guard_top100_displaced',
+        displaced,
+        MetricLoggerUnit.Count,
+        {
+          chainId: String(this.chainId),
+          protocol: String(protocol),
+          applied: String(this.applyTvlGuard),
+        }
+      );
+    }
+    if (anchorTokens === undefined) {
+      this.deps.metric.putMetric(
+        'CachePools.aurora.tvl_guard_skipped',
+        1,
+        MetricLoggerUnit.Count,
+        {
+          chainId: String(this.chainId),
+          protocol: String(protocol),
+          reason: 'no_anchor_tokens',
+        }
+      );
+    }
+  }
 }
 
 export class AuroraV4PoolsProvider
@@ -733,9 +811,10 @@ export class AuroraV4PoolsProvider
     chainId: number,
     trackedEthThreshold: number,
     deps: AuroraProviderDeps<'listAllV4RoutablePools'>,
-    private readonly admissionDeps: AuroraV4AdmissionDeps = DEFAULT_V4_ADMISSION_DEPS
+    private readonly admissionDeps: AuroraV4AdmissionDeps = DEFAULT_V4_ADMISSION_DEPS,
+    applyTvlGuard = false
   ) {
-    super(chainId, trackedEthThreshold, deps);
+    super(chainId, trackedEthThreshold, deps, applyTvlGuard);
   }
 
   async getPools(): Promise<V4SubgraphPool[]> {
@@ -824,6 +903,7 @@ export class AuroraV4PoolsProvider
     const impliedSourceTokens =
       IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
     const result: V4SubgraphPool[] = [];
+    const rankedPools: Array<{id: string; raw: number; guarded: number}> = [];
     let droppedNullDecimals = 0;
     const admittedByFamily: Record<V4AdmissionFamily, number> = {
       threshold: 0,
@@ -841,10 +921,26 @@ export class AuroraV4PoolsProvider
     const impliedTopUpCapUsd = IMPLIED_TVL_TOPUP_CAP_ETH * nativePrice;
     let impliedPriced = 0;
     let impliedCapped = 0;
+    const anchorTokens = tvlGuardAnchorTokens(this.chainId, chainId =>
+      this.admissionDeps.majorTokens(chainId)
+    );
+    const capUsd = this.tvlGuardCapUsd(nativePrice);
+    const guardedByReason: Record<TvlGuardReason, number> = {
+      side_imbalance: 0,
+      unanchored_one_side: 0,
+    };
     for (const pool of pools) {
       const hooks = (pool.hooksAddress ?? ZERO_ADDRESS).toLowerCase();
       const token0 = pool.token0Address.toLowerCase();
       const token1 = pool.token1Address.toLowerCase();
+      // The guard bounds the priced-side TVL first; the implied top-up then
+      // values an unpriced side on top of it, under its own cap.
+      const guarded = guardPricedTvlUsd(
+        {...pool, amount0: pool.tvlToken0, amount1: pool.tvlToken1},
+        anchorTokens,
+        capUsd
+      );
+      if (guarded.reason) guardedByReason[guarded.reason]++;
       // SQL tvlUsd counts only sides with a fresh price row. Fresh launchpad
       // tokens have none, so their pools (whole token supply vs a near-empty
       // quote side) would compute ≈$0 and fail admission even though the
@@ -853,7 +949,9 @@ export class AuroraV4PoolsProvider
       const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
       if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
       const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
-      const tvlUsd = pool.tvlUsd + impliedUsd;
+      const rawTvlUsd = pool.tvlUsd + impliedUsd;
+      const guardedTvlUsd = guarded.tvlUsd + impliedUsd;
+      const tvlUsd = this.applyTvlGuard ? guardedTvlUsd : rawTvlUsd;
       // On non-ETH-native chains, the historical ETH-named thresholds are
       // native-unit thresholds: subgraph derivedETH is derivedNative there.
       const tvlEth = tvlUsd / nativePrice;
@@ -874,7 +972,7 @@ export class AuroraV4PoolsProvider
       if (
         impliedUsd > 0 &&
         !admissionFamily(
-          pool.tvlUsd / nativePrice,
+          (this.applyTvlGuard ? guarded.tvlUsd : pool.tvlUsd) / nativePrice,
           pool.liquidity,
           hooks,
           token0,
@@ -912,6 +1010,11 @@ export class AuroraV4PoolsProvider
         tvlETH: tvlEth,
         tvlUSD: tvlUsd,
       });
+      rankedPools.push({
+        id: pool.poolId.toLowerCase(),
+        raw: rawTvlUsd,
+        guarded: guardedTvlUsd,
+      });
     }
     if (droppedNullDecimals > 0) {
       this.deps.metric.putMetric(
@@ -945,6 +1048,12 @@ export class AuroraV4PoolsProvider
         {chainId: String(this.chainId), protocol: String(Protocol.V4), family}
       );
     }
+    this.emitTvlGuarded(
+      Protocol.V4,
+      guardedByReason,
+      anchorTokens,
+      rankedPools
+    );
     return result;
   }
 }
@@ -961,6 +1070,15 @@ export class AuroraV3PoolsProvider
   extends BaseAuroraPoolsProvider<'listAllV3RoutablePools'>
   implements ISubgraphProvider<V3SubgraphPool>
 {
+  constructor(
+    chainId: number,
+    trackedEthThreshold: number,
+    deps: AuroraProviderDeps<'listAllV3RoutablePools'>,
+    applyTvlGuard = false
+  ) {
+    super(chainId, trackedEthThreshold, deps, applyTvlGuard);
+  }
+
   async getPools(): Promise<V3SubgraphPool[]> {
     const ctx = auroraContext(this.deps.metric);
     // Price lookup inside the fetch slot for the same one-connection-per-
@@ -977,20 +1095,39 @@ export class AuroraV3PoolsProvider
       IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
     const impliedTopUpCapUsd = IMPLIED_TVL_TOPUP_CAP_ETH * nativePrice;
     const result: V3SubgraphPool[] = [];
+    const rankedPools: Array<{id: string; raw: number; guarded: number}> = [];
     let impliedPriced = 0;
     let impliedCapped = 0;
     const admittedByFamily = {threshold: 0, exact_zero: 0};
+    const anchorTokens = tvlGuardAnchorTokens(this.chainId);
+    const capUsd = this.tvlGuardCapUsd(nativePrice);
+    const guardedByReason: Record<TvlGuardReason, number> = {
+      side_imbalance: 0,
+      unanchored_one_side: 0,
+    };
     for (const pool of pools) {
+      // Same order as V4: guard the priced-side TVL, then add the capped
+      // implied top-up for an unpriced side.
+      const guarded = guardPricedTvlUsd(
+        {...pool, amount0: pool.tvlToken0, amount1: pool.tvlToken1},
+        anchorTokens,
+        capUsd
+      );
+      if (guarded.reason) guardedByReason[guarded.reason]++;
       const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
       if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
       const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
-      const tvlUsd = pool.tvlUsd + impliedUsd;
+      const rawTvlUsd = pool.tvlUsd + impliedUsd;
+      const guardedTvlUsd = guarded.tvlUsd + impliedUsd;
+      const tvlUsd = this.applyTvlGuard ? guardedTvlUsd : rawTvlUsd;
       // On non-ETH-native chains, the historical ETH-named thresholds are
       // native-unit thresholds: subgraph derivedETH is derivedNative there.
       const tvlEth = tvlUsd / nativePrice;
-      // Family (b) is judged on the RAW priced-side TVL (pre-top-up): it
-      // mirrors the subgraph's exact `totalValueLockedETH: "0"` — the cohort
-      // the pricing pipeline can't see. The top-up only feeds family (a).
+      // Family (b) is judged on the RAW priced-side TVL (pre-guard,
+      // pre-top-up): it mirrors the subgraph's exact `totalValueLockedETH: "0"`
+      // — the cohort the pricing pipeline can't see. A pool the guard
+      // collapses had a nonzero raw TVL, so it does not re-enter here. The
+      // top-up only feeds family (a).
       const admissionFamily = (tvlEthForThreshold: number) => {
         if (tvlEthForThreshold > this.trackedEthThreshold) return 'threshold';
         if (parsePositiveLiquidity(pool.liquidity) && pool.tvlUsd === 0) {
@@ -1002,7 +1139,12 @@ export class AuroraV3PoolsProvider
       if (!family) continue;
       admittedByFamily[family]++;
       // Count only admission FLIPS (rescued by the top-up), matching V4.
-      if (impliedUsd > 0 && !admissionFamily(pool.tvlUsd / nativePrice)) {
+      if (
+        impliedUsd > 0 &&
+        !admissionFamily(
+          (this.applyTvlGuard ? guarded.tvlUsd : pool.tvlUsd) / nativePrice
+        )
+      ) {
         impliedPriced++;
       }
       result.push({
@@ -1013,6 +1155,11 @@ export class AuroraV3PoolsProvider
         token1: {id: pool.token1Address.toLowerCase()},
         tvlETH: tvlEth,
         tvlUSD: tvlUsd,
+      });
+      rankedPools.push({
+        id: pool.poolAddress.toLowerCase(),
+        raw: rawTvlUsd,
+        guarded: guardedTvlUsd,
       });
     }
     if (impliedPriced > 0) {
@@ -1039,6 +1186,12 @@ export class AuroraV3PoolsProvider
         {chainId: String(this.chainId), protocol: String(Protocol.V3), family}
       );
     }
+    this.emitTvlGuarded(
+      Protocol.V3,
+      guardedByReason,
+      anchorTokens,
+      rankedPools
+    );
     return result;
   }
 }
@@ -1055,9 +1208,10 @@ export class AuroraV2PoolsProvider
     chainId: number,
     trackedEthThreshold: number,
     private readonly untrackedUsdThreshold: number,
-    deps: AuroraProviderDeps<'listAllV2RoutablePools'>
+    deps: AuroraProviderDeps<'listAllV2RoutablePools'>,
+    applyTvlGuard = false
   ) {
-    super(chainId, trackedEthThreshold, deps);
+    super(chainId, trackedEthThreshold, deps, applyTvlGuard);
   }
 
   async getPools(): Promise<V2SubgraphPool[]> {
@@ -1086,10 +1240,24 @@ export class AuroraV2PoolsProvider
       untracked_usd: 0,
     };
     const result: V2SubgraphPool[] = [];
+    const rankedPools: Array<{id: string; raw: number; guarded: number}> = [];
     let impliedStaleSide = 0;
+    const anchorTokens = tvlGuardAnchorTokens(this.chainId);
+    const capUsd = this.tvlGuardCapUsd(nativePrice);
+    const guardedByReason: Record<TvlGuardReason, number> = {
+      side_imbalance: 0,
+      unanchored_one_side: 0,
+    };
     for (const pool of pools) {
       const token0 = pool.token0Address.toLowerCase();
       const token1 = pool.token1Address.toLowerCase();
+      const guarded = guardPricedTvlUsd(
+        {...pool, amount0: pool.reserve0, amount1: pool.reserve1},
+        anchorTokens,
+        capUsd
+      );
+      if (guarded.reason) guardedByReason[guarded.reason]++;
+      const pricedTvlUsd = this.applyTvlGuard ? guarded.tvlUsd : pool.tvlUsd;
       // The V2 subgraph carries two TVL numbers and V2SubgraphProvider uses
       // each for one job. trackedReserveETH DOUBLES the tracked side when only
       // one side is whitelisted (both sides of a constant-product pair are
@@ -1107,9 +1275,9 @@ export class AuroraV2PoolsProvider
       const oneSidePriced =
         pool.token0PriceUsd !== null || pool.token1PriceUsd !== null;
       const trackedUsd = bothSidesPriced
-        ? pool.tvlUsd
+        ? pricedTvlUsd
         : oneSidePriced
-          ? 2 * pool.tvlUsd
+          ? 2 * pricedTvlUsd
           : 0;
       const tvlNative = trackedUsd / nativePrice;
       // A side whose token went idle has a price row older than the
@@ -1131,7 +1299,13 @@ export class AuroraV2PoolsProvider
           pool.token0PriceUsd === null &&
           pool.token0HasStalePrice &&
           parsePositiveLiquidity(pool.reserve0));
-      const untrackedUsd = staleSideImplied ? 2 * pool.tvlUsd : pool.tvlUsd;
+      // One rule for the served value and both guard-metric values, so the
+      // shadow metrics rank exactly what would be served.
+      const reserveUsdOf = (pricedUsd: number) =>
+        staleSideImplied ? 2 * pricedUsd : pricedUsd;
+      const untrackedUsd = reserveUsdOf(pricedTvlUsd);
+      const rawReserveUsd = reserveUsdOf(pool.tvlUsd);
+      const guardedReserveUsd = reserveUsdOf(guarded.tvlUsd);
       let family: V2AdmissionFamily | undefined;
       if (token0 === fei || token1 === fei) {
         family = 'fei';
@@ -1160,6 +1334,11 @@ export class AuroraV2PoolsProvider
         reserve: tvlNative,
         reserveUSD: untrackedUsd,
       });
+      rankedPools.push({
+        id: pool.pairAddress.toLowerCase(),
+        raw: rawReserveUsd,
+        guarded: guardedReserveUsd,
+      });
     }
     for (const [family, count] of Object.entries(admittedByFamily)) {
       this.deps.metric.putMetric(
@@ -1177,6 +1356,12 @@ export class AuroraV2PoolsProvider
         {chainId: String(this.chainId), protocol: String(Protocol.V2)}
       );
     }
+    this.emitTvlGuarded(
+      Protocol.V2,
+      guardedByReason,
+      anchorTokens,
+      rankedPools
+    );
     return result;
   }
 }
@@ -1251,6 +1436,133 @@ export function impliedOneHopTvlUsd(
     implied = reserve0 * (p1! * humanPrice);
   }
   return Number.isFinite(implied) && implied > 0 ? implied : 0;
+}
+
+// --- Junk-price TVL guard ---
+
+// A pool's priced-side TVL may be at most this many times its smaller priced
+// side, plus that side. Prod `current_token_prices` carries fresh but absurd
+// prices for junk tokens, and a pool pairing one with a near-empty real side
+// reads as billions (Polygon V3 WPOL/"BTC" $5.7B, Arc V3 USDC/"USDC" $27.6B).
+// Measured on prod, legitimately imbalanced pools sit well inside 10:1
+// (wstETH/USDC.e 6.2:1, VELO/WETH 2.6:1).
+const MAX_PRICED_SIDE_VALUE_RATIO = 10;
+
+// A side worth less than this cannot corroborate the other side's price, so
+// the guard treats it as unpriced. An empty real side (0 WPOL, or 0 WETH in a
+// single-sided launch pool) then takes the one-side rule instead of an
+// imbalance cap of about $0, which would drop the pool from the snapshot.
+const MIN_PRICED_SIDE_USD = 1;
+
+// Ceiling for a pool with exactly one priced side when that side is not an
+// anchor token: the price is the only evidence, and nothing in the pool can
+// corroborate it. Also the floor of the imbalance cap. USD rather than native
+// units, because a native-denominated cap collapses to cents on cheap-native
+// chains (1 CELO is about $0.3). About 1 ETH, far below the top-N pools it
+// would otherwise displace. Providers raise it when their native-unit
+// admission floor is higher (tvlGuardCapUsd).
+const UNANCHORED_ONE_SIDE_TVL_CAP_USD = 2500;
+
+// Admission uses a strict > against trackedEthThreshold in native units, so
+// the cap must sit above that floor. A USD constant alone stops doing so if
+// an erroneous fresh native price is very high.
+const GUARD_ADMISSION_FLOOR_MARGIN = 2;
+
+export type TvlGuardReason = 'side_imbalance' | 'unanchored_one_side';
+
+export type TvlGuardInput = {
+  token0Address: string;
+  token1Address: string;
+  // Raw base-unit amounts (divide by 10^decimals).
+  amount0: string;
+  amount1: string;
+  token0PriceUsd: number | null;
+  token1PriceUsd: number | null;
+  token0Decimals: number | null;
+  token1Decimals: number | null;
+  // Priced-side TVL as the SQL computed it.
+  tvlUsd: number;
+};
+
+/**
+ * Tokens whose fresh price the guard trusts on its own: the chain's major
+ * tokens (`getMajorTokens`), its wrapped native and the zero address. Returns
+ * undefined when the chain has no major-token entry; the guard then skips
+ * only its one-side check, which is the one that needs anchors.
+ */
+export function tvlGuardAnchorTokens(
+  chainId: number,
+  majorTokens: (chainId: number) => Iterable<string> = getMajorTokens
+): ReadonlySet<string> | undefined {
+  const majors = [...majorTokens(chainId)].map(token => token.toLowerCase());
+  if (majors.length === 0) return undefined;
+  const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(chainId);
+  return new Set([
+    ...majors,
+    ZERO_ADDRESS,
+    ...(wrappedNative ? [wrappedNative] : []),
+  ]);
+}
+
+/**
+ * Bounds the raw SQL priced-side TVL when applied; callers also run this in
+ * shadow to measure its effect while serving raw TVL.
+ *
+ * A side counts as priced only when its computed value is at least $1. With
+ * two priced sides, cap raw TVL at eleven times the smaller side, but never
+ * below min(raw TVL, capUsd). With one priced side, cap at capUsd only when
+ * anchor tokens are known and that side is not an anchor. With neither side
+ * priced, leave raw TVL unchanged. Report a reason only when TVL falls.
+ *
+ * A malformed or non-finite side counts as $0. Providers set capUsd to at
+ * least $2,500 and above their native-unit admission floor, so a guard cannot
+ * drop a pool admitted by that floor.
+ */
+export function guardPricedTvlUsd(
+  pool: TvlGuardInput,
+  anchorTokens: ReadonlySet<string> | undefined,
+  capUsd: number
+): {tvlUsd: number; reason: TvlGuardReason | undefined} {
+  const sideUsd = (
+    amount: string,
+    decimals: number | null,
+    priceUsd: number | null
+  ): number | undefined => {
+    if (priceUsd === null || decimals === null) return undefined;
+    const value = (Number(amount) / 10 ** decimals) * priceUsd;
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  };
+  const usd0 = sideUsd(pool.amount0, pool.token0Decimals, pool.token0PriceUsd);
+  const usd1 = sideUsd(pool.amount1, pool.token1Decimals, pool.token1PriceUsd);
+
+  const priced0 = usd0 !== undefined && usd0 >= MIN_PRICED_SIDE_USD;
+  const priced1 = usd1 !== undefined && usd1 >= MIN_PRICED_SIDE_USD;
+  if (priced0 && priced1) {
+    const cap = Math.max(
+      (1 + MAX_PRICED_SIDE_VALUE_RATIO) * Math.min(usd0, usd1),
+      Math.min(pool.tvlUsd, capUsd)
+    );
+    return pool.tvlUsd > cap
+      ? {tvlUsd: cap, reason: 'side_imbalance'}
+      : {tvlUsd: pool.tvlUsd, reason: undefined};
+  }
+  const pricedToken = priced0
+    ? pool.token0Address
+    : priced1
+      ? pool.token1Address
+      : undefined;
+  if (
+    pricedToken !== undefined &&
+    anchorTokens !== undefined &&
+    !anchorTokens.has(pricedToken.toLowerCase()) &&
+    pool.tvlUsd > capUsd
+  ) {
+    return {
+      tvlUsd: capUsd,
+      reason: 'unanchored_one_side',
+    };
+  }
+  return {tvlUsd: pool.tvlUsd, reason: undefined};
 }
 
 // Mirrors the subgraph's `liquidity_gt: "0"` condition; malformed values
@@ -1766,39 +2078,49 @@ export function applyAuroraPoolSources<
     // two fetches bypass the sweep's fetch semaphore and ride the spare pool
     // connection instead of queueing FIFO behind ~40 sweep fetches.
     scopedRun?: boolean;
+    // Aurora services to use instead of the shared uniroute connection. Unset
+    // in production; lets the env-to-provider path run without a database.
+    providerDeps?: AuroraProviderDeps<AuroraPoolListMethod>;
   }
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
   if (!config) return;
 
-  // A failed init (e.g. missing CA bundle file) must degrade THIS feature,
-  // never kill the whole all-chains pool-caching run. The failure is latched
-  // (env is immutable, a retry can't succeed) but re-emitted every tick so a
-  // permanently-down Aurora path stays visible.
-  const init = getOrCreateUnirouteAuroraDb(logger);
-  if (init.status === 'init_failed') {
-    metric.putMetric('CachePools.aurora.init_error', 1, MetricLoggerUnit.Count);
-    logger.error('Aurora pool source init failed — staying on subgraphs', {
-      error: init.error.message,
-    });
-    return;
-  }
-  if (init.status === 'env_missing') {
-    logger.warn(
-      'POOL_CACHING_AURORA_*_TARGETS set but Aurora connection env is missing — staying on subgraphs'
-    );
-    return;
-  }
-  const db = init.db;
+  let deps = options?.providerDeps;
+  if (!deps) {
+    // A failed init (e.g. missing CA bundle file) must degrade THIS feature,
+    // never kill the whole all-chains pool-caching run. The failure is latched
+    // (env is immutable, a retry can't succeed) but re-emitted every tick so a
+    // permanently-down Aurora path stays visible.
+    const init = getOrCreateUnirouteAuroraDb(logger);
+    if (init.status === 'init_failed') {
+      metric.putMetric(
+        'CachePools.aurora.init_error',
+        1,
+        MetricLoggerUnit.Count
+      );
+      logger.error('Aurora pool source init failed — staying on subgraphs', {
+        error: init.error.message,
+      });
+      return;
+    }
+    if (init.status === 'env_missing') {
+      logger.warn(
+        'POOL_CACHING_AURORA_*_TARGETS set but Aurora connection env is missing — staying on subgraphs'
+      );
+      return;
+    }
+    const db = init.db;
 
-  const deps: AuroraProviderDeps<keyof RoutablePoolsService> = {
-    routablePools: createAuroraRoutablePoolsService(db, 'uniroute'),
-    prices: createAuroraCurrentTokenPricesService(db, 'uniroute'),
-    logger,
-    metric,
-    fetchSemaphore: options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE,
-  };
-  const shadowDeps: AuroraProviderDeps<keyof RoutablePoolsService> = {
+    deps = {
+      routablePools: createAuroraRoutablePoolsService(db, 'uniroute'),
+      prices: createAuroraCurrentTokenPricesService(db, 'uniroute'),
+      logger,
+      metric,
+      fetchSemaphore: options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE,
+    };
+  }
+  const shadowDeps: AuroraProviderDeps<AuroraPoolListMethod> = {
     ...deps,
     fetchSemaphore: options?.scopedRun ? undefined : AURORA_SHADOW_FETCH_SLOTS,
   };
@@ -1828,6 +2150,9 @@ export function applyAuroraPoolSources<
     }
 
     const providerDeps = mode === 'shadow' ? shadowDeps : deps;
+    const applyTvlGuard =
+      config.tvlGuardTargets === 'all' ||
+      config.tvlGuardTargets.has(targetKey(chainId, protocol));
 
     // Per-protocol provider dispatch. A combo added to
     // AURORA_SUPPORTED_TARGETS must have a protocol-shaped provider branch
@@ -1838,7 +2163,9 @@ export function applyAuroraPoolSources<
         new AuroraV4PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
-          providerDeps
+          providerDeps,
+          DEFAULT_V4_ADMISSION_DEPS,
+          applyTvlGuard
         ),
         chainProtocol.provider as ISubgraphProvider<V4SubgraphPool>,
         chainId,
@@ -1854,7 +2181,8 @@ export function applyAuroraPoolSources<
         new AuroraV3PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
-          providerDeps
+          providerDeps,
+          applyTvlGuard
         ),
         chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
         chainId,
@@ -1871,7 +2199,8 @@ export function applyAuroraPoolSources<
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
           thresholds.untrackedUsdThresholdFor(protocol, chainId),
-          providerDeps
+          providerDeps,
+          applyTvlGuard
         ),
         chainProtocol.provider as ISubgraphProvider<V2SubgraphPool>,
         chainId,
