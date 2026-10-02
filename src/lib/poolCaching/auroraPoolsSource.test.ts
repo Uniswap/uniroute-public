@@ -2227,6 +2227,171 @@ describe('AuroraV4PoolsProvider', () => {
     }
   });
 
+  it('passes the chain bypass and permissioned hooks to the V4 read', async () => {
+    const permissionedHook = '0x0000000000000000000000000000000000000abc';
+    const admissionDeps = {
+      permissionedHookAddresses: () => [permissionedHook],
+      permissionedAdapterTokens: () => [],
+      majorTokens: () => [],
+    };
+    class FakeCapturingV4RoutablePools
+      implements Pick<RoutablePoolsService, 'listAllV4RoutablePools'>
+    {
+      options:
+        | Parameters<RoutablePoolsService['listAllV4RoutablePools']>[1]
+        | null = null;
+
+      async listAllV4RoutablePools(
+        _ctx: Parameters<RoutablePoolsService['listAllV4RoutablePools']>[0],
+        options: Parameters<RoutablePoolsService['listAllV4RoutablePools']>[1]
+      ) {
+        this.options = options;
+        return [];
+      }
+    }
+    const routablePools = new FakeCapturingV4RoutablePools();
+    await new AuroraV4PoolsProvider(
+      ROBINHOOD,
+      0.01,
+      {
+        routablePools,
+        prices: freshPrices(),
+        logger: noopLogger,
+        metric: new FakeMetric(),
+      },
+      admissionDeps
+    ).getPools();
+
+    expect(routablePools.options).toEqual({
+      chainId: ROBINHOOD,
+      minTvlUsd: 0,
+      lockedAmountPrefilter: {
+        alwaysIncludeHooks: [
+          ...new Set(
+            [...(getTvlBypassHookAddresses(ROBINHOOD) ?? [])].map(hook =>
+              hook.toLowerCase()
+            )
+          ),
+          permissionedHook.toLowerCase(),
+        ],
+      },
+    });
+  });
+
+  it.each([false, true])(
+    'preserves V4 admission after filtering rows with no locked amount (guard=%s)',
+    async applyTvlGuard => {
+      const bypassHook = [...getTvlBypassHookAddresses(ROBINHOOD)!][0]!;
+      const permissionedHook = '0x0000000000000000000000000000000000000abc';
+      const adapter = '0x0000000000000000000000000000000000000a11';
+      const major = '0x0000000000000000000000000000000000000b22';
+      // The bypass hook is also permissioned here, so one row exercises a
+      // hook that both hook families list.
+      const admissionDeps = {
+        permissionedHookAddresses: () => [permissionedHook, bypassHook],
+        permissionedAdapterTokens: () => [adapter],
+        majorTokens: () => [major],
+      };
+      const rows = [
+        v4Row({
+          poolId: '0xthreshold',
+          tvlUsd: 40,
+          liquidity: '0',
+          tvlToken0: '20000000000000000',
+        }),
+        v4Row({
+          poolId: '0xband',
+          tvlUsd: 10,
+          liquidity: '1',
+          tvlToken1: '10000000',
+        }),
+        v4Row({
+          poolId: '0ximplied',
+          token0Address: ROBINHOOD_WRAPPED_NATIVE,
+          tvlUsd: 1,
+          liquidity: '1',
+          token0PriceUsd: 2000,
+          token1PriceUsd: null,
+          sqrtPriceX96: '79228162514264337593543950336000',
+          tvlToken0: '500000000000000',
+          tvlToken1: '5000000000000000000000',
+          token1Decimals: 18,
+        }),
+        // These have the shape of the TVL admission families, but no TVL.
+        v4Row({poolId: '0xempty-threshold', tvlUsd: 0, liquidity: '0'}),
+        v4Row({poolId: '0xempty-band', tvlUsd: 0, liquidity: '1'}),
+        // Hook families admit zero-amount rows and must survive the read.
+        v4Row({
+          poolId: '0xbypass',
+          tvlUsd: 0,
+          liquidity: '0',
+          hooksAddress: bypassHook,
+        }),
+        v4Row({
+          poolId: '0xpermissioned',
+          token0Address: adapter,
+          token1Address: major,
+          tvlUsd: 0,
+          liquidity: '1',
+          hooksAddress: permissionedHook,
+        }),
+        v4Row({
+          poolId: '0xbypass-and-permissioned',
+          token0Address: adapter,
+          token1Address: major,
+          tvlUsd: 0,
+          liquidity: '0',
+          hooksAddress: bypassHook,
+        }),
+        v4Row({
+          poolId: '0xother-hook',
+          tvlUsd: 0,
+          liquidity: '1',
+          hooksAddress: '0x0000000000000000000000000000000000000def',
+        }),
+      ];
+      const hookForms = new Set(
+        [
+          ...(getTvlBypassHookAddresses(ROBINHOOD) ?? []),
+          permissionedHook,
+          bypassHook,
+        ].map(hook => hook.toLowerCase())
+      );
+      const sqlFilteredRows = rows.filter(
+        row =>
+          BigInt(row.tvlToken0) > 0n ||
+          BigInt(row.tvlToken1) > 0n ||
+          (row.hooksAddress !== null &&
+            hookForms.has(row.hooksAddress.toLowerCase()))
+      );
+      const runAdmission = (readRows: typeof rows) =>
+        new AuroraV4PoolsProvider(
+          ROBINHOOD,
+          0.01,
+          {
+            routablePools: new FakeV4RoutablePools(readRows),
+            prices: freshPrices(),
+            logger: noopLogger,
+            metric: new FakeMetric(),
+          },
+          admissionDeps,
+          applyTvlGuard
+        ).getPools();
+
+      const unfiltered = await runAdmission(rows);
+      const prefiltered = await runAdmission(sqlFilteredRows);
+      expect(unfiltered.map(pool => pool.id).sort()).toEqual([
+        '0xband',
+        '0xbypass',
+        '0xbypass-and-permissioned',
+        '0ximplied',
+        '0xpermissioned',
+        '0xthreshold',
+      ]);
+      expect(prefiltered).toEqual(unfiltered);
+    }
+  );
+
   it('replicates the subgraph admission union (threshold / high-liquidity band / bypass hooks)', async () => {
     // Native price 2000 → tvlETH = tvlUsd / 2000.
     const bypassHook = [...getTvlBypassHookAddresses(ROBINHOOD)!][0]!;
@@ -2262,7 +2427,7 @@ describe('AuroraV4PoolsProvider', () => {
     });
 
     const pools = await provider.getPools();
-    expect(capturedMinTvlUsd).toBe(0); // full set fetched, union applied in TS
+    expect(capturedMinTvlUsd).toBe(0); // no SQL TVL floor; union applied in TS
     expect(pools.map(p => p.id).sort()).toEqual(['0xa1', '0xa2', '0xa5']);
     const families = metric.byKey('CachePools.aurora.admitted_by_family');
     expect(families).toEqual(

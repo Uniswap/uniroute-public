@@ -868,18 +868,36 @@ export class AuroraV4PoolsProvider
 
   async getPools(): Promise<V4SubgraphPool[]> {
     const ctx = auroraContext(this.deps.metric);
-    // Fetch the FULL set (floor 0) and replicate the subgraph V4 admission
-    // union in TS below — a single SQL floor would drop pools the subgraph
-    // path includes (the [V4_MIN_TVL_ETH, trackedEthThreshold) high-liquidity
-    // band and the zero-TVL bypass-hook pools). The native-price lookup rides
-    // the SAME fetch slot: a provider must hold at most one pool connection
-    // at a time, or dozens of concurrent price queries would drain the pool
-    // outside the semaphore's control (security-gate finding on #12440).
+    const bypassHooks = new Set(
+      [...(getTvlBypassHookAddresses(this.chainId) ?? [])].map(hook =>
+        hook.toLowerCase()
+      )
+    );
+    const permissionedHooks = new Set(
+      [...this.admissionDeps.permissionedHookAddresses(this.chainId)].map(
+        hook => hook.toLowerCase()
+      )
+    );
+    // The read stays unfloored on TVL: a SQL floor would drop the
+    // [V4_MIN_TVL_ETH, trackedEthThreshold) liquidity band and pools the
+    // implied top-up admits. It skips pools with nothing locked on either
+    // side, which no TVL-based family below can admit, and keeps the bypass
+    // and permissioned hooks, whose families need no TVL. On launchpad chains
+    // a large share of pools hold nothing, and reading them all can approach
+    // the statement timeout.
+    //
+    // The native-price lookup rides the SAME fetch slot: a provider must hold
+    // at most one pool connection at a time, or dozens of concurrent price
+    // queries would drain the pool outside the semaphore's control
+    // (security-gate finding on #12440).
     const {nativePrice, pools} = await this.withFetchSlot(async () => ({
       nativePrice: await this.nativeUsdPrice(ctx),
       pools: await this.deps.routablePools.listAllV4RoutablePools(ctx, {
         chainId: this.chainId as ExtendedChainId,
         minTvlUsd: 0,
+        lockedAmountPrefilter: {
+          alwaysIncludeHooks: [...bypassHooks, ...permissionedHooks],
+        },
       }),
     }));
 
@@ -889,19 +907,9 @@ export class AuroraV4PoolsProvider
     //   (b) liquidity > 0 AND tvlETH > V4_MIN_TVL_ETH
     //   (c) hooks ∈ TVL-bypass registries (no floor)
     //   (d) permissioned hook + bounded adapter/known-token pair (no floor)
-    const bypassHooks = new Set(
-      [...(getTvlBypassHookAddresses(this.chainId) ?? [])].map(hook =>
-        hook.toLowerCase()
-      )
-    );
     // Build these once per fetch to keep every row comparison bounded and
     // normalized. Permissioned pairs need an adapter endpoint; a major/major
     // pool under a public hook is not an owned, finite admission family.
-    const permissionedHooks = new Set(
-      [...this.admissionDeps.permissionedHookAddresses(this.chainId)].map(
-        hook => hook.toLowerCase()
-      )
-    );
     const permissionedAdapters = new Set(
       [...this.admissionDeps.permissionedAdapterTokens(this.chainId)].map(
         token => token.toLowerCase()
