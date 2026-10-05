@@ -1123,8 +1123,6 @@ export const FABLES_RWA_ETH_HOOK_ON_ROBINHOOD =
   '0xca89f079af00f752bfd3c345358dc38d4d73e080';
 export const FABLES_RAMP_ETH_HOOK_ON_ROBINHOOD =
   '0x594e8e6281edf2d363a0293a50004cf868e7a080';
-export const DEAL_HOOK_ON_ROBINHOOD =
-  '0xc9211d96bedda686e9374d4d29da61ed848920c4';
 export const PREMIUM_LAUNCH_HOOK_ON_ROBINHOOD =
   '0x1af6269a7e53422406ff2410b8ed5590f610aacc';
 export const COVERT_HOOK_ON_ROBINHOOD =
@@ -1412,6 +1410,52 @@ export const TIBBIR_HOOK_ON_ROBINHOOD =
   '0x88e5d1cf9907acd48e7c81ff6ebc088ad358a5cc';
 export const PROTECTED_SPY_HOOK_ON_ROBINHOOD =
   '0x0d41311c3e310d90339e39fd1841dddb08d550c0';
+export const GENIE_HOOK_ON_ROBINHOOD =
+  '0xbffde2c00a6a1957a5d7c6425ecac8a8780e20cc';
+export const ONCHAIN_BUREAU_HOOK_ON_ROBINHOOD =
+  '0x724641b0e3341b8b78c5495e533fe690c43af0c0';
+export const XFUND_HOOK_ON_ROBINHOOD =
+  '0xcb90d87b5c1f4cd10702a28ca683b552dc9c20cc';
+export const BASTION_HOOK_ON_ROBINHOOD =
+  '0xa8027e71ade2523536220a56e45047770bf73ae4';
+export const LAUNCH_TAX_HOOK_ON_ROBINHOOD_2 =
+  '0xbb91434507908e1b37d36b46b8106633a3da20cc';
+// GRO permissioned pool (groma-dev/gromacoin). Uniswap's canonical
+// v4-periphery permissionedPools adapter parameterized with
+// GroAllowlistChecker, which gates swaps on ERC-3643/T-REX identity
+// verification (identityRegistry.isVerified). Added by operator decision:
+// Sepolia testnet deploy, NOT source-verified on-chain, and a KYC-gated
+// permissioned pool (swaps revert for non-verified accounts; needs UR 2.2+).
+export const GRO_PERMISSIONED_HOOK_ON_SEPOLIA =
+  '0xe14faba2f92e9f48b36ba6dd08bbc69333a80888';
+export const TAMA_DYNAMIC_FEE_HOOK_ON_MONAD =
+  '0x14a233aacbfa823d2fad13b3e52ee3ddbc6c9080';
+export const TAMA_DYNAMIC_FEE_HOOK_ON_ARC =
+  '0x6e3ba2861ec4c4ef6a86051a40c2441b4d959080';
+export const TWIG_WRAP_HOOK_ON_BASE =
+  '0xf7423f48886f86f551b517254d21af4267732888';
+export const BLINKTRADE_HOOK_ON_ROBINHOOD =
+  '0x3747cfde3f57c25d7e9e2c217e80f86c45ad20cc';
+// FloorHook (ROUTE-2164): afterSwap fee <=2% (MAX_FEE_BPS, positive delta,
+// quote-reflected); 3% price-impact cap reverts large swaps; buyback-and-burn
+// runs off the swap path. No caller/quoter gate, no hookData, no oracle. Pass.
+export const FLOOR_HOOK_ON_ROBINHOOD =
+  '0x7d309a342f12e7f788ccf992740e5c482d4b6044';
+// TreasuryFeeHook (ROUTE-2166) / SwapFeeHook (ROUTE-2167): sibling fixed-fee
+// hooks; buy/sell fee <= immutable maxFeeBps, hard-ceilinged by constant
+// ABSOLUTE_MAX_FEE_BPS=10%; positive gross-up. No caller/quoter gate (§1.9.5
+// clean: no sender==quoter branch), no hookData, no oracle. Pass.
+export const TREASURY_FEE_HOOK_ON_ROBINHOOD =
+  '0xe5015a5074658b073c10ecd3826b84f5340540cc';
+export const SWAP_FEE_HOOK_ON_ROBINHOOD =
+  '0xf8da5ccbdcf2240b055331e694e4c32f848e00cc';
+// RobinhoodWarsTaxHook: steady-state tax <=1.5% (timelocked); 90-99%
+// "launch tax" is pre-trading-only (setLaunchTax reverts once trading
+// starts), hard-capped by MAX_LAUNCH_TAX_BPS, time-boxed <=1h, positive
+// gross-up (quote-reflected + slippage-protected). Flagged for operator
+// awareness of the launch-window magnitude.
+export const ROBINHOOD_WARS_TAX_HOOK_ON_ROBINHOOD =
+  '0xd3202a4b307b73d3f9014081af34880ba222a0cc';
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
 > &
@@ -1512,7 +1556,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
-  [ChainId.SEPOLIA]: [ADDRESS_ZERO],
+  [ChainId.SEPOLIA]: [ADDRESS_ZERO, GRO_PERMISSIONED_HOOK_ON_SEPOLIA],
   [ChainId.OPTIMISM]: [
     ADDRESS_ZERO,
     ARRAKIS_PRIVATE_HOOK_V2,
@@ -1579,6 +1623,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.BASE_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.BASE]: [
     KERB_FEE_HOOK_ON_BASE,
+    TWIG_WRAP_HOOK_ON_BASE,
     TAMA_DYNAMIC_FEE_HOOK_ON_BASE,
     BASEDBID_HOOK_ON_BASE,
     BASESTONK_ADVANCED_FEE_HOOK_V6B_ON_BASE,
@@ -1740,6 +1785,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MONAD_TESTNET]: [ADDRESS_ZERO],
   [ChainId.MONAD]: [
     ADDRESS_ZERO,
+    TAMA_DYNAMIC_FEE_HOOK_ON_MONAD,
     LONGER_HOOK_ON_MONAD,
     WETH_HOOKS_ADDRESS_ON_MONAD,
     DOPPLER_HOOKS_ADDRESS_ON_MONAD,
@@ -1951,7 +1997,6 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FABLES_RAMP_HOOK_ON_ROBINHOOD,
     FABLES_RWA_ETH_HOOK_ON_ROBINHOOD,
     FABLES_RAMP_ETH_HOOK_ON_ROBINHOOD,
-    DEAL_HOOK_ON_ROBINHOOD,
     PREMIUM_LAUNCH_HOOK_ON_ROBINHOOD,
     COVERT_HOOK_ON_ROBINHOOD,
     CATCH_FAMILY_V1_CGOLD_ON_ROBINHOOD,
@@ -1991,6 +2036,16 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SHREDDER_HOOK_ON_ROBINHOOD,
     TIBBIR_HOOK_ON_ROBINHOOD,
     PROTECTED_SPY_HOOK_ON_ROBINHOOD,
+    GENIE_HOOK_ON_ROBINHOOD,
+    ONCHAIN_BUREAU_HOOK_ON_ROBINHOOD,
+    XFUND_HOOK_ON_ROBINHOOD,
+    BASTION_HOOK_ON_ROBINHOOD,
+    LAUNCH_TAX_HOOK_ON_ROBINHOOD_2,
+    BLINKTRADE_HOOK_ON_ROBINHOOD,
+    FLOOR_HOOK_ON_ROBINHOOD,
+    TREASURY_FEE_HOOK_ON_ROBINHOOD,
+    SWAP_FEE_HOOK_ON_ROBINHOOD,
+    ROBINHOOD_WARS_TAX_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [
     ADDRESS_ZERO,
@@ -2001,6 +2056,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   ],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
   [CHAIN_ID_ARC]: [
+    TAMA_DYNAMIC_FEE_HOOK_ON_ARC,
     PACKED_TAX_HOOK_ON_ARC,
     CIR_BTC_USDC_HOOK_ON_ARC,
     MEMESPAD_HOOK_ON_ARC,
