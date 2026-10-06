@@ -1,4 +1,5 @@
 import {describe, it, expect, vi} from 'vitest';
+import {utils} from 'ethers';
 import {
   v4HooksPoolsFiltering,
   hasCustomAccountingPermissions,
@@ -551,12 +552,43 @@ describe('v4HooksPoolsFiltering', () => {
   });
 
   // --- Error in token creation falling back to 18 decimals ---
-  describe('token creation error fallback', () => {
-    it('falls back to 18 decimals when token decimals are invalid', () => {
+  describe('hook address casing', () => {
+    // Low bits 0xa00: beforeAddLiquidity + beforeRemoveLiquidity only, so the
+    // hook has no swap or custom-accounting permission and the pool routes.
+    const lowercaseHook = '0xabcdef0000000000000000000000000000000a00';
+    const checksummedHook = utils.getAddress(lowercaseHook);
+    // Flip the case of the first letter, so the casing is mixed but the
+    // EIP-55 checksum is wrong.
+    const firstLetter = checksummedHook.slice(2).search(/[a-fA-F]/) + 2;
+    const flipped = checksummedHook[firstLetter];
+    const badChecksumHook =
+      checksummedHook.slice(0, firstLetter) +
+      (flipped === flipped.toUpperCase()
+        ? flipped.toLowerCase()
+        : flipped.toUpperCase()) +
+      checksummedHook.slice(firstLetter + 1);
+
+    it.each([
+      {label: 'lowercase', hooks: lowercaseHook},
+      {label: 'checksummed', hooks: checksummedHook},
+      {label: 'mixed case with a wrong checksum', hooks: badChecksumHook},
+    ])('routes a pool whose hook address is $label', ({hooks}) => {
+      expect(utils.isAddress(badChecksumHook)).toBe(false);
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [createPool({hooks, tvlETH: 100})],
+        mockLogger,
+        mockMetric
+      );
+      expect(result.length).toBe(1);
+    });
+  });
+
+  describe('invalid token decimals', () => {
+    it('classifies a hooked pool without error, since decimals do not enter the pool id', () => {
       // A hookless (ADDRESS_ZERO) pool can never carry a dynamic fee — there's no
-      // hook to set one — so isDynamicFeePool (and its token construction) is now
-      // correctly skipped for it via short-circuit. Use a real, no-swap-permission
-      // hook instead so the dynamic-fee check (and its decimals fallback) actually runs.
+      // hook to set one — so isDynamicFeePool is skipped for it. Use a real,
+      // no-swap-permission hook so the dynamic-fee check actually runs.
       const hookNoSwap = '0x0000000000000000000000000000000000000100';
       const pool = createPool({
         hooks: hookNoSwap,
@@ -574,20 +606,24 @@ describe('v4HooksPoolsFiltering', () => {
           decimals: '18',
         },
       });
+      const logger: Logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+        fatal: vi.fn(),
+      };
       const result = v4HooksPoolsFiltering(
         ChainId.MAINNET,
         [pool],
-        mockLogger,
+        logger,
         mockMetric
       );
-      // The catch block should handle the NaN decimals and still process the pool
       expect(result.length).toBe(1);
-      expect(mockLogger.error).toHaveBeenCalledWith(
-        expect.stringContaining('Error creating tokens')
-      );
+      expect(logger.error).not.toHaveBeenCalled();
     });
 
-    it('falls back to 18 decimals for negative decimal value', () => {
+    it('keeps a hookless pool with a negative decimals value', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
@@ -613,8 +649,7 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('falls back with ADDRESS_ZERO token0 in catch block', () => {
-      // token1 has invalid decimals to trigger error, token0 is ADDRESS_ZERO
+    it('keeps a hookless native-token0 pool whose token1 decimals are invalid', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,
@@ -640,8 +675,7 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('falls back with ADDRESS_ZERO token1 in catch block', () => {
-      // token0 has invalid decimals to trigger error, token1 is ADDRESS_ZERO
+    it('keeps a hookless native-token1 pool whose token0 decimals are invalid', () => {
       const pool = createPool({
         hooks: ADDRESS_ZERO,
         tvlETH: 100,

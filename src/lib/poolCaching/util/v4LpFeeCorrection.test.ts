@@ -211,15 +211,11 @@ describe('isDynamicFeeV4Pool', () => {
   });
 
   it('detects a dynamic-fee pool from its id', () => {
-    expect(
-      isDynamicFeeV4Pool(CHAIN_ID, hookedPool(DYNAMIC_POOL_ID, '3499'))
-    ).toBe(true);
+    expect(isDynamicFeeV4Pool(hookedPool(DYNAMIC_POOL_ID, '3499'))).toBe(true);
   });
 
   it('does not flag a static-fee pool behind the same hook', () => {
-    expect(
-      isDynamicFeeV4Pool(CHAIN_ID, hookedPool(STATIC_POOL_ID, '3499'))
-    ).toBe(false);
+    expect(isDynamicFeeV4Pool(hookedPool(STATIC_POOL_ID, '3499'))).toBe(false);
   });
 
   it('short-circuits a hookless pool, since a dynamic fee needs a hook', () => {
@@ -227,15 +223,15 @@ describe('isDynamicFeeV4Pool', () => {
       ...hookedPool(HOOKLESS_DYNAMIC_POOL_ID, '3499'),
       hooks: '0x0000000000000000000000000000000000000000',
     } as V4SubgraphPool;
-    expect(isDynamicFeeV4Pool(CHAIN_ID, pool)).toBe(false);
+    expect(isDynamicFeeV4Pool(pool)).toBe(false);
   });
 
-  it('treats a pool whose currencies will not construct as dynamic', () => {
+  it('treats a pool whose id cannot be derived as dynamic', () => {
     const pool = {
       ...hookedPool(DYNAMIC_POOL_ID, '3499'),
       token0: {id: 'not-an-address', decimals: '18'},
     } as unknown as V4SubgraphPool;
-    expect(isDynamicFeeV4Pool(CHAIN_ID, pool)).toBe(true);
+    expect(isDynamicFeeV4Pool(pool)).toBe(true);
   });
 });
 
@@ -249,9 +245,9 @@ describe('isFeeTierProvenByPoolId', () => {
   });
 
   it('proves a pool whose id re-derives from its own feeTier', () => {
-    expect(
-      isFeeTierProvenByPoolId(CHAIN_ID, hookedPool(STATIC_POOL_ID, '3000'))
-    ).toBe(true);
+    expect(isFeeTierProvenByPoolId(hookedPool(STATIC_POOL_ID, '3000'))).toBe(
+      true
+    );
   });
 
   it('proves a hookless pool too — the id is the whole evidence', () => {
@@ -259,13 +255,13 @@ describe('isFeeTierProvenByPoolId', () => {
       ...hookedPool(HOOKLESS_3000_POOL_ID, '3000'),
       hooks: HOOKLESS,
     } as V4SubgraphPool;
-    expect(isFeeTierProvenByPoolId(CHAIN_ID, pool)).toBe(true);
+    expect(isFeeTierProvenByPoolId(pool)).toBe(true);
   });
 
   it('proves nothing when the feeTier is the drifted total', () => {
-    expect(
-      isFeeTierProvenByPoolId(CHAIN_ID, hookedPool(STATIC_POOL_ID, '3499'))
-    ).toBe(false);
+    expect(isFeeTierProvenByPoolId(hookedPool(STATIC_POOL_ID, '3499'))).toBe(
+      false
+    );
   });
 
   // Every failure mode must fall through to StateView — the pre-filter may
@@ -292,7 +288,7 @@ describe('isFeeTierProvenByPoolId', () => {
         }) as V4SubgraphPool,
     },
     {
-      label: 'a token address that will not construct',
+      label: 'a token value that is not an address',
       pool: () =>
         ({
           ...hookedPool(STATIC_POOL_ID, '3000'),
@@ -308,7 +304,71 @@ describe('isFeeTierProvenByPoolId', () => {
         }) as V4SubgraphPool,
     },
   ])('proves nothing for $label', ({pool}) => {
-    expect(isFeeTierProvenByPoolId(CHAIN_ID, pool())).toBe(false);
+    expect(isFeeTierProvenByPoolId(pool())).toBe(false);
+  });
+});
+
+// Rows read from prod data-ingestion v4_pool_metadata for Robinhood (4663),
+// in the casing it stores (EIP-55 checksummed). The ids are the on-chain
+// PoolIds, so these pin the derivation to the real contract, not to itself.
+describe('pool-id checks against prod Robinhood rows', () => {
+  function robinhoodPool(
+    overrides: Pick<
+      V4SubgraphPool,
+      'id' | 'feeTier' | 'tickSpacing' | 'hooks'
+    > & {
+      token0: string;
+      token1: string;
+    }
+  ): V4SubgraphPool {
+    return {
+      ...overrides,
+      liquidity: '1000',
+      token0: {id: overrides.token0, decimals: '18'},
+      token1: {id: overrides.token1, decimals: '18'},
+      tvlETH: 10,
+      tvlUSD: 10,
+    };
+  }
+  // fee_bips 8388608: a launchpad pool whose hook sets the fee per swap.
+  const dynamicFeePool = robinhoodPool({
+    id: '0x0ea129c0ae3621fbd0873abcd85c863591f701ce211e22dc07434f5214a697da',
+    feeTier: '10000',
+    tickSpacing: '200',
+    hooks: '0x4e3468951D49f2EEa976eD0D6e75fFCb44a9a544',
+    token0: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73',
+    token1: '0xd12d7363d0013c686e4B57659689fD7C67068bA3',
+  });
+  // fee_bips 3000 against native ETH (the zero address) behind a hook.
+  const staticNativePool = robinhoodPool({
+    id: '0x1e8df275f20900d7106b3577045810f01c0b2cbe7d8f7f0350dc1e62166cfb50',
+    feeTier: '3000',
+    tickSpacing: '200',
+    hooks: '0xF7521Cf0bB7C11e2D2794189412614Cf2e29a0cC',
+    token0: '0x0000000000000000000000000000000000000000',
+    token1: '0x438d3e1aAf28b36b6829282dBE5389a822120123',
+  });
+
+  it('flags the dynamic-fee pool and proves no static fee for it', () => {
+    expect(isDynamicFeeV4Pool(dynamicFeePool)).toBe(true);
+    expect(isFeeTierProvenByPoolId(dynamicFeePool)).toBe(false);
+  });
+
+  it('proves the static fee of the native-ETH pool and does not flag it', () => {
+    expect(isFeeTierProvenByPoolId(staticNativePool)).toBe(true);
+    expect(isDynamicFeeV4Pool(staticNativePool)).toBe(false);
+  });
+
+  it('gives the same answers for the lowercased rows the Aurora provider emits', () => {
+    const lowercased = (pool: V4SubgraphPool): V4SubgraphPool => ({
+      ...pool,
+      id: pool.id.toLowerCase(),
+      hooks: pool.hooks.toLowerCase(),
+      token0: {...pool.token0, id: pool.token0.id.toLowerCase()},
+      token1: {...pool.token1, id: pool.token1.id.toLowerCase()},
+    });
+    expect(isDynamicFeeV4Pool(lowercased(dynamicFeePool))).toBe(true);
+    expect(isFeeTierProvenByPoolId(lowercased(staticNativePool))).toBe(true);
   });
 });
 

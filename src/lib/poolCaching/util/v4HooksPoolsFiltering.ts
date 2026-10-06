@@ -9,7 +9,7 @@ import {
 } from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {HOOKS_ADDRESSES_ALLOWLIST} from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
-import {ChainId, Currency, Token} from '@uniswap/sdk-core';
+import {ChainId} from '@uniswap/sdk-core';
 import {PriorityQueue} from '@datastructures-js/priority-queue';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
@@ -17,7 +17,6 @@ import {Logger} from '../sor-providers/util/log';
 import {IMetric} from '../sor-providers/util/metric';
 import {MetricLoggerUnit} from '../sor-providers/util/metric';
 import {isPoolFeeDynamic} from './isPoolFeeDynamic';
-import {nativeOnChain} from './nativeOnChain';
 import {getMajorTokens, isMajorPair} from './majorTokens';
 import {isStaticFeeWithinSanityCeiling} from './feeTierSanityCeiling';
 
@@ -58,24 +57,6 @@ export function hasCustomAccountingPermissions(hookAddress: string): boolean {
   );
 }
 
-function buildPoolCurrencyPair(
-  pool: V4SubgraphPool,
-  chainId: ChainId,
-  decimalsOverride?: number
-): [Currency, Currency] {
-  const buildCurrency = (token: V4SubgraphPool['token0']): Currency =>
-    token.id === ADDRESS_ZERO
-      ? nativeOnChain(chainId)
-      : new Token(
-          chainId,
-          token.id,
-          decimalsOverride ?? parseInt(token.decimals),
-          token.symbol,
-          token.name
-        );
-  return [buildCurrency(pool.token0), buildCurrency(pool.token1)];
-}
-
 // Both unvetted admission gates — isHooksPoolRoutable (routable queue) and
 // isAutoAllowlistedHook (auto-admit fallback) — must reject dynamic-fee pools:
 // a hook can set its fee from a plain beforeSwap with no custom-accounting
@@ -86,56 +67,36 @@ function isDynamicFeePool(
   chainId: ChainId,
   logger: Logger
 ): boolean {
-  try {
-    const [tokenA, tokenB] = buildPoolCurrencyPair(pool, chainId);
-    return isPoolFeeDynamic(
-      tokenA,
-      tokenB,
-      Number(pool.tickSpacing),
-      pool.hooks,
-      pool.id
-    );
-  } catch (e) {
+  const dynamic = isPoolFeeDynamic(pool);
+  if (dynamic === undefined) {
+    // Fail closed: a pool whose id cannot be derived (an unparseable address
+    // or tickSpacing) is treated as dynamic so both gates reject it.
     logger?.error(
-      `Error creating tokens for pool ${pool.id} on chain ${chainId} with token0 decimals ${pool.token0.decimals} token1 decimals ${pool.token1.decimals}: ${e}`
+      `Error classifying dynamic fee for pool ${pool.id} on chain ${chainId}, treating as dynamic: pool key is outside the PoolKey domain`
     );
-
-    try {
-      // hardcode to 18 decimals since we cannot parse and pass the token invariant checks
-      const [tokenA, tokenB] = buildPoolCurrencyPair(pool, chainId, 18);
-      return isPoolFeeDynamic(
-        tokenA,
-        tokenB,
-        Number(pool.tickSpacing),
-        pool.hooks,
-        pool.id
-      );
-    } catch (fallbackError) {
-      // Fail closed: a pool that can't be classified even with the decimals
-      // fallback (e.g. an unparseable token address) is treated as dynamic so
-      // both gates reject it, rather than the throw aborting the whole batch.
-      logger?.error(
-        `Error classifying dynamic fee for pool ${pool.id} on chain ${chainId} after 18-decimal fallback, treating as dynamic: ${fallbackError}`
-      );
-      return true;
-    }
+    return true;
   }
+  return dynamic;
 }
+
+type HookPermissions = {swap: boolean; customAccounting: boolean};
 
 function isHooksPoolRoutable(
   pool: V4SubgraphPool,
   chainId: ChainId,
   logger: Logger,
-  metric: IMetric
+  metric: IMetric,
+  hookPermissions: (hookAddress: string) => HookPermissions
 ): boolean {
   try {
+    const permissions = hookPermissions(pool.hooks);
     metric?.putMetric(
-      `Hook.hasSwapPermissions.${Hook.hasSwapPermissions(pool.hooks)}`,
+      `Hook.hasSwapPermissions.${permissions.swap}`,
       1,
       MetricLoggerUnit.Count
     );
     metric?.putMetric(
-      `Hook.hasCustomAccountingPermissions.${hasCustomAccountingPermissions(pool.hooks)}`,
+      `Hook.hasCustomAccountingPermissions.${permissions.customAccounting}`,
       1,
       MetricLoggerUnit.Count
     );
@@ -147,8 +108,8 @@ function isHooksPoolRoutable(
   return (
     isFeeTierWithinSanityCeiling(pool) &&
     (pool.hooks === ADDRESS_ZERO ||
-      (!Hook.hasSwapPermissions(pool.hooks) &&
-        !hasCustomAccountingPermissions(pool.hooks) &&
+      (!hookPermissions(pool.hooks).swap &&
+        !hookPermissions(pool.hooks).customAccounting &&
         !isDynamicFeePool(pool, chainId, logger)))
   );
 }
@@ -194,6 +155,25 @@ export function v4HooksPoolsFiltering(
     (HOOKS_ADDRESSES_DENYLIST[chainId] ?? []).map(hook => hook.toLowerCase())
   );
   const majorTokens = getMajorTokens(chainId);
+  // The v4-sdk re-validates the address on every permission check, and a
+  // snapshot carries far fewer distinct hooks than pools (Robinhood: ~300k
+  // pools), so each hook is checked once per call. Permission bits are the
+  // address's low bits, so the check runs on the lowercase form: casing
+  // cannot change the answer, and a wrong EIP-55 checksum cannot make the
+  // sdk throw. A malformed address still throws and is not cached.
+  const hookPermissionsByAddress = new Map<string, HookPermissions>();
+  const hookPermissions = (hookAddress: string): HookPermissions => {
+    const address = hookAddress.toLowerCase();
+    let permissions = hookPermissionsByAddress.get(address);
+    if (permissions === undefined) {
+      permissions = {
+        swap: Hook.hasSwapPermissions(address),
+        customAccounting: hasCustomAccountingPermissions(address),
+      };
+      hookPermissionsByAddress.set(address, permissions);
+    }
+    return permissions;
+  };
 
   // Permissioned-hook (e.g. Superstate) pools are admitted by their hook, not by
   // TVL — an adapter↔adapter pool's tvlETH is ~0 and would lose the top-N race,
@@ -242,7 +222,7 @@ export function v4HooksPoolsFiltering(
     const hookAddress = pool.hooks.toLowerCase();
     if (denylistedHooksAddresses.has(hookAddress)) return false;
     if (hookAddress === ADDRESS_ZERO) return false;
-    if (hasCustomAccountingPermissions(hookAddress)) return false;
+    if (hookPermissions(hookAddress).customAccounting) return false;
     // The auto-admit path must not be laxer than vetted routable/explicit paths; it admitted ROUTE-1607 pools.
     if (!isFeeTierWithinSanityCeiling(pool)) return false;
     if (isMajorPair(pool.token0.id, pool.token1.id, majorTokens)) return false;
@@ -359,7 +339,7 @@ export function v4HooksPoolsFiltering(
       return;
     }
 
-    if (isHooksPoolRoutable(pool, chainId, logger, metric)) {
+    if (isHooksPoolRoutable(pool, chainId, logger, metric, hookPermissions)) {
       addPoolToQueue(pool, v4PoolsByTokenPairsAndFees);
     } else if (isAutoAllowlistedHook(pool)) {
       addPoolToQueue(pool, autoAllowlistedPoolsByTokenPairsAndFees);

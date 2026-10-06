@@ -30,8 +30,6 @@
 import {ethers} from 'ethers';
 import pLimit from 'p-limit';
 import {LRUCache} from 'lru-cache';
-import {Currency, Token} from '@uniswap/sdk-core';
-import {Pool as V4SDKPool} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
 import {ChainId} from '../../config';
@@ -39,7 +37,7 @@ import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
 import {Logger} from '../sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from '../sor-providers/util/metric';
 import {isPoolFeeDynamic} from './isPoolFeeDynamic';
-import {nativeOnChain} from './nativeOnChain';
+import {computeV4PoolId} from './v4PoolIdFast';
 
 /** v4-core PIPS denominator (hundredths of a bip). */
 export const PIPS_DENOMINATOR = 1_000_000;
@@ -95,23 +93,6 @@ export interface V4PoolKeyFees {
 }
 
 /**
- * The pool's two PoolKey currencies.
- *
- * Decimals are pinned to 18 rather than parsed: they do not enter the pool id,
- * and a NaN from the subgraph would fail the `Token` invariant for no reason.
- */
-function poolKeyCurrencies(
-  chainId: number,
-  pool: V4SubgraphPool
-): [Currency, Currency] {
-  const currency = (address: string): Currency =>
-    address === ADDRESS_ZERO
-      ? nativeOnChain(chainId)
-      : new Token(chainId, address, 18);
-  return [currency(pool.token0.id), currency(pool.token1.id)];
-}
-
-/**
  * True when the pool's `PoolKey.fee` is the dynamic-fee sentinel.
  *
  * `PoolKey.fee` is the very thing this module derives, so it cannot be read
@@ -120,25 +101,11 @@ function poolKeyCurrencies(
  * snapshot already carries verbatim. A hookless pool cannot have a dynamic
  * fee, which short-circuits the keccak for nearly every pool.
  */
-export function isDynamicFeeV4Pool(
-  chainId: number,
-  pool: V4SubgraphPool
-): boolean {
+export function isDynamicFeeV4Pool(pool: V4SubgraphPool): boolean {
   if (pool.hooks === ADDRESS_ZERO) return false;
-  try {
-    const [currency0, currency1] = poolKeyCurrencies(chainId, pool);
-    return isPoolFeeDynamic(
-      currency0,
-      currency1,
-      Number(pool.tickSpacing),
-      pool.hooks,
-      pool.id
-    );
-  } catch {
-    // A pool whose currencies will not construct cannot be shown to be
-    // static, and the correction must never rewrite a fee it cannot justify.
-    return true;
-  }
+  // A pool whose id cannot be derived cannot be shown to be static, and the
+  // correction must never rewrite a fee it cannot justify.
+  return isPoolFeeDynamic(pool) ?? true;
 }
 
 /**
@@ -148,37 +115,25 @@ export function isDynamicFeeV4Pool(
  * `feeTier` into the PoolKey and re-deriving the id settles it with no RPC.
  *
  * One-directional by construction: a match licenses a SKIP and nothing else.
- * A mismatch, an unparseable field, or a derivation that throws disproves
- * nothing — those fall through to `StateView.getSlot0`, which remains the
- * only thing permitted to change a fee.
+ * A mismatch or a field outside the PoolKey domain disproves nothing — those
+ * fall through to `StateView.getSlot0`, which remains the only thing
+ * permitted to change a fee.
  *
- * Uses the same v4-sdk derivation `isPoolFeeDynamic` calls one level down.
- * `V4Pool.computePoolId` produces byte-identical ids but would pull the
- * serving-path model graph into the cron for no gain.
+ * Runs once per snapshot pool on every tick, so it uses `computeV4PoolId`
+ * (one keccak per pool) rather than the v4-sdk derivation, which costs about
+ * ten times more per pool and blocks the cron's event loop for tens of
+ * seconds on Robinhood's ~300k pools.
  */
-export function isFeeTierProvenByPoolId(
-  chainId: number,
-  pool: V4SubgraphPool
-): boolean {
-  const feeTier = Number(pool.feeTier);
-  const tickSpacing = Number(pool.tickSpacing);
-  if (!Number.isInteger(feeTier) || !Number.isInteger(tickSpacing)) {
-    return false;
-  }
-  try {
-    const [currency0, currency1] = poolKeyCurrencies(chainId, pool);
-    return (
-      V4SDKPool.getPoolId(
-        currency0,
-        currency1,
-        feeTier,
-        tickSpacing,
-        pool.hooks
-      ).toLowerCase() === pool.id.toLowerCase()
-    );
-  } catch {
-    return false;
-  }
+export function isFeeTierProvenByPoolId(pool: V4SubgraphPool): boolean {
+  return (
+    computeV4PoolId(
+      pool.token0.id.toLowerCase(),
+      pool.token1.id.toLowerCase(),
+      Number(pool.feeTier),
+      Number(pool.tickSpacing),
+      pool.hooks.toLowerCase()
+    ) === pool.id.toLowerCase()
+  );
 }
 
 /**
@@ -488,7 +443,7 @@ export async function applyV4LpFeeCorrection(
   // memo as well as the rewrite: its slot0 lpFee moves with every hook update,
   // so latching one would be wrong even if it were never written back.
   const isDynamic = new Map(
-    pools.map(pool => [pool.id, isDynamicFeeV4Pool(chainId, pool)])
+    pools.map(pool => [pool.id, isDynamicFeeV4Pool(pool)])
   );
 
   // Deliberately NOT memoized: a memo hit rewrites a drifted feeTier without
@@ -499,7 +454,7 @@ export async function applyV4LpFeeCorrection(
   const candidatePools: V4SubgraphPool[] = [];
   for (const pool of pools) {
     if (isDynamic.get(pool.id) || lpFeeMemo.has(memoKey(pool.id))) continue;
-    if (isFeeTierProvenByPoolId(chainId, pool)) {
+    if (isFeeTierProvenByPoolId(pool)) {
       provenByPoolId.add(pool.id);
       continue;
     }
