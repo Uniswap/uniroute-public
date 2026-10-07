@@ -602,6 +602,9 @@ describe('buildV4PoolKeyRegistry', () => {
  * the full-set reads are not part of the registry's contract and throw.
  */
 class FakeRoutablePoolsService implements RoutablePoolsService {
+  async batchGetPoolVolumeUsd30d(): Promise<ReadonlyMap<string, number>> {
+    return new Map();
+  }
   readonly calls: ListPoolKeysOptions[] = [];
   constructor(
     private readonly pagesByChain: ReadonlyMap<

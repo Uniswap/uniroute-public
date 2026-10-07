@@ -86,41 +86,89 @@ class FakeMetric extends IMetric {
 }
 
 class FakeV2RoutablePools
-  implements Pick<RoutablePoolsService, 'listAllV2RoutablePools'>
+  implements
+    Pick<
+      RoutablePoolsService,
+      'listAllV2RoutablePools' | 'batchGetPoolVolumeUsd30d'
+    >
 {
   constructor(
     private readonly rows: Awaited<
       ReturnType<RoutablePoolsService['listAllV2RoutablePools']>
-    >
+    >,
+    private readonly volumes: ReadonlyMap<string, number> | Error = new Map()
   ) {}
+  readonly volumeCalls: string[][] = [];
   async listAllV2RoutablePools() {
     return this.rows;
+  }
+  async batchGetPoolVolumeUsd30d(
+    _ctx: Parameters<RoutablePoolsService['batchGetPoolVolumeUsd30d']>[0],
+    options: Parameters<RoutablePoolsService['batchGetPoolVolumeUsd30d']>[1]
+  ) {
+    this.volumeCalls.push([...options.poolIdentifiers]);
+    if (this.volumes instanceof Error) throw this.volumes;
+    return new Map(
+      [...this.volumes].filter(([id]) => options.poolIdentifiers.includes(id))
+    );
   }
 }
 
 class FakeV3RoutablePools
-  implements Pick<RoutablePoolsService, 'listAllV3RoutablePools'>
+  implements
+    Pick<
+      RoutablePoolsService,
+      'listAllV3RoutablePools' | 'batchGetPoolVolumeUsd30d'
+    >
 {
   constructor(
     private readonly rows: Awaited<
       ReturnType<RoutablePoolsService['listAllV3RoutablePools']>
-    >
+    >,
+    private readonly volumes: ReadonlyMap<string, number> | Error = new Map()
   ) {}
+  readonly volumeCalls: string[][] = [];
   async listAllV3RoutablePools() {
     return this.rows;
+  }
+  async batchGetPoolVolumeUsd30d(
+    _ctx: Parameters<RoutablePoolsService['batchGetPoolVolumeUsd30d']>[0],
+    options: Parameters<RoutablePoolsService['batchGetPoolVolumeUsd30d']>[1]
+  ) {
+    this.volumeCalls.push([...options.poolIdentifiers]);
+    if (this.volumes instanceof Error) throw this.volumes;
+    return new Map(
+      [...this.volumes].filter(([id]) => options.poolIdentifiers.includes(id))
+    );
   }
 }
 
 class FakeV4RoutablePools
-  implements Pick<RoutablePoolsService, 'listAllV4RoutablePools'>
+  implements
+    Pick<
+      RoutablePoolsService,
+      'listAllV4RoutablePools' | 'batchGetPoolVolumeUsd30d'
+    >
 {
   constructor(
     private readonly rows: Awaited<
       ReturnType<RoutablePoolsService['listAllV4RoutablePools']>
-    >
+    >,
+    private readonly volumes: ReadonlyMap<string, number> | Error = new Map()
   ) {}
+  readonly volumeCalls: string[][] = [];
   async listAllV4RoutablePools() {
     return this.rows;
+  }
+  async batchGetPoolVolumeUsd30d(
+    _ctx: Parameters<RoutablePoolsService['batchGetPoolVolumeUsd30d']>[0],
+    options: Parameters<RoutablePoolsService['batchGetPoolVolumeUsd30d']>[1]
+  ) {
+    this.volumeCalls.push([...options.poolIdentifiers]);
+    if (this.volumes instanceof Error) throw this.volumes;
+    return new Map(
+      [...this.volumes].filter(([id]) => options.poolIdentifiers.includes(id))
+    );
   }
 }
 
@@ -1976,8 +2024,12 @@ describe('AuroraV4PoolsProvider', () => {
           | 'listAllV2RoutablePools'
           | 'listAllV3RoutablePools'
           | 'listAllV4RoutablePools'
+          | 'batchGetPoolVolumeUsd30d'
         >
     {
+      async batchGetPoolVolumeUsd30d() {
+        return new Map<string, number>();
+      }
       async listAllV2RoutablePools() {
         return [];
       }
@@ -2080,8 +2132,12 @@ describe('AuroraV4PoolsProvider', () => {
           | 'listAllV2RoutablePools'
           | 'listAllV3RoutablePools'
           | 'listAllV4RoutablePools'
+          | 'batchGetPoolVolumeUsd30d'
         >
     {
+      async batchGetPoolVolumeUsd30d() {
+        return new Map<string, number>();
+      }
       async listAllV2RoutablePools() {
         return [
           {
@@ -2416,6 +2472,7 @@ describe('AuroraV4PoolsProvider', () => {
     const metric = new FakeMetric();
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async (_ctx, options) => {
           capturedMinTvlUsd = options.minTvlUsd;
           return rows;
@@ -2470,7 +2527,10 @@ describe('AuroraV4PoolsProvider', () => {
       v4Row({poolId: '0xb1', tvlUsd: 0, liquidity: '0', hooksAddress: null}),
     ];
     const provider = new AuroraV4PoolsProvider(ARBITRUM, 0.01, {
-      routablePools: {listAllV4RoutablePools: async () => rows},
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV4RoutablePools: async () => rows,
+      },
       prices: {
         batchGet: async () =>
           new Map([
@@ -2512,7 +2572,10 @@ describe('AuroraV4PoolsProvider', () => {
         chainId,
         0.01,
         {
-          routablePools: {listAllV4RoutablePools: async () => [row]},
+          routablePools: {
+            batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+            listAllV4RoutablePools: async () => [row],
+          },
           prices: {
             batchGet: async () =>
               new Map([
@@ -2582,6 +2645,7 @@ describe('AuroraV4PoolsProvider', () => {
     try {
       const provider = new AuroraV4PoolsProvider(chainId, 0.01, {
         routablePools: {
+          batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
           listAllV4RoutablePools: async () => [
             v4Row({hooksAddress: hook, tvlUsd: 0, liquidity: '0'}),
           ],
@@ -2648,6 +2712,7 @@ describe('AuroraV4PoolsProvider', () => {
     });
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async () => [
           launchpadPool,
           memePricedPool,
@@ -2691,6 +2756,7 @@ describe('AuroraV4PoolsProvider', () => {
     });
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async () => [junkPool],
       },
       prices: freshPrices(),
@@ -2776,6 +2842,7 @@ describe('AuroraV4PoolsProvider', () => {
   it('rejects a stale native price', async () => {
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async () => [],
       },
       prices: {
@@ -2803,6 +2870,7 @@ describe('AuroraV4PoolsProvider', () => {
     const metric = new FakeMetric();
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async () => [
           {
             poolId: '0xABCD',
@@ -2888,6 +2956,7 @@ describe('AuroraV4PoolsProvider', () => {
   it('throws when no native price is available (wrapper falls back)', async () => {
     const provider = new AuroraV4PoolsProvider(ROBINHOOD, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async () => [],
       },
       prices: {batchGet: async () => new Map()},
@@ -2900,6 +2969,7 @@ describe('AuroraV4PoolsProvider', () => {
   it('throws for chains without a known wrapped-native address', async () => {
     const provider = new AuroraV4PoolsProvider(999999, 0.01, {
       routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
         listAllV4RoutablePools: async () => [],
       },
       prices: {batchGet: async () => new Map()},
@@ -2907,6 +2977,115 @@ describe('AuroraV4PoolsProvider', () => {
       metric: new FakeMetric(),
     });
     await expect(provider.getPools()).rejects.toThrow(/wrapped-native/);
+  });
+
+  it.each([false, true])(
+    'credits capped V4 pools by volume with apply=%s',
+    async apply => {
+      const make = (poolId: string, tvlUsd = 40000) =>
+        v4Row({
+          poolId,
+          token0Address: ROBINHOOD_WRAPPED_NATIVE,
+          token1Address: '0x0000000000000000000000000000000000000bad',
+          tvlToken0: '0',
+          tvlToken1: String(tvlUsd * 1_000_000),
+          token0PriceUsd: 2000,
+          token1PriceUsd: 1,
+          tvlUsd,
+        });
+      const rows = [
+        make('0xfull'),
+        make('0xpartial'),
+        make('0xjunk'),
+        make('0xmissing'),
+        make('0xuncapped', 2000),
+      ];
+      const service = new FakeV4RoutablePools(
+        rows,
+        new Map([
+          ['0xfull', 400000],
+          ['0xpartial', 100000],
+          ['0xjunk', 0],
+        ])
+      );
+      const metric = new FakeMetric();
+      const pools = await new AuroraV4PoolsProvider(
+        ROBINHOOD,
+        0.01,
+        {
+          routablePools: service,
+          prices: freshPrices(),
+          logger: noopLogger,
+          metric,
+        },
+        undefined,
+        apply
+      ).getPools();
+      expect(service.volumeCalls).toEqual([
+        ['0xfull', '0xjunk', '0xmissing', '0xpartial'],
+      ]);
+      expect(pools.map(pool => pool.tvlUSD)).toEqual(
+        apply
+          ? [40000, 10000, 2500, 2500, 2000]
+          : [40000, 40000, 40000, 40000, 2000]
+      );
+      expect(
+        metric.byKey('CachePools.aurora.tvl_guard_volume_credited')
+      ).toEqual([
+        expect.objectContaining({
+          value: 2,
+          tags: expect.objectContaining({applied: String(apply)}),
+        }),
+      ]);
+    }
+  );
+
+  it('keeps the V4 cap when the volume read fails', async () => {
+    const row = v4Row({
+      poolId: '0xfail',
+      token0Address: ROBINHOOD_WRAPPED_NATIVE,
+      token1Address: '0x0000000000000000000000000000000000000bad',
+      tvlToken0: '0',
+      tvlToken1: '40000000000',
+      token0PriceUsd: 2000,
+      token1PriceUsd: 1,
+      tvlUsd: 40000,
+    });
+    const warnings: string[] = [];
+    const metric = new FakeMetric();
+    const pools = await new AuroraV4PoolsProvider(
+      ROBINHOOD,
+      0.01,
+      {
+        routablePools: new FakeV4RoutablePools(
+          [row],
+          new TypeError('private detail')
+        ),
+        prices: freshPrices(),
+        logger: {
+          ...noopLogger,
+          warn: message => {
+            warnings.push(message);
+          },
+        },
+        metric,
+      },
+      undefined,
+      true
+    ).getPools();
+    expect(pools[0]?.tvlUSD).toBe(2500);
+    expect(metric.byKey('CachePools.aurora.tvl_guard_volume_error')).toEqual([
+      expect.objectContaining({
+        value: 1,
+        tags: {chainId: String(ROBINHOOD), protocol: String(Protocol.V4)},
+      }),
+    ]);
+    expect(metric.byKey('CachePools.aurora.tvl_guard_volume_credited')).toEqual(
+      []
+    );
+    expect(warnings).toEqual([
+      'Aurora TVL guard volume read failed: TypeError',
+    ]);
   });
 });
 
@@ -2977,7 +3156,10 @@ describe('AuroraV3PoolsProvider', () => {
     metric = new FakeMetric()
   ) =>
     new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
-      routablePools: {listAllV3RoutablePools: async () => rows},
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV3RoutablePools: async () => rows,
+      },
       prices: freshPrices(),
       logger: noopLogger,
       metric,
@@ -3213,6 +3395,59 @@ describe('AuroraV3PoolsProvider', () => {
   });
 
   it.each([false, true])(
+    'ranks credited V3 shadow/apply top-100 displacement with apply=%s',
+    async apply => {
+      const normal = Array.from({length: 101}, (_, index) =>
+        v3Row({poolAddress: `0xnormal${index}`, tvlUsd: 5000})
+      );
+      const credited = {
+        ...v3Row({poolAddress: '0xcredited', tvlUsd: 10000}),
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        token1Address: '0x0000000000000000000000000000000000000bad',
+        tvlToken0: '0',
+        tvlToken1: '10000000000',
+        token0PriceUsd: 2000,
+        token1PriceUsd: 1,
+      };
+      const junk = {...credited, poolAddress: '0xjunk'};
+      const service = new FakeV3RoutablePools(
+        [...normal, credited, junk],
+        new Map([['0xcredited', 100000]])
+      );
+      const metric = new FakeMetric();
+      await new AuroraV3PoolsProvider(
+        ROBINHOOD,
+        0.01,
+        {
+          routablePools: service,
+          prices: freshPrices(),
+          logger: noopLogger,
+          metric,
+        },
+        apply
+      ).getPools();
+      expect(service.volumeCalls).toEqual([['0xcredited', '0xjunk']]);
+      expect(
+        metric.byKey('CachePools.aurora.tvl_guard_top100_displaced')
+      ).toEqual([expect.objectContaining({value: 1})]);
+
+      const uncapped = new FakeV3RoutablePools(normal);
+      await new AuroraV3PoolsProvider(
+        ROBINHOOD,
+        0.01,
+        {
+          routablePools: uncapped,
+          prices: freshPrices(),
+          logger: noopLogger,
+          metric: new FakeMetric(),
+        },
+        apply
+      ).getPools();
+      expect(uncapped.volumeCalls).toEqual([]);
+    }
+  );
+
+  it.each([false, true])(
     'reports three raw top-100 pools displaced in V3 with apply=%s',
     async apply => {
       const normal = Array.from({length: 101}, (_, index) => ({
@@ -3309,7 +3544,10 @@ describe('AuroraV3PoolsProvider', () => {
   it('throws on a stale native price (primary mode falls back upstream)', async () => {
     const staleTs = new Date(Date.now() - 25 * 60 * 60 * 1000);
     const provider = new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
-      routablePools: {listAllV3RoutablePools: async () => [v3Row({})]},
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV3RoutablePools: async () => [v3Row({})],
+      },
       prices: {
         batchGet: async () =>
           new Map([
@@ -3329,6 +3567,107 @@ describe('AuroraV3PoolsProvider', () => {
       metric: new FakeMetric(),
     });
     await expect(provider.getPools()).rejects.toThrow(/Stale native/);
+  });
+
+  it.each([false, true])(
+    'credits capped V3 pools by volume with apply=%s',
+    async apply => {
+      const make = (poolAddress: string, tvlUsd = 40000) => ({
+        ...v3Row({poolAddress, tvlUsd}),
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        token1Address: '0x0000000000000000000000000000000000000bad',
+        tvlToken0: '0',
+        tvlToken1: String(tvlUsd * 1_000_000),
+        token0PriceUsd: 2000,
+        token1PriceUsd: 1,
+      });
+      const rows = [
+        make('0xfull'),
+        make('0xpartial'),
+        make('0xjunk'),
+        make('0xmissing'),
+        make('0xuncapped', 2000),
+      ];
+      const service = new FakeV3RoutablePools(
+        rows,
+        new Map([
+          ['0xfull', 400000],
+          ['0xpartial', 100000],
+          ['0xjunk', 0],
+        ])
+      );
+      const metric = new FakeMetric();
+      const pools = await new AuroraV3PoolsProvider(
+        ROBINHOOD,
+        0.01,
+        {
+          routablePools: service,
+          prices: freshPrices(),
+          logger: noopLogger,
+          metric,
+        },
+        apply
+      ).getPools();
+      expect(service.volumeCalls).toEqual([
+        ['0xfull', '0xjunk', '0xmissing', '0xpartial'],
+      ]);
+      expect(pools.map(pool => pool.tvlUSD)).toEqual(
+        apply
+          ? [40000, 10000, 2500, 2500, 2000]
+          : [40000, 40000, 40000, 40000, 2000]
+      );
+      expect(
+        metric.byKey('CachePools.aurora.tvl_guard_volume_credited')
+      ).toEqual([
+        expect.objectContaining({
+          value: 2,
+          tags: expect.objectContaining({applied: String(apply)}),
+        }),
+      ]);
+    }
+  );
+
+  it('keeps the V3 cap when the volume read fails', async () => {
+    const row = {
+      ...v3Row({poolAddress: '0xfail', tvlUsd: 40000}),
+      token0Address: ROBINHOOD_WRAPPED_NATIVE,
+      token1Address: '0x0000000000000000000000000000000000000bad',
+      tvlToken0: '0',
+      tvlToken1: '40000000000',
+      token0PriceUsd: 2000,
+      token1PriceUsd: 1,
+    };
+    const warnings: string[] = [];
+    const metric = new FakeMetric();
+    const pools = await new AuroraV3PoolsProvider(
+      ROBINHOOD,
+      0.01,
+      {
+        routablePools: new FakeV3RoutablePools(
+          [row],
+          new TypeError('private detail')
+        ),
+        prices: freshPrices(),
+        logger: {
+          ...noopLogger,
+          warn: message => {
+            warnings.push(message);
+          },
+        },
+        metric,
+      },
+      true
+    ).getPools();
+    expect(pools[0]?.tvlUSD).toBe(2500);
+    expect(metric.byKey('CachePools.aurora.tvl_guard_volume_error')).toEqual([
+      expect.objectContaining({
+        value: 1,
+        tags: {chainId: String(ROBINHOOD), protocol: String(Protocol.V3)},
+      }),
+    ]);
+    expect(warnings).toEqual([
+      'Aurora TVL guard volume read failed: TypeError',
+    ]);
   });
 });
 
@@ -3428,7 +3767,10 @@ describe('AuroraV2PoolsProvider', () => {
       trackedEthThreshold,
       untrackedUsdThreshold,
       {
-        routablePools: {listAllV2RoutablePools: async () => rows},
+        routablePools: {
+          batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+          listAllV2RoutablePools: async () => rows,
+        },
         prices: freshNativePrice(chainId),
         logger: noopLogger,
         metric,
@@ -3634,6 +3976,171 @@ describe('AuroraV2PoolsProvider', () => {
       ])
     );
   });
+
+  it.each([false, true])(
+    'credits capped V2 pools by volume with apply=%s',
+    async apply => {
+      const make = (pairAddress: string, tvlUsd = 40000) =>
+        v2Row({
+          pairAddress,
+          tvlUsd,
+          token0PriceUsd: null,
+          token1PriceUsd: 1,
+          token1Address: '0x0000000000000000000000000000000000000bad',
+        });
+      const rows = [
+        make('0xfull'),
+        make('0xpartial'),
+        make('0xjunk'),
+        make('0xmissing'),
+        make('0xuncapped', 2000),
+      ];
+      const service = new FakeV2RoutablePools(
+        rows,
+        new Map([
+          ['0xfull', 400000],
+          ['0xpartial', 100000],
+          ['0xjunk', 0],
+        ])
+      );
+      const metric = new FakeMetric();
+      const pools = await new AuroraV2PoolsProvider(
+        CHAIN_ID_ROBINHOOD,
+        0.01,
+        0,
+        {
+          routablePools: service,
+          prices: freshNativePrice(CHAIN_ID_ROBINHOOD),
+          logger: noopLogger,
+          metric,
+        },
+        apply
+      ).getPools();
+      expect(service.volumeCalls).toEqual([
+        ['0xfull', '0xjunk', '0xmissing', '0xpartial'],
+      ]);
+      expect(pools.map(pool => pool.reserveUSD)).toEqual(
+        apply
+          ? [40000, 10000, 2500, 2500, 2000]
+          : [40000, 40000, 40000, 40000, 2000]
+      );
+      expect(
+        metric.byKey('CachePools.aurora.tvl_guard_volume_credited')
+      ).toEqual([
+        expect.objectContaining({
+          value: 2,
+          tags: expect.objectContaining({applied: String(apply)}),
+        }),
+      ]);
+    }
+  );
+
+  it('keeps the V2 cap when the volume read fails', async () => {
+    const row = v2Row({
+      pairAddress: '0xfail',
+      tvlUsd: 40000,
+      token0PriceUsd: null,
+      token1PriceUsd: 1,
+      token1Address: '0x0000000000000000000000000000000000000bad',
+    });
+    const warnings: string[] = [];
+    const metric = new FakeMetric();
+    const pools = await new AuroraV2PoolsProvider(
+      CHAIN_ID_ROBINHOOD,
+      0.01,
+      0,
+      {
+        routablePools: new FakeV2RoutablePools(
+          [row],
+          new TypeError('private detail')
+        ),
+        prices: freshNativePrice(CHAIN_ID_ROBINHOOD),
+        logger: {
+          ...noopLogger,
+          warn: message => {
+            warnings.push(message);
+          },
+        },
+        metric,
+      },
+      true
+    ).getPools();
+    expect(pools[0]?.reserveUSD).toBe(2500);
+    expect(metric.byKey('CachePools.aurora.tvl_guard_volume_error')).toEqual([
+      expect.objectContaining({
+        value: 1,
+        tags: {
+          chainId: String(CHAIN_ID_ROBINHOOD),
+          protocol: String(Protocol.V2),
+        },
+      }),
+    ]);
+    expect(warnings).toEqual([
+      'Aurora TVL guard volume read failed: TypeError',
+    ]);
+  });
+
+  it('looks up only the highest raw capped V2 pools and counts truncation', async () => {
+    const row = (pairAddress: string, tvlUsd: number) =>
+      v2Row({
+        pairAddress,
+        tvlUsd,
+        token0PriceUsd: null,
+        token1PriceUsd: 1,
+        token1Address: '0x0000000000000000000000000000000000000bad',
+      });
+    const service = new FakeV2RoutablePools(
+      [
+        row('0xd', 30000),
+        row('0xc', 40000),
+        row('0xb', 50000),
+        row('0xa', 40000),
+      ],
+      new Map([
+        ['0xa', 400000],
+        ['0xb', 400000],
+        ['0xc', 400000],
+        ['0xd', 400000],
+      ])
+    );
+    const metric = new FakeMetric();
+    const pools = await new AuroraV2PoolsProvider(
+      CHAIN_ID_ROBINHOOD,
+      0.01,
+      0,
+      {
+        routablePools: service,
+        prices: freshNativePrice(CHAIN_ID_ROBINHOOD),
+        logger: noopLogger,
+        metric,
+        volumeLookupMaxPools: 2,
+      },
+      true
+    ).getPools();
+
+    expect(service.volumeCalls).toEqual([['0xb', '0xa']]);
+    expect(pools.map(pool => [pool.id, pool.reserveUSD])).toEqual([
+      ['0xd', 2500],
+      ['0xc', 2500],
+      ['0xb', 40000],
+      ['0xa', 40000],
+    ]);
+    expect(
+      metric.byKey('CachePools.aurora.tvl_guard_volume_truncated')
+    ).toEqual([
+      {
+        key: 'CachePools.aurora.tvl_guard_volume_truncated',
+        value: 2,
+        tags: {
+          chainId: String(CHAIN_ID_ROBINHOOD),
+          protocol: String(Protocol.V2),
+        },
+      },
+    ]);
+    expect(
+      metric.putMetricKeys.has('CachePools.aurora.tvl_guard_volume_truncated')
+    ).toBe(true);
+  });
 });
 
 describe('AuroraV2PoolsProvider stale-price side', () => {
@@ -3687,7 +4194,8 @@ describe('AuroraV2PoolsProvider stale-price side', () => {
     trackedEthThreshold: number,
     untrackedUsdThreshold: number,
     metric = new FakeMetric(),
-    applyTvlGuard = false
+    applyTvlGuard = false,
+    volumes: ReadonlyMap<string, number> = new Map()
   ) {
     const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(CHAIN_ID_TEMPO)!;
     return new AuroraV2PoolsProvider(
@@ -3695,7 +4203,10 @@ describe('AuroraV2PoolsProvider stale-price side', () => {
       trackedEthThreshold,
       untrackedUsdThreshold,
       {
-        routablePools: {listAllV2RoutablePools: async () => rows},
+        routablePools: {
+          batchGetPoolVolumeUsd30d: async () => volumes,
+          listAllV2RoutablePools: async () => rows,
+        },
         prices: {
           batchGet: async () =>
             new Map([
@@ -3740,6 +4251,65 @@ describe('AuroraV2PoolsProvider stale-price side', () => {
           tags: expect.objectContaining({applied: String(apply)}),
         }),
       ]);
+    }
+  );
+
+  it.each([false, true])(
+    'credits a capped stale-side V2 pool before reserve and tracked admission with apply=%s',
+    async apply => {
+      const metric = new FakeMetric();
+      const row = {
+        ...tempoRow({pairAddress: '0xcredited', tvlUsd: 40000}),
+        token1Address: '0x0000000000000000000000000000000000000bad',
+        reserve1: '40000000000',
+      };
+      const pools = await tempoProvider(
+        [row],
+        1000,
+        Number.MAX_VALUE,
+        metric,
+        apply,
+        new Map([['0xcredited', 100000]])
+      ).getPools();
+
+      expect(
+        pools.map(pool => [pool.id, pool.reserveUSD, pool.reserve])
+      ).toEqual([['0xcredited', apply ? 20000 : 80000, apply ? 20000 : 80000]]);
+      expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            value: 1,
+            tags: expect.objectContaining({family: 'tracked_reserve'}),
+          }),
+        ])
+      );
+    }
+  );
+
+  it.each([
+    {trackedEthThreshold: 19999, admitted: true},
+    {trackedEthThreshold: 20001, admitted: false},
+  ])(
+    'holds the stale-side tracked threshold boundary at USD 20,000 with threshold=$trackedEthThreshold',
+    async ({trackedEthThreshold, admitted}) => {
+      const metric = new FakeMetric();
+      const pools = await tempoProvider(
+        [tempoRow({tvlUsd: 10000})],
+        trackedEthThreshold,
+        Number.MAX_VALUE,
+        metric,
+        true
+      ).getPools();
+      expect(pools.map(pool => pool.reserveUSD)).toEqual(
+        admitted ? [20000] : []
+      );
+      expect(
+        metric
+          .byKey('CachePools.aurora.admitted_by_family')
+          .some(
+            entry => entry.tags?.family === 'tracked_reserve' && entry.value > 0
+          )
+      ).toBe(admitted);
     }
   );
 
