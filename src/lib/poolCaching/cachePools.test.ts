@@ -1,7 +1,15 @@
 import {describe, it, expect, vi, beforeEach} from 'vitest';
+import * as zlib from 'zlib';
 import {cacheAllPools, CachePoolsConfig} from './cachePools';
 import type {Logger} from './sor-providers/util/log';
-import {IMetric} from './sor-providers/util/metric';
+import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import type {
+  EulerSwapHooks,
+  IAggHooksSubgraphProvider,
+  IEulerSwapHooksSubgraphProvider,
+  ProviderConfig,
+  V4SubgraphPool,
+} from './sor-providers';
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 
@@ -47,6 +55,9 @@ vi.mock('./util/v4HooksPoolsFiltering', () => ({
   v4HooksPoolsFiltering: (_chainId: any, pools: any[]) => pools,
 }));
 
+// Lets a test make the inline mainnet V3 extra fetch throw.
+const v3ManualFetch = vi.hoisted((): {error?: Error} => ({}));
+
 // Mock V2SubgraphProvider and V3SubgraphProvider constructors used inside cachePoolsForChainProtocol
 vi.mock('./sor-providers', () => ({
   V2SubgraphProvider: class {
@@ -56,6 +67,7 @@ vi.mock('./sor-providers', () => ({
   },
   V3SubgraphProvider: class {
     async getPools() {
+      if (v3ManualFetch.error) throw v3ManualFetch.error;
       return [];
     }
   },
@@ -85,15 +97,84 @@ function createMockLogger(): Logger {
 }
 
 class MockMetric extends IMetric {
+  readonly calls: Array<{
+    key: string;
+    value: number;
+    unit: MetricLoggerUnit;
+    tags?: Record<string, string>;
+  }> = [];
   setProperty(_key: string, _value: unknown): void {}
   putDimensions(_dimensions: Record<string, string>): void {}
   putMetric(
-    _key: string,
-    _value: number,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _unit?: any,
-    _tags?: Record<string, string>
-  ): void {}
+    key: string,
+    value: number,
+    unit: MetricLoggerUnit,
+    tags?: Record<string, string>
+  ): void {
+    this.calls.push({key, value, unit, tags});
+  }
+}
+
+// Closure-based fakes for the extra V4 pool sources (implements their real
+// interfaces, so a signature drift fails the compile rather than staying
+// silently stale).
+class FakeEulerSwapHooksSubgraphProvider
+  implements IEulerSwapHooksSubgraphProvider
+{
+  constructor(
+    private readonly hooks: EulerSwapHooks[] = [],
+    private readonly poolByHook: Record<
+      string,
+      V4SubgraphPool | undefined
+    > = {},
+    private readonly error?: Error
+  ) {}
+
+  async getHooks(_providerConfig?: ProviderConfig): Promise<EulerSwapHooks[]> {
+    if (this.error) {
+      throw this.error;
+    }
+    return this.hooks;
+  }
+
+  async getPoolByHook(
+    hook: string,
+    _providerConfig?: ProviderConfig
+  ): Promise<V4SubgraphPool | undefined> {
+    return this.poolByHook[hook];
+  }
+}
+
+class FakeAggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
+  constructor(
+    private readonly pools: V4SubgraphPool[] = [],
+    private readonly error?: Error
+  ) {}
+
+  async getPools(_providerConfig?: ProviderConfig): Promise<V4SubgraphPool[]> {
+    if (this.error) {
+      throw this.error;
+    }
+    return this.pools;
+  }
+}
+
+// Inflates a written snapshot back into its pool ids, so tests assert on
+// the snapshot the job wrote rather than on "S3 was called".
+function writtenPoolIds(body: Buffer): string[] {
+  const parsed: unknown = JSON.parse(zlib.inflateSync(body).toString('utf8'));
+  if (!Array.isArray(parsed)) throw new Error('snapshot is not an array');
+  return parsed.map((pool: unknown) => {
+    if (
+      typeof pool !== 'object' ||
+      pool === null ||
+      !('id' in pool) ||
+      typeof pool.id !== 'string'
+    ) {
+      throw new Error('snapshot pool has no string id');
+    }
+    return pool.id;
+  });
 }
 
 function makePool(id: string, token0Id: string, token1Id: string) {
@@ -150,6 +231,7 @@ describe('cacheAllPools', () => {
     mockLogger = createMockLogger();
     mockMetric = new MockMetric();
     mockChainProtocols = [];
+    v3ManualFetch.error = undefined;
     sendMock.mockClear();
     sendMock.mockResolvedValue({});
   });
@@ -1064,6 +1146,204 @@ describe('cacheAllPools', () => {
       await cacheAllPools(mockLogger, mockMetric, config, 2);
       // All 5 entries should produce S3 uploads
       expect(putObjectCalls()).toHaveLength(5);
+    });
+  });
+
+  // --- Extra (best-effort) V4 pool sources ---
+  // These sources are additions on top of the main pool set. A failure in
+  // any one of them must cost only its own pools, never the snapshot built
+  // from the main set.
+  describe('extra pool sources (best-effort)', () => {
+    const mainPool = makeV4Pool(
+      '0xmainpool',
+      '0x0000000000000000000000000000000000000000',
+      '0x1111',
+      '0x2222'
+    );
+
+    it('writes the snapshot without euler hook pools when eulerHooksProvider fails, and tags the failure', async () => {
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V4,
+          chainId: ChainId.MAINNET,
+          timeout: 90000,
+          provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
+          eulerHooksProvider: new FakeEulerSwapHooksSubgraphProvider(
+            [],
+            {},
+            new Error('euler subgraph unreachable')
+          ),
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toContain(mainPool.id);
+
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V4),
+          source: 'euler_hooks',
+          status: 'failure',
+          reason: 'fetch_error',
+        },
+      });
+
+      const warnMessages = vi
+        .mocked(mockLogger.warn)
+        .mock.calls.map(call => call[0]);
+      expect(
+        warnMessages.some(
+          msg =>
+            typeof msg === 'string' &&
+            msg.includes(
+              'Extra pool source failed, writing the snapshot without its pools: source=euler_hooks error=Error'
+            )
+        )
+      ).toBe(true);
+      expect(
+        warnMessages.some(
+          msg => typeof msg === 'string' && msg.includes('unreachable')
+        )
+      ).toBe(false);
+    });
+
+    it('writes the snapshot without agg hook pools when aggHooksProvider fails, and tags the failure', async () => {
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V4,
+          chainId: ChainId.MAINNET,
+          timeout: 90000,
+          provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
+          aggHooksProvider: new FakeAggHooksSubgraphProvider(
+            [],
+            new Error('agg hooks subgraph unreachable')
+          ),
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toContain(mainPool.id);
+
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V4),
+          source: 'agg_hooks',
+          status: 'failure',
+          reason: 'fetch_error',
+        },
+      });
+
+      const warnMessages = vi
+        .mocked(mockLogger.warn)
+        .mock.calls.map(call => call[0]);
+      expect(
+        warnMessages.some(
+          msg =>
+            typeof msg === 'string' &&
+            msg.includes(
+              'Extra pool source failed, writing the snapshot without its pools: source=agg_hooks error=Error'
+            )
+        )
+      ).toBe(true);
+      expect(
+        warnMessages.some(
+          msg => typeof msg === 'string' && msg.includes('unreachable')
+        )
+      ).toBe(false);
+    });
+
+    it('emits status:success and includes the pool when aggHooksProvider succeeds', async () => {
+      const aggPool = makeV4Pool(
+        '0xaggpool',
+        '0x3333333333333333333333333333333333333333',
+        '0x5555',
+        '0x6666'
+      );
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V4,
+          chainId: ChainId.MAINNET,
+          timeout: 90000,
+          provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
+          aggHooksProvider: new FakeAggHooksSubgraphProvider([aggPool]),
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toContain(aggPool.id);
+
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V4),
+          source: 'agg_hooks',
+          status: 'success',
+        },
+      });
+    });
+
+    it('writes the mainnet V3 snapshot without the manual pool when its fetch fails, and tags the failure', async () => {
+      const mainV3Pool = makeV3Pool('0xmainv3pool', '0x1111', '0x2222');
+      v3ManualFetch.error = new Error('v3 subgraph unreachable');
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V3,
+          chainId: ChainId.MAINNET,
+          timeout: 90000,
+          provider: {getPools: vi.fn().mockResolvedValue([mainV3Pool])},
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toEqual([mainV3Pool.id]);
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V3),
+          source: 'v3_mainnet_manual',
+          status: 'failure',
+          reason: 'fetch_error',
+        },
+      });
+      const warnMessages = vi
+        .mocked(mockLogger.warn)
+        .mock.calls.map(call => call[0]);
+      expect(warnMessages).toContainEqual(
+        expect.stringContaining(
+          'Extra pool source failed, writing the snapshot without its pools: source=v3_mainnet_manual error=Error'
+        )
+      );
+      expect(
+        warnMessages.some(
+          msg => typeof msg === 'string' && msg.includes('unreachable')
+        )
+      ).toBe(false);
     });
   });
 });

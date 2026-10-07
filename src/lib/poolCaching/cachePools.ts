@@ -84,6 +84,49 @@ function prefixedLogger(logger: Logger, prefix: string): Logger {
   };
 }
 
+// The extra pool sources layered on top of the main `provider.getPools()`
+// result; the values are the `source` tag of `CachePools.extraPoolSource`.
+const ExtraPoolSource = {
+  EULER_HOOKS: 'euler_hooks',
+  AGG_HOOKS: 'agg_hooks',
+  V3_MAINNET_MANUAL: 'v3_mainnet_manual',
+} as const;
+type ExtraPoolSource = (typeof ExtraPoolSource)[keyof typeof ExtraPoolSource];
+
+// Euler hooks, agg hooks and the hardcoded mainnet V3 fetch add pools to the
+// main pool set from their own subgraph endpoints, which the main set does
+// not depend on. Each runs best-effort: a failure costs only its own pools,
+// never the snapshot built from the main set.
+async function withExtraPoolSource<T>(
+  source: ExtraPoolSource,
+  metricTags: Record<string, string>,
+  metricInstance: IMetric,
+  logger: Logger,
+  fn: () => Promise<T>
+): Promise<T | undefined> {
+  try {
+    const result = await fn();
+    metricInstance.putMetric(
+      'CachePools.extraPoolSource',
+      1,
+      MetricLoggerUnit.Count,
+      {...metricTags, source, status: 'success'}
+    );
+    return result;
+  } catch (err) {
+    metricInstance.putMetric(
+      'CachePools.extraPoolSource',
+      1,
+      MetricLoggerUnit.Count,
+      {...metricTags, source, status: 'failure', reason: 'fetch_error'}
+    );
+    logger.warn(
+      `Extra pool source failed, writing the snapshot without its pools: source=${source} error=${err instanceof Error ? err.name : typeof err}`
+    );
+    return undefined;
+  }
+}
+
 async function cachePoolsForChainProtocol(
   chainProtocol: ChainProtocol,
   s3: S3Client,
@@ -214,26 +257,35 @@ async function cachePoolsForChainProtocol(
     }
 
     if (protocol === Protocol.V3 && chainId === ChainId.MAINNET) {
-      const v3MainnetSubgraphProvider = new V3SubgraphProvider(
-        ChainId.MAINNET,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        0, // wstETH/USDC totalValueLockedUSDUntracked is 0
-        v3SubgraphUrlOverride(ChainId.MAINNET),
-        undefined,
-        logger,
+      const filteredPools = await withExtraPoolSource(
+        ExtraPoolSource.V3_MAINNET_MANUAL,
+        metricTags,
         metricInstance,
-        subgraphFetchFactory
+        logger,
+        async () => {
+          const v3MainnetSubgraphProvider = new V3SubgraphProvider(
+            ChainId.MAINNET,
+            3,
+            90000,
+            true,
+            v3TrackedEthThreshold,
+            0, // wstETH/USDC totalValueLockedUSDUntracked is 0
+            v3SubgraphUrlOverride(ChainId.MAINNET),
+            undefined,
+            logger,
+            metricInstance,
+            subgraphFetchFactory
+          );
+          const additionalPools = await v3MainnetSubgraphProvider.getPools();
+          return additionalPools.filter((pool: V3SubgraphPool) => {
+            return (
+              pool.id.toLowerCase() ===
+              '0x4622df6fb2d9bee0dcdacf545acdb6a2b2f4f863'
+            );
+          });
+        }
       );
-      const additionalPools = await v3MainnetSubgraphProvider.getPools();
-      const filteredPools = additionalPools.filter((pool: V3SubgraphPool) => {
-        return (
-          pool.id.toLowerCase() === '0x4622df6fb2d9bee0dcdacf545acdb6a2b2f4f863'
-        );
-      });
-      filteredPools.forEach(pool => pools.push(pool));
+      filteredPools?.forEach(pool => pools.push(pool));
 
       pools = (pools as Array<V3SubgraphPool>).filter(
         (pool: V3SubgraphPool) => {
@@ -256,45 +308,63 @@ async function cachePoolsForChainProtocol(
       const manuallyIncludedV4Pools: V4SubgraphPool[] = [];
 
       if (eulerHooksProvider) {
-        const eulerHooks = await eulerHooksProvider.getHooks();
-        if (eulerHooks) {
-          metricInstance.putMetric(
-            'eulerHooks.length',
-            eulerHooks.length,
-            MetricLoggerUnit.Count,
-            metricTags
-          );
-          const eulerPools = await Promise.all(
-            eulerHooks.map(async eulerHook => {
-              const pool = await eulerHooksProvider.getPoolByHook(
-                eulerHook.hook
-              );
-              logger.info(`eulerHooks pool ${JSON.stringify(pool)}`);
-              if (pool) {
-                (pool as V4SubgraphPool).tvlUSD = 1000;
-                (pool as V4SubgraphPool).tvlETH = 5500000;
-              }
-              return pool;
-            })
-          );
-          eulerPools.forEach(pool => {
-            if (pool) {
-              manuallyIncludedV4Pools.push(pool as V4SubgraphPool);
+        const eulerPools = await withExtraPoolSource(
+          ExtraPoolSource.EULER_HOOKS,
+          metricTags,
+          metricInstance,
+          logger,
+          async () => {
+            const eulerHooks = await eulerHooksProvider.getHooks();
+            if (!eulerHooks) {
+              return [];
             }
-          });
-        }
+            metricInstance.putMetric(
+              'eulerHooks.length',
+              eulerHooks.length,
+              MetricLoggerUnit.Count,
+              metricTags
+            );
+            const hookPools = await Promise.all(
+              eulerHooks.map(async eulerHook => {
+                const pool = await eulerHooksProvider.getPoolByHook(
+                  eulerHook.hook
+                );
+                logger.info(`eulerHooks pool ${JSON.stringify(pool)}`);
+                if (pool) {
+                  (pool as V4SubgraphPool).tvlUSD = 1000;
+                  (pool as V4SubgraphPool).tvlETH = 5500000;
+                }
+                return pool;
+              })
+            );
+            return hookPools.filter(
+              (pool): pool is V4SubgraphPool =>
+                pool !== null && pool !== undefined
+            );
+          }
+        );
+        eulerPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
 
       if (aggHooksProvider) {
-        const aggHooksPools = await aggHooksProvider.getPools();
-        logger.debug(`aggHooksPools ${JSON.stringify(aggHooksPools)}`);
-        metricInstance.putMetric(
-          'aggHooks.pools.length',
-          aggHooksPools.length,
-          MetricLoggerUnit.Count,
-          metricTags
+        const aggHooksPools = await withExtraPoolSource(
+          ExtraPoolSource.AGG_HOOKS,
+          metricTags,
+          metricInstance,
+          logger,
+          async () => {
+            const result = await aggHooksProvider.getPools();
+            logger.debug(`aggHooksPools ${JSON.stringify(result)}`);
+            metricInstance.putMetric(
+              'aggHooks.pools.length',
+              result.length,
+              MetricLoggerUnit.Count,
+              metricTags
+            );
+            return result;
+          }
         );
-        aggHooksPools.forEach(pool => manuallyIncludedV4Pools.push(pool));
+        aggHooksPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
 
       if (chainId === ChainId.UNICHAIN) {
