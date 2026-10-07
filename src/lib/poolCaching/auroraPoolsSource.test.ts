@@ -2291,7 +2291,11 @@ describe('AuroraV4PoolsProvider', () => {
       majorTokens: () => [],
     };
     class FakeCapturingV4RoutablePools
-      implements Pick<RoutablePoolsService, 'listAllV4RoutablePools'>
+      implements
+        Pick<
+          RoutablePoolsService,
+          'listAllV4RoutablePools' | 'batchGetPoolVolumeUsd30d'
+        >
     {
       options:
         | Parameters<RoutablePoolsService['listAllV4RoutablePools']>[1]
@@ -2303,6 +2307,10 @@ describe('AuroraV4PoolsProvider', () => {
       ) {
         this.options = options;
         return [];
+      }
+
+      async batchGetPoolVolumeUsd30d() {
+        return new Map<string, number>();
       }
     }
     const routablePools = new FakeCapturingV4RoutablePools();
