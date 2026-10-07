@@ -706,6 +706,28 @@ describe('computePoolParity', () => {
     expect(parity.jaccardBps).toBe(0);
     expect(parity.missingTop100).toBe(0);
     expect(parity.missingTop100Live).toBe(0);
+    expect(parity.missingTop100LiveIds).toEqual([]);
+  });
+
+  it('lists every live top-100 miss, more than the sample holds, and none below the cut', () => {
+    // Seven missing pools rank above 93 shared ones, and an eighth missing
+    // pool ranks 101st, outside the counted top 100.
+    const missing = Array.from({length: 7}, (_, i) =>
+      v3Pool(`0xm${i}`, 10_000 - i)
+    );
+    const shared = Array.from({length: 93}, (_, i) =>
+      v3Pool(`0xs${i}`, 1_000 - i)
+    );
+    const belowCut = v3Pool('0xlow', 1);
+
+    const parity = computePoolParity(
+      [...missing, ...shared, belowCut],
+      shared,
+      undefined
+    );
+    expect(parity.missingTop100Live).toBe(7);
+    expect(parity.missingTop100LiveIds).toEqual(missing.map(pool => pool.id));
+    expect(parity.missingLiveSample).toHaveLength(5);
   });
 
   it('excludes emptied pools from the live top-100 gap and its sample', () => {
@@ -1647,6 +1669,80 @@ describe('AuroraSourcedProvider shadow mode', () => {
     expect(
       metric.byKey('CachePools.parity.missing_top100_live')[0]!.value
     ).toBe(1);
+  });
+
+  describe('servable live top-100 gap', () => {
+    const shadowV4 = (
+      aurora: V4SubgraphPool[],
+      subgraph: V4SubgraphPool[],
+      logger: Logger,
+      metric: FakeMetric
+    ) =>
+      new AuroraSourcedProvider(
+        'shadow',
+        fakeProvider([aurora]),
+        fakeProvider([subgraph]),
+        1,
+        Protocol.V4,
+        0.5,
+        0,
+        logger,
+        metric
+      );
+    const capture = () => {
+      const warnings: Array<{message: string; fields: unknown}> = [];
+      const logger: Logger = {
+        ...noopLogger,
+        warn: (message, fields) => warnings.push({message, fields}),
+      };
+      return {warnings, logger};
+    };
+    const shared = v4Pool('0xshared', 100, ADDRESS_ZERO, '7');
+
+    it('counts a missing live pool that serving keeps and names it in an unsampled warn', async () => {
+      const missing = v4Pool('0xmissing', 500, ADDRESS_ZERO, '9');
+      const metric = new FakeMetric();
+      const {warnings, logger} = capture();
+
+      await shadowV4([shared], [missing, shared], logger, metric).getPools();
+      await settlePendingAuroraShadowsForTesting();
+      expect(
+        metric.byKey('CachePools.parity.servable_missing_top100_live')
+      ).toEqual([
+        {
+          key: 'CachePools.parity.servable_missing_top100_live',
+          value: 1,
+          tags: {chainId: '1', protocol: String(Protocol.V4), mode: 'shadow'},
+        },
+      ]);
+      expect(warnings).toEqual([
+        {
+          message: 'Aurora servable top-100 gap 1:V4: missingTop100Live=1',
+          fields: {missingTop100LiveIds: ['0xmissing']},
+        },
+      ]);
+    });
+
+    it('does not count a missing pool that serving drops, and stays quiet', async () => {
+      // A hookless pool above the fee ceiling: the raw gap counts it, the
+      // serving filter drops it.
+      const absurdFee = {
+        ...v4Pool('0xabsurd', 500, ADDRESS_ZERO, '9'),
+        feeTier: '990000',
+      };
+      const metric = new FakeMetric();
+      const {warnings, logger} = capture();
+
+      await shadowV4([shared], [absurdFee, shared], logger, metric).getPools();
+      await settlePendingAuroraShadowsForTesting();
+      expect(
+        metric.byKey('CachePools.parity.missing_top100_live')[0]!.value
+      ).toBe(1);
+      expect(
+        metric.byKey('CachePools.parity.servable_missing_top100_live')[0]!.value
+      ).toBe(0);
+      expect(warnings).toEqual([]);
+    });
   });
 
   it('still returns the subgraph result when the Aurora fetch fails', async () => {

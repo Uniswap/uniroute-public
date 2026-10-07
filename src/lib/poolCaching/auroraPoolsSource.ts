@@ -1883,6 +1883,10 @@ export interface PoolParity {
   // value, and a pool drained to dust stays live. missingTop100 keeps the
   // unfiltered view next to it.
   missingTop100Live: number;
+  // The pools behind missingTop100Live (at most 100), lowercase, in subgraph
+  // TVL order. A flip gate values every one, so unlike the samples below it
+  // is not truncated.
+  missingTop100LiveIds: string[];
   missingInAurora: number;
   extraInAurora: number;
   // The reverse of missingTop100: how many of Aurora's top 100 pools by TVL
@@ -1958,7 +1962,11 @@ export function computePoolParity(
   const countMissing = (pools: AnySubgraphPool[]) =>
     pools.filter(pool => !auroraById.has(pool.id.toLowerCase())).length;
   const missingTop100 = countMissing(subgraphByTvlDesc.slice(0, 100));
-  const missingTop100Live = countMissing(liveSubgraphByTvlDesc.slice(0, 100));
+  const missingTop100LiveIds = liveSubgraphByTvlDesc
+    .slice(0, 100)
+    .map(pool => pool.id.toLowerCase())
+    .filter(id => !auroraById.has(id));
+  const missingTop100Live = missingTop100LiveIds.length;
   // Ties break on the lowercase id, so equal-TVL pools at the cutoff give the
   // same count on every sweep whatever order the source returned them in.
   const auroraTop100 = [...auroraById.entries()]
@@ -2003,6 +2011,7 @@ export function computePoolParity(
     jaccardBps: Math.round((intersection / unionSize) * 10000),
     missingTop100,
     missingTop100Live,
+    missingTop100LiveIds,
     missingInAurora: subgraphById.size - intersection,
     extraInAurora: auroraById.size - intersection,
     extraTop100,
@@ -2301,6 +2310,21 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
           MetricLoggerUnit.None,
           this.tags
         );
+        this.metric.putMetric(
+          'CachePools.parity.servable_missing_top100_live',
+          servable.missingTop100Live,
+          MetricLoggerUnit.Count,
+          this.tags
+        );
+        // The info line below is sampled. This warn is not, so every sweep
+        // that misses a live servable top-100 pool leaves all of the missing
+        // ids in the logs for the flip gate's value check.
+        if (servable.missingTop100Live > 0) {
+          this.logger.warn(
+            `Aurora servable top-100 gap ${targetKey(this.chainId, this.protocol)}: missingTop100Live=${servable.missingTop100Live}`,
+            {missingTop100LiveIds: servable.missingTop100LiveIds}
+          );
+        }
         this.logger.info(
           `Aurora servable parity ${targetKey(this.chainId, this.protocol)}: ` +
             `subgraph=${servable.subgraphCount} aurora=${servable.auroraCount} ` +
