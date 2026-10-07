@@ -180,17 +180,16 @@ const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
 // This mirrors createChainProtocols' V2/V3/V4 matrix. Base's 15.2M-row full
 // fetch needs SQL admission pushdown first; Ink and Monad testnet have no
-// Aurora pool rows yet. Unichain V2 is left out for the same reason as Base:
-// its ~1.05M pairs, all but ~100 of them empty spam, make the full read
-// exceed the cron's 30s statement timeout on most sweeps.
+// Aurora pool rows yet. Unichain V2 needs its per-combo pre-filter because
+// its full read exceeds the cron's 30s statement timeout.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
   readonly [Protocol, readonly number[]]
 > = [
   [
     Protocol.V2,
     [
-      1, 42161, 137, 10, 56, 43114, 81457, 480, 1868, 143, 4217, 196, 59144,
-      4326, 4663, 5042,
+      1, 42161, 137, 10, 56, 43114, 81457, 130, 480, 1868, 143, 4217, 196,
+      59144, 4326, 4663, 5042,
     ],
   ],
   [
@@ -208,6 +207,26 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
     ],
   ],
 ];
+
+// V2 combos whose full read exceeds the statement timeout. They are read
+// only with the pre-filter; without it they stay on the subgraph.
+const V2_TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set(['130:V2']);
+
+// The cut targets empty spam pairs, which are almost all of Unichain's V2
+// pairs. On an ETH-native chain such as Unichain, tracked V2 admission needs
+// over 0.025 native, far above $1. On a chain whose native token is cheap,
+// that admission floor can sit below $1, and pool_stats can undervalue a
+// pair on any chain. So each combo's shadow parity must measure coverage
+// before it is listed, and before it serves from this lossy read.
+const V2_PREFILTER_MIN_POOL_STATS_TVL_USD = 1;
+const V2_FEI_TOKEN = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
+const V2_BASE_VIRTUAL_TOKEN = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b';
+
+function v2PrefilterAlwaysIncludeTokens(chainId: number): readonly string[] {
+  return chainId === SdkChainId.BASE
+    ? [V2_FEI_TOKEN, V2_BASE_VIRTUAL_TOKEN]
+    : [V2_FEI_TOKEN];
+}
 
 export const AURORA_SUPPORTED_TARGETS: ReadonlySet<string> = new Set(
   AURORA_CHAIN_IDS_BY_PROTOCOL.flatMap(([protocol, chainIds]) =>
@@ -230,6 +249,9 @@ export interface AuroraPoolsSourceConfig {
   shadowTargets: 'all' | ReadonlySet<string>;
   primaryTargets: 'all' | ReadonlySet<string>;
   tvlGuardTargets: 'all' | ReadonlySet<string>;
+  v2PrefilterTargets: ReadonlySet<string>;
+  // A lossy pre-filter requires explicit per-combo selection.
+  v2PrefilterWildcardIgnored: boolean;
   // Prod enables the guard per combo after its shadow soak; rejecting `*`
   // keeps an all-combo typo in shadow everywhere and makes it observable.
   tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
@@ -333,6 +355,14 @@ export function auroraPoolsSourceConfigFromEnv(
     .some(entry => entry.trim() === '*')
     ? 'all'
     : parseTargets(tvlGuardRaw);
+  const v2PrefilterRaw = process.env.POOL_CACHING_AURORA_V2_PREFILTER_TARGETS;
+  const parsedV2PrefilterTargets = parseTargets(v2PrefilterRaw);
+  const v2PrefilterWildcardIgnored =
+    parsedV2PrefilterTargets === 'all' || parsedV2PrefilterTargets.has('*');
+  const v2PrefilterTargets =
+    parsedV2PrefilterTargets === 'all'
+      ? new Set<string>()
+      : new Set([...parsedV2PrefilterTargets].filter(key => key !== '*'));
   const setEnvironments = environments
     .map(value => value?.trim().toLowerCase())
     .filter((value): value is string => Boolean(value));
@@ -354,6 +384,8 @@ export function auroraPoolsSourceConfigFromEnv(
     tvlGuardTargets: tvlGuardTargetsWildcardRejection
       ? new Set()
       : parsedTvlGuardTargets,
+    v2PrefilterTargets,
+    v2PrefilterWildcardIgnored,
     tvlGuardTargetsWildcardRejection,
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
@@ -1435,7 +1467,10 @@ export class AuroraV2PoolsProvider
     trackedEthThreshold: number,
     private readonly untrackedUsdThreshold: number,
     deps: AuroraProviderDeps<'listAllV2RoutablePools'>,
-    applyTvlGuard = false
+    applyTvlGuard = false,
+    private readonly poolStatsPrefilter:
+      | {minPoolStatsTvlUsd: number; alwaysIncludeTokens: readonly string[]}
+      | undefined = undefined
   ) {
     super(chainId, trackedEthThreshold, deps, applyTvlGuard);
   }
@@ -1449,11 +1484,12 @@ export class AuroraV2PoolsProvider
       pools: await this.deps.routablePools.listAllV2RoutablePools(ctx, {
         chainId: this.chainId as ExtendedChainId,
         minTvlUsd: 0,
+        ...(this.poolStatsPrefilter
+          ? {poolStatsPrefilter: this.poolStatsPrefilter}
+          : {}),
       }),
     }));
 
-    const fei = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
-    const virtual = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b';
     type V2AdmissionFamily =
       | 'fei'
       | 'virtual'
@@ -1551,11 +1587,11 @@ export class AuroraV2PoolsProvider
       const rawReserveUsd = reserveUsdOf(pool.tvlUsd);
       const guardedReserveUsd = reserveUsdOf(creditedPricedUsd);
       let family: V2AdmissionFamily | undefined;
-      if (token0 === fei || token1 === fei) {
+      if (token0 === V2_FEI_TOKEN || token1 === V2_FEI_TOKEN) {
         family = 'fei';
       } else if (
         this.chainId === SdkChainId.BASE &&
-        (token0 === virtual || token1 === virtual)
+        (token0 === V2_BASE_VIRTUAL_TOKEN || token1 === V2_BASE_VIRTUAL_TOKEN)
       ) {
         family = 'virtual';
       } else if (tvlNative > this.trackedEthThreshold) {
@@ -2405,6 +2441,41 @@ export function applyAuroraPoolSources<
       {reason: config.tvlGuardTargetsWildcardRejection}
     );
   }
+  if (config.v2PrefilterWildcardIgnored) {
+    metric.putMetric(
+      'CachePools.aurora.v2_prefilter_config_rejected',
+      1,
+      MetricLoggerUnit.Count,
+      {reason: 'wildcard'}
+    );
+    logger.warn(
+      'Aurora V2 pre-filter targets wildcard ignored — list explicit combos'
+    );
+  }
+  const skippedTargets = new Set<string>();
+  for (const {chainId, protocol} of chainProtocols) {
+    const key = targetKey(chainId, protocol);
+    if (
+      V2_TARGETS_REQUIRING_PREFILTER.has(key) &&
+      resolveAuroraMode(config, chainId, protocol) &&
+      !config.v2PrefilterTargets.has(key)
+    ) {
+      skippedTargets.add(key);
+      logger.warn(
+        `Aurora pool source ${key} requires the V2 pre-filter — staying on subgraph`
+      );
+      metric.putMetric(
+        'CachePools.aurora.target_skipped',
+        1,
+        MetricLoggerUnit.Count,
+        {
+          chainId: String(chainId),
+          protocol: String(protocol),
+          reason: 'prefilter_required',
+        }
+      );
+    }
+  }
 
   let deps = options?.providerDeps;
   if (!deps) {
@@ -2447,6 +2518,8 @@ export function applyAuroraPoolSources<
 
   for (const chainProtocol of chainProtocols) {
     const {chainId, protocol} = chainProtocol;
+    const key = targetKey(chainId, protocol);
+    if (skippedTargets.has(key)) continue;
     const mode = resolveAuroraModeWithPrimaryFloor(
       config,
       chainId,
@@ -2456,7 +2529,7 @@ export function applyAuroraPoolSources<
     );
     if (!mode) continue;
 
-    if (!AURORA_SUPPORTED_TARGETS.has(targetKey(chainId, protocol))) {
+    if (!AURORA_SUPPORTED_TARGETS.has(key)) {
       logger.warn(
         `Aurora pool source targeted for ${targetKey(chainId, protocol)} but only ${[...AURORA_SUPPORTED_TARGETS].join(', ')} are code-supported — staying on subgraph`
       );
@@ -2520,7 +2593,13 @@ export function applyAuroraPoolSources<
           thresholds.trackedEthThresholdFor(protocol, chainId),
           thresholds.untrackedUsdThresholdFor(protocol, chainId),
           providerDeps,
-          applyTvlGuard
+          applyTvlGuard,
+          config.v2PrefilterTargets.has(key)
+            ? {
+                minPoolStatsTvlUsd: V2_PREFILTER_MIN_POOL_STATS_TVL_USD,
+                alwaysIncludeTokens: v2PrefilterAlwaysIncludeTokens(chainId),
+              }
+            : undefined
         ),
         chainProtocol.provider as ISubgraphProvider<V2SubgraphPool>,
         chainId,
