@@ -7345,97 +7345,170 @@ describe('UniRouteBL', () => {
       expect(response.error).toBeUndefined();
     });
 
-    it('should filter out routes with intermediary FOT tokens for EXACT_OUT', async () => {
-      const intermediaryFotToken = '0x1111111111111111111111111111111111111111';
+    describe('intermediary FOT tokens', () => {
+      // OCTAA on Monad: a 10% FOT token that UniRoute routed through on an
+      // EXACT_IN WMON -> OCTAA -> USDC quote, producing an unreachable minimum.
+      // Checksummed here while the token handler keys on lowercase, so a
+      // casing mismatch in the filter fails these tests.
+      const intermediaryFotToken = '0xBB848dAC056e385d2f7c750eC839157dccf4cfF3';
       const fotHandlerWithIntermediary = new FotTokenHandler(
         new Set([intermediaryFotToken.toLowerCase()])
       );
+      const fotFilteredMetric = buildMetricKey('FotIntermediaryRoutesFiltered');
+      const directPoolAddress = '0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640';
 
-      // Create a route repository that returns multi-hop routes through FOT intermediary
+      const directRoute = (
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo
+      ): RouteBasic =>
+        new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            new Address(directPoolAddress),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+        ]);
+
+      const fotIntermediaryRoute = (
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo
+      ): RouteBasic =>
+        new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            tokenInCurrencyInfo.wrappedAddress,
+            new Address(intermediaryFotToken),
+            new Address('0x2222222222222222222222222222222222222222'),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+          new V2Pool(
+            new Address(intermediaryFotToken),
+            tokenOutCurrencyInfo.wrappedAddress,
+            new Address('0x3333333333333333333333333333333333333333'),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+        ]);
+
       class FotIntermediaryRoutesRepository extends TestRoutesRepository {
+        constructor(private readonly includeDirectRoute: boolean) {
+          super();
+        }
+
         public async getRoutes(
           chain: Chain,
           tokenInCurrencyInfo: CurrencyInfo,
-          tokenOutCurrencyInfo: CurrencyInfo,
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          protocols: Protocol[],
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          tradeType: TradeType,
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          fotInDirectSwap: boolean,
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          hooksOptions: HooksOptions | undefined,
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          skipPoolsForTokensCache: boolean,
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          nsCtx: RouteNamespaceContext,
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          ctx: UniContext
+          tokenOutCurrencyInfo: CurrencyInfo
         ): Promise<RouteBasic[]> {
-          return [
-            // Route 1: direct (no intermediary FOT)
-            new RouteBasic(Protocol.V2, [
-              new V2Pool(
-                tokenInCurrencyInfo.wrappedAddress,
-                tokenOutCurrencyInfo.wrappedAddress,
-                new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
-                BigInt('1000000000000'),
-                BigInt('1000000000000')
-              ),
-            ]),
-            // Route 2: multi-hop through FOT intermediary token
-            new RouteBasic(Protocol.V2, [
-              new V2Pool(
-                tokenInCurrencyInfo.wrappedAddress,
-                new Address(intermediaryFotToken),
-                new Address('0x2222222222222222222222222222222222222222'),
-                BigInt('1000000000000'),
-                BigInt('1000000000000')
-              ),
-              new V2Pool(
-                new Address(intermediaryFotToken),
-                tokenOutCurrencyInfo.wrappedAddress,
-                new Address('0x3333333333333333333333333333333333333333'),
-                BigInt('1000000000000'),
-                BigInt('1000000000000')
-              ),
-            ]),
-          ];
+          const fotRoute = fotIntermediaryRoute(
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo
+          );
+          return this.includeDirectRoute
+            ? [directRoute(tokenInCurrencyInfo, tokenOutCurrencyInfo), fotRoute]
+            : [fotRoute];
         }
       }
 
-      const request = new QuoteRequest({
-        ...baseRequest,
-        tradeType: 'EXACT_OUT',
-      });
+      class RecordingQuoteStrategy extends MockedQuoteStrategy {
+        public readonly receivedRoutes: RouteBasic<Pool>[][] = [];
 
-      const mockedQuoteStrategy = new MockedQuoteStrategy();
-      const uniRouteBL = new UniRouteBL(
-        serviceConfig,
-        redisCache,
-        chainRepository,
-        poolDiscoverer,
-        freshPoolDetailsWrapper,
-        fotHandlerWithIntermediary,
-        quoteFetcher,
-        quoteSelector,
-        routeQuoteAllocator,
-        gasEstimateProvider,
-        noGasConverter,
-        new FotIntermediaryRoutesRepository(),
-        cachedRoutesRepository,
-        noRouteCacheRepository,
-        mockedQuoteStrategy,
-        dummySimulator,
-        quoteRequestValidator,
-        tokenProvider,
-        mockedRpcProviderMap,
-        stateOverrideResolver
+        async findBestQuoteCandidates(
+          ctx: Context,
+          chain: Chain,
+          tokenInCurrencyInfo: CurrencyInfo,
+          tokenOutCurrencyInfo: CurrencyInfo,
+          amount: bigint,
+          tradeType: TradeType,
+          protocols: Protocol[],
+          serviceConfig: IUniRouteServiceConfig,
+          routes: RouteBasic<Pool>[],
+          tokensInfo: Map<string, Erc20Token | null>,
+          metricTags: string[]
+        ): Promise<QuoteSplit[]> {
+          this.receivedRoutes.push(routes);
+          return super.findBestQuoteCandidates(
+            ctx,
+            chain,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            amount,
+            tradeType,
+            protocols,
+            serviceConfig,
+            routes,
+            tokensInfo,
+            metricTags
+          );
+        }
+      }
+
+      const buildFotIntermediaryBL = (
+        routesRepository: FotIntermediaryRoutesRepository,
+        quoteStrategy: MockedQuoteStrategy
+      ): UniRouteBL =>
+        new UniRouteBL(
+          serviceConfig,
+          redisCache,
+          chainRepository,
+          poolDiscoverer,
+          freshPoolDetailsWrapper,
+          fotHandlerWithIntermediary,
+          quoteFetcher,
+          quoteSelector,
+          routeQuoteAllocator,
+          gasEstimateProvider,
+          noGasConverter,
+          routesRepository,
+          cachedRoutesRepository,
+          noRouteCacheRepository,
+          quoteStrategy,
+          dummySimulator,
+          quoteRequestValidator,
+          tokenProvider,
+          mockedRpcProviderMap,
+          stateOverrideResolver
+        );
+
+      it.each(['EXACT_IN', 'EXACT_OUT'])(
+        'drops routes through an intermediary FOT token for %s',
+        async tradeType => {
+          const quoteStrategy = new RecordingQuoteStrategy();
+          const testCtx = buildTestContext();
+
+          const response = await buildFotIntermediaryBL(
+            new FotIntermediaryRoutesRepository(true),
+            quoteStrategy
+          ).quote(testCtx, new QuoteRequest({...baseRequest, tradeType}));
+
+          expect(response.error).toBeUndefined();
+          expect(quoteStrategy.receivedRoutes).toHaveLength(1);
+          const servedRoutes = quoteStrategy.receivedRoutes[0];
+          expect(servedRoutes).toHaveLength(1);
+          expect(
+            servedRoutes[0].path.map(pool => pool.address.toString())
+          ).toEqual([directPoolAddress]);
+          expect(testCtx.metrics.countStore[fotFilteredMetric]).toBe(1);
+        }
       );
 
-      const response = await uniRouteBL.quote(ctx, request);
-      // Should succeed — the direct route (without FOT intermediary) is still available
-      expect(response.error).toBeUndefined();
+      it('hands the quote strategy no routes for EXACT_IN when every route passes through an intermediary FOT token', async () => {
+        const quoteStrategy = new RecordingQuoteStrategy();
+        const testCtx = buildTestContext();
+
+        await buildFotIntermediaryBL(
+          new FotIntermediaryRoutesRepository(false),
+          quoteStrategy
+        ).quote(
+          testCtx,
+          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        );
+
+        expect(quoteStrategy.receivedRoutes).toEqual([[]]);
+        expect(testCtx.metrics.countStore[fotFilteredMetric]).toBe(1);
+      });
     });
   });
 });

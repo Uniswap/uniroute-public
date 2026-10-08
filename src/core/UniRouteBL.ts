@@ -727,15 +727,19 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       }
 
-      if (tradeType === TradeType.ExactOut && routes.length > 0) {
+      if (routes.length > 0) {
         routes = await this.filterFotIntermediaryRoutes(
           ctx,
           chain,
           routes,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
+          tradeType,
           tokensInfo
         );
+      }
+
+      if (tradeType === TradeType.ExactOut && routes.length > 0) {
         routes = routes.filter(
           route =>
             !route.path.some(
@@ -1667,9 +1671,11 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * For EXACT_OUT only, drops routes whose intermediary pools contain FOT
-   * tokens. Direct-swap FOT tokens are already rejected upstream; this
-   * handles multi-hop routes routing through an intermediary FOT token.
+   * Drops routes whose intermediary pools contain FOT tokens, for both trade
+   * types. EXACT_OUT cannot guarantee output through any FOT hop, and EXACT_IN
+   * quotes only price the fees of tokenIn/tokenOut (see adjustV2QuotesForFOT),
+   * so an intermediary fee would make the served minimum unreachable on-chain.
+   * Direct-swap FOT tokens are handled upstream.
    */
   private async filterFotIntermediaryRoutes(
     ctx: Context,
@@ -1677,6 +1683,7 @@ export class UniRouteBL implements IUniRoutedBL {
     routes: RouteBasic<Pool>[],
     tokenInCurrencyInfo: CurrencyInfo,
     tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
     tokensInfo: Map<string, Erc20Token | null>
   ): Promise<RouteBasic<Pool>[]> {
     const preFilterCount = routes.length;
@@ -1691,12 +1698,21 @@ export class UniRouteBL implements IUniRoutedBL {
         ctx
       );
     if (fotIntermediaryTokens.size > 0) {
-      ctx.logger.debug(
-        'Filtered routes with intermediary FOT tokens for EXACT_OUT',
+      ctx.logger.debug('Filtered routes with intermediary FOT tokens', {
+        tradeType,
+        preFilterCount,
+        postFilterCount: filteredRoutes.length,
+        fotIntermediaryTokens: Array.from(fotIntermediaryTokens),
+      });
+      await ctx.metrics.count(
+        buildMetricKey('FotIntermediaryRoutesFiltered'),
+        preFilterCount - filteredRoutes.length,
         {
-          preFilterCount,
-          postFilterCount: filteredRoutes.length,
-          fotIntermediaryTokens: Array.from(fotIntermediaryTokens),
+          tags: [
+            `chain:${ChainId[chain.chainId]}`,
+            `tradeType:${tradeType}`,
+            'status:success',
+          ],
         }
       );
     }
