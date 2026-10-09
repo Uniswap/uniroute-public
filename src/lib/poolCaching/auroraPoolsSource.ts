@@ -178,10 +178,11 @@ export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 // pools in TopPools selection (council review finding on #11463).
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
-// This mirrors createChainProtocols' V2/V3/V4 matrix. Base's 15.2M-row full
-// fetch needs SQL admission pushdown first; Ink and Monad testnet have no
-// Aurora pool rows yet. Unichain V2 needs its per-combo pre-filter because
-// its full read exceeds the cron's 30s statement timeout.
+// This mirrors createChainProtocols' V2/V3/V4 matrix. Base V3 and V4 (1.9M
+// and 15.4M rows) need SQL admission pushdown first; Ink and Monad testnet
+// have no Aurora pool rows yet. Unichain V2 and Base V2 need their per-combo
+// pre-filter because their full reads exceed the cron's 30s statement
+// timeout.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
   readonly [Protocol, readonly number[]]
 > = [
@@ -189,7 +190,7 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
     Protocol.V2,
     [
       1, 42161, 137, 10, 56, 43114, 81457, 130, 480, 1868, 143, 4217, 196,
-      59144, 4326, 4663, 5042,
+      59144, 4326, 4663, 5042, 8453,
     ],
   ],
   [
@@ -210,10 +211,14 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
 
 // V2 combos whose full read exceeds the statement timeout. They are read
 // only with the pre-filter; without it they stay on the subgraph.
-const V2_TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set(['130:V2']);
+const V2_TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set([
+  '130:V2',
+  '8453:V2',
+]);
 
-// The cut targets empty spam pairs, which are almost all of Unichain's V2
-// pairs. On an ETH-native chain such as Unichain, tracked V2 admission needs
+// The cut targets empty and dust spam pairs, which are almost all of
+// Unichain's and Base's V2 pairs (Base: 42k of 3.07M pairs hold $1 or more
+// in pool_stats). On an ETH-native chain such as these, tracked V2 admission needs
 // over 0.025 native, far above $1. On a chain whose native token is cheap,
 // that admission floor can sit below $1, and pool_stats can undervalue a
 // pair on any chain. So each combo's shadow parity must measure coverage

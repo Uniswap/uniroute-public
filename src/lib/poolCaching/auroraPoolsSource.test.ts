@@ -4111,9 +4111,10 @@ describe('AuroraV2PoolsProvider', () => {
     }
   });
 
-  // Every mode that could read 130:V2 (wildcard shadow, primary with a valid,
-  // absent or invalid floor, scoped or unscoped run) must skip it without the
-  // pre-filter: an unfiltered read exceeds the statement timeout.
+  // Every mode that could read a V2 combo that requires the pre-filter
+  // (wildcard shadow, primary with a valid, absent or invalid floor, scoped
+  // or unscoped run) must skip it without the pre-filter: an unfiltered read
+  // exceeds the statement timeout. TARGET stands for the combo's key.
   it.each([
     {
       name: 'wildcard shadow',
@@ -4124,23 +4125,23 @@ describe('AuroraV2PoolsProvider', () => {
     {
       name: 'primary with a floor',
       shadow: undefined,
-      primary: '130:V2',
-      floors: '{"130:V2":5}',
+      primary: 'TARGET',
+      floors: '{"TARGET":5}',
     },
     {
       name: 'primary without a floor',
       shadow: undefined,
-      primary: '130:V2',
+      primary: 'TARGET',
       floors: undefined,
     },
     {
       name: 'primary with an invalid floor',
       shadow: undefined,
-      primary: '130:V2',
-      floors: '{"130:V2":"x"}',
+      primary: 'TARGET',
+      floors: '{"TARGET":"x"}',
     },
   ])(
-    'never reads Unichain V2 without its pre-filter: $name',
+    'never reads Unichain or Base V2 without its pre-filter: $name',
     async ({shadow, primary, floors}) => {
       const keys = [
         'POOL_CACHING_AURORA_SHADOW_TARGETS',
@@ -4162,48 +4163,126 @@ describe('AuroraV2PoolsProvider', () => {
         else process.env[key] = value;
       };
       try {
-        setEnv('POOL_CACHING_AURORA_SHADOW_TARGETS', shadow);
-        setEnv('POOL_CACHING_AURORA_PRIMARY_TARGETS', primary);
-        setEnv('POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET', floors);
-        delete process.env.POOL_CACHING_AURORA_V2_PREFILTER_TARGETS;
-        for (const scopedRun of [false, true]) {
-          const metric = new FakeMetric();
-          const subgraph = fakeProvider<V2SubgraphPool>([[]]);
-          const unichain = {
-            chainId: 130,
-            protocol: Protocol.V2,
-            provider: subgraph,
-          };
-          applyAuroraPoolSources(
-            [unichain],
-            {
-              trackedEthThresholdFor: () => 0.025,
-              untrackedUsdThresholdFor: () => Number.MAX_VALUE,
-            },
-            noopLogger,
-            metric,
-            {
-              scopedRun,
-              providerDeps: {
-                routablePools: new FakeAllRoutablePools([]),
-                prices: freshNativePrice(130),
-                logger: noopLogger,
-                metric,
-              },
-            }
+        for (const chainId of [130, 8453]) {
+          const target = `${chainId}:V2`;
+          const forTarget = (value: string | undefined) =>
+            value?.replace(/TARGET/g, target);
+          setEnv('POOL_CACHING_AURORA_SHADOW_TARGETS', forTarget(shadow));
+          setEnv('POOL_CACHING_AURORA_PRIMARY_TARGETS', forTarget(primary));
+          setEnv(
+            'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
+            forTarget(floors)
           );
-          expect(unichain.provider).toBe(subgraph);
-          expect(metric.byKey('CachePools.aurora.target_skipped')).toEqual([
-            expect.objectContaining({
-              tags: expect.objectContaining({reason: 'prefilter_required'}),
-            }),
-          ]);
+          delete process.env.POOL_CACHING_AURORA_V2_PREFILTER_TARGETS;
+          for (const scopedRun of [false, true]) {
+            const metric = new FakeMetric();
+            const subgraph = fakeProvider<V2SubgraphPool>([[]]);
+            const chainProtocol = {
+              chainId,
+              protocol: Protocol.V2,
+              provider: subgraph,
+            };
+            applyAuroraPoolSources(
+              [chainProtocol],
+              {
+                trackedEthThresholdFor: () => 0.025,
+                untrackedUsdThresholdFor: () => Number.MAX_VALUE,
+              },
+              noopLogger,
+              metric,
+              {
+                scopedRun,
+                providerDeps: {
+                  routablePools: new FakeAllRoutablePools([]),
+                  prices: freshNativePrice(chainId),
+                  logger: noopLogger,
+                  metric,
+                },
+              }
+            );
+            expect(chainProtocol.provider).toBe(subgraph);
+            expect(metric.byKey('CachePools.aurora.target_skipped')).toEqual([
+              expect.objectContaining({
+                tags: expect.objectContaining({
+                  chainId: String(chainId),
+                  reason: 'prefilter_required',
+                }),
+              }),
+            ]);
+          }
         }
       } finally {
         for (const key of keys) setEnv(key, saved.get(key));
       }
     }
   );
+
+  it('reads Base V2 through the pre-filter with FEI and VIRTUAL always included when it is listed', async () => {
+    const keys = [
+      'POOL_CACHING_AURORA_SHADOW_TARGETS',
+      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
+      'POOL_CACHING_AURORA_V2_PREFILTER_TARGETS',
+    ];
+    const saved = new Map(keys.map(key => [key, process.env[key]]));
+    try {
+      process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+      delete process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
+      process.env.POOL_CACHING_AURORA_V2_PREFILTER_TARGETS = '130:V2,8453:V2';
+      class FakeAllRoutablePools extends FakeV2RoutablePools {
+        async listAllV3RoutablePools() {
+          return [];
+        }
+        async listAllV4RoutablePools() {
+          return [];
+        }
+      }
+      const metric = new FakeMetric();
+      const routablePools = new FakeAllRoutablePools([]);
+      const base = {
+        chainId: 8453,
+        protocol: Protocol.V2,
+        provider: fakeProvider<V2SubgraphPool>([[]]),
+      };
+      applyAuroraPoolSources(
+        [base],
+        {
+          trackedEthThresholdFor: () => 0.025,
+          untrackedUsdThresholdFor: () => Number.MAX_VALUE,
+        },
+        noopLogger,
+        metric,
+        {
+          scopedRun: true,
+          providerDeps: {
+            routablePools,
+            prices: freshNativePrice(8453),
+            logger: noopLogger,
+            metric,
+          },
+        }
+      );
+      expect(base.provider).toBeInstanceOf(AuroraSourcedProvider);
+      await base.provider.getPools();
+      await settlePendingAuroraShadowsForTesting();
+      expect(routablePools.options).toEqual([
+        {
+          chainId: 8453,
+          minTvlUsd: 0,
+          poolStatsPrefilter: {
+            minPoolStatsTvlUsd: 1,
+            alwaysIncludeTokens: [FEI, VIRTUAL],
+          },
+        },
+      ]);
+      expect(metric.byKey('CachePools.aurora.target_skipped')).toEqual([]);
+    } finally {
+      for (const key of keys) {
+        const value = saved.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 
   function provider(
     chainId: number,
@@ -4885,7 +4964,7 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
         )
         .filter(
           cp =>
-            cp.chainId !== CHAIN_ID_BASE &&
+            (cp.chainId !== CHAIN_ID_BASE || cp.protocol === Protocol.V2) &&
             cp.chainId !== CHAIN_ID_INK &&
             cp.chainId !== CHAIN_ID_MONAD_TESTNET
         )
@@ -4895,7 +4974,6 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
     for (const key of [
       '8453:V4',
       '8453:V3',
-      '8453:V2',
       '57073:V4',
       '57073:V3',
       '57073:V2',
@@ -4904,6 +4982,7 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
       expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(false);
     }
     expect(AURORA_SUPPORTED_TARGETS.has('130:V2')).toBe(true);
+    expect(AURORA_SUPPORTED_TARGETS.has('8453:V2')).toBe(true);
   });
 });
 
