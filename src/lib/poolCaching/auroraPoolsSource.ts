@@ -4,7 +4,7 @@
  * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
  * format, serving path) is unchanged.
  *
- * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix (except Base V3/V4 and
+ * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix (except
  * Monad testnet;
  * AURORA_SUPPORTED_TARGETS). Env
  * targets outside the allowlist are ignored with a metric, so even a `*`
@@ -181,11 +181,10 @@ export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 // pools in TopPools selection (council review finding on #11463).
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
-// This mirrors createChainProtocols' V2/V3/V4 matrix. Base V3 and V4 (1.9M
-// and 15.4M rows) need SQL admission pushdown first; Monad testnet has no
-// Aurora pool rows yet. Unichain V2 and Base V2 need their per-combo
-// pre-filter because their full reads exceed the cron's 30s statement
-// timeout.
+// This mirrors createChainProtocols' V2/V3/V4 matrix. Monad testnet has no
+// Aurora pool rows yet. Unichain V2, Base V2, Base V3 (1.9M rows), and Base
+// V4 (15.4M rows) need their per-combo pre-filter because their full reads
+// exceed the cron's 30s statement timeout.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
   readonly [Protocol, readonly number[]]
 > = [
@@ -200,23 +199,25 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
     Protocol.V3,
     [
       1, 42161, 137, 10, 42220, 56, 43114, 81457, 130, 480, 7777777, 1868, 143,
-      4217, 196, 59144, 4326, 4663, 5042, 57073,
+      4217, 196, 59144, 4326, 4663, 5042, 57073, 8453,
     ],
   ],
   [
     Protocol.V4,
     [
       11155111, 42161, 137, 480, 7777777, 130, 81457, 1, 1868, 10, 56, 143,
-      4217, 196, 43114, 42220, 59144, 4326, 4663, 5042, 57073,
+      4217, 196, 43114, 42220, 59144, 4326, 4663, 5042, 57073, 8453,
     ],
   ],
 ];
 
-// V2 combos whose full read exceeds the statement timeout. They are read
-// only with the pre-filter; without it they stay on the subgraph.
-const V2_TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set([
+// Combos whose full read exceeds the statement timeout. They are read only
+// with the pool_stats pre-filter; without it they stay on the subgraph.
+const TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set([
   '130:V2',
   '8453:V2',
+  '8453:V3',
+  '8453:V4',
 ]);
 
 // The cut targets empty and dust spam pairs, which are almost all of
@@ -225,8 +226,13 @@ const V2_TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set([
 // over 0.025 native, far above $1. On a chain whose native token is cheap,
 // that admission floor can sit below $1, and pool_stats can undervalue a
 // pair on any chain. So each combo's shadow parity must measure coverage
-// before it is listed, and before it serves from this lossy read.
-const V2_PREFILTER_MIN_POOL_STATS_TVL_USD = 1;
+// before it is listed, and before it serves from this lossy read. V3 and V4
+// use the same $1 floor. V2 always includes FEI (and VIRTUAL on Base)
+// because its admission has token-based families. V3 and V4 admission has
+// no token-based family, so they include no tokens, and V4 keeps its
+// always-include hooks instead. The floor does drop V3's exact_zero family
+// (refusePrefilteredV3Primary).
+const PREFILTER_MIN_POOL_STATS_TVL_USD = 1;
 const V2_FEI_TOKEN = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
 const V2_BASE_VIRTUAL_TOKEN = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b';
 
@@ -257,9 +263,9 @@ export interface AuroraPoolsSourceConfig {
   shadowTargets: 'all' | ReadonlySet<string>;
   primaryTargets: 'all' | ReadonlySet<string>;
   tvlGuardTargets: 'all' | ReadonlySet<string>;
-  v2PrefilterTargets: ReadonlySet<string>;
+  prefilterTargets: ReadonlySet<string>;
   // A lossy pre-filter requires explicit per-combo selection.
-  v2PrefilterWildcardIgnored: boolean;
+  prefilterWildcardIgnored: boolean;
   // Prod enables the guard per combo after its shadow soak; rejecting `*`
   // keeps an all-combo typo in shadow everywhere and makes it observable.
   tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
@@ -363,14 +369,14 @@ export function auroraPoolsSourceConfigFromEnv(
     .some(entry => entry.trim() === '*')
     ? 'all'
     : parseTargets(tvlGuardRaw);
-  const v2PrefilterRaw = process.env.POOL_CACHING_AURORA_V2_PREFILTER_TARGETS;
-  const parsedV2PrefilterTargets = parseTargets(v2PrefilterRaw);
-  const v2PrefilterWildcardIgnored =
-    parsedV2PrefilterTargets === 'all' || parsedV2PrefilterTargets.has('*');
-  const v2PrefilterTargets =
-    parsedV2PrefilterTargets === 'all'
+  const prefilterRaw = process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS;
+  const parsedPrefilterTargets = parseTargets(prefilterRaw);
+  const prefilterWildcardIgnored =
+    parsedPrefilterTargets === 'all' || parsedPrefilterTargets.has('*');
+  const prefilterTargets =
+    parsedPrefilterTargets === 'all'
       ? new Set<string>()
-      : new Set([...parsedV2PrefilterTargets].filter(key => key !== '*'));
+      : new Set([...parsedPrefilterTargets].filter(key => key !== '*'));
   const setEnvironments = environments
     .map(value => value?.trim().toLowerCase())
     .filter((value): value is string => Boolean(value));
@@ -392,8 +398,8 @@ export function auroraPoolsSourceConfigFromEnv(
     tvlGuardTargets: tvlGuardTargetsWildcardRejection
       ? new Set()
       : parsedTvlGuardTargets,
-    v2PrefilterTargets,
-    v2PrefilterWildcardIgnored,
+    prefilterTargets,
+    prefilterWildcardIgnored,
     tvlGuardTargetsWildcardRejection,
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
@@ -459,6 +465,44 @@ export function resolveAuroraModeWithPrimaryFloor(
     1,
     MetricLoggerUnit.Count,
     {chainId: String(chainId), protocol: String(protocol)}
+  );
+  return 'shadow';
+}
+
+// A V3 combo read through the pool_stats pre-filter never sees the
+// exact_zero family (liquidity > 0 with no priced TVL): those pools have a
+// null or zero pool_stats.tvl_usd, so the candidate query drops them, and no
+// index on pool_stats reaches them without a sequential scan (Base V3 holds
+// ~299k). Top-100 parity cannot see the loss because those pools never rank,
+// so such a combo stays shadow-only until the family has its own read.
+export function refusePrefilteredV3Primary(
+  mode: AuroraTargetMode,
+  config: AuroraPoolsSourceConfig,
+  chainId: number,
+  protocol: Protocol,
+  logger: Logger,
+  metric: IMetric
+): AuroraTargetMode {
+  const key = targetKey(chainId, protocol);
+  if (
+    mode !== 'primary' ||
+    protocol !== Protocol.V3 ||
+    !config.prefilterTargets.has(key)
+  ) {
+    return mode;
+  }
+  logger.warn(
+    `Aurora pool source ${key} is pre-filtered, which drops the V3 exact_zero family — downgrading to shadow`
+  );
+  metric.putMetric(
+    'CachePools.aurora.primary_refused',
+    1,
+    MetricLoggerUnit.Count,
+    {
+      chainId: String(chainId),
+      protocol: String(protocol),
+      reason: 'prefilter_drops_exact_zero',
+    }
   );
   return 'shadow';
 }
@@ -1030,7 +1074,14 @@ export class AuroraV4PoolsProvider
     trackedEthThreshold: number,
     deps: AuroraProviderDeps<'listAllV4RoutablePools'>,
     private readonly admissionDeps: AuroraV4AdmissionDeps = DEFAULT_V4_ADMISSION_DEPS,
-    applyTvlGuard = false
+    applyTvlGuard = false,
+    // Lossy candidate pre-filter for chains whose full read exceeds the
+    // statement timeout (Base). Replaces lockedAmountPrefilter below with the
+    // pool_stats pre-filter, same always-include hook set; mutually
+    // exclusive by the lib's option union.
+    private readonly poolStatsPrefilter:
+      | {minPoolStatsTvlUsd: number}
+      | undefined = undefined
   ) {
     super(chainId, trackedEthThreshold, deps, applyTvlGuard);
   }
@@ -1047,13 +1098,17 @@ export class AuroraV4PoolsProvider
         hook => hook.toLowerCase()
       )
     );
+    const alwaysIncludeHooks = [...bypassHooks, ...permissionedHooks];
     // The read stays unfloored on TVL: a SQL floor would drop the
     // [V4_MIN_TVL_ETH, trackedEthThreshold) liquidity band and pools the
     // implied top-up admits. It skips pools with nothing locked on either
     // side, which no TVL-based family below can admit, and keeps the bypass
     // and permissioned hooks, whose families need no TVL. On launchpad chains
     // a large share of pools hold nothing, and reading them all can approach
-    // the statement timeout.
+    // the statement timeout. Where that still isn't enough (Base), the
+    // pool_stats pre-filter below trades some of this family's admission
+    // coverage for a read that fits the timeout at all — shadow parity
+    // measures what it drops.
     //
     // The native-price lookup rides the SAME fetch slot: a provider must hold
     // at most one pool connection at a time, or dozens of concurrent price
@@ -1061,13 +1116,23 @@ export class AuroraV4PoolsProvider
     // (security-gate finding on #12440).
     const {nativePrice, pools} = await this.withFetchSlot(async () => ({
       nativePrice: await this.nativeUsdPrice(ctx),
-      pools: await this.deps.routablePools.listAllV4RoutablePools(ctx, {
-        chainId: this.chainId as ExtendedChainId,
-        minTvlUsd: 0,
-        lockedAmountPrefilter: {
-          alwaysIncludeHooks: [...bypassHooks, ...permissionedHooks],
-        },
-      }),
+      pools: await this.deps.routablePools.listAllV4RoutablePools(
+        ctx,
+        this.poolStatsPrefilter
+          ? {
+              chainId: this.chainId as ExtendedChainId,
+              minTvlUsd: 0,
+              poolStatsPrefilter: {
+                minPoolStatsTvlUsd: this.poolStatsPrefilter.minPoolStatsTvlUsd,
+                alwaysIncludeHooks,
+              },
+            }
+          : {
+              chainId: this.chainId as ExtendedChainId,
+              minTvlUsd: 0,
+              lockedAmountPrefilter: {alwaysIncludeHooks},
+            }
+      ),
     }));
 
     // Subgraph V4 admission = union of four query families
@@ -1327,7 +1392,12 @@ export class AuroraV3PoolsProvider
     chainId: number,
     trackedEthThreshold: number,
     deps: AuroraProviderDeps<'listAllV3RoutablePools'>,
-    applyTvlGuard = false
+    applyTvlGuard = false,
+    // Lossy candidate pre-filter for chains whose full read exceeds the
+    // statement timeout (Base); same shape as V2's.
+    private readonly poolStatsPrefilter:
+      | {minPoolStatsTvlUsd: number}
+      | undefined = undefined
   ) {
     super(chainId, trackedEthThreshold, deps, applyTvlGuard);
   }
@@ -1341,6 +1411,9 @@ export class AuroraV3PoolsProvider
       pools: await this.deps.routablePools.listAllV3RoutablePools(ctx, {
         chainId: this.chainId as ExtendedChainId,
         minTvlUsd: 0,
+        ...(this.poolStatsPrefilter
+          ? {poolStatsPrefilter: this.poolStatsPrefilter}
+          : {}),
       }),
     }));
 
@@ -2416,28 +2489,28 @@ export function applyAuroraPoolSources<
       {reason: config.tvlGuardTargetsWildcardRejection}
     );
   }
-  if (config.v2PrefilterWildcardIgnored) {
+  if (config.prefilterWildcardIgnored) {
     metric.putMetric(
-      'CachePools.aurora.v2_prefilter_config_rejected',
+      'CachePools.aurora.prefilter_config_rejected',
       1,
       MetricLoggerUnit.Count,
       {reason: 'wildcard'}
     );
     logger.warn(
-      'Aurora V2 pre-filter targets wildcard ignored — list explicit combos'
+      'Aurora pre-filter targets wildcard ignored — list explicit combos'
     );
   }
   const skippedTargets = new Set<string>();
   for (const {chainId, protocol} of chainProtocols) {
     const key = targetKey(chainId, protocol);
     if (
-      V2_TARGETS_REQUIRING_PREFILTER.has(key) &&
+      TARGETS_REQUIRING_PREFILTER.has(key) &&
       resolveAuroraMode(config, chainId, protocol) &&
-      !config.v2PrefilterTargets.has(key)
+      !config.prefilterTargets.has(key)
     ) {
       skippedTargets.add(key);
       logger.warn(
-        `Aurora pool source ${key} requires the V2 pre-filter — staying on subgraph`
+        `Aurora pool source ${key} requires the pre-filter — staying on subgraph`
       );
       metric.putMetric(
         'CachePools.aurora.target_skipped',
@@ -2495,14 +2568,22 @@ export function applyAuroraPoolSources<
     const {chainId, protocol} = chainProtocol;
     const key = targetKey(chainId, protocol);
     if (skippedTargets.has(key)) continue;
-    const mode = resolveAuroraModeWithPrimaryFloor(
+    const resolvedMode = resolveAuroraModeWithPrimaryFloor(
       config,
       chainId,
       protocol,
       logger,
       metric
     );
-    if (!mode) continue;
+    if (!resolvedMode) continue;
+    const mode = refusePrefilteredV3Primary(
+      resolvedMode,
+      config,
+      chainId,
+      protocol,
+      logger,
+      metric
+    );
 
     if (!AURORA_SUPPORTED_TARGETS.has(key)) {
       logger.warn(
@@ -2533,7 +2614,10 @@ export function applyAuroraPoolSources<
           thresholds.trackedEthThresholdFor(protocol, chainId),
           providerDeps,
           DEFAULT_V4_ADMISSION_DEPS,
-          applyTvlGuard
+          applyTvlGuard,
+          config.prefilterTargets.has(key)
+            ? {minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD}
+            : undefined
         ),
         chainProtocol.provider as ISubgraphProvider<V4SubgraphPool>,
         chainId,
@@ -2550,7 +2634,10 @@ export function applyAuroraPoolSources<
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
           providerDeps,
-          applyTvlGuard
+          applyTvlGuard,
+          config.prefilterTargets.has(key)
+            ? {minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD}
+            : undefined
         ),
         chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
         chainId,
@@ -2569,9 +2656,9 @@ export function applyAuroraPoolSources<
           thresholds.untrackedUsdThresholdFor(protocol, chainId),
           providerDeps,
           applyTvlGuard,
-          config.v2PrefilterTargets.has(key)
+          config.prefilterTargets.has(key)
             ? {
-                minPoolStatsTvlUsd: V2_PREFILTER_MIN_POOL_STATS_TVL_USD,
+                minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD,
                 alwaysIncludeTokens: v2PrefilterAlwaysIncludeTokens(chainId),
               }
             : undefined
