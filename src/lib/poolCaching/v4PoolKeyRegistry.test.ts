@@ -631,6 +631,12 @@ class FakeRoutablePoolsService implements RoutablePoolsService {
   ): Promise<V4RoutablePool[]> {
     return Promise.reject(new Error('not part of the registry contract'));
   }
+  listV4RoutablePoolsByHooks(): Promise<V4RoutablePool[]> {
+    return Promise.reject(new Error('not part of the registry contract'));
+  }
+  listV3RoutablePoolsByAddresses(): Promise<V3RoutablePool[]> {
+    return Promise.reject(new Error('not part of the registry contract'));
+  }
   listAllV4PoolKeys(
     _ctx: Context,
     _options: ListPoolKeysOptions

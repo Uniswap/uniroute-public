@@ -1,6 +1,23 @@
 import {describe, it, expect, vi, beforeEach} from 'vitest';
 import * as zlib from 'zlib';
-import {cacheAllPools, CachePoolsConfig} from './cachePools';
+import {
+  cacheAllPools,
+  CachePoolsConfig,
+  withExtraPoolSource,
+} from './cachePools';
+import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
+import {
+  ExtraPoolSourceName,
+  type ExtraPoolsSource,
+  MAINNET_V3_MANUAL_POOL_IDS,
+  V4_EXTRA_POOL_SOURCE_MEMORY,
+  extraSourceKey,
+  resetExtraPoolSourceMemoryForTesting,
+} from './extraPoolSources';
+import {
+  EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS,
+  ExtraPoolSourceMemory,
+} from './extraPoolSourceMemory';
 import type {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import type {
@@ -8,6 +25,7 @@ import type {
   IAggHooksSubgraphProvider,
   IEulerSwapHooksSubgraphProvider,
   ProviderConfig,
+  V3SubgraphPool,
   V4SubgraphPool,
 } from './sor-providers';
 import {Protocol} from '@uniswap/router-sdk';
@@ -232,6 +250,7 @@ describe('cacheAllPools', () => {
     mockMetric = new MockMetric();
     mockChainProtocols = [];
     v3ManualFetch.error = undefined;
+    resetExtraPoolSourceMemoryForTesting();
     sendMock.mockClear();
     sendMock.mockResolvedValue({});
   });
@@ -1153,6 +1172,178 @@ describe('cacheAllPools', () => {
   // These sources are additions on top of the main pool set. A failure in
   // any one of them must cost only its own pools, never the snapshot built
   // from the main set.
+  describe('extra pool source carry-forward', () => {
+    const mainPool = makeV4Pool(
+      '0xmainpool',
+      '0x0000000000000000000000000000000000000000',
+      '0x1111',
+      '0x2222'
+    );
+    const aggPool = makeV4Pool(
+      '0xaggpool',
+      '0x3333333333333333333333333333333333333333',
+      '0x5555',
+      '0x6666'
+    );
+    const aggChainProtocol = (aggHooksProvider: IAggHooksSubgraphProvider) => ({
+      protocol: Protocol.V4,
+      chainId: ChainId.MAINNET,
+      timeout: 90000,
+      provider: {getPools: async () => [mainPool]},
+      aggHooksProvider,
+    });
+    const carryForwardTags = (outcome: string) => ({
+      key: 'CachePools.extraPoolSource.carryForward',
+      value: 1,
+      unit: MetricLoggerUnit.Count,
+      tags: {
+        chainId: String(ChainId.MAINNET),
+        protocol: String(Protocol.V4),
+        source: 'agg_hooks',
+        outcome,
+      },
+    });
+
+    it('serves the last good agg hook pools when a later sweep fails', async () => {
+      mockChainProtocols = [
+        aggChainProtocol(new FakeAggHooksSubgraphProvider([aggPool])),
+      ];
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      sendMock.mockClear();
+      mockMetric = new MockMetric();
+      mockChainProtocols = [
+        aggChainProtocol(
+          new FakeAggHooksSubgraphProvider([], new Error('subgraph shut off'))
+        ),
+      ];
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toContain(aggPool.id);
+      expect(mockMetric.calls).toContainEqual(carryForwardTags('served'));
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V4),
+          source: 'agg_hooks',
+          status: 'failure',
+          reason: 'fetch_error',
+        },
+      });
+    });
+
+    it('drops the pools once the last good result is past the max age', async () => {
+      V4_EXTRA_POOL_SOURCE_MEMORY.recordGood(
+        extraSourceKey(ExtraPoolSourceName.AGG_HOOKS, ChainId.MAINNET),
+        [aggPool],
+        Date.now() - EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS - 60_000
+      );
+      mockChainProtocols = [
+        aggChainProtocol(
+          new FakeAggHooksSubgraphProvider([], new Error('subgraph shut off'))
+        ),
+      ];
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).not.toContain(aggPool.id);
+      expect(mockMetric.calls).toContainEqual(carryForwardTags('expired'));
+    });
+  });
+
+  describe('withExtraPoolSource', () => {
+    const NOW_MS = Date.UTC(2026, 9, 13, 12);
+    const key = extraSourceKey(ExtraPoolSourceName.AGG_HOOKS, ChainId.MAINNET);
+    const tags = {chainId: String(ChainId.MAINNET), protocol: 'V4'};
+    const pool = makeV4Pool('0xaggpool', '0x3333', '0x5555', '0x6666');
+
+    function run(
+      memory: ExtraPoolSourceMemory<V4SubgraphPool>,
+      fn: () => Promise<V4SubgraphPool[]>,
+      timeoutMs?: number
+    ) {
+      return withExtraPoolSource(
+        ExtraPoolSourceName.AGG_HOOKS,
+        ChainId.MAINNET,
+        tags,
+        mockMetric,
+        mockLogger,
+        memory,
+        fn,
+        () => NOW_MS,
+        timeoutMs
+      );
+    }
+    const statusOf = () =>
+      mockMetric.calls
+        .filter(call => call.key === 'CachePools.extraPoolSource')
+        .map(call => call.tags);
+
+    it('treats a read that outlives its timeout as a failure and carries forward', async () => {
+      const memory = new ExtraPoolSourceMemory<V4SubgraphPool>();
+      memory.recordGood(key, [pool], NOW_MS - 20 * 60_000);
+
+      const result = await run(memory, () => new Promise(() => {}), 10);
+
+      expect(result).toEqual([pool]);
+      expect(statusOf()).toEqual([
+        {...tags, source: 'agg_hooks', status: 'failure', reason: 'timeout'},
+      ]);
+    });
+
+    it('carries forward over an empty read when a recent read had pools', async () => {
+      const memory = new ExtraPoolSourceMemory<V4SubgraphPool>();
+      memory.recordGood(key, [pool], NOW_MS - 20 * 60_000);
+
+      const result = await run(memory, async () => []);
+
+      expect(result).toEqual([pool]);
+      expect(statusOf()).toEqual([
+        {
+          ...tags,
+          source: 'agg_hooks',
+          status: 'failure',
+          reason: 'empty_result',
+        },
+      ]);
+    });
+
+    it('serves an empty read as success when the source has no recent pools', async () => {
+      const result = await run(
+        new ExtraPoolSourceMemory<V4SubgraphPool>(),
+        async () => []
+      );
+
+      expect(result).toEqual([]);
+      expect(statusOf()).toEqual([
+        {...tags, source: 'agg_hooks', status: 'success'},
+      ]);
+    });
+
+    it('serves nothing on a failure with no good result since the process started', async () => {
+      const result = await run(
+        new ExtraPoolSourceMemory<V4SubgraphPool>(),
+        async () => {
+          throw new Error('aurora down');
+        }
+      );
+
+      expect(result).toBeUndefined();
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource.carryForward',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {...tags, source: 'agg_hooks', outcome: 'none'},
+      });
+    });
+  });
+
   describe('extra pool sources (best-effort)', () => {
     const mainPool = makeV4Pool(
       '0xmainpool',
@@ -1203,7 +1394,7 @@ describe('cacheAllPools', () => {
           msg =>
             typeof msg === 'string' &&
             msg.includes(
-              'Extra pool source failed, writing the snapshot without its pools: source=euler_hooks error=Error'
+              'Extra pool source failed: source=euler_hooks reason=fetch_error error=Error'
             )
         )
       ).toBe(true);
@@ -1255,7 +1446,7 @@ describe('cacheAllPools', () => {
           msg =>
             typeof msg === 'string' &&
             msg.includes(
-              'Extra pool source failed, writing the snapshot without its pools: source=agg_hooks error=Error'
+              'Extra pool source failed: source=agg_hooks reason=fetch_error error=Error'
             )
         )
       ).toBe(true);
@@ -1336,7 +1527,7 @@ describe('cacheAllPools', () => {
         .mock.calls.map(call => call[0]);
       expect(warnMessages).toContainEqual(
         expect.stringContaining(
-          'Extra pool source failed, writing the snapshot without its pools: source=v3_mainnet_manual error=Error'
+          'Extra pool source failed: source=v3_mainnet_manual reason=fetch_error error=Error'
         )
       );
       expect(
@@ -1344,6 +1535,132 @@ describe('cacheAllPools', () => {
           msg => typeof msg === 'string' && msg.includes('unreachable')
         )
       ).toBe(false);
+    });
+
+    // The Aurora wrappers applyAuroraPoolSources installs: cachePools hands
+    // each its subgraph source, so after the subgraph shutoff the snapshot
+    // still carries the extra pools from Aurora.
+    it('serves EulerSwap pools through an installed Aurora override when the subgraph source fails', async () => {
+      const auroraEulerPool = makeV4Pool(
+        '0xauroraeulerpool',
+        '0x0222155e00e159a6a12613ee7c7b1021f9f568a8',
+        '0x078d782b760474a361dda0af3839290b0ef57ad6',
+        '0x4200000000000000000000000000000000000006'
+      );
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V4,
+          chainId: ChainId.UNICHAIN,
+          timeout: 90000,
+          provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
+          eulerHooksProvider: new FakeEulerSwapHooksSubgraphProvider(
+            [],
+            {},
+            new Error('subgraph shut off')
+          ),
+          extraPoolSourceOverrides: {
+            euler: (subgraph: ExtraPoolsSource<V4SubgraphPool>) =>
+              new AuroraSourcedExtraPoolsProvider<V4SubgraphPool>(
+                'primary',
+                ExtraPoolSourceName.EULER_HOOKS,
+                ChainId.UNICHAIN,
+                {getPools: async () => [auroraEulerPool]},
+                subgraph,
+                mockLogger,
+                mockMetric
+              ),
+          },
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toEqual(
+        expect.arrayContaining([mainPool.id, auroraEulerPool.id])
+      );
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.UNICHAIN),
+          protocol: String(Protocol.V4),
+          source: 'euler_hooks',
+          status: 'success',
+        },
+      });
+    });
+
+    it('serves the mainnet manual V3 pool through an installed Aurora override, carries it forward when both reads fail, and drops it after a restart', async () => {
+      const mainV3Pool = makeV3Pool('0xmainv3pool', '0x1111', '0x2222');
+      const manualPool = makeV3Pool(
+        MAINNET_V3_MANUAL_POOL_IDS[0] ?? '',
+        '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0',
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+      );
+      v3ManualFetch.error = new Error('subgraph shut off');
+      let auroraResult: Error | Array<typeof manualPool> = [manualPool];
+      const chainProtocol = {
+        protocol: Protocol.V3,
+        chainId: ChainId.MAINNET,
+        timeout: 90000,
+        // A fresh array per run: cachePools appends the extra pools to it.
+        provider: {getPools: async () => [mainV3Pool]},
+        extraPoolSourceOverrides: {
+          v3Manual: (subgraph: ExtraPoolsSource<V3SubgraphPool>) =>
+            new AuroraSourcedExtraPoolsProvider(
+              'primary',
+              ExtraPoolSourceName.V3_MAINNET_MANUAL,
+              ChainId.MAINNET,
+              {
+                getPools: async () => {
+                  if (auroraResult instanceof Error) throw auroraResult;
+                  return auroraResult;
+                },
+              },
+              subgraph,
+              mockLogger,
+              mockMetric
+            ),
+        },
+      };
+      mockChainProtocols = [chainProtocol];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+      expect(writtenPoolIds(putObjectCalls()[0].input.Body)).toEqual([
+        mainV3Pool.id,
+        manualPool.id,
+      ]);
+
+      auroraResult = new Error('statement timeout');
+      sendMock.mockClear();
+      await cacheAllPools(mockLogger, mockMetric, config);
+      expect(writtenPoolIds(putObjectCalls()[0].input.Body)).toEqual([
+        mainV3Pool.id,
+        manualPool.id,
+      ]);
+
+      // A restart empties the process-local memory: nothing to carry.
+      resetExtraPoolSourceMemoryForTesting();
+      sendMock.mockClear();
+      await cacheAllPools(mockLogger, mockMetric, config);
+      expect(writtenPoolIds(putObjectCalls()[0].input.Body)).toEqual([
+        mainV3Pool.id,
+      ]);
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V3),
+          source: 'v3_mainnet_manual',
+          status: 'failure',
+          reason: 'fetch_error',
+        },
+      });
     });
   });
 });

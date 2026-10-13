@@ -29,6 +29,16 @@ import {
   ChainProtocol,
 } from './cacheConfig';
 import {applyAuroraPoolSources} from './auroraPoolsSource';
+import {
+  ExtraPoolSourceName,
+  ExtraPoolsSource,
+  MAINNET_V3_MANUAL_POOL_IDS,
+  SubgraphEulerSwapPoolsSource,
+  V3_EXTRA_POOL_SOURCE_MEMORY,
+  V4_EXTRA_POOL_SOURCE_MEMORY,
+  extraSourceKey,
+} from './extraPoolSources';
+import {ExtraPoolSourceMemory} from './extraPoolSourceMemory';
 import {materializeV4PoolKeyRegistries} from './v4PoolKeyRegistry';
 
 // Bounds the registry step (per run, all chains): Aurora reads take single-
@@ -84,47 +94,138 @@ function prefixedLogger(logger: Logger, prefix: string): Logger {
   };
 }
 
-// The extra pool sources layered on top of the main `provider.getPools()`
-// result; the values are the `source` tag of `CachePools.extraPoolSource`.
-const ExtraPoolSource = {
-  EULER_HOOKS: 'euler_hooks',
-  AGG_HOOKS: 'agg_hooks',
-  V3_MAINNET_MANUAL: 'v3_mainnet_manual',
-} as const;
-type ExtraPoolSource = (typeof ExtraPoolSource)[keyof typeof ExtraPoolSource];
+// Bounds one extra source's read so a hung read cannot stall the combo past
+// the job timeout (900s). Generous next to a normal read: the subgraph V3
+// manual path crawls mainnet V3 with 90s pages and 3 retries. The timeout
+// detaches rather than cancels; the late read is ignored.
+export const EXTRA_POOL_SOURCE_TIMEOUT_MS = 300_000;
+
+type ExtraPoolSourceFailureReason = 'fetch_error' | 'timeout' | 'empty_result';
+
+class ExtraPoolSourceTimeoutError extends Error {
+  override readonly name = 'ExtraPoolSourceTimeoutError';
+}
+
+function withExtraPoolSourceTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new ExtraPoolSourceTimeoutError(`no result within ${timeoutMs}ms`)
+        ),
+      timeoutMs
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // Euler hooks, agg hooks and the hardcoded mainnet V3 fetch add pools to the
-// main pool set from their own subgraph endpoints, which the main set does
+// main pool set from their own reads (subgraph, or Aurora where an
+// extraPoolSourceOverrides wrapper is installed), which the main set does
 // not depend on. Each runs best-effort: a failure costs only its own pools,
 // never the snapshot built from the main set.
-async function withExtraPoolSource<T>(
-  source: ExtraPoolSource,
+//
+// Carry-forward: once the subgraph is gone a failed read has no fallback,
+// so a single bad sweep would write the snapshot without these pools. A
+// failed, timed-out or empty read instead serves the source's last good
+// pools while they are within EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS. An
+// empty read with no recent good result is a legitimate empty source and
+// still counts as success. A partial read is served as is; the Aurora
+// wrapper's coverage check reports it.
+export async function withExtraPoolSource<T extends {id: string}>(
+  source: ExtraPoolSourceName,
+  chainId: number,
   metricTags: Record<string, string>,
   metricInstance: IMetric,
   logger: Logger,
-  fn: () => Promise<T>
-): Promise<T | undefined> {
+  memory: ExtraPoolSourceMemory<T>,
+  fn: () => Promise<T[]>,
+  nowMs: () => number = Date.now,
+  timeoutMs: number = EXTRA_POOL_SOURCE_TIMEOUT_MS
+): Promise<readonly T[] | undefined> {
+  const key = extraSourceKey(source, chainId);
+  const emit = (
+    status: 'success' | 'failure',
+    reason?: ExtraPoolSourceFailureReason
+  ) =>
+    metricInstance.putMetric(
+      'CachePools.extraPoolSource',
+      1,
+      MetricLoggerUnit.Count,
+      reason
+        ? {...metricTags, source, status, reason}
+        : {...metricTags, source, status}
+    );
+
+  let reason: ExtraPoolSourceFailureReason;
   try {
-    const result = await fn();
-    metricInstance.putMetric(
-      'CachePools.extraPoolSource',
-      1,
-      MetricLoggerUnit.Count,
-      {...metricTags, source, status: 'success'}
-    );
-    return result;
+    const result = await withExtraPoolSourceTimeout(fn(), timeoutMs);
+    const lastGood = memory.lastGood(key, nowMs());
+    const hasRecentGood =
+      lastGood !== undefined &&
+      lastGood !== 'expired' &&
+      lastGood.pools.length > 0;
+    if (result.length > 0 || !hasRecentGood) {
+      if (result.length > 0) memory.recordGood(key, result, nowMs());
+      emit('success');
+      return result;
+    }
+    reason = 'empty_result';
   } catch (err) {
-    metricInstance.putMetric(
-      'CachePools.extraPoolSource',
-      1,
-      MetricLoggerUnit.Count,
-      {...metricTags, source, status: 'failure', reason: 'fetch_error'}
-    );
+    reason =
+      err instanceof ExtraPoolSourceTimeoutError ? 'timeout' : 'fetch_error';
     logger.warn(
-      `Extra pool source failed, writing the snapshot without its pools: source=${source} error=${err instanceof Error ? err.name : typeof err}`
+      `Extra pool source failed: source=${source} reason=${reason} error=${err instanceof Error ? err.name : typeof err}`
+    );
+  }
+  emit('failure', reason);
+  return carryForward(
+    source,
+    key,
+    metricTags,
+    metricInstance,
+    logger,
+    memory,
+    nowMs()
+  );
+}
+
+function carryForward<T extends {id: string}>(
+  source: ExtraPoolSourceName,
+  key: string,
+  metricTags: Record<string, string>,
+  metricInstance: IMetric,
+  logger: Logger,
+  memory: ExtraPoolSourceMemory<T>,
+  nowMs: number
+): readonly T[] | undefined {
+  const lastGood = memory.lastGood(key, nowMs);
+  const outcome =
+    lastGood === undefined
+      ? 'none'
+      : lastGood === 'expired'
+        ? 'expired'
+        : 'served';
+  metricInstance.putMetric(
+    'CachePools.extraPoolSource.carryForward',
+    1,
+    MetricLoggerUnit.Count,
+    {...metricTags, source, outcome}
+  );
+  if (lastGood === undefined || lastGood === 'expired') {
+    logger.warn(
+      `Extra pool source has no recent good result, writing the snapshot without its pools: source=${source} outcome=${outcome}`
     );
     return undefined;
   }
+  logger.warn(
+    `Extra pool source carried forward its last good result: source=${source} pools=${lastGood.pools.length} ageMinutes=${Math.round(lastGood.ageMs / 60_000)}`
+  );
+  return lastGood.pools;
 }
 
 async function cachePoolsForChainProtocol(
@@ -135,8 +236,14 @@ async function cachePoolsForChainProtocol(
   metricInstance: IMetric,
   subgraphFetchFactory?: SubgraphFetchFactory
 ): Promise<void> {
-  const {protocol, chainId, provider, eulerHooksProvider, aggHooksProvider} =
-    chainProtocol;
+  const {
+    protocol,
+    chainId,
+    provider,
+    eulerHooksProvider,
+    aggHooksProvider,
+    extraPoolSourceOverrides,
+  } = chainProtocol;
   const metricTags = {chainId: String(chainId), protocol: String(protocol)};
   logger = prefixedLogger(logger, `[${chainId}_${protocol}]`);
   const fetchStartTime = new Date();
@@ -257,12 +364,9 @@ async function cachePoolsForChainProtocol(
     }
 
     if (protocol === Protocol.V3 && chainId === ChainId.MAINNET) {
-      const filteredPools = await withExtraPoolSource(
-        ExtraPoolSource.V3_MAINNET_MANUAL,
-        metricTags,
-        metricInstance,
-        logger,
-        async () => {
+      const manualPoolIds = new Set(MAINNET_V3_MANUAL_POOL_IDS);
+      const subgraphManualSource: ExtraPoolsSource<V3SubgraphPool> = {
+        getPools: async () => {
           const v3MainnetSubgraphProvider = new V3SubgraphProvider(
             ChainId.MAINNET,
             3,
@@ -277,13 +381,22 @@ async function cachePoolsForChainProtocol(
             subgraphFetchFactory
           );
           const additionalPools = await v3MainnetSubgraphProvider.getPools();
-          return additionalPools.filter((pool: V3SubgraphPool) => {
-            return (
-              pool.id.toLowerCase() ===
-              '0x4622df6fb2d9bee0dcdacf545acdb6a2b2f4f863'
-            );
-          });
-        }
+          return additionalPools.filter((pool: V3SubgraphPool) =>
+            manualPoolIds.has(pool.id.toLowerCase())
+          );
+        },
+      };
+      const manualSource =
+        extraPoolSourceOverrides?.v3Manual?.(subgraphManualSource) ??
+        subgraphManualSource;
+      const filteredPools = await withExtraPoolSource(
+        ExtraPoolSourceName.V3_MAINNET_MANUAL,
+        chainId,
+        metricTags,
+        metricInstance,
+        logger,
+        V3_EXTRA_POOL_SOURCE_MEMORY,
+        () => manualSource.getPools()
       );
       filteredPools?.forEach(pool => pools.push(pool));
 
@@ -308,52 +421,40 @@ async function cachePoolsForChainProtocol(
       const manuallyIncludedV4Pools: V4SubgraphPool[] = [];
 
       if (eulerHooksProvider) {
+        const subgraphEulerSource = new SubgraphEulerSwapPoolsSource(
+          eulerHooksProvider,
+          logger,
+          metricInstance,
+          metricTags
+        );
+        const eulerSource =
+          extraPoolSourceOverrides?.euler?.(subgraphEulerSource) ??
+          subgraphEulerSource;
         const eulerPools = await withExtraPoolSource(
-          ExtraPoolSource.EULER_HOOKS,
+          ExtraPoolSourceName.EULER_HOOKS,
+          chainId,
           metricTags,
           metricInstance,
           logger,
-          async () => {
-            const eulerHooks = await eulerHooksProvider.getHooks();
-            if (!eulerHooks) {
-              return [];
-            }
-            metricInstance.putMetric(
-              'eulerHooks.length',
-              eulerHooks.length,
-              MetricLoggerUnit.Count,
-              metricTags
-            );
-            const hookPools = await Promise.all(
-              eulerHooks.map(async eulerHook => {
-                const pool = await eulerHooksProvider.getPoolByHook(
-                  eulerHook.hook
-                );
-                logger.info(`eulerHooks pool ${JSON.stringify(pool)}`);
-                if (pool) {
-                  (pool as V4SubgraphPool).tvlUSD = 1000;
-                  (pool as V4SubgraphPool).tvlETH = 5500000;
-                }
-                return pool;
-              })
-            );
-            return hookPools.filter(
-              (pool): pool is V4SubgraphPool =>
-                pool !== null && pool !== undefined
-            );
-          }
+          V4_EXTRA_POOL_SOURCE_MEMORY,
+          () => eulerSource.getPools()
         );
         eulerPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
 
       if (aggHooksProvider) {
+        const aggHooksSource =
+          extraPoolSourceOverrides?.aggHooks?.(aggHooksProvider) ??
+          aggHooksProvider;
         const aggHooksPools = await withExtraPoolSource(
-          ExtraPoolSource.AGG_HOOKS,
+          ExtraPoolSourceName.AGG_HOOKS,
+          chainId,
           metricTags,
           metricInstance,
           logger,
+          V4_EXTRA_POOL_SOURCE_MEMORY,
           async () => {
-            const result = await aggHooksProvider.getPools();
+            const result = await aggHooksSource.getPools();
             logger.debug(`aggHooksPools ${JSON.stringify(result)}`);
             metricInstance.putMetric(
               'aggHooks.pools.length',

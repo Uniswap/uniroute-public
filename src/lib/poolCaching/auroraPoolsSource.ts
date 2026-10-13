@@ -65,6 +65,13 @@ import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
 import {ChainId as SdkChainId} from '@uniswap/sdk-core';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {
+  applyAuroraExtraPoolSources,
+  auroraExtraSourceConfigFromEnv,
+  type AuroraExtraSourceDeps,
+  type ExtraSourceChainProtocol,
+  reportInertExtraSourceTargets,
+} from './auroraExtraPoolSources';
 import {ARBITRUM} from '../../stores/chain/hardcoded/chains/Arbitrum';
 import {ARC} from '../../stores/chain/hardcoded/chains/Arc';
 import {AVALANCHE} from '../../stores/chain/hardcoded/chains/Avalanche';
@@ -837,6 +844,43 @@ function volumeCreditedTvlUsd(
   );
 }
 
+// Fresh USD price of the chain's wrapped-native token, or a throw (no known
+// wrapped native, no price row, or a row older than
+// NATIVE_PRICE_MAX_STALENESS_MS). batchGet returns whatever row exists
+// regardless of age; a frozen price would silently skew every TVL floor and
+// tvlETH, so stale is treated as missing (a throw makes primary mode fall
+// back to the subgraph).
+export async function fetchNativeUsdPrice(
+  prices: CurrentTokenPricesService,
+  chainId: number,
+  ctx: Context
+): Promise<number> {
+  const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(chainId);
+  if (!wrappedNative) {
+    throw new Error(
+      `No wrapped-native address known for chain ${chainId} — cannot derive tvlETH`
+    );
+  }
+  const extendedChainId = toExtendedChainId(chainId);
+  const address = createAddress(wrappedNative, extendedChainId);
+  const priceMap = await prices.batchGet(ctx, [
+    {chainId: extendedChainId, address},
+  ]);
+  const entry = priceMap.get(canonicalTokenKey(chainId, wrappedNative));
+  const price = entry?.priceUsd;
+  if (!entry || !price || !Number.isFinite(price) || price <= 0) {
+    throw new Error(
+      `No current native token price for chain ${chainId} (${wrappedNative}) — cannot derive tvlETH`
+    );
+  }
+  if (Date.now() - entry.timestamp.getTime() > NATIVE_PRICE_MAX_STALENESS_MS) {
+    throw new Error(
+      `Stale native token price for chain ${chainId} (${wrappedNative}, ${entry.timestamp.toISOString()}) — cannot derive tvlETH`
+    );
+  }
+  return price;
+}
+
 abstract class BaseAuroraPoolsProvider<
   TListMethod extends keyof RoutablePoolsService,
 > {
@@ -865,35 +909,8 @@ abstract class BaseAuroraPoolsProvider<
   // USD price of the chain's wrapped-native token: converts the ETH-denominated
   // TVL floors into USD and Aurora's USD TVL back into tvlETH, so the
   // serve-side TrackedEthThreshold filters keep working unchanged.
-  protected async nativeUsdPrice(ctx: Context): Promise<number> {
-    const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(this.chainId);
-    if (!wrappedNative) {
-      throw new Error(
-        `No wrapped-native address known for chain ${this.chainId} — cannot derive tvlETH`
-      );
-    }
-    const chainId = this.chainId as ExtendedChainId;
-    const address = createAddress(wrappedNative, chainId);
-    const priceMap = await this.deps.prices.batchGet(ctx, [{chainId, address}]);
-    const entry = priceMap.get(canonicalTokenKey(this.chainId, wrappedNative));
-    const price = entry?.priceUsd;
-    if (!price || !Number.isFinite(price) || price <= 0) {
-      throw new Error(
-        `No current native token price for chain ${this.chainId} (${wrappedNative}) — cannot derive tvlETH`
-      );
-    }
-    // batchGet returns whatever row exists regardless of age; a frozen price
-    // would silently skew the floor and every tvlETH. Treat stale as missing
-    // (throw → primary mode falls back to the subgraph).
-    if (
-      Date.now() - entry!.timestamp.getTime() >
-      NATIVE_PRICE_MAX_STALENESS_MS
-    ) {
-      throw new Error(
-        `Stale native token price for chain ${this.chainId} (${wrappedNative}, ${entry!.timestamp.toISOString()}) — cannot derive tvlETH`
-      );
-    }
-    return price;
+  protected nativeUsdPrice(ctx: Context): Promise<number> {
+    return fetchNativeUsdPrice(this.deps.prices, this.chainId, ctx);
   }
 
   // The guard's cap for this fetch: at least the USD constant, and always
@@ -2452,9 +2469,7 @@ export interface AuroraSourceThresholds {
 // POOL_CACHING_AURORA_*_TARGETS env flags are set AND the Aurora connection
 // env is complete. Only combos in AURORA_SUPPORTED_TARGETS are ever wrapped.
 export function applyAuroraPoolSources<
-  T extends {
-    protocol: Protocol;
-    chainId: number;
+  T extends ExtraSourceChainProtocol & {
     provider:
       | ISubgraphProvider<V2SubgraphPool>
       | ISubgraphProvider<V3SubgraphPool>
@@ -2473,10 +2488,16 @@ export function applyAuroraPoolSources<
     // Aurora services to use instead of the shared uniroute connection. Unset
     // in production; lets the env-to-provider path run without a database.
     providerDeps?: AuroraProviderDeps<AuroraPoolListMethod>;
+    // The extra pool sources' targeted reads, alongside providerDeps. Without
+    // it, a run given providerDeps leaves the extra sources on the subgraph.
+    extraSourceRoutablePools?: AuroraExtraSourceDeps['routablePools'];
   }
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
-  if (!config) return;
+  if (!config) {
+    reportInertExtraSourceTargets(logger, metric);
+    return;
+  }
   if (config.tvlGuardTargetsWildcardRejection) {
     metric.putMetric(
       'CachePools.aurora.tvl_guard_config_rejected',
@@ -2526,6 +2547,7 @@ export function applyAuroraPoolSources<
   }
 
   let deps = options?.providerDeps;
+  let extraSourceRoutablePools = options?.extraSourceRoutablePools;
   if (!deps) {
     // A failed init (e.g. missing CA bundle file) must degrade THIS feature,
     // never kill the whole all-chains pool-caching run. The failure is latched
@@ -2551,8 +2573,10 @@ export function applyAuroraPoolSources<
     }
     const db = init.db;
 
+    const routablePools = createAuroraRoutablePoolsService(db, 'uniroute');
+    extraSourceRoutablePools = routablePools;
     deps = {
-      routablePools: createAuroraRoutablePoolsService(db, 'uniroute'),
+      routablePools,
       prices: createAuroraCurrentTokenPricesService(db, 'uniroute'),
       logger,
       metric,
@@ -2685,6 +2709,28 @@ export function applyAuroraPoolSources<
     }
     logger.info(
       `Aurora pool source enabled (${mode}) for ${targetKey(chainId, protocol)}`
+    );
+  }
+
+  if (extraSourceRoutablePools) {
+    const prices = deps.prices;
+    const extraDeps = (fetchSlots: FetchSlots | undefined) => ({
+      routablePools: extraSourceRoutablePools,
+      nativeUsdPrice: (ctx: Context, chainId: number) =>
+        fetchNativeUsdPrice(prices, chainId, ctx),
+      newContext: () => auroraContext(metric),
+      logger,
+      metric,
+      fetchSlots,
+    });
+    applyAuroraExtraPoolSources(
+      chainProtocols,
+      auroraExtraSourceConfigFromEnv(),
+      extraDeps(options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE),
+      extraDeps(options?.scopedRun ? undefined : AURORA_SHADOW_FETCH_SLOTS),
+      logger,
+      metric,
+      !options?.scopedRun
     );
   }
 }

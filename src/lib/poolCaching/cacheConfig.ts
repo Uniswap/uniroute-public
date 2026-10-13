@@ -30,6 +30,7 @@ import {
 } from './sor-providers';
 
 import {Logger} from './sor-providers/util/log';
+import type {ExtraPoolSourceOverrides} from './extraPoolSources';
 import {IMetric} from './sor-providers/util/metric';
 
 import {
@@ -255,6 +256,9 @@ export interface ChainProtocol {
     | ISubgraphProvider<V4SubgraphPool>;
   eulerHooksProvider?: EulerSwapHooksSubgraphProvider;
   aggHooksProvider?: AggHooksSubgraphProvider;
+  // Set by applyAuroraPoolSources, never here: Aurora wrappers for the extra
+  // sources above (and the mainnet V3 manual read) on Aurora-targeted combos.
+  extraPoolSourceOverrides?: ExtraPoolSourceOverrides;
 }
 
 export function createChainProtocols(

@@ -16,7 +16,6 @@ import Timeout from 'await-timeout';
 import {ethers} from 'ethers';
 import {gql, GraphQLClient} from 'graphql-request';
 import _ from 'lodash';
-import pLimit from 'p-limit';
 
 import {ProviderConfig} from '../provider';
 import {SubgraphFetchFactory} from '../util/subgraphFetch';
@@ -25,33 +24,7 @@ import {Logger} from '../util/log';
 import {IMetric} from '../util/metric';
 import {salvageAllowedSubgraphErrorOrRethrow} from '../util/allowedSubgraphError';
 import {SUBGRAPH_URL_BY_CHAIN, V4SubgraphPool} from './subgraphProvider';
-
-// Module-scoped (not per-instance): one AggHooksSubgraphProvider is
-// constructed per chain, and their getPools() calls can run concurrently
-// across chains in the same cron-worker process. The constrained resource
-// (Node's default DNS resolution capacity, UV_THREADPOOL_SIZE=4) is
-// process-wide, so the cap must be shared across every instance, not scoped
-// per chain. Without this, a burst of 100+ simultaneous
-// pseudoTotalValueLocked eth_calls has been observed to saturate DNS
-// resolution and fail with ENOTFOUND even though the RPC endpoint itself is
-// reachable and working (see ROUTE-1134 CCA scheduled-pools outage RCA,
-// 2026-07-23, which hit the identical failure mode from a different caller
-// sharing this container).
-const PSEUDO_TVL_CONCURRENCY = 10;
-const pseudoTvlLimit = pLimit(PSEUDO_TVL_CONCURRENCY);
-
-const PSEUDO_TVL_ABI = [
-  {
-    type: 'function',
-    name: 'pseudoTotalValueLocked',
-    inputs: [{name: 'poolId', type: 'bytes32', internalType: 'PoolId'}],
-    outputs: [
-      {name: 'amount0', type: 'uint256', internalType: 'uint256'},
-      {name: 'amount1', type: 'uint256', internalType: 'uint256'},
-    ],
-    stateMutability: 'view',
-  },
-] as const;
+import {PSEUDO_TVL_ABI, pseudoTvlLimit} from './pseudoTvlReader';
 
 interface AggHooksRawPool {
   id: string;
@@ -89,8 +62,10 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
 
   constructor(
     private chainId: ChainId,
-    private hookAddresses: string[],
-    private ethersProvider: ethers.providers.BaseProvider,
+    // Read by the Aurora-backed replacement source, which values the same
+    // registry hooks through the same RPC endpoint.
+    readonly hookAddresses: readonly string[],
+    readonly ethersProvider: ethers.providers.BaseProvider,
     private retries = 2,
     private timeout = 30000,
     private rollback = true,
@@ -98,7 +73,7 @@ export class AggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
     bearerToken?: string,
     private logger?: Logger,
     private metric?: IMetric,
-    private useExternalLiquidity = false,
+    readonly useExternalLiquidity = false,
     /**
      * Transport for this provider's GraphQL calls. Left undefined,
      * graphql-request falls back to its bundled cross-fetch (node-fetch@2),
