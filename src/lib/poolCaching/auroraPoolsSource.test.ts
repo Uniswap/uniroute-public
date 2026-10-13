@@ -5069,11 +5069,10 @@ describe('AuroraV2PoolsProvider stale-price side', () => {
 });
 
 describe('AURORA_SUPPORTED_TARGETS', () => {
-  it('covers exactly the V2/V3/V4 cron matrix minus Base, Ink, and Monad testnet', () => {
+  it('covers exactly the V2/V3/V4 cron matrix minus Base V3/V4 and Monad testnet', () => {
     // Derived from the live cron matrix so adding or removing a cron target
     // fails this test until the Aurora allowlist decision is revisited.
     const CHAIN_ID_BASE = 8453;
-    const CHAIN_ID_INK = 57073;
     const CHAIN_ID_MONAD_TESTNET = 10143;
     const expected = new Set(
       createChainProtocols(noopLogger, new FakeMetric())
@@ -5083,24 +5082,23 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
         .filter(
           cp =>
             (cp.chainId !== CHAIN_ID_BASE || cp.protocol === Protocol.V2) &&
-            cp.chainId !== CHAIN_ID_INK &&
             cp.chainId !== CHAIN_ID_MONAD_TESTNET
         )
         .map(cp => targetKey(cp.chainId, cp.protocol))
     );
     expect(new Set(AURORA_SUPPORTED_TARGETS)).toEqual(expected);
-    for (const key of [
-      '8453:V4',
-      '8453:V3',
-      '57073:V4',
-      '57073:V3',
-      '57073:V2',
-      '10143:V2',
-    ]) {
+    for (const key of ['8453:V4', '8453:V3', '10143:V2']) {
       expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(false);
     }
-    expect(AURORA_SUPPORTED_TARGETS.has('130:V2')).toBe(true);
-    expect(AURORA_SUPPORTED_TARGETS.has('8453:V2')).toBe(true);
+    for (const key of [
+      '130:V2',
+      '8453:V2',
+      '57073:V2',
+      '57073:V3',
+      '57073:V4',
+    ]) {
+      expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(true);
+    }
   });
 });
 
@@ -5114,6 +5112,9 @@ describe('Aurora registry lookups', () => {
     );
     expect(WRAPPED_NATIVE_BY_CHAIN.get(4663)).toBe(
       '0x0bd7d308f8e1639fab988df18a8011f41eacad73'
+    );
+    expect(WRAPPED_NATIVE_BY_CHAIN.get(57073)).toBe(
+      '0x4200000000000000000000000000000000000006'
     );
   });
 
@@ -5136,5 +5137,128 @@ describe('Aurora registry lookups', () => {
       ])
     );
     expect(IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[1]).toBeUndefined();
+  });
+});
+
+describe('Ink Aurora shadow', () => {
+  const CHAIN_ID_INK = 57073;
+  const INK_WETH = '0x4200000000000000000000000000000000000006';
+  const keys = [
+    'POOL_CACHING_AURORA_SHADOW_TARGETS',
+    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
+  ];
+  const saved = new Map<string, string | undefined>();
+  beforeEach(() => {
+    for (const key of keys) saved.set(key, process.env[key]);
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    delete process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
+  });
+  afterEach(() => {
+    for (const key of keys) {
+      const value = saved.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('shadows every Ink protocol from a `*` target and keeps serving the subgraph', async () => {
+    const readChainIds: number[] = [];
+    type ListOptions = Parameters<
+      RoutablePoolsService['listAllV3RoutablePools']
+    >[1];
+    class FakeRoutablePools
+      implements
+        Pick<
+          RoutablePoolsService,
+          | 'listAllV2RoutablePools'
+          | 'listAllV3RoutablePools'
+          | 'listAllV4RoutablePools'
+          | 'batchGetPoolVolumeUsd30d'
+        >
+    {
+      async batchGetPoolVolumeUsd30d() {
+        return new Map<string, number>();
+      }
+      async listAllV2RoutablePools(_ctx: unknown, options: ListOptions) {
+        readChainIds.push(Number(options.chainId));
+        return [];
+      }
+      async listAllV3RoutablePools(_ctx: unknown, options: ListOptions) {
+        readChainIds.push(Number(options.chainId));
+        return [];
+      }
+      async listAllV4RoutablePools(_ctx: unknown, options: ListOptions) {
+        readChainIds.push(Number(options.chainId));
+        return [];
+      }
+    }
+    const prices = {
+      batchGet: async () =>
+        new Map([
+          [
+            `${CHAIN_ID_INK}_${INK_WETH}`,
+            {
+              chainId: CHAIN_ID_INK,
+              tokenAddress: undefined as never,
+              priceUsd: 2000,
+              timestamp: new Date(),
+              updatedAt: new Date(),
+            },
+          ],
+        ]),
+    };
+    const metric = new FakeMetric();
+    const subgraphV3 = fakeProvider([[v3Pool('0xink', 100)]]);
+    const chainProtocols = [
+      {
+        chainId: CHAIN_ID_INK,
+        protocol: Protocol.V2,
+        provider: fakeProvider<V2SubgraphPool>([[]]),
+      },
+      {chainId: CHAIN_ID_INK, protocol: Protocol.V3, provider: subgraphV3},
+      {
+        chainId: CHAIN_ID_INK,
+        protocol: Protocol.V4,
+        provider: fakeProvider<V4SubgraphPool>([[]]),
+      },
+    ];
+    applyAuroraPoolSources(
+      chainProtocols,
+      {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
+      noopLogger,
+      metric,
+      {
+        providerDeps: {
+          routablePools: new FakeRoutablePools(),
+          prices,
+          logger: noopLogger,
+          metric,
+        },
+      }
+    );
+
+    expect(chainProtocols[1]!.provider).not.toBe(subgraphV3);
+    const served = await chainProtocols[1]!.provider.getPools();
+    expect(served.map(pool => pool.id)).toEqual(['0xink']);
+    await chainProtocols[0]!.provider.getPools();
+    await chainProtocols[2]!.provider.getPools();
+    await settlePendingAuroraShadowsForTesting();
+
+    expect(readChainIds).toEqual([CHAIN_ID_INK, CHAIN_ID_INK, CHAIN_ID_INK]);
+    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(0);
+    expect(metric.byKey('CachePools.aurora.unsupported_target')).toHaveLength(
+      0
+    );
+    expect(
+      metric
+        .byKey('CachePools.parity.subgraph_count')
+        .map(entry => entry.tags?.protocol)
+    ).toEqual(
+      expect.arrayContaining([
+        String(Protocol.V2),
+        String(Protocol.V3),
+        String(Protocol.V4),
+      ])
+    );
   });
 });

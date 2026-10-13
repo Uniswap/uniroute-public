@@ -4,8 +4,8 @@
  * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
  * format, serving path) is unchanged.
  *
- * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix (except Base, Ink,
- * and Monad testnet;
+ * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix (except Base V3/V4 and
+ * Monad testnet;
  * AURORA_SUPPORTED_TARGETS). Env
  * targets outside the allowlist are ignored with a metric, so even a `*`
  * flag cannot enable other chains/protocols without a code change.
@@ -72,6 +72,7 @@ import {BASE} from '../../stores/chain/hardcoded/chains/Base';
 import {BNB} from '../../stores/chain/hardcoded/chains/BNB';
 import {BLAST} from '../../stores/chain/hardcoded/chains/Blast';
 import {CELO} from '../../stores/chain/hardcoded/chains/Celo';
+import {INK} from '../../stores/chain/hardcoded/chains/Ink';
 import {LINEA} from '../../stores/chain/hardcoded/chains/Linea';
 import {MAINNET} from '../../stores/chain/hardcoded/chains/Mainnet';
 import {MEGAETH} from '../../stores/chain/hardcoded/chains/MegaEth';
@@ -119,6 +120,7 @@ const HARD_CODED_CHAINS = [
   BNB,
   BLAST,
   CELO,
+  INK,
   LINEA,
   MAINNET,
   MEGAETH,
@@ -180,8 +182,8 @@ export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
 // This mirrors createChainProtocols' V2/V3/V4 matrix. Base V3 and V4 (1.9M
-// and 15.4M rows) need SQL admission pushdown first; Ink and Monad testnet
-// have no Aurora pool rows yet. Unichain V2 and Base V2 need their per-combo
+// and 15.4M rows) need SQL admission pushdown first; Monad testnet has no
+// Aurora pool rows yet. Unichain V2 and Base V2 need their per-combo
 // pre-filter because their full reads exceed the cron's 30s statement
 // timeout.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
@@ -191,21 +193,21 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
     Protocol.V2,
     [
       1, 42161, 137, 10, 56, 43114, 81457, 130, 480, 1868, 143, 4217, 196,
-      59144, 4326, 4663, 5042, 8453,
+      59144, 4326, 4663, 5042, 8453, 57073,
     ],
   ],
   [
     Protocol.V3,
     [
       1, 42161, 137, 10, 42220, 56, 43114, 81457, 130, 480, 7777777, 1868, 143,
-      4217, 196, 59144, 4326, 4663, 5042,
+      4217, 196, 59144, 4326, 4663, 5042, 57073,
     ],
   ],
   [
     Protocol.V4,
     [
       11155111, 42161, 137, 480, 7777777, 130, 81457, 1, 1868, 10, 56, 143,
-      4217, 196, 43114, 42220, 59144, 4326, 4663, 5042,
+      4217, 196, 43114, 42220, 59144, 4326, 4663, 5042, 57073,
     ],
   ],
 ];
