@@ -328,6 +328,15 @@ export class GasConverter implements IGasConverter {
           quoteToken,
           chainId,
         });
+        void ctx.metrics
+          .count(buildMetricKey('GasConverter.NoGasPool'), 1, {
+            tags: [
+              `chain:${ChainId[chainId]}`,
+              'status:failure',
+              'reason:no_gas_pool',
+            ],
+          })
+          .catch(() => undefined);
         return null;
       }
     } catch (error) {

@@ -1,4 +1,4 @@
-import {ChainId} from '../../lib/config';
+import {buildMetricKey, ChainId} from '../../lib/config';
 import {CurrencyAmount as CurrencyAmountRaw, Token} from '@uniswap/sdk-core';
 import {Pair} from '@uniswap/v2-sdk';
 import {Pool as V3SDKPool} from '@uniswap/v3-sdk';
@@ -60,6 +60,7 @@ import {V3Pool} from '../../models/pool/V3Pool';
 import {Address} from '../../models/address/Address';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {V4Pool} from '../../models/pool/V4Pool';
+import {Protocol} from '../../models/pool/Protocol';
 
 export const ARB_GASINFO_ADDRESS = '0x000000000000000000000000000000000000006C';
 
@@ -156,11 +157,17 @@ export async function getHighestLiquidityV2NativePool(
     blockNumber
   );
 
-  if (pools.length === 0) {
+  const fundedPools = pools.filter(
+    pool => pool.reserve0 > 0n && pool.reserve1 > 0n
+  );
+  if (fundedPools.length === 0) {
+    if (pools.length > 0) {
+      countAllGasPoolsEmpty(ctx, token.chainId, Protocol.V2);
+    }
     return null;
   }
 
-  return pools[0];
+  return fundedPools[0];
 }
 
 export async function getHighestLiquidityV3NativePool(
@@ -183,13 +190,7 @@ export async function getHighestLiquidityV3NativePool(
     blockNumber
   );
 
-  if (pools.length === 0) {
-    return null;
-  }
-
-  return pools.reduce((prev, current) => {
-    return prev.liquidity > current.liquidity ? prev : current;
-  });
+  return pickHighestActiveLiquidityPool(pools, token.chainId, ctx);
 }
 
 export async function getHighestLiquidityV4NativePool(
@@ -212,11 +213,54 @@ export async function getHighestLiquidityV4NativePool(
     blockNumber
   );
 
-  if (pools.length === 0) {
+  return pickHighestActiveLiquidityPool(pools, token.chainId, ctx);
+}
+
+// A concentrated-liquidity pool with no liquidity at its current price has a
+// price nothing anchors: a drained pool sits wherever the last swap left it,
+// often MIN/MAX tick, a mid price off by dozens of orders of magnitude that
+// nothing downstream bounds. Such a pool says nothing about the token's value,
+// so it is never a gas-conversion candidate, however few others exist.
+//
+// Only exactly-zero liquidity is excluded. A pool with dust in-range liquidity
+// can still sit at an extreme price and pass; no liquidity floor is applied
+// because in-range liquidity alone cannot tell a dust pool from a deep pool
+// whose positions are mostly out of range.
+function pickHighestActiveLiquidityPool<TPool extends V3Pool | V4Pool>(
+  pools: TPool[],
+  chainId: number,
+  ctx: Context
+): TPool | null {
+  const activePools = pools.filter(pool => pool.liquidity > 0n);
+  if (activePools.length === 0) {
+    if (pools.length > 0) {
+      countAllGasPoolsEmpty(ctx, chainId, pools[0].protocol);
+    }
     return null;
   }
 
-  return pools.reduce((prev, current) => {
+  return activePools.reduce((prev, current) => {
     return prev.liquidity > current.liquidity ? prev : current;
   });
+}
+
+// Counted per protocol, only when every candidate of that protocol was empty;
+// skipping one dead tier next to a funded pool changes nothing and is not
+// counted. Another protocol may still price the gas, so whether the
+// conversion as a whole fell back to zero is GasConverter.NoGasPool.
+function countAllGasPoolsEmpty(
+  ctx: Context,
+  chainId: number,
+  protocol: Protocol
+): void {
+  void ctx.metrics
+    .count(buildMetricKey('GasConverter.AllGasPoolsEmpty'), 1, {
+      tags: [
+        `chain:${ChainId[chainId]}`,
+        `protocol:${protocol}`,
+        'status:failure',
+        'reason:zero_liquidity',
+      ],
+    })
+    .catch(() => undefined);
 }
