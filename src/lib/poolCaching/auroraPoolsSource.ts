@@ -156,6 +156,7 @@ const USDG_ON_ROBINHOOD = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
 // pool must not mint implied TVL. Per-chain opt-in requires verifying that
 // chain's deployed subgraph whitelist and minimumNativeLocked semantics; new
 // chains intentionally launch without it and shadow parity decides if needed.
+// V4 only: the V3 provider does not apply it (see AuroraV3PoolsProvider).
 export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
   [chainId: number]: ReadonlySet<string>;
 } = {
@@ -1308,7 +1309,14 @@ export class AuroraV4PoolsProvider
 //       the subgraph cannot value in tracked terms — an EXACT-zero match,
 //       not V4's (V4_MIN_TVL_ETH, threshold] band)
 // No hook families, and V3SubgraphPool carries no token decimals/symbols, so
-// null-decimals pools are kept (implied pricing just contributes 0 for them).
+// null-decimals pools are kept.
+//
+// No implied one-hop top-up, unlike V4. On Robinhood V3 it valued the meme
+// side of hundreds of thousands of dead launchpad pools at spot, each holding
+// a few dollars of WETH, so the top-up alone lifted them past family (a): prod
+// shadow admitted ~378k pools against the subgraph's ~33.6k, ~347k of them
+// only through the top-up. The subgraph's derivedETH does not price a token
+// from a pool that thin, so the priced-side TVL alone is the closer replica.
 export class AuroraV3PoolsProvider
   extends BaseAuroraPoolsProvider<'listAllV3RoutablePools'>
   implements ISubgraphProvider<V3SubgraphPool>
@@ -1334,13 +1342,8 @@ export class AuroraV3PoolsProvider
       }),
     }));
 
-    const impliedSourceTokens =
-      IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN[this.chainId];
-    const impliedTopUpCapUsd = IMPLIED_TVL_TOPUP_CAP_ETH * nativePrice;
     const result: V3SubgraphPool[] = [];
     const rankedPools: Array<{id: string; raw: number; guarded: number}> = [];
-    let impliedPriced = 0;
-    let impliedCapped = 0;
     const admittedByFamily = {threshold: 0, exact_zero: 0};
     const anchorTokens = tvlGuardAnchorTokens(this.chainId);
     const capUsd = this.tvlGuardCapUsd(nativePrice);
@@ -1360,8 +1363,6 @@ export class AuroraV3PoolsProvider
     );
     let volumeCredited = 0;
     for (const pool of pools) {
-      // Same order as V4: guard the priced-side TVL, then add the capped
-      // implied top-up for an unpriced side.
       const guarded = guardPricedTvlUsd(
         {...pool, amount0: pool.tvlToken0, amount1: pool.tvlToken1},
         anchorTokens,
@@ -1375,39 +1376,22 @@ export class AuroraV3PoolsProvider
         volumeByPool.get(pool.poolAddress)
       );
       if (creditedPricedUsd > guarded.tvlUsd) volumeCredited++;
-      const rawImpliedUsd = impliedOneHopTvlUsd(pool, impliedSourceTokens);
-      if (rawImpliedUsd > impliedTopUpCapUsd) impliedCapped++;
-      const impliedUsd = Math.min(rawImpliedUsd, impliedTopUpCapUsd);
-      const rawTvlUsd = pool.tvlUsd + impliedUsd;
-      const guardedTvlUsd = creditedPricedUsd + impliedUsd;
-      const tvlUsd = this.applyTvlGuard ? guardedTvlUsd : rawTvlUsd;
+      const tvlUsd = this.applyTvlGuard ? creditedPricedUsd : pool.tvlUsd;
       // On non-ETH-native chains, the historical ETH-named thresholds are
       // native-unit thresholds: subgraph derivedETH is derivedNative there.
       const tvlEth = tvlUsd / nativePrice;
-      // Family (b) is judged on the RAW priced-side TVL (pre-guard,
-      // pre-top-up): it mirrors the subgraph's exact `totalValueLockedETH: "0"`
-      // — the cohort the pricing pipeline can't see. A pool the guard
-      // collapses had a nonzero raw TVL, so it does not re-enter here. The
-      // top-up only feeds family (a).
-      const admissionFamily = (tvlEthForThreshold: number) => {
-        if (tvlEthForThreshold > this.trackedEthThreshold) return 'threshold';
-        if (parsePositiveLiquidity(pool.liquidity) && pool.tvlUsd === 0) {
-          return 'exact_zero';
-        }
-        return undefined;
-      };
-      const family = admissionFamily(tvlEth);
+      // Family (b) is judged on the RAW priced-side TVL (pre-guard): it
+      // mirrors the subgraph's exact `totalValueLockedETH: "0"` — the cohort
+      // the pricing pipeline can't see. A pool the guard collapses had a
+      // nonzero raw TVL, so it does not re-enter here.
+      let family: 'threshold' | 'exact_zero' | undefined;
+      if (tvlEth > this.trackedEthThreshold) {
+        family = 'threshold';
+      } else if (parsePositiveLiquidity(pool.liquidity) && pool.tvlUsd === 0) {
+        family = 'exact_zero';
+      }
       if (!family) continue;
       admittedByFamily[family]++;
-      // Count only admission FLIPS (rescued by the top-up), matching V4.
-      if (
-        impliedUsd > 0 &&
-        !admissionFamily(
-          (this.applyTvlGuard ? creditedPricedUsd : pool.tvlUsd) / nativePrice
-        )
-      ) {
-        impliedPriced++;
-      }
       result.push({
         id: pool.poolAddress.toLowerCase(),
         feeTier: String(pool.feeTier),
@@ -1419,25 +1403,9 @@ export class AuroraV3PoolsProvider
       });
       rankedPools.push({
         id: pool.poolAddress.toLowerCase(),
-        raw: rawTvlUsd,
-        guarded: guardedTvlUsd,
+        raw: pool.tvlUsd,
+        guarded: creditedPricedUsd,
       });
-    }
-    if (impliedPriced > 0) {
-      this.deps.metric.putMetric(
-        'CachePools.aurora.implied_priced',
-        impliedPriced,
-        MetricLoggerUnit.Count,
-        {chainId: String(this.chainId), protocol: String(Protocol.V3)}
-      );
-    }
-    if (impliedCapped > 0) {
-      this.deps.metric.putMetric(
-        'CachePools.aurora.implied_capped',
-        impliedCapped,
-        MetricLoggerUnit.Count,
-        {chainId: String(this.chainId), protocol: String(Protocol.V3)}
-      );
     }
     for (const [family, count] of Object.entries(admittedByFamily)) {
       this.deps.metric.putMetric(
@@ -1677,8 +1645,8 @@ export class AuroraV2PoolsProvider
  * Float math is deliberate: values feed TVL floor comparisons and snapshot
  * ranking, not amounts — the ~15 significant digits of a double are plenty.
  */
-// Structural slice shared by V4RoutablePool and V3RoutablePool — the implied
-// one-hop math is protocol-agnostic (both carry sqrtPriceX96 + raw reserves).
+// The slice of a routable-pool row the implied one-hop math reads
+// (sqrtPriceX96 + raw reserves). Only the V4 provider applies it.
 export type ImpliedPricingPool = Pick<
   V4RoutablePool,
   | 'token0Address'

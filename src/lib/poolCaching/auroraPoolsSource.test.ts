@@ -3397,39 +3397,157 @@ describe('AuroraV3PoolsProvider', () => {
     );
   });
 
-  it('admits a launchpad-shaped pool via implied pricing and counts only flips', async () => {
+  // Prod Robinhood V3 WETH/耄耋 (0xe75268ae…, 1% fee) as the lib returns it:
+  // WETH fresh at $2,475.97, the meme's price row stale so it reads as
+  // unpriced. Its real sqrtPriceX96 and meme reserve value the meme side at
+  // ~$3.4k through the pool's own spot, which a 1 ETH implied top-up would
+  // admit on its own. Prod holds 0.0294 WETH ($72.89) on the priced side.
+  const ROBINHOOD_WETH_PRICE_USD = 2475.9658298148115;
+  function robinhoodLaunchpadRow(wethSideRaw: string, tvlUsd: number) {
+    return {
+      ...v3Row({poolAddress: '0xe75268aE9ff7Eb78aa817eCFBA8A5ECC86363A85'}),
+      token0Address: ROBINHOOD_WRAPPED_NATIVE,
+      token1Address: '0xCC86080aADbd3cC73F9E12Caef21bC490550981F',
+      feeTier: 10000,
+      tickSpacing: 200,
+      liquidity: '36819258015569838458222',
+      tvlUsd,
+      sqrtPriceX96: '2106832061742670567202467337011845',
+      tvlToken0: wethSideRaw,
+      tvlToken1: '980352612397000690847492254',
+      token0PriceUsd: ROBINHOOD_WETH_PRICE_USD,
+      token1PriceUsd: null,
+      token0Decimals: 18,
+      token1Decimals: 18,
+    };
+  }
+  // The WETH side scaled to 0.005 WETH ($12.38), under the 0.01 ETH
+  // threshold, like the ~347k pools the top-up admitted on prod.
+  const thinLaunchpadRow = () =>
+    robinhoodLaunchpadRow('5000000000000000', 0.005 * ROBINHOOD_WETH_PRICE_USD);
+
+  it('does not admit a launchpad pool on the implied value of its unpriced side', async () => {
     const metric = new FakeMetric();
-    const rows = [
-      // Raw $1 (fails (a); fails (b) since raw != 0). Token0 = wrapped
-      // native (a designated implied source) priced $2000; token1 unpriced;
-      // sqrtPrice 2^96 with 1e17 raw token1 → implied ≈ $200 → admitted.
-      v3Row({
-        poolAddress: '0xF1',
-        tvlUsd: 1,
-        liquidity: '7',
-        token0Address: ROBINHOOD_WRAPPED_NATIVE,
-        token0PriceUsd: 2000,
-        sqrtPriceX96: '79228162514264337593543950336',
-        tvlToken1: '100000000000000000',
-      }),
-      // Same implied ingredients but raw tvlUsd = 0 with liquidity: admitted
-      // via family (b) either way → NOT a flip.
-      v3Row({
-        poolAddress: '0xF2',
-        tvlUsd: 0,
-        liquidity: '7',
-        token0Address: ROBINHOOD_WRAPPED_NATIVE,
-        token0PriceUsd: 2000,
-        sqrtPriceX96: '79228162514264337593543950336',
-        tvlToken1: '100000000000000000',
-      }),
+    // The same shape with no priced value at all still enters family (b).
+    const exactZero = {
+      ...thinLaunchpadRow(),
+      poolAddress: '0xF2',
+      tvlUsd: 0,
+      token0PriceUsd: null,
+    };
+    const pools = await new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV3RoutablePools: async () => [thinLaunchpadRow(), exactZero],
+      },
+      prices: freshPrices(ROBINHOOD_WETH_PRICE_USD),
+      logger: noopLogger,
+      metric,
+    }).getPools();
+    expect(pools.map(p => p.id)).toEqual(['0xf2']);
+    expect(metric.byKey('CachePools.aurora.implied_priced')).toEqual([]);
+    expect(metric.byKey('CachePools.aurora.implied_capped')).toEqual([]);
+    expect(metric.byKey('CachePools.aurora.admitted_by_family')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 0,
+          tags: expect.objectContaining({family: 'threshold'}),
+        }),
+        expect.objectContaining({
+          value: 1,
+          tags: expect.objectContaining({family: 'exact_zero'}),
+        }),
+      ])
+    );
+  });
+
+  it('values an admitted pool on its priced side only', async () => {
+    // The prod WETH side is above the threshold, so the pool is admitted, and
+    // it is served at that TVL rather than with 1 ETH of implied value added.
+    const pools = await new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV3RoutablePools: async () => [
+          robinhoodLaunchpadRow('29438418689958345', 72.88947017598016),
+        ],
+      },
+      prices: freshPrices(ROBINHOOD_WETH_PRICE_USD),
+      logger: noopLogger,
+      metric: new FakeMetric(),
+    }).getPools();
+    expect(pools.map(p => [p.id, p.tvlUSD])).toEqual([
+      ['0xe75268ae9ff7eb78aa817ecfba8a5ecc86363a85', 72.88947017598016],
+    ]);
+  });
+
+  it('serves Robinhood V3 in primary mode without the thin launchpad pool', async () => {
+    const keys = [
+      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
+      'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
+      'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     ];
-    const pools = await mkProvider(rows, metric).getPools();
-    expect(pools.map(p => p.id).sort()).toEqual(['0xf1', '0xf2']);
-    const flips = metric.byKey('CachePools.aurora.implied_priced');
-    expect(flips).toHaveLength(1);
-    expect(flips[0]!.value).toBe(1);
-    expect(flips[0]!.tags?.protocol).toBe(String(Protocol.V3));
+    const saved = new Map(keys.map(key => [key, process.env[key]]));
+    const real = v3Row({poolAddress: '0xREAL', tvlUsd: 4000});
+    class FakeRoutablePools
+      implements
+        Pick<
+          RoutablePoolsService,
+          | 'listAllV2RoutablePools'
+          | 'listAllV3RoutablePools'
+          | 'listAllV4RoutablePools'
+          | 'batchGetPoolVolumeUsd30d'
+        >
+    {
+      async batchGetPoolVolumeUsd30d() {
+        return new Map<string, number>();
+      }
+      async listAllV2RoutablePools() {
+        return [];
+      }
+      async listAllV3RoutablePools() {
+        return [real, thinLaunchpadRow()];
+      }
+      async listAllV4RoutablePools() {
+        return [];
+      }
+    }
+    try {
+      process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V3';
+      process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
+        '{"4663:V3":1}';
+      delete process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS;
+      resetAuroraPoolCountBaselinesForTesting();
+      const metric = new FakeMetric();
+      const subgraph = fakeProvider<V3SubgraphPool>([[]]);
+      const chainProtocols = [
+        {chainId: ROBINHOOD, protocol: Protocol.V3, provider: subgraph},
+      ];
+      applyAuroraPoolSources(
+        chainProtocols,
+        {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
+        noopLogger,
+        metric,
+        {
+          scopedRun: true,
+          providerDeps: {
+            routablePools: new FakeRoutablePools(),
+            prices: freshPrices(ROBINHOOD_WETH_PRICE_USD),
+            logger: noopLogger,
+            metric,
+          },
+        }
+      );
+      const served = await chainProtocols[0].provider.getPools();
+      expect(served.map(p => p.id)).toEqual(['0xreal']);
+      expect(subgraph.calls).toBe(0);
+      expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+    } finally {
+      for (const key of keys) {
+        const value = saved.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it.each([false, true])(
