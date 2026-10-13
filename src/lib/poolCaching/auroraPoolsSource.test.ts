@@ -12,6 +12,7 @@ import {
   TVL_GUARD_EXTRA_ANCHOR_TOKENS_BY_CHAIN,
   WRAPPED_NATIVE_BY_CHAIN,
   applyAuroraPoolSources,
+  auroraContext,
   auroraPoolsSourceConfigFromEnv,
   computePoolParity,
   guardPricedTvlUsd,
@@ -26,6 +27,7 @@ import {
   poolCachingAuroraStatementTimeoutMsFromEnv,
   type TvlGuardWildcardRejection,
 } from './auroraPoolsSource';
+import {Context} from '@uniswap/lib-uni/context';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
 import {getPermissionedHookAddresses} from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {createChainProtocols} from './cacheConfig';
@@ -3439,6 +3441,56 @@ describe('AuroraV3PoolsProvider', () => {
       logger: noopLogger,
       metric,
     });
+
+  it('tags the lib read-duration metric with the combo, so per-combo read times are visible', async () => {
+    const metric = new FakeMetric();
+    // What lib-data-ingestion-aurora's withMethodMetrics emits through the
+    // context it is handed.
+    const emitLibTimer = async (ctx: Context) =>
+      ctx.metrics.timer('aurora.method.duration', 7, {
+        tags: [
+          'group:uniroute',
+          'method:listallv3routablepools',
+          'status:success',
+        ],
+      });
+    await new AuroraV3PoolsProvider(ROBINHOOD, 0.01, {
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV3RoutablePools: async ctx => {
+          await emitLibTimer(ctx);
+          return [];
+        },
+      },
+      prices: freshPrices(),
+      logger: noopLogger,
+      metric,
+    }).getPools();
+
+    expect(metric.byKey('aurora.method.duration')).toEqual([
+      expect.objectContaining({
+        value: 7,
+        tags: {
+          chainId: String(ROBINHOOD),
+          protocol: String(Protocol.V3),
+          group: 'uniroute',
+          method: 'listallv3routablepools',
+          status: 'success',
+        },
+      }),
+    ]);
+  });
+
+  it('adds no combo tags to a context built without them', async () => {
+    const metric = new FakeMetric();
+    await auroraContext(metric).metrics.timer('aurora.method.duration', 3, {
+      tags: ['method:foreachv4poolkeypage', 'status:success'],
+    });
+    expect(metric.byKey('aurora.method.duration')[0]?.tags).toEqual({
+      method: 'foreachv4poolkeypage',
+      status: 'success',
+    });
+  });
 
   it('replicates the V3 admission union (threshold / exact-zero-TVL with liquidity)', async () => {
     // Native price 2000 → tvlETH = tvlUsd / 2000.

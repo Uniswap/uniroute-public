@@ -658,10 +658,17 @@ export function createUnirouteAuroraDbFromEnv(
 // The pool-caching cron passes around the SOR-ported Logger/IMetric rather
 // than a full uni Context; lib-data-ingestion-aurora services need
 // ctx.metrics (IMetrics). Bridge putMetric-style emission so the lib's
-// aurora.method.* metrics still land in Datadog.
+// aurora.method.* metrics still land in Datadog. `extraTags` are added to
+// every metric emitted through the context: the per-combo providers pass
+// their chainId and protocol, so aurora.method.duration shows each combo's
+// read time (bounded: one value per cron chain and protocol). The lib itself
+// stays untouched, so its other consumers keep their tags.
 
 class PoolCachingIMetricsAdapter implements IMetrics {
-  constructor(private readonly metric: IMetric) {}
+  constructor(
+    private readonly metric: IMetric,
+    private readonly extraTags: Readonly<Record<string, string>> = {}
+  ) {}
 
   private put(
     name: string,
@@ -669,7 +676,7 @@ class PoolCachingIMetricsAdapter implements IMetrics {
     unit: MetricLoggerUnit,
     opts?: Partial<MetricOptions>
   ): Promise<void> {
-    const tags: Record<string, string> = {};
+    const tags: Record<string, string> = {...this.extraTags};
     for (const tag of opts?.tags ?? []) {
       const idx = tag.indexOf(':');
       if (idx > 0) tags[tag.slice(0, idx)] = tag.slice(idx + 1);
@@ -701,10 +708,22 @@ class PoolCachingIMetricsAdapter implements IMetrics {
   }
 }
 
-export function auroraContext(metric: IMetric): Context {
+export function auroraContext(
+  metric: IMetric,
+  extraTags: Readonly<Record<string, string>> = {}
+): Context {
   const ctx = Context.Background();
-  ctx.metrics = new PoolCachingIMetricsAdapter(metric);
+  ctx.metrics = new PoolCachingIMetricsAdapter(metric, extraTags);
   return ctx;
+}
+
+// The per-combo tags the pool-caching providers put on the lib's
+// aurora.method.* metrics.
+export function auroraComboTags(
+  chainId: number,
+  protocol: Protocol
+): Record<string, string> {
+  return {chainId: String(chainId), protocol: String(protocol)};
 }
 
 // --- Aurora providers (per-protocol) ---
@@ -1104,7 +1123,10 @@ export class AuroraV4PoolsProvider
   }
 
   async getPools(): Promise<V4SubgraphPool[]> {
-    const ctx = auroraContext(this.deps.metric);
+    const ctx = auroraContext(
+      this.deps.metric,
+      auroraComboTags(this.chainId, Protocol.V4)
+    );
     const bypassHooks = new Set(
       [...(getTvlBypassHookAddresses(this.chainId) ?? [])].map(hook =>
         hook.toLowerCase()
@@ -1420,7 +1442,10 @@ export class AuroraV3PoolsProvider
   }
 
   async getPools(): Promise<V3SubgraphPool[]> {
-    const ctx = auroraContext(this.deps.metric);
+    const ctx = auroraContext(
+      this.deps.metric,
+      auroraComboTags(this.chainId, Protocol.V3)
+    );
     // Price lookup inside the fetch slot for the same one-connection-per-
     // provider invariant as V4.
     const {nativePrice, pools} = await this.withFetchSlot(async () => ({
@@ -1541,7 +1566,10 @@ export class AuroraV2PoolsProvider
   }
 
   async getPools(): Promise<V2SubgraphPool[]> {
-    const ctx = auroraContext(this.deps.metric);
+    const ctx = auroraContext(
+      this.deps.metric,
+      auroraComboTags(this.chainId, Protocol.V2)
+    );
     // Price lookup inside the fetch slot for the same one-connection-per-
     // provider invariant as V4/V3.
     const {nativePrice, pools} = await this.withFetchSlot(async () => ({
