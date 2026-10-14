@@ -1,7 +1,7 @@
 import {buildMetricKey, ChainId} from '../../lib/config';
 import {CurrencyAmount as CurrencyAmountRaw, Token} from '@uniswap/sdk-core';
 import {Pair} from '@uniswap/v2-sdk';
-import {Pool as V3SDKPool} from '@uniswap/v3-sdk';
+import {ADDRESS_ZERO, Pool as V3SDKPool} from '@uniswap/v3-sdk';
 import {Pool as V4SDKPool} from '@uniswap/v4-sdk';
 
 import {
@@ -106,11 +106,64 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.INK]: [USDC_INK],
 };
 
-export type GasPools = {
-  nativeAndQuoteTokenV2Pool: V2Pool | null;
-  nativeAndQuoteTokenV3Pool: V3Pool | null;
-  nativeAndQuoteTokenV4Pool: V4Pool | null;
-};
+export type NativePool = V2Pool | V3Pool | V4Pool;
+
+const Q96 = 1n << 96n;
+
+/** Select by gas-token depth, using hooked slot0 pricing only as a last resort. */
+export function selectDeepestNativePool<TPool extends NativePool>(
+  gasToken: Token,
+  pools: readonly TPool[]
+): TPool | null {
+  const gasTokenAddress = gasToken.address.toLowerCase();
+  // Strict depth comparisons preserve protocol priority and input order on ties.
+  const orderedPools = [
+    ...pools.filter(pool => pool instanceof V2Pool),
+    ...pools.filter(pool => pool instanceof V3Pool),
+    ...pools.filter(pool => pool instanceof V4Pool),
+  ];
+  let deepestPool: TPool | null = null;
+  let deepestDepth = 0n;
+  let deepestHookedPool: TPool | null = null;
+  let deepestHookedDepth = 0n;
+
+  for (const pool of orderedPools) {
+    // The on-chain V3/V4 repositories build pools in request order, while
+    // reserves and sqrtPriceX96 follow the sorted (canonical) token order.
+    const otherTokenAddress =
+      pool.token0.lowerCased === gasTokenAddress
+        ? pool.token1.lowerCased
+        : pool.token0.lowerCased;
+    const isToken0 = gasTokenAddress < otherTokenAddress;
+    let depth: bigint;
+    if (pool instanceof V2Pool) {
+      if (pool.reserve0 <= 0n || pool.reserve1 <= 0n) {
+        continue;
+      }
+      depth = isToken0 ? pool.reserve0 : pool.reserve1;
+    } else {
+      if (pool.liquidity === 0n || pool.sqrtPriceX96 === 0n) {
+        continue;
+      }
+      depth = isToken0
+        ? (pool.liquidity * Q96) / pool.sqrtPriceX96
+        : (pool.liquidity * pool.sqrtPriceX96) / Q96;
+    }
+
+    if (pool instanceof V4Pool && pool.hooks.toLowerCase() !== ADDRESS_ZERO) {
+      // Hooks can price away from slot0, even when virtual reserves look deep.
+      if (depth > deepestHookedDepth) {
+        deepestHookedPool = pool;
+        deepestHookedDepth = depth;
+      }
+    } else if (depth > deepestDepth) {
+      deepestPool = pool;
+      deepestDepth = depth;
+    }
+  }
+
+  return deepestPool ?? deepestHookedPool;
+}
 
 // Determines if native currency is token0
 // Gets the native price of the pool, dependent on 0 or 1
@@ -167,7 +220,7 @@ export async function getHighestLiquidityV2NativePool(
     return null;
   }
 
-  return fundedPools[0];
+  return selectDeepestNativePool(gasToken, fundedPools);
 }
 
 export async function getHighestLiquidityV3NativePool(
@@ -190,7 +243,7 @@ export async function getHighestLiquidityV3NativePool(
     blockNumber
   );
 
-  return pickHighestActiveLiquidityPool(pools, token.chainId, ctx);
+  return pickDeepestActiveNativePool(pools, gasToken, ctx);
 }
 
 export async function getHighestLiquidityV4NativePool(
@@ -213,7 +266,7 @@ export async function getHighestLiquidityV4NativePool(
     blockNumber
   );
 
-  return pickHighestActiveLiquidityPool(pools, token.chainId, ctx);
+  return pickDeepestActiveNativePool(pools, gasToken, ctx);
 }
 
 // A concentrated-liquidity pool with no liquidity at its current price has a
@@ -221,27 +274,20 @@ export async function getHighestLiquidityV4NativePool(
 // often MIN/MAX tick, a mid price off by dozens of orders of magnitude that
 // nothing downstream bounds. Such a pool says nothing about the token's value,
 // so it is never a gas-conversion candidate, however few others exist.
-//
-// Only exactly-zero liquidity is excluded. A pool with dust in-range liquidity
-// can still sit at an extreme price and pass; no liquidity floor is applied
-// because in-range liquidity alone cannot tell a dust pool from a deep pool
-// whose positions are mostly out of range.
-function pickHighestActiveLiquidityPool<TPool extends V3Pool | V4Pool>(
+function pickDeepestActiveNativePool<TPool extends V3Pool | V4Pool>(
   pools: TPool[],
-  chainId: number,
+  gasToken: Token,
   ctx: Context
 ): TPool | null {
   const activePools = pools.filter(pool => pool.liquidity > 0n);
   if (activePools.length === 0) {
     if (pools.length > 0) {
-      countAllGasPoolsEmpty(ctx, chainId, pools[0].protocol);
+      countAllGasPoolsEmpty(ctx, gasToken.chainId, pools[0].protocol);
     }
     return null;
   }
 
-  return activePools.reduce((prev, current) => {
-    return prev.liquidity > current.liquidity ? prev : current;
-  });
+  return selectDeepestNativePool(gasToken, activePools);
 }
 
 // Counted per protocol, only when every candidate of that protocol was empty;

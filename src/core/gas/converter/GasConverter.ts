@@ -1,9 +1,10 @@
 import {CurrencyAmount as CurrencyAmountRaw, Token} from '@uniswap/sdk-core';
 import {
-  GasPools,
+  NativePool,
   getHighestLiquidityV2NativePool,
   getHighestLiquidityV3NativePool,
   getHighestLiquidityV4NativePool,
+  selectDeepestNativePool,
   getQuoteThroughNativePool,
 } from '../gas-helpers';
 import {Erc20Token} from 'src/models/token/Erc20Token';
@@ -28,46 +29,19 @@ export class GasConverter implements IGasConverter {
     private readonly v4PoolRepository: IPoolsRepository<V4Pool>
   ) {}
 
-  private async convertPoolsToSDK(
+  private convertPoolToSDK(
     chainId: ChainId,
     tokensInfo: Map<string, Erc20Token | null>,
-    gasPools: GasPools,
+    pool: NativePool | null,
     ctx: Context
-  ): Promise<{
-    nativeAndQuoteTokenV2PoolSDK: Pair | null;
-    nativeAndQuoteTokenV3PoolSDK: V3SDKPool | null;
-    nativeAndQuoteTokenV4PoolSDK: V4SDKPool | null;
-  }> {
-    const nativeAndQuoteTokenV2PoolSDK: Pair | null =
-      gasPools.nativeAndQuoteTokenV2Pool
-        ? gasPools.nativeAndQuoteTokenV2Pool.toV2SDKPool(
-            chainId,
-            tokensInfo,
-            ctx
-          )
-        : null;
-    const nativeAndQuoteTokenV3PoolSDK: V3SDKPool | null =
-      gasPools.nativeAndQuoteTokenV3Pool
-        ? gasPools.nativeAndQuoteTokenV3Pool.toV3SDKPool(
-            chainId,
-            tokensInfo,
-            ctx
-          )
-        : null;
-    const nativeAndQuoteTokenV4PoolSDK: V4SDKPool | null =
-      gasPools.nativeAndQuoteTokenV4Pool
-        ? gasPools.nativeAndQuoteTokenV4Pool.toV4SDKPool(
-            chainId,
-            tokensInfo,
-            ctx
-          )
-        : null;
-
-    return {
-      nativeAndQuoteTokenV2PoolSDK,
-      nativeAndQuoteTokenV3PoolSDK,
-      nativeAndQuoteTokenV4PoolSDK,
-    };
+  ): Pair | V3SDKPool | V4SDKPool | null {
+    if (pool instanceof V2Pool) {
+      return pool.toV2SDKPool(chainId, tokensInfo, ctx);
+    }
+    if (pool instanceof V3Pool) {
+      return pool.toV3SDKPool(chainId, tokensInfo, ctx);
+    }
+    return pool ? pool.toV4SDKPool(chainId, tokensInfo, ctx) : null;
   }
 
   public async updateQuotesGasDetails(
@@ -130,22 +104,16 @@ export class GasConverter implements IGasConverter {
       wrappedNativeTokenInfo?.priceUSD && quoteTokenInfo?.priceUSD;
 
     // Only fetch gas pools if USD pricing is not available for the quote token
-    let nativeAndQuoteTokenV2PoolSDK: Pair | null = null;
-    let nativeAndQuoteTokenV3PoolSDK: V3SDKPool | null = null;
-    let nativeAndQuoteTokenV4PoolSDK: V4SDKPool | null = null;
+    let nativePoolSDK: Pair | V3SDKPool | V4SDKPool | null = null;
 
     if (!canUseUsdPricing) {
-      const gasPools = await this.fetchGasRelatedPools(
+      const gasPool = await this.fetchGasRelatedPools(
         chainId,
         quoteToken,
         ctx,
         blockNumber
       );
-      ({
-        nativeAndQuoteTokenV2PoolSDK,
-        nativeAndQuoteTokenV3PoolSDK,
-        nativeAndQuoteTokenV4PoolSDK,
-      } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx));
+      nativePoolSDK = this.convertPoolToSDK(chainId, tokensInfo, gasPool, ctx);
     }
 
     for (const quote of quotes) {
@@ -183,9 +151,7 @@ export class GasConverter implements IGasConverter {
             totalGasCostNativeCurrency,
             quoteToken,
             wrappedNativeCurrency,
-            nativeAndQuoteTokenV2PoolSDK,
-            nativeAndQuoteTokenV3PoolSDK,
-            nativeAndQuoteTokenV4PoolSDK,
+            nativePoolSDK,
             ctx
           );
 
@@ -237,21 +203,20 @@ export class GasConverter implements IGasConverter {
       quoteTokenInfo.symbol,
       quoteTokenInfo.name
     );
-    const gasPools = await this.fetchGasRelatedPools(chainId, quoteToken, ctx);
-    const {
-      nativeAndQuoteTokenV2PoolSDK,
-      nativeAndQuoteTokenV3PoolSDK,
-      nativeAndQuoteTokenV4PoolSDK,
-    } = await this.convertPoolsToSDK(chainId, tokensInfo, gasPools, ctx);
+    const gasPool = await this.fetchGasRelatedPools(chainId, quoteToken, ctx);
+    const nativePoolSDK = this.convertPoolToSDK(
+      chainId,
+      tokensInfo,
+      gasPool,
+      ctx
+    );
 
     const gasCostInTermsOfQuoteToken = await this.convertGasCostToQuoteToken(
       chainId,
       totalGasCostNativeCurrency,
       quoteToken,
       wrappedNativeCurrency,
-      nativeAndQuoteTokenV2PoolSDK,
-      nativeAndQuoteTokenV3PoolSDK,
-      nativeAndQuoteTokenV4PoolSDK,
+      nativePoolSDK,
       ctx
     );
 
@@ -294,9 +259,7 @@ export class GasConverter implements IGasConverter {
     totalGasCostNativeCurrency: CurrencyAmountRaw<Token>,
     quoteToken: Token,
     wrappedNativeCurrency: Token,
-    nativeAndQuoteTokenV2PoolSDK: Pair | null,
-    nativeAndQuoteTokenV3PoolSDK: V3SDKPool | null,
-    nativeAndQuoteTokenV4PoolSDK: V4SDKPool | null,
+    nativePoolSDK: Pair | V3SDKPool | V4SDKPool | null,
     ctx: Context
   ): Promise<CurrencyAmountRaw<Token> | null> {
     if (quoteToken.equals(wrappedNativeCurrency)) {
@@ -304,23 +267,11 @@ export class GasConverter implements IGasConverter {
     }
 
     try {
-      if (nativeAndQuoteTokenV3PoolSDK) {
+      if (nativePoolSDK) {
         return getQuoteThroughNativePool(
           chainId,
           totalGasCostNativeCurrency,
-          nativeAndQuoteTokenV3PoolSDK
-        );
-      } else if (nativeAndQuoteTokenV2PoolSDK) {
-        return getQuoteThroughNativePool(
-          chainId,
-          totalGasCostNativeCurrency,
-          nativeAndQuoteTokenV2PoolSDK
-        );
-      } else if (nativeAndQuoteTokenV4PoolSDK) {
-        return getQuoteThroughNativePool(
-          chainId,
-          totalGasCostNativeCurrency,
-          nativeAndQuoteTokenV4PoolSDK
+          nativePoolSDK
         );
       } else {
         ctx.logger.debug('GasConverter.convertGasCostToQuoteToken', {
@@ -363,49 +314,35 @@ export class GasConverter implements IGasConverter {
     quoteToken: Token,
     ctx: Context,
     blockNumber?: number
-  ): Promise<GasPools> {
+  ): Promise<NativePool | null> {
     const wrappedCurrency = getGasToken(chainId);
+    if (wrappedCurrency.equals(quoteToken)) {
+      return null;
+    }
 
-    let nativeAndQuoteTokenPoolPromiseV2: Promise<V2Pool | null> | null = null;
-    let nativeAndQuoteTokenPoolPromiseV3: Promise<V3Pool | null> | null = null;
-    let nativeAndQuoteTokenPoolPromiseV4: Promise<V4Pool | null> | null = null;
-
-    // If the quote token is the wrapped native currency, we don't need to fetch the native and quote token pool
-    if (!wrappedCurrency.equals(quoteToken)) {
-      nativeAndQuoteTokenPoolPromiseV2 = getHighestLiquidityV2NativePool(
+    const pools = await Promise.all([
+      getHighestLiquidityV2NativePool(
         quoteToken,
         this.v2PoolRepository,
         ctx,
         blockNumber
-      );
-      nativeAndQuoteTokenPoolPromiseV3 = getHighestLiquidityV3NativePool(
+      ),
+      getHighestLiquidityV3NativePool(
         quoteToken,
         this.v3PoolRepository,
         ctx,
         blockNumber
-      );
-      nativeAndQuoteTokenPoolPromiseV4 = getHighestLiquidityV4NativePool(
+      ),
+      getHighestLiquidityV4NativePool(
         quoteToken,
         this.v4PoolRepository,
         ctx,
         blockNumber
-      );
-    }
-
-    const [
-      nativeAndQuoteTokenV2Pool,
-      nativeAndQuoteTokenV3Pool,
-      nativeAndQuoteTokenV4Pool,
-    ] = await Promise.all([
-      nativeAndQuoteTokenPoolPromiseV2,
-      nativeAndQuoteTokenPoolPromiseV3,
-      nativeAndQuoteTokenPoolPromiseV4,
+      ),
     ]);
-
-    return {
-      nativeAndQuoteTokenV2Pool,
-      nativeAndQuoteTokenV3Pool,
-      nativeAndQuoteTokenV4Pool,
-    };
+    return selectDeepestNativePool(
+      wrappedCurrency,
+      pools.filter(pool => pool !== null)
+    );
   }
 }

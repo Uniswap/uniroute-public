@@ -4,6 +4,7 @@ import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {
+  selectDeepestNativePool,
   getHighestLiquidityV2NativePool,
   getHighestLiquidityV3NativePool,
   getHighestLiquidityV4NativePool,
@@ -23,6 +24,15 @@ import {RouteBasic} from '../../models/route/RouteBasic';
 import {Protocol} from '../../models/pool/Protocol';
 import {buildMetricKey, ChainId} from '../../lib/config';
 import {PATHUSD_TEMPO} from '../../lib/tokenUtils';
+
+import {
+  createDawaePools,
+  createRplPools,
+  createV4Pool,
+  gasToken,
+  rpl,
+  weth,
+} from '../../../tests/fixtures/nativeGasPools';
 
 class FakePoolsRepository<TPool extends Pool>
   implements IPoolsRepository<TPool>
@@ -266,8 +276,7 @@ describe('GasConverter pool fallback on Tempo', () => {
 
   it('falls through an empty V3 pool to a funded V4 pool', async () => {
     const ctx = buildTestContext();
-    // V3 outranks V4 in the conversion order, so an empty V3 pool that still
-    // qualified would shadow the funded V4 pool.
+    // An empty V3 pool must not shadow a funded V4 pool.
     const emptyV3Pool = new V3Pool(
       PATHUSD,
       CBBTC_TEMPO,
@@ -321,3 +330,171 @@ describe('GasConverter pool fallback on Tempo', () => {
     expect(gasCostInQuoteToken).toBeLessThan(13_700n);
   });
 });
+
+const hook = '0x0000000000000000000000000000000000000080';
+
+describe('selectDeepestNativePool', () => {
+  it('chooses the live DAWAE V2 reserves over its empty V3 pool', () => {
+    const {dead, live} = createDawaePools();
+    expect(selectDeepestNativePool(gasToken, [dead, live])).toBe(live);
+  });
+
+  it('chooses RPL fee 3000 by WETH depth despite its smaller liquidity', () => {
+    const {shallow, deep} = createRplPools();
+    expect(selectDeepestNativePool(gasToken, [shallow, deep])).toBe(deep);
+  });
+
+  it('uses the token1 virtual reserve when the gas token is token1', () => {
+    const {shallow, deep} = createRplPools();
+    // RPL is token1 in the same observed pools. The high-price pool holds more RPL.
+    expect(selectDeepestNativePool(rplToken(), [deep, shallow])).toBe(shallow);
+    const shallowV4 = createV4Pool(shallow);
+    expect(
+      selectDeepestNativePool(rplToken(), [createV4Pool(deep), shallowV4])
+    ).toBe(shallowV4);
+  });
+
+  it('uses reserve0 when the gas token is token0', () => {
+    const {live} = createDawaePools();
+    const {deep} = createRplPools();
+    const pair = new V2Pool(
+      weth,
+      rpl,
+      live.address,
+      live.reserve1,
+      live.reserve0
+    );
+    expect(selectDeepestNativePool(gasToken, [pair, deep])).toBe(deep);
+  });
+
+  it('measures WETH depth in canonical order for pools built in request order', () => {
+    // The on-chain V3/V4 repositories put the requested WETH first, but DAWAE
+    // sorts before WETH, so sqrtPriceX96 is the WETH-per-DAWAE price.
+    const {dead} = createDawaePools();
+    const dawae = dead.token0;
+    // About 3.1e-9 WETH per DAWAE, the V2 pair's price: 5.6e17 WETH deep.
+    const fairPriced = new V3Pool(
+      weth,
+      dawae,
+      3000,
+      dead.address,
+      10n ** 22n,
+      4_420_000_000_000_000_000_000_000n,
+      0n
+    );
+    // 100x cheaper DAWAE with more liquidity: 5.6e16 WETH but 1.8e29 DAWAE.
+    const mispriced = new V3Pool(
+      weth,
+      dawae,
+      10000,
+      dead.address,
+      10n ** 23n,
+      44_200_000_000_000_000_000_000n,
+      0n
+    );
+    expect(selectDeepestNativePool(gasToken, [mispriced, fairPriced])).toBe(
+      fairPriced
+    );
+    const fairPricedV4 = createV4Pool(fairPriced);
+    expect(
+      selectDeepestNativePool(gasToken, [createV4Pool(mispriced), fairPricedV4])
+    ).toBe(fairPricedV4);
+  });
+
+  it('returns null for no candidates', () => {
+    expect(selectDeepestNativePool(gasToken, [])).toBeNull();
+  });
+
+  it('returns null for zero reserves, liquidity, price, and rounded-down depth', () => {
+    const {dead, live} = createDawaePools();
+    const {shallow} = createRplPools();
+    const zeroPrice = new V3Pool(
+      weth,
+      rpl,
+      500,
+      shallow.address,
+      shallow.liquidity,
+      0n,
+      0n
+    );
+    const dust = new V3Pool(
+      weth,
+      rpl,
+      500,
+      shallow.address,
+      1n,
+      shallow.sqrtPriceX96,
+      shallow.tickCurrent
+    );
+    expect(
+      selectDeepestNativePool(gasToken, [
+        dead,
+        new V2Pool(live.token0, weth, live.address, live.reserve0, 0n),
+        new V2Pool(live.token0, weth, live.address, 0n, live.reserve1),
+        zeroPrice,
+        dust,
+        createV4Pool(dead),
+        createV4Pool(zeroPrice),
+        createV4Pool(dust),
+      ])
+    ).toBeNull();
+  });
+
+  it.each(['V2', 'V3', 'V4'])(
+    'prefers positive-depth %s over a deeper hooked V4 pool',
+    protocol => {
+      const {shallow, deep} = createRplPools();
+      const {live} = createDawaePools();
+      const hookless =
+        protocol === 'V2'
+          ? live
+          : protocol === 'V3'
+            ? shallow
+            : createV4Pool(shallow);
+      expect(
+        selectDeepestNativePool(gasToken, [createV4Pool(deep, hook), hookless])
+      ).toBe(hookless);
+    }
+  );
+
+  it('uses the deepest hooked pool when other pools have no depth', () => {
+    const {shallow, deep} = createRplPools();
+    const {dead} = createDawaePools();
+    const hooked = createV4Pool(deep, hook);
+    expect(
+      selectDeepestNativePool(gasToken, [
+        createV4Pool(shallow, hook),
+        dead,
+        hooked,
+      ])
+    ).toBe(hooked);
+    expect(selectDeepestNativePool(gasToken, [hooked])).toBe(hooked);
+  });
+
+  it('breaks ties by V2, V3, V4, then input order', () => {
+    const {deep} = createRplPools();
+    const v4 = createV4Pool(deep);
+    const v4Second = createV4Pool(deep);
+    // Pin a reserve equal to the observed RPL pool virtual WETH reserve.
+    const pair = new V2Pool(weth, rpl, deep.address, 16977695728298808073n, 1n);
+    const pairSecond = new V2Pool(
+      weth,
+      rpl,
+      deep.address,
+      pair.reserve0,
+      pair.reserve1
+    );
+    expect(
+      selectDeepestNativePool(gasToken, [v4, deep, pair, pairSecond])
+    ).toBe(pair);
+    expect(selectDeepestNativePool(gasToken, [v4, deep])).toBe(deep);
+    expect(selectDeepestNativePool(gasToken, [v4, v4Second])).toBe(v4);
+    expect(
+      selectDeepestNativePool(gasToken, [deep, createRplPools().deep])
+    ).toBe(deep);
+  });
+});
+
+function rplToken() {
+  return new Token(gasToken.chainId, rpl.address, 18);
+}
