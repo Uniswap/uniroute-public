@@ -108,9 +108,7 @@ import {IQuoteRequestValidator} from './QuoteRequestValidator';
 import {
   calculateUsdAmount,
   getBucketFromAmount,
-  getFineGrainedBucketFromAmount,
   UsdBucket,
-  UsdBucketFineGrained,
 } from '../stores/route/uniroutes/usdBucketUtils';
 import {
   getCorrectedQuote,
@@ -186,10 +184,9 @@ function detectFotInDirectSwap(
 }
 
 /**
- * Computes the USD value of the input amount and the corresponding
- * cache bucket (coarse) plus fine-grained bucket (metrics).
+ * Computes the USD value of the input amount and its bucket.
  */
-function computeUsdBuckets(
+function computeUsdBucket(
   chainId: ChainId,
   amountIn: bigint,
   tradeType: TradeType,
@@ -199,7 +196,6 @@ function computeUsdBuckets(
 ): {
   usdAmount: number | undefined;
   usdBucket: UsdBucket;
-  fineGrainedUsdBucket: UsdBucketFineGrained;
 } {
   const usdAmount = calculateUsdAmount(
     chainId,
@@ -212,7 +208,6 @@ function computeUsdBuckets(
   return {
     usdAmount,
     usdBucket: getBucketFromAmount(usdAmount),
-    fineGrainedUsdBucket: getFineGrainedBucketFromAmount(usdAmount),
   };
 }
 
@@ -575,7 +570,7 @@ export class UniRouteBL implements IUniRoutedBL {
         amountIn += portionAmount;
       }
 
-      const {usdAmount, usdBucket, fineGrainedUsdBucket} = computeUsdBuckets(
+      const {usdAmount, usdBucket} = computeUsdBucket(
         chain.chainId,
         amountIn,
         tradeType,
@@ -584,12 +579,11 @@ export class UniRouteBL implements IUniRoutedBL {
         tokensInfo
       );
 
-      metricTags.push(`bucket:${fineGrainedUsdBucket}`);
+      metricTags.push(`bucket:${usdBucket}`);
       ctx.logger.debug('Calculated USD amount and bucket', {
         amountIn: amountIn.toString(),
         usdAmount,
-        fineGrainedUsdBucket,
-        cacheUsdBucket: usdBucket,
+        usdBucket,
         tokenIn: tokenInCurrencyInfo.wrappedAddress.toString(),
         tokenOut: tokenOutCurrencyInfo.wrappedAddress.toString(),
       });
@@ -617,7 +611,6 @@ export class UniRouteBL implements IUniRoutedBL {
           tradeType,
           amountIn,
           usdBucket,
-          fineGrainedUsdBucket,
           quoteType,
           protocols,
           nsCtx,
@@ -758,7 +751,7 @@ export class UniRouteBL implements IUniRoutedBL {
           routes,
           debugLogs,
           usedCachedRoutes,
-          fineGrainedUsdBucket
+          usdBucket
         );
         if (forceMixedResult.forceMixedNoRouteResponse) {
           metricTags.push(`status:${QuoteStatus.NoRoute}`);
@@ -875,6 +868,7 @@ export class UniRouteBL implements IUniRoutedBL {
         tradeType,
         amountIn,
         usdBucket,
+        usdAmount,
         quoteType,
         hooksOptions,
         protocols,
@@ -894,7 +888,7 @@ export class UniRouteBL implements IUniRoutedBL {
             data: quoteErrorData(QuoteErrorReason.NO_ROUTE),
           },
           hitsCachedRoutes: usedCachedRoutes,
-          usdBucket: fineGrainedUsdBucket.toString(),
+          usdBucket: usdBucket.toString(),
           debugInfo: debugLogs
             ? this.constructDebugInfo(routes, bestQuoteCandidates)
             : undefined,
@@ -931,7 +925,7 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes,
         fotInDirectSwap,
         externalTransferFailedInDirectSwap,
-        fineGrainedUsdBucket,
+        usdBucket,
         portionBips,
         portionRecipient,
         debugInfo,
@@ -1203,7 +1197,6 @@ export class UniRouteBL implements IUniRoutedBL {
     tradeType: TradeType,
     amountIn: bigint,
     usdBucket: UsdBucket,
-    fineGrainedUsdBucket: UsdBucketFineGrained,
     quoteType: QuoteType,
     protocols: Protocol[],
     nsCtx: RouteNamespaceContext,
@@ -1264,7 +1257,7 @@ export class UniRouteBL implements IUniRoutedBL {
             data: quoteErrorData(QuoteErrorReason.NO_ROUTE_CACHE_HIT),
           },
           hitsCachedRoutes: false,
-          usdBucket: fineGrainedUsdBucket.toString(),
+          usdBucket: usdBucket.toString(),
         }),
       };
     }
@@ -1731,7 +1724,7 @@ export class UniRouteBL implements IUniRoutedBL {
     routes: RouteBasic<Pool>[],
     debugLogs: boolean,
     usedCachedRoutes: boolean,
-    fineGrainedUsdBucket: UsdBucketFineGrained
+    usdBucket: UsdBucket
   ): {
     routes: RouteBasic<Pool>[];
     forceMixedNoRouteResponse?: QuoteResponse;
@@ -1749,7 +1742,7 @@ export class UniRouteBL implements IUniRoutedBL {
             data: quoteErrorData(QuoteErrorReason.NO_MIXED_ROUTE),
           },
           hitsCachedRoutes: usedCachedRoutes,
-          usdBucket: fineGrainedUsdBucket.toString(),
+          usdBucket: usdBucket.toString(),
           debugInfo: debugLogs
             ? this.constructDebugInfo(filteredRoutes, [])
             : undefined,
@@ -2103,6 +2096,7 @@ export class UniRouteBL implements IUniRoutedBL {
     tradeType: TradeType,
     amountIn: bigint,
     usdBucket: UsdBucket,
+    usdAmount: number | undefined,
     quoteType: QuoteType,
     hooksOptions: HooksOptions,
     protocols: Protocol[],
@@ -2140,6 +2134,7 @@ export class UniRouteBL implements IUniRoutedBL {
         tradeType,
         amountIn,
         usdBucket,
+        usdAmount,
         quoteType,
         hooksOptions,
         protocols,
@@ -2228,6 +2223,7 @@ export class UniRouteBL implements IUniRoutedBL {
     tradeType: TradeType,
     amountIn: bigint,
     usdBucket: UsdBucket,
+    usdAmount: number | undefined,
     quoteType: QuoteType,
     hooksOptions: HooksOptions,
     protocols: Protocol[],
@@ -2327,7 +2323,8 @@ export class UniRouteBL implements IUniRoutedBL {
           amountIn,
           usdBucket,
           ctx,
-          options?.testAggHooks
+          options?.testAggHooks,
+          usdAmount
         )
       )
     );
@@ -2375,24 +2372,29 @@ export class UniRouteBL implements IUniRoutedBL {
       // Check each USD bucket for cached routes
       for (const usdBucket of allUsdBuckets) {
         try {
-          // Admin inspection — read + process only, no refresh enqueue.
+          // Admin inspection — read + process only, no refresh enqueue, and
+          // the LITERAL bucket contents: the serving read may fall through
+          // from an empty fine bucket to a higher one, which would list the
+          // same routes under several buckets and hide whether this one
+          // repopulated.
           // Admin endpoint operates on the base (pure-Uniswap) keyspace —
           // specialised namespaces aren't surfaced here. See ROUTE-1103
           // (payload will accept nsCtx when we expand).
           // TODO: https://linear.app/uniswap/issue/ROUTE-1103/tech-debt-admin-getcachedroutes-request-payload-to-modify-to-accept
           const adminProtocols = [...UNISWAP_NATIVE_PROTOCOLS]; // All protocols
           const adminQuoteRequest = new QuoteRequest(); // Empty — we're not doing a full quote
-          const readResult = await this.cachedRoutesRepository.readCachedRoutes(
-            EMPTY_NAMESPACE_CONTEXT,
-            chain.chainId,
-            tokenInCurrencyInfo,
-            tokenOutCurrencyInfo,
-            tradeType,
-            amountIn,
-            usdBucket,
-            adminProtocols,
-            ctx
-          );
+          const readResult =
+            await this.cachedRoutesRepository.readCachedRoutesAtBucket(
+              EMPTY_NAMESPACE_CONTEXT,
+              chain.chainId,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
+              tradeType,
+              amountIn,
+              usdBucket,
+              adminProtocols,
+              ctx
+            );
           const routes =
             await this.cachedRoutesRepository.processCachedRoutesResult(
               readResult,
@@ -2597,7 +2599,7 @@ export class UniRouteBL implements IUniRoutedBL {
     usedCachedRoutes: boolean,
     fotInDirectSwap: boolean,
     externalTransferFailedInDirectSwap: boolean,
-    fineGrainedUsdBucket: UsdBucketFineGrained,
+    usdBucket: UsdBucket,
     portionBips?: number,
     portionRecipient?: string,
     debugInfo?: DebugInfo,
@@ -3103,7 +3105,7 @@ export class UniRouteBL implements IUniRoutedBL {
       swapSteps: swapStepStructs,
       priceImpact: this.formatPriceImpact(quoteSplit.swapInfo?.priceImpact),
       quoteId: ctx.requestId,
-      usdBucket: fineGrainedUsdBucket.toString(),
+      usdBucket: usdBucket.toString(),
     });
 
     // Log detailed error if simulation failed
