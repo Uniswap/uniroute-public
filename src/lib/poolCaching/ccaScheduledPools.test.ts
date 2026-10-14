@@ -12,7 +12,7 @@ import {
   CcaScheduledPoolsWriterDeps,
   CCA_SCHEDULED_POOLS_S3_KEY,
   LbpInitializerInfo,
-  makeDataApiPendingAuctionsFetcher,
+  makePendingLbpAuctionsFetcher,
   PendingLbpAuction,
 } from './ccaScheduledPools';
 import {
@@ -399,7 +399,7 @@ describe('buildCcaScheduledPools', () => {
       strategyAddress: STRATEGY,
       launchedToken: UNI.toLowerCase(),
     };
-    // Activated but absent from data-api (trailing window over): must persist
+    // Activated but absent from liquidity's response (trailing window over): must persist
     // to bridge until the subgraph serves the real pool.
     const activatedSurvivor: CcaScheduledPoolEntry = {
       ...stale,
@@ -411,7 +411,7 @@ describe('buildCcaScheduledPools', () => {
       id: '0xexpired',
       expiresAtMs: NOW - 1,
     };
-    // Not yet activated, no longer reported by data-api, and the on-chain
+    // Not yet activated, no longer reported by liquidity, and the on-chain
     // re-verification shows a zeroed registration: reorged away — dropped.
     const reorgedAway: CcaScheduledPoolEntry = {
       ...stale,
@@ -421,7 +421,7 @@ describe('buildCcaScheduledPools', () => {
       activateAtMs: NOW + 2 * 60 * 60 * 1000,
       auctionAddress: '0xreorged-auction',
     };
-    // Not yet activated, aged past data-api's 14-day pending window, but the
+    // Not yet activated, aged past liquidity's 14-day pending window, but the
     // on-chain registration is still live (long-scheduled launch): REBUILT
     // with a fresh schedule (a verbatim carry-forward would let the estimate
     // drift for days).
@@ -478,7 +478,7 @@ describe('buildCcaScheduledPools', () => {
 
   it('keeps the bridge entry of a just-migrated auction whose initializers read back zeroed', async () => {
     // migrate() CONSUMES the initializers struct, so the on-chain read is 0
-    // while data-api's trailing window still reports the auction with
+    // while liquidity's trailing window still reports the auction with
     // pool_key_hash set. The activated previous entry is the routing bridge
     // until the subgraph serves the real pool — it must NOT be pruned.
     pendingAuctions = [{...pendingAuctions[0], hasMigrated: true}];
@@ -661,7 +661,7 @@ describe('buildCcaScheduledPools', () => {
   it('rewrites a first-sight fresh entry when the migration already landed on the fallback key', async () => {
     // No previous registry object: the writer's first observation of this
     // auction races a lagging RPC read (still returns the pre-migration
-    // hookless registration) against data-api's recorded fallback key. The
+    // hookless registration) against liquidity's recorded fallback key. The
     // rebuilt entry must be published under the real poolId and counted as a
     // fallback incident.
     const migratedId = computeCcaPoolId(
@@ -831,7 +831,7 @@ describe('buildCcaScheduledPools', () => {
         auctionAddress: AUCTION,
       },
       // Near activation: the zeroed read may be a just-consumed migrate()
-      // racing data-api's hasMigrated snapshot — kept (TOCTOU guard).
+      // racing liquidity's hasMigrated snapshot — kept (TOCTOU guard).
       {
         ...base,
         id: '0xnearlaunch',
@@ -876,7 +876,7 @@ describe('buildCcaScheduledPools', () => {
   });
 
   it('resurrects an aged-out orphan whose stale estimate expired but whose registration is live', async () => {
-    // Absent from data-api (past the 14-day window), estimate drifted so far
+    // Absent from liquidity's response (past the 14-day window), estimate drifted so far
     // the entry looks activated AND expired — but on-chain the migration is
     // still scheduled. It must be rebuilt, not silently dropped.
     previousObjects.set(CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, 1), [
@@ -1015,7 +1015,7 @@ describe('buildCcaScheduledPools', () => {
   });
 
   it('rebuilds an orphan whose registration changed to a routing-inert hook', async () => {
-    // Orphan: absent from data-api's response, but its on-chain registration
+    // Orphan: absent from liquidity's response, but its on-chain registration
     // is live and now carries an inert hook — rebuilt under the hook-derived
     // poolId rather than dropped or kept stale.
     pendingAuctions = [];
@@ -1083,7 +1083,7 @@ describe('buildCcaScheduledPools', () => {
   });
 
   it('keeps a pre-activation entry when its initializers() read fails transiently', async () => {
-    // The auction IS still in data-api's response, but this run's on-chain
+    // The auction IS still in liquidity's response, but this run's on-chain
     // read fails — the previous entry must survive rather than vanish right
     // before its migration block.
     const previousEntry: CcaScheduledPoolEntry = {
@@ -1267,7 +1267,7 @@ describe('buildCcaScheduledPools', () => {
 
   it('drops a fresh entry whose id mismatches the recorded migrated pool (lagging RPC race)', async () => {
     const migratedId = `0x${'e'.repeat(64)}`;
-    // data-api already recorded the migration under a DIFFERENT poolId, but
+    // liquidity already recorded the migration under a DIFFERENT poolId, but
     // the (lagging) RPC still returns a live non-zero registration — the
     // fresh entry it builds must not re-publish the wrong id.
     pendingAuctions = [
@@ -1334,7 +1334,7 @@ describe('buildCcaScheduledPools', () => {
   });
 });
 
-describe('makeDataApiPendingAuctionsFetcher', () => {
+describe('makePendingLbpAuctionsFetcher', () => {
   let ctx: TestContext;
 
   /**
@@ -1382,13 +1382,13 @@ describe('makeDataApiPendingAuctionsFetcher', () => {
     });
     ctx.fetcher = fetcher;
 
-    const auctions = await makeDataApiPendingAuctionsFetcher(
+    const auctions = await makePendingLbpAuctionsFetcher(
       ctx,
-      'https://data-api.internal'
+      'https://liquidity.internal'
     )([1]);
 
     expect(calls[0].url).toBe(
-      'https://data-api.internal/data.v1.AuctionService/ListAuctionsPendingLbpMigration'
+      'https://liquidity.internal/data.v1.AuctionService/ListAuctionsPendingLbpMigration'
     );
     expect(calls[0].init?.body).toBe('{"chainIds":[1]}');
     expect(auctions).toEqual([
@@ -1411,7 +1411,7 @@ describe('makeDataApiPendingAuctionsFetcher', () => {
     ctx.fetcher = fetcher;
 
     await expect(
-      makeDataApiPendingAuctionsFetcher(ctx, 'https://data-api.internal')([1])
+      makePendingLbpAuctionsFetcher(ctx, 'https://liquidity.internal')([1])
     ).rejects.toThrow('HTTP 503');
   });
 
@@ -1420,7 +1420,7 @@ describe('makeDataApiPendingAuctionsFetcher', () => {
     ctx.fetcher = fetcher;
 
     await expect(
-      makeDataApiPendingAuctionsFetcher(ctx, 'https://data-api.internal')([1])
+      makePendingLbpAuctionsFetcher(ctx, 'https://liquidity.internal')([1])
     ).rejects.toThrow('HTTP 200');
   });
 
@@ -1429,7 +1429,7 @@ describe('makeDataApiPendingAuctionsFetcher', () => {
     ctx.fetcher = fetcher;
 
     await expect(
-      makeDataApiPendingAuctionsFetcher(ctx, 'https://data-api.internal')([1])
+      makePendingLbpAuctionsFetcher(ctx, 'https://liquidity.internal')([1])
     ).resolves.toEqual([]);
   });
 });

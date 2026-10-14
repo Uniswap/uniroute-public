@@ -4,7 +4,7 @@
  * A CCA launch migrates auction liquidity into a brand-new V4 pool at a
  * migrationBlock known well in advance. The subgraph→S3 pool cron (+ serve
  * caches) takes ~20-50 min to surface that pool, so this job pre-registers it:
- * it polls data-api for auctions pending LBP migration, completes the PoolKey
+ * it polls liquidity for auctions pending LBP migration, completes the PoolKey
  * with one authoritative `LBPStrategy.initializers(auction)` eth_call, and
  * publishes a small per-chain registry object to the pool-cache S3 bucket.
  * `S3SubgraphPoolDiscovererV4` merges active entries into routing at serve
@@ -57,7 +57,7 @@ export interface CcaScheduledPoolEntry {
   expiresAtMs: number;
   auctionAddress: string;
   // The LBP strategy holding this auction's registration; used to re-verify
-  // initializers(auction) on-chain when the auction leaves data-api's window
+  // initializers(auction) on-chain when the auction leaves liquidity's window
   // before activation.
   strategyAddress: string;
   // The auctioned token (vs the paired currency). The serve-time merge only
@@ -99,13 +99,13 @@ export interface PendingLbpAuction {
   chainId: number;
   address: string;
   lbpStrategyAddress: string;
-  // True once migrate() ran (data-api pool_key_hash set). Disambiguates an
+  // True once migrate() ran (the auction's pool_key_hash is set). Disambiguates an
   // initializers() read of migrationBlock 0: the strategy CONSUMES the
   // per-auction struct on migrate(), so 0 means either "registration
   // cleared/reorged" (prune) or "already migrated" (keep the entry — it's
   // the bridge until the subgraph serves the real pool).
   hasMigrated: boolean;
-  // The ACTUAL migrated pool's V4 poolId (data-api pool_key_hash, from the
+  // The ACTUAL migrated pool's V4 poolId (the auction's pool_key_hash, from the
   // Migrated event). Can differ from the poolId we pre-registered:
   // LBPStrategy.migrate() rewrites key.hooks to the strategy address when
   // the canonical hookless pool already exists at migrate time
@@ -366,7 +366,7 @@ export function isDenylistedCcaHook(chainId: number, hook: string): boolean {
 }
 
 // A zeroed initializers() read is ambiguous: the strategy consumes the struct
-// on migrate(), and both the data-api snapshot (read-replica + pubsub
+// on migrate(), and both liquidity's snapshot (read-replica + pubsub
 // ingestion lag) and the on-chain read race the actual migration. Since
 // migrate() is only possible at/after migrationBlock, a zero read is provably
 // "cleared/reorged" only when the entry's estimated activation is comfortably
@@ -412,7 +412,7 @@ export function computeCcaPoolId(
 }
 
 /**
- * When data-api's recorded migrated pool key differs from what we
+ * When the auction's recorded migrated pool key differs from what we
  * pre-registered, check whether the difference is EXACTLY migrate()'s
  * front-run fallback — key.hooks rewritten to the strategy address, every
  * other PoolKey field unchanged. If recomputing the entry's key with
@@ -460,15 +460,15 @@ function rebuildEntryForFallbackHook(
  * container has no request context; `ctx` must carry an installed fetcher —
  * see workerFetcher.ts).
  */
-export function makeDataApiPendingAuctionsFetcher(
+export function makePendingLbpAuctionsFetcher(
   ctx: Context,
-  dataApiUrl: string
+  liquidityUrl: string
 ): (chainIds: number[]) => Promise<PendingLbpAuction[]> {
   return async (chainIds: number[]) => {
     // Wire shape mirrors data.v1.AuctionService/ListAuctionsPendingLbpMigration
-    // (data-api proto/data/v1/auction.proto) — the same local-interface
-    // consumption pattern liquidity's DataApiClient uses; there is no
-    // published data-api client package.
+    // (proto/data/v1/auction.proto), served by liquidity since the LP-1613
+    // gateway flip. Consumed through a local interface rather than a generated
+    // client so this container takes no proto dependency.
     const response = await unirouteFetch<{
       auctions?: Array<{
         auctionId?: string;
@@ -479,10 +479,10 @@ export function makeDataApiPendingAuctionsFetcher(
       }>;
     }>(ctx, {
       method: 'POST',
-      url: `${dataApiUrl}/data.v1.AuctionService/ListAuctionsPendingLbpMigration`,
+      url: `${liquidityUrl}/data.v1.AuctionService/ListAuctionsPendingLbpMigration`,
       body: {chainIds},
       timeoutMs: 10_000,
-      metricTags: {vendor: 'data-api'},
+      metricTags: {vendor: 'liquidity'},
     });
     // axios threw on a non-2xx here (no validateStatus override), and the
     // caller counts a failed run — so keep throwing rather than silently
@@ -596,7 +596,7 @@ async function readPreviousEntries(
     }
     // A transient read failure must ABORT this chain's run (skip the PUT):
     // treating it as "no previous entries" would overwrite the registry
-    // without activated survivors that data-api's trailing window no longer
+    // without activated survivors that liquidity's trailing window no longer
     // returns — deleting exactly the entries the feature exists to serve.
     logger.error(
       `Failed to read previous CCA scheduled pools object at ${key}`,
@@ -651,7 +651,7 @@ export async function buildCcaScheduledPools(
   if (!config.s3Bucket) {
     throw new Error('POOL_CACHING_S3_BUCKET must be set');
   }
-  // Fail-closed parseChainIds can yield []. Skip entirely — data-api treats
+  // Fail-closed parseChainIds can yield []. Skip entirely — liquidity treats
   // an empty chain_ids filter as "all chains", which would fetch every
   // pending auction across the fleet each tick for nothing.
   if (config.chainIds.length === 0) {
@@ -749,7 +749,7 @@ export async function buildCcaScheduledPools(
         // Fresh reads run in parallel (same job-timeout rationale as the
         // orphan re-verification below). The strategy CONSUMES the
         // per-auction initializers struct on migrate(), so a migrationBlock-0
-        // read is ambiguous and disambiguated via data-api's pool_key_hash:
+        // read is ambiguous and disambiguated via the auction's pool_key_hash:
         // - hasMigrated: the auction migrated — its previous entry is the
         //   bridge until the subgraph serves the real pool; leave it alone.
         // - not migrated: registration cleared/reorged — record it so the
@@ -848,8 +848,8 @@ export async function buildCcaScheduledPools(
         //   fresh entry under a DIFFERENT poolId prunes the stale-id one;
         // - registration read back CLEARED this run and activation is
         //   comfortably in the future → dropped (canceled/reorged; the
-        //   safety margin covers migrate() racing data-api's snapshot);
-        // - absent from data-api (aged past the 14-day pending window,
+        //   safety margin covers migrate() racing liquidity's snapshot);
+        // - absent from liquidity's response (aged past the 14-day pending window,
         //   reorged, or cleared) → re-verified on-chain in parallel; if
         //   still registered, REBUILT with a fresh schedule estimate (a
         //   verbatim carry-forward would let the estimate drift for days),
@@ -861,7 +861,7 @@ export async function buildCcaScheduledPools(
         // auction → fresh pool id, to supersede a previous entry whose
         // on-chain params (and therefore poolId) changed: the old-id entry
         // would otherwise linger as a duplicate until expiry (its auction is
-        // still reported by data-api, so it never becomes an orphan).
+        // still reported by liquidity, so it never becomes an orphan).
         const freshIdByAuction = new Map(
           freshEntries.map(entry => [
             entry.auctionAddress.toLowerCase(),
@@ -899,7 +899,7 @@ export async function buildCcaScheduledPools(
                       entry.auctionAddress
                     );
                     if (info.migrationBlock === 0n) {
-                      // Zero is ambiguous and this orphan has no data-api row
+                      // Zero is ambiguous and this orphan has no auction row
                       // to disambiguate with — same margin rule as the
                       // cleared-prune above.
                       return [
@@ -959,7 +959,7 @@ export async function buildCcaScheduledPools(
           const auctionKey = entry.auctionAddress.toLowerCase();
           // Prune a cleared registration only when activation is far enough
           // out that the zero read cannot be a just-consumed migration (see
-          // CLEARED_DROP_SAFETY_MARGIN_MS) — data-api's hasMigrated snapshot
+          // CLEARED_DROP_SAFETY_MARGIN_MS) — liquidity's hasMigrated snapshot
           // can lag the on-chain migrate().
           if (
             clearedAuctions.has(auctionKey) &&
@@ -1041,7 +1041,7 @@ export async function buildCcaScheduledPools(
         }
         for (const entry of freshEntries) {
           // The mismatch prune above only filters `previous`: a lagging RPC
-          // read racing data-api's recorded migration would re-publish the
+          // read racing liquidity's recorded migration would re-publish the
           // pruned wrong-id entry here — filter fresh entries the same way,
           // including the fallback-hook rewrite (a first-sight auction whose
           // migration already landed on the strategy-as-hook key must be
@@ -1196,7 +1196,7 @@ export async function buildCcaScheduledPools(
   );
 
   // Per-chain failures are isolated above, but a run where EVERY chain failed
-  // (IAM, data-api, RPC all-down) must surface as a job-level error so the
+  // (IAM, liquidity, RPC all-down) must surface as a job-level error so the
   // cron completed{status:failure} metric and its monitor fire.
   if (config.chainIds.length > 0 && failedChains === config.chainIds.length) {
     throw new Error(
