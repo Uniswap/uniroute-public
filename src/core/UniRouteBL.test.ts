@@ -1,3 +1,7 @@
+import {FakeTokenHandler} from '../../tests/test-utils/FakeTokenHandler';
+import {getGasToken} from '../lib/tokenUtils';
+import {IQuoteStrategy} from './strategy/IQuoteStrategy';
+import {IQuoteSelector} from './quote/selector/IQuoteSelector';
 import {describe, expect, it, beforeEach, vi} from 'vitest';
 import {UniRouteBL} from './UniRouteBL';
 import {
@@ -113,6 +117,20 @@ vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
       ? 'CurveStableSwapNG'
       : undefined,
 }));
+
+class FakeQuoteStrategy implements IQuoteStrategy {
+  constructor(
+    public findBestQuoteCandidates: IQuoteStrategy['findBestQuoteCandidates']
+  ) {}
+
+  name(): string {
+    return 'FakeQuoteStrategy';
+  }
+}
+
+class FakeQuoteSelector implements IQuoteSelector {
+  constructor(public getBestQuotes: IQuoteSelector['getBestQuotes']) {}
+}
 
 class TestTokenHandler implements ITokenHandler {
   public async getToken(
@@ -569,6 +587,118 @@ describe('UniRouteBL', () => {
     getGasPrice: vi.fn().mockResolvedValue(BigNumber.from('0')),
   } as unknown as JsonRpcProvider;
   mockedRpcProviderMap.set(ChainId.MAINNET, mockProvider);
+
+  describe('gas conversion trust passed through quote()', () => {
+    it.each([
+      {quotePriceUSD: 1, gasEnabled: true, expected: true},
+      {quotePriceUSD: undefined, gasEnabled: true, expected: false},
+      {quotePriceUSD: 10, gasEnabled: true, expected: false},
+      {quotePriceUSD: 1, gasEnabled: false, expected: false},
+    ])(
+      'passes trust $expected with quote price $quotePriceUSD and gas enabled $gasEnabled',
+      async ({quotePriceUSD, gasEnabled, expected}) => {
+        const fifa = new Address('0x66641fcfca7d919629d5e4a72d9f13787fcaf304');
+        const usdt = new Address('0xdac17f958d2ee523a2206206994597c13d831ec7');
+        const native = getGasToken(ChainId.MAINNET);
+        const tokens = new Map<string, Erc20Token | null>([
+          [
+            fifa.toString(),
+            new Erc20Token(fifa, 18, 'FIFA', 'FIFA', undefined, 3.9787e-9),
+          ],
+          [
+            usdt.toString(),
+            new Erc20Token(
+              usdt,
+              6,
+              'USDT',
+              'Tether USD',
+              undefined,
+              quotePriceUSD
+            ),
+          ],
+          [
+            native.address,
+            new Erc20Token(
+              new Address(native.address),
+              native.decimals,
+              'WETH',
+              'Wrapped Ether',
+              undefined,
+              2500
+            ),
+          ],
+        ]);
+        const pricedTokenHandler = new FakeTokenHandler(
+          async (_chain, address) => tokens.get(address.toString()) ?? null,
+          async () => tokens
+        );
+        const passedTrust: (boolean | undefined)[] = [];
+        const capturingSelector = new FakeQuoteSelector(
+          async (quotes, _tradeType, _topN, _metricTags, _ctx, options) => {
+            passedTrust.push(options?.gasConversionTrusted);
+            return quotes.slice(0, 1);
+          }
+        );
+        const route = new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            fifa,
+            usdt,
+            new Address('0x0000000000000000000000000000000000000001'),
+            19200000000000000000000000n,
+            76035n
+          ),
+        ]);
+        // The best output is last and split so using the first candidate or a
+        // single leg cannot accidentally confirm the measured exchange rate.
+        const strategy = new FakeQuoteStrategy(async () => [
+          new QuoteSplit([new QuoteBasic(route, 1n)]),
+          new QuoteSplit([
+            new QuoteBasic(new RouteBasic(Protocol.V2, route.path, 25), 19009n),
+            new QuoteBasic(new RouteBasic(Protocol.V2, route.path, 35), 26612n),
+            new QuoteBasic(new RouteBasic(Protocol.V2, route.path, 40), 30414n),
+          ]),
+        ]);
+        const config = {
+          ...serviceConfig,
+          GasEstimation: {...serviceConfig.GasEstimation, Enabled: gasEnabled},
+        };
+        const bl = new UniRouteBL(
+          config,
+          redisCache,
+          chainRepository,
+          poolDiscoverer,
+          freshPoolDetailsWrapper,
+          pricedTokenHandler,
+          quoteFetcher,
+          capturingSelector,
+          routeQuoteAllocator,
+          gasEstimateProvider,
+          noGasConverter,
+          routeRepository,
+          cachedRoutesRepository,
+          noRouteCacheRepository,
+          strategy,
+          dummySimulator,
+          quoteRequestValidator,
+          tokenProvider,
+          mockedRpcProviderMap,
+          stateOverrideResolver
+        );
+        await bl.quote(
+          ctx,
+          new QuoteRequest({
+            ...baseRequest,
+            tokenInAddress: fifa.toString().toLowerCase(),
+            tokenOutAddress: usdt.toString().toLowerCase(),
+            amount: '19200000000000000000000000',
+            tradeType: 'EXACT_IN',
+            blockNumber: 26186720,
+          })
+        );
+        expect(passedTrust).toEqual([expected]);
+      }
+    );
+  });
 
   describe('quote caching behavior', () => {
     it('should not use cached routes for FAST quote type in sync mode (start with empty cache)', async () => {

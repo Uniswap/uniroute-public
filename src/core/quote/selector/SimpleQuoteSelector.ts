@@ -33,6 +33,12 @@ export class SimpleQuoteSelector implements IQuoteSelector {
    * on their merits. v2 also corrects the ExactOut adjustment sign (input
    * PLUS gas = total cost) — legacy subtracts in both directions, which
    * under ExactOut's lower-wins ranking rewards gassier routes.
+   *
+   * Tiny ExactIn trades spend more than the threshold on gas on every route,
+   * so the v2 rule alone would always fall back to raw output and serve the
+   * gassiest route. When the caller confirms the conversion independently
+   * (`gasConversionTrusted`, see gasConversionTrust.ts) and every candidate
+   * carries a complete positive gas cost, gas ordering is kept.
    */
   constructor(private readonly minGasConversionGuardEnabled = false) {}
 
@@ -41,7 +47,8 @@ export class SimpleQuoteSelector implements IQuoteSelector {
     tradeType: TradeType,
     topN: number,
     metricTags: string[],
-    ctx: UniContext
+    ctx: UniContext,
+    options?: {gasConversionTrusted?: boolean}
   ): Promise<QuoteSplit[]> {
     if (quotes.length === 0) {
       return [];
@@ -122,8 +129,20 @@ export class SimpleQuoteSelector implements IQuoteSelector {
         getOriginalAmount(quoteSplit) > 0n && isWithinThreshold(quoteSplit)
     );
 
+    const trustedConversionOverride =
+      this.minGasConversionGuardEnabled &&
+      !v2Valid &&
+      options?.gasConversionTrusted === true &&
+      tradeType === TradeType.ExactIn &&
+      quotes.every(
+        quoteSplit =>
+          getOriginalAmount(quoteSplit) > 0n &&
+          quoteSplit.quotes.every(
+            quote => (quote.gasDetails?.gasCostInQuoteToken ?? 0n) > 0n
+          )
+      );
     const validGasAdjustments = this.minGasConversionGuardEnabled
-      ? v2Valid
+      ? v2Valid || trustedConversionOverride
       : legacyValid;
     const getAmountForSorting = validGasAdjustments
       ? getGasAdjustedAmount
@@ -135,7 +154,7 @@ export class SimpleQuoteSelector implements IQuoteSelector {
       {
         tags: [
           ...metricTags,
-          `status:${validGasAdjustments ? 'valid' : 'invalid'}`,
+          `status:${trustedConversionOverride ? 'valid_trusted_conversion' : validGasAdjustments ? 'valid' : 'invalid'}`,
           `rule:${this.minGasConversionGuardEnabled ? 'v2' : 'legacy'}`,
         ],
       }

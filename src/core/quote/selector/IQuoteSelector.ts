@@ -8,6 +8,7 @@ export interface IQuoteSelector {
     tradeType: TradeType,
     topN: number,
     metricTags: string[],
-    ctx: UniContext
+    ctx: UniContext,
+    options?: {gasConversionTrusted?: boolean}
   ): Promise<QuoteSplit[]>;
 }

@@ -1,3 +1,4 @@
+import {buildMetricKey} from '../../../lib/config';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Pool} from '../../../models/pool/V3Pool';
 import {TradeType} from '../../../models/quote/TradeType';
@@ -835,6 +836,147 @@ describe('gas-guard rules (legacy vs v2 min-ratio conversion probe)', () => {
         },
       },
     ]);
+
+  describe('trusted conversion for tiny trades', () => {
+    // Measured FIFA -> USDT outputs and gas costs at mainnet block 26186720.
+    const grossLeader = () => split(76035n, 592752n);
+    const netLeader = () => split(75702n, 33260n);
+
+    it('ranks the net-positive candidate ahead of the net-negative gross leader', async () => {
+      const gross = grossLeader();
+      const net = netLeader();
+      const result = await new SimpleQuoteSelector(true).getBestQuotes(
+        [gross, net],
+        TradeType.ExactIn,
+        2,
+        [],
+        ctx,
+        {gasConversionTrusted: true}
+      );
+      expect(result).toEqual([net, gross]);
+    });
+
+    it.each([undefined, {}, {gasConversionTrusted: false}])(
+      'preserves gross order without trust (%o)',
+      async options => {
+        const gross = grossLeader();
+        const net = netLeader();
+        expect(
+          await new SimpleQuoteSelector(true).getBestQuotes(
+            [net, gross],
+            TradeType.ExactIn,
+            2,
+            [],
+            ctx,
+            options
+          )
+        ).toEqual([gross, net]);
+      }
+    );
+
+    it('preserves ExactOut gross ordering with trust', async () => {
+      const lowerInput = split(75702n, 592752n);
+      const higherInput = split(76035n, 33260n);
+      expect(
+        await new SimpleQuoteSelector(true).getBestQuotes(
+          [higherInput, lowerInput],
+          TradeType.ExactOut,
+          2,
+          [],
+          ctx,
+          {gasConversionTrusted: true}
+        )
+      ).toEqual([lowerInput, higherInput]);
+    });
+
+    it.each(['missing details', 'missing cost', 'zero cost'])(
+      'preserves gross order when one split leg has incomplete conversion (%s)',
+      async conversion => {
+        const gross = grossLeader();
+        const incomplete = new QuoteSplit([
+          ...netLeader().quotes,
+          {
+            route: new RouteBasic<V3Pool>(Protocol.V3, [pool()]),
+            amount: 1n,
+            gasDetails:
+              conversion === 'missing details'
+                ? undefined
+                : {
+                    gasCostInQuoteToken:
+                      conversion === 'missing cost' ? undefined : 0n,
+                    gasCostInWei: 1n,
+                    gasPriceInWei: 1n,
+                    gasCostInEth: 0,
+                    gasUse: 1n,
+                  },
+          },
+        ]);
+        expect(
+          await new SimpleQuoteSelector(true).getBestQuotes(
+            [incomplete, gross],
+            TradeType.ExactIn,
+            2,
+            [],
+            ctx,
+            {gasConversionTrusted: true}
+          )
+        ).toEqual([gross, incomplete]);
+      }
+    );
+
+    it.each([0n, -1n])(
+      'preserves gross order for a nonpositive candidate (%s)',
+      async amount => {
+        const gross = grossLeader();
+        const net = netLeader();
+        const invalid = split(amount, 1n);
+        expect(
+          await new SimpleQuoteSelector(true).getBestQuotes(
+            [net, invalid, gross],
+            TradeType.ExactIn,
+            3,
+            [],
+            ctx,
+            {gasConversionTrusted: true}
+          )
+        ).toEqual([gross, net, invalid]);
+      }
+    );
+
+    it('ignores trust with the legacy guard', async () => {
+      const gross = grossLeader();
+      const net = netLeader();
+      expect(
+        await new SimpleQuoteSelector(false).getBestQuotes(
+          [net, gross],
+          TradeType.ExactIn,
+          2,
+          [],
+          ctx,
+          {gasConversionTrusted: true}
+        )
+      ).toEqual([gross, net]);
+    });
+
+    it('emits the trusted status with existing tags and no rule divergence', async () => {
+      const metricContext = buildTestContext();
+      const spy = vi.spyOn(metricContext.metrics, 'count');
+      await new SimpleQuoteSelector(true).getBestQuotes(
+        [grossLeader(), netLeader()],
+        TradeType.ExactIn,
+        2,
+        ['chain:MAINNET'],
+        metricContext,
+        {gasConversionTrusted: true}
+      );
+      expect(spy).toHaveBeenCalledExactlyOnceWith(
+        buildMetricKey('SimpleQuoteSelector.GasAdjustments'),
+        1,
+        {tags: ['chain:MAINNET', 'status:valid_trusted_conversion', 'rule:v2']}
+      );
+      spy.mockRestore();
+    });
+  });
 
   // Mirrors the production incident: a cheap-gas candidate with slightly
   // lower raw output (net-best), an accurately-expensive ZLCA-style

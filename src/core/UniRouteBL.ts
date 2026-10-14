@@ -1,3 +1,4 @@
+import {isGasConversionTrustworthy} from './quote/selector/gasConversionTrust';
 import {Context} from '@uniswap/lib-uni/context';
 import {CurrencyAmount, TradeType as SdkTradeType} from '@uniswap/sdk-core';
 import {
@@ -1759,6 +1760,54 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
+   * Whether the selector may keep gas-adjusted ordering for this candidate
+   * set even when every route spends more than its guard threshold on gas
+   * (tiny trades). Uses the token prices GasConverter converted with and the
+   * candidates' own exchange rate to confirm them.
+   */
+  private isCandidateGasConversionTrusted(
+    chainId: ChainId,
+    tradeType: TradeType,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    amountIn: bigint,
+    candidates: QuoteSplit[],
+    tokensInfo: Map<string, Erc20Token | null>
+  ): boolean {
+    if (tradeType !== TradeType.ExactIn) {
+      return false;
+    }
+    const quoteTokenAddress = tokenOutCurrencyInfo.wrappedAddress.toString();
+    const gasTokenAddress = getGasToken(chainId).address;
+    const quoteToken = tokensInfo.get(quoteTokenAddress);
+    const nativeToken = tokensInfo.get(gasTokenAddress);
+    const tokenIn = tokensInfo.get(
+      tokenInCurrencyInfo.wrappedAddress.toString()
+    );
+    if (!quoteToken || !nativeToken || !tokenIn) {
+      return false;
+    }
+    const bestGrossOutput = candidates.reduce((best, candidate) => {
+      const output = candidate.quotes.reduce(
+        (sum, quote) => sum + quote.amount,
+        0n
+      );
+      return output > best ? output : best;
+    }, 0n);
+    return isGasConversionTrustworthy({
+      tradeType,
+      quoteTokenIsWrappedNative:
+        quoteTokenAddress.toLowerCase() === gasTokenAddress.toLowerCase(),
+      nativePriceUSD: nativeToken.priceUSD,
+      quoteTokenPriceUSD: quoteToken.priceUSD,
+      tokenInPriceUSD: tokenIn.priceUSD,
+      amountInDecimal: Number(amountIn) / 10 ** tokenIn.decimals,
+      bestGrossOutputDecimal:
+        Number(bestGrossOutput) / 10 ** quoteToken.decimals,
+    });
+  }
+
+  /**
    * Runs the four-stage quote pipeline against the prepared routes:
    *   1. Strategy: enumerate quote candidates from the route set.
    *   2. Gas adjustment: compute USD-denominated gas costs per candidate
@@ -1849,7 +1898,20 @@ export class UniRouteBL implements IUniRoutedBL {
         tradeType,
         this.serviceConfig.Simulation.TopNQuotes,
         metricTags,
-        ctx
+        ctx,
+        {
+          gasConversionTrusted:
+            this.serviceConfig.GasEstimation.Enabled &&
+            this.isCandidateGasConversionTrusted(
+              chain.chainId,
+              tradeType,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
+              amountIn,
+              bestQuoteCandidates,
+              tokensInfo
+            ),
+        }
       );
       await logElapsedTime(
         'SelectorGetBestQuotes',
