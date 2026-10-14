@@ -1026,6 +1026,61 @@ describe('v4PoolKeyRegistryFormat', () => {
     }
   });
 
+  it('admits the Ink Aegis Engine pool PoolKey when 57073 is hooked-enabled (ROUTE-2266)', () => {
+    const previous = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+    process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS =
+      '1,10,56,137,196,4663,42161,5042,57073,8453';
+    try {
+      // The partner-reported Ink USDT0/USDC pool: allowlisted Aegis hook,
+      // dynamic-fee sentinel, tickSpacing 1. (8388608, 1) is off the
+      // canonical grid, so only the registry can put it in the probe set.
+      // The pool id below is the one on chain; re-deriving it from the
+      // PoolKey proves the key (and so the registry entry) is right.
+      const INK = 57073;
+      const AEGIS_ENGINE_ON_INK = '0xe449e013004db4a5681e9622ca10c5ba0ea610cc';
+      const USDT0_ON_INK = '0x0200c29006150606b650577bbe7b6248f58470c1';
+      const USDC_ON_INK = '0x2d270e6886d130d724215a266106e6832161eaed';
+      const ONCHAIN_POOL_ID =
+        '0xfff506f639ae6cbe6c4743ddfbac69169bca6f1a38ff6997c6f35ff2f8bd1805';
+      const derivedPoolId = V4SDKPool.getPoolId(
+        new Token(INK, USDT0_ON_INK, 6),
+        new Token(INK, USDC_ON_INK, 6),
+        DYNAMIC_FEE_FLAG,
+        1,
+        AEGIS_ENGINE_ON_INK
+      ).toLowerCase();
+      expect(derivedPoolId).toBe(ONCHAIN_POOL_ID);
+      expect(
+        registryAdmissibleHookAddresses(INK).includes(AEGIS_ENGINE_ON_INK)
+      ).toBe(true);
+      const {file, stats} = buildV4PoolKeyRegistry(
+        INK,
+        [
+          row({
+            token0Address: USDT0_ON_INK,
+            token1Address: USDC_ON_INK,
+            feeBips: DYNAMIC_FEE_FLAG,
+            tickSpacing: 1,
+            hooksAddress: AEGIS_ENGINE_ON_INK,
+            poolId: ONCHAIN_POOL_ID,
+          }),
+        ],
+        GENERATED_AT
+      );
+      expect(stats.includedHooked).toBe(1);
+      expect(stats.skippedInvalidId).toBe(0);
+      expect(file.pairs[v4RegistryPairKey(USDT0_ON_INK, USDC_ON_INK)]).toEqual([
+        [DYNAMIC_FEE_FLAG, 1, AEGIS_ENGINE_ON_INK],
+      ]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
+      } else {
+        process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = previous;
+      }
+    }
+  });
+
   it('registryAdmissibleHookAddresses lists exactly the per-chain admissible set', () => {
     const hookedChains = new Set([8453]);
     const addresses = registryAdmissibleHookAddresses(8453, hookedChains);
