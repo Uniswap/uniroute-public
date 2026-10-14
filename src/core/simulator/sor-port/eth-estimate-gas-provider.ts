@@ -49,11 +49,11 @@ export class EthEstimateGasSimulator extends Simulator {
         quoteSplit.swapInfo!.tokenInIsNative &&
         this.chainId === ChainId.MAINNET
       ) {
-        // w/o this gas estimate differs by a lot depending on if user holds enough native balance
-        // always estimate gas as if user holds enough balance
-        // so that gas estimate is consistent for UniswapX. Override-bearing
-        // requests never reach this fast path — they go straight to the
-        // eth_simulateV1 bundle where overrides apply.
+        // Use a funded sender for consistent UniswapX gas estimates.
+        // Native input reaches this path from EthSimulateV1Simulator only
+        // without a simulation backend or as its outage fallback, and never
+        // with overrides. The bundle reports executed gasUsed charged to the
+        // user, while eth_estimateGas returns a gas limit.
         fromAddress = BEACON_CHAIN_DEPOSIT_ADDRESS;
       }
       ctx.logger.info('Simulating using eth_estimateGas on Universal Router', {

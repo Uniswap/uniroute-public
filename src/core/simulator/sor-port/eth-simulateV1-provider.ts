@@ -9,6 +9,8 @@ import {
 // simulation metrics; routing dashboards query them by these names).
 const METRIC_UNIRPC_SIMULATION_LATENCY = 'UniRpcV2.Simulation.Latency.dist';
 const METRIC_UNIRPC_SIMULATION_REQUEST = 'UniRpcV2.Simulation.Request';
+const METRIC_NATIVE_ESTIMATE_GAS_FALLBACK =
+  'UniRpcV2.Simulation.NativeEstimateGasFallback';
 
 /**
  * unirpc_simulateV0 is unirpc-v2's eth_simulateV1 subset with identical
@@ -468,27 +470,30 @@ export class EthSimulateV1Simulator extends Simulator {
     stateOverrides?: ResolvedStateOverride[]
   ): Promise<QuoteSplit> {
     const hasOverrides = !!stateOverrides && stateOverrides.length > 0;
+    const canEstimateGas = !hasOverrides && hasNativeToken(this.chainId);
+    const nativeInput = quoteSplit.swapInfo?.tokenInIsNative;
+    const supportsSimulation = this.simulationSupportedChains.includes(
+      this.chainId
+    );
 
-    // eth_estimateGas state-override support is a non-standard Geth extension
-    // and provider-dependent. When overrides are present, skip the
-    // eth_estimateGas fast-path entirely — never silently drop overrides.
-    // Make call to eth estimate gas if possible
-    // For erc20s, we must check if the token allowance is sufficient
-    // Skip eth_estimateGas for chains without a native token (e.g. Tempo) —
-    // these chains use an ERC-20 as their gas token, causing eth_estimateGas
-    // to revert with ETH_TRANSFER_FAILED.
+    // Native input uses the bundle's executed gasUsed, which is what the
+    // user is charged. eth_estimateGas returns a gas limit instead, so use
+    // it for native input only without a backend or on a backend outage.
+    // Approved ERC-20s retain the estimateGas fast path. Overrides skip it
+    // because estimateGas override support is provider-dependent, as do
+    // chains without a native token where it reverts with ETH_TRANSFER_FAILED.
     if (
-      !hasOverrides &&
-      hasNativeToken(this.chainId) &&
-      (quoteSplit.swapInfo!.tokenInIsNative ||
-        (await this.checkTokenApproved(
-          fromAddress,
-          quoteSplit.swapInfo!.tokenInWrappedAddress,
-          quoteSplit.swapInfo!.inputAmount,
-          swapOptions,
-          this.provider,
-          ctx
-        )))
+      canEstimateGas &&
+      (nativeInput
+        ? !supportsSimulation
+        : await this.checkTokenApproved(
+            fromAddress,
+            quoteSplit.swapInfo!.tokenInWrappedAddress,
+            quoteSplit.swapInfo!.inputAmount,
+            swapOptions,
+            this.provider,
+            ctx
+          ))
     ) {
       ctx.logger.info(
         'Simulating with eth_estimateGas since token is native or approved.'
@@ -508,7 +513,7 @@ export class EthSimulateV1Simulator extends Simulator {
       }
     }
 
-    if (!this.simulationSupportedChains.includes(this.chainId)) {
+    if (!supportsSimulation) {
       const msg = `Simulation not supported on chain ${this.chainId}`;
       ctx.logger.info(msg);
       return {
@@ -528,7 +533,7 @@ export class EthSimulateV1Simulator extends Simulator {
     // allowance/code override is honored instead of a live-RPC allowance
     // precheck (if the override doesn't actually fix approval, sim
     // returns the real revert reason).
-    return await this.ethSimulateV1(
+    const result = await this.ethSimulateV1(
       fromAddress,
       swapOptions,
       quoteSplit,
@@ -537,5 +542,28 @@ export class EthSimulateV1Simulator extends Simulator {
       blockNumber,
       stateOverrides
     );
+    if (
+      canEstimateGas &&
+      nativeInput &&
+      result.simulationResult?.status === SimulationStatus.SYSTEM_DOWN
+    ) {
+      void ctx.metrics
+        .count(METRIC_NATIVE_ESTIMATE_GAS_FALLBACK, 1, {
+          tags: [
+            `chain:${this.chainId}`,
+            TAG_STATUS_FAILURE,
+            'reason:simulation_backend_unavailable',
+          ],
+        })
+        .catch(() => undefined);
+      return await this.ethEstimateGasSimulator.ethEstimateGas(
+        fromAddress,
+        swapOptions,
+        quoteSplit,
+        ctx,
+        blockNumber
+      );
+    }
+    return result;
   }
 }
