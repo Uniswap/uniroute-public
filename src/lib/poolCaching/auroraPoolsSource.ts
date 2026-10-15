@@ -585,19 +585,28 @@ export function unirouteAuroraConnectionOptionsFromEnv(logger: {
     return undefined;
   }
 
-  // When DATA_INGESTION_AURORA_SERVERNAME is set we're behind a proxy/Lattice
-  // path: TLS hostname verification must target the proxy hostname rather than
-  // the DNS name we dial. Otherwise verify against the RDS CA bundle baked
-  // into the ECS image (containers/Dockerfile.ec2).
+  // When DATA_INGESTION_AURORA_SERVERNAME is set we're behind a Lattice path:
+  // TLS hostname verification must target that hostname rather than the DNS
+  // name we dial. Behind an RDS Proxy the cert is ACM-issued and chains to
+  // Node's default roots; when Lattice passes straight through to an Aurora
+  // endpoint (DATA_INGESTION_AURORA_RDS_CA=true) it chains to the RDS CA
+  // bundle baked into the ECS image (containers/Dockerfile.ec2), which is
+  // also what the direct, same-VPC path verifies against.
   const servername = process.env.DATA_INGESTION_AURORA_SERVERNAME;
+  const useRdsCa =
+    !servername || process.env.DATA_INGESTION_AURORA_RDS_CA === 'true';
+  const ca = useRdsCa
+    ? fs.readFileSync('/var/task/aws-rds-ca-bundle.pem', 'utf8')
+    : undefined;
   const ssl = servername
     ? {
+        ...(ca && {ca}),
         rejectUnauthorized: true,
         servername,
         checkServerIdentity: (_host: string, cert: tls.PeerCertificate) =>
           tls.checkServerIdentity(servername, cert),
       }
-    : {ca: fs.readFileSync('/var/task/aws-rds-ca-bundle.pem', 'utf8')};
+    : {ca};
 
   return {
     host,
