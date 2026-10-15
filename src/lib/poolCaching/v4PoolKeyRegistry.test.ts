@@ -248,7 +248,7 @@ describe('buildV4PoolKeyRegistry', () => {
     }
   });
 
-  it('under the code-default Base hook restriction the build keeps Arrakis pools and skips launchpad pools (ROUTE-2026)', () => {
+  it('under the code-default Base hook restriction the build keeps Arrakis and MemeStock pools and skips launchpad pools (ROUTE-2026)', () => {
     const prevHooked = process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS;
     const prevRestricted = process.env.V4_POOLKEY_REGISTRY_HOOKS_BY_CHAIN;
     process.env.V4_POOLKEY_REGISTRY_HOOKED_CHAINS = '8453';
@@ -259,6 +259,9 @@ describe('buildV4PoolKeyRegistry', () => {
       const baseUsdc = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
       const baseDgld = '0xe908475f8beb7a138b0dc6eb5a05cb27068ffb9a';
       const zoraCoinHook = '0x0469a4bd3724dc86c9542f4694c976da13c450c0';
+      const pumpM = '0xb2000000000000000000003d136636c649efd792';
+      const nvdac = '0xb20000000000000000000078ee7ce2fe4908108c';
+      const memeStockHook = '0xdec66745e5a7ba272aa3e801ed655f92b33528c0';
       const {file, stats} = buildV4PoolKeyRegistry(
         8453,
         [
@@ -270,6 +273,17 @@ describe('buildV4PoolKeyRegistry', () => {
             hooksAddress: ARRAKIS_PRIVATE_HOOK_V2,
             poolId:
               '0x68ab198bc4c61c8c691a3e35d1b3a5248d8e04acb9e28a1bb2ef0d3fa564fe93',
+          }),
+          // The Base PUMP.M/NVDAc MemeStock pool, verbatim from its
+          // Initialize event: fee 6000, tickSpacing 10.
+          row({
+            token0Address: pumpM,
+            token1Address: nvdac,
+            feeBips: 6000,
+            tickSpacing: 10,
+            hooksAddress: memeStockHook,
+            poolId:
+              '0x82dcf8096400db392d5206090793dd221726fc80babe5db8ce6ce84e4d15d64b',
           }),
           // A Zora coin pool on a non-canonical tier: allowlisted for routing,
           // admissible without the restriction, excluded with it.
@@ -285,8 +299,11 @@ describe('buildV4PoolKeyRegistry', () => {
       expect(file.pairs[v4RegistryPairKey(baseUsdc, baseDgld)]).toEqual([
         [DYNAMIC_FEE_FLAG, 5, ARRAKIS_PRIVATE_HOOK_V2],
       ]);
+      expect(file.pairs[v4RegistryPairKey(pumpM, nvdac)]).toEqual([
+        [6000, 10, memeStockHook],
+      ]);
       expect(file.pairs[v4RegistryPairKey(USDC, SIERRA)]).toBeUndefined();
-      expect(stats.includedHooked).toBe(1);
+      expect(stats.includedHooked).toBe(2);
       expect(stats.skippedHooked).toBe(1);
     } finally {
       if (prevHooked === undefined) {

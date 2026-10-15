@@ -28,6 +28,7 @@ import {
   ARRAKIS_PRIVATE_HOOK_V2,
   getProtocolForAggHookAddress,
   HOOKS_ADDRESSES_ALLOWLIST,
+  MEMESTOCK_HOOK_ON_BASE,
 } from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {MAX_REASONABLE_V4_FEE_TIER_PPM} from './feeTierSanityCeiling';
@@ -175,7 +176,11 @@ export type RestrictedRegistryHooksByChain = ReadonlyMap<
 export const DEFAULT_REGISTRY_HOOK_RESTRICTIONS: Readonly<
   Record<number, readonly string[]>
 > = {
-  8453: [ARRAKIS_PRIVATE_HOOK_ON_BASE, ARRAKIS_PRIVATE_HOOK_V2],
+  8453: [
+    ARRAKIS_PRIVATE_HOOK_ON_BASE,
+    ARRAKIS_PRIVATE_HOOK_V2,
+    MEMESTOCK_HOOK_ON_BASE,
+  ],
 };
 
 export type RegistryHookRestrictionProblem =

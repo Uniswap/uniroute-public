@@ -214,6 +214,63 @@ describe('SubgraphProvider V4 TVL-bypass Hook query', () => {
     }
   });
 
+  it('fetches the Base MemeStock hook by address and keeps its zero-liquidity pool', async () => {
+    // PUMP.M/NVDAc: the hook parks the current tick in an empty band, so
+    // in-range liquidity reads 0 and tracked TVL is below Base's floor.
+    const memeStockPool = {
+      id: '0x82dcf8096400db392d5206090793dd221726fc80babe5db8ce6ce84e4d15d64b',
+      feeTier: '0',
+      tickSpacing: '10',
+      hooks: '0xDec66745E5a7BA272aa3E801ED655f92b33528C0',
+      liquidity: '0',
+      token0: {
+        symbol: 'PUMP.M',
+        id: '0xb2000000000000000000003d136636c649efd792',
+        name: 'PUMP.M',
+        decimals: '18',
+      },
+      token1: {symbol: 'NVDAc', id: '0x2222', name: 'NVDAc', decimals: '18'},
+      totalValueLockedUSD: '0.1',
+      totalValueLockedETH: '0.00003',
+      totalValueLockedUSDUntracked: '0',
+    };
+    // Allowlisted on Base but not TVL-bypass: the sanitize exemption must
+    // stay scoped to the bypass hooks.
+    const nonBypassHookPool = {
+      ...memeStockPool,
+      id: '0x' + 'cd'.repeat(32),
+      hooks: '0x5c999109609f9f857f4d58240ccb12bf219ee044',
+    };
+    const {provider, calls} = makeRecordingProvider(
+      ChainId.BASE,
+      (query, variables) => {
+        if (variables.id !== '') return {pools: []};
+        if (query.includes('getV4TvlBypassHookPools')) {
+          return {pools: [memeStockPool, nonBypassHookPool]};
+        }
+        return {pools: []};
+      }
+    );
+
+    const pools = await provider.getPools();
+
+    const bypassCalls = calls.filter(c =>
+      c.query.includes('getV4TvlBypassHookPools')
+    );
+    expect(bypassCalls.length).toBeGreaterThan(0);
+    for (const call of bypassCalls) {
+      const tvlBypassHooks = (call.variables.tvlBypassHooks as string[]).map(
+        h => h.toLowerCase()
+      );
+      expect(tvlBypassHooks).toContain(
+        '0xdec66745e5a7ba272aa3e801ed655f92b33528c0'
+      ); // MemeStock
+    }
+    const poolIds = pools.map(p => p.id);
+    expect(poolIds).toContain(memeStockPool.id);
+    expect(poolIds).not.toContain(nonBypassHookPool.id);
+  });
+
   it('omits the TVL-bypass Hook query for a chain with none configured (Polygon)', async () => {
     const {provider, queries} = makeRecordingProvider(ChainId.POLYGON);
     await provider.getPools();
