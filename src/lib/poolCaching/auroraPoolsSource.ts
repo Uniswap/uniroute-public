@@ -26,6 +26,7 @@
 
 import * as fs from 'fs';
 import * as tls from 'tls';
+import {Pool, type PoolClient} from 'pg';
 import {Protocol} from '@uniswap/router-sdk';
 import {Kysely} from 'kysely';
 import {Context} from '@uniswap/lib-uni/context';
@@ -42,6 +43,7 @@ import {
 import {
   MAX_POOL_VOLUME_IDENTIFIERS_PER_STATEMENT,
   createDataIngestionAuroraKysely,
+  createDataIngestionAuroraKyselyFromPool,
   createAuroraRoutablePoolsService,
   createAuroraCurrentTokenPricesService,
   canonicalTokenKey,
@@ -549,19 +551,27 @@ export function getOrCreateUnirouteAuroraDb(logger: Logger): AuroraDbInitState {
 // source here, token-metadata serving pool in stores/token). Pool tuning is
 // deliberately NOT part of it — each consumer's sizing/timeouts are its own
 // decision, but credentials and hostname-verification rules must never fork.
+export interface UnirouteAuroraConnection {
+  host: string;
+  database: string;
+  user: string;
+  password: string;
+  ssl: NonNullable<
+    Parameters<typeof createDataIngestionAuroraKysely>[0]['ssl']
+  >;
+  /**
+   * True on the Lattice path, where the dial target is an RDS Proxy. The
+   * proxy rejects pg's `statement_timeout` startup parameter outright
+   * (FATAL 0A000 "RDS Proxy currently doesn't support the option
+   * statement_timeout"), so pools on this path must bound statements
+   * per session instead — see createUnirouteAuroraKysely.
+   */
+  behindRdsProxy: boolean;
+}
+
 export function unirouteAuroraConnectionOptionsFromEnv(logger: {
   warn: (message: string) => void;
-}):
-  | {
-      host: string;
-      database: string;
-      user: string;
-      password: string;
-      ssl: NonNullable<
-        Parameters<typeof createDataIngestionAuroraKysely>[0]['ssl']
-      >;
-    }
-  | undefined {
+}): UnirouteAuroraConnection | undefined {
   const host = process.env.DATA_INGESTION_AURORA_HOST;
   if (!host) return undefined;
 
@@ -589,7 +599,93 @@ export function unirouteAuroraConnectionOptionsFromEnv(logger: {
       }
     : {ca: fs.readFileSync('/var/task/aws-rds-ca-bundle.pem', 'utf8')};
 
-  return {host, database, user, password, ssl};
+  return {
+    host,
+    database,
+    user,
+    password,
+    ssl,
+    behindRdsProxy: servername !== undefined,
+  };
+}
+
+/** Pool sizing and timeouts; each consumer picks its own. */
+export interface UnirouteAuroraPoolTuning {
+  max: number;
+  connectionTimeoutMillis: number;
+  /** Server-side bound on one statement; must be a positive integer. */
+  statementTimeoutMillis: number;
+  idleTimeoutMillis?: number;
+  keepAlive?: boolean;
+}
+
+/**
+ * Builds a uniroute Aurora handle with the statement timeout applied the
+ * way the dial target accepts it. A direct reader takes pg's
+ * `statement_timeout` startup parameter. An RDS Proxy rejects that
+ * parameter, so on the proxy path the pool sends `SET statement_timeout`
+ * on every new connection instead: pg serializes queries per client, so
+ * the SET lands before the first statement of that connection, and the
+ * proxy pins the session for it, which is fine for pools this small.
+ */
+export function createUnirouteAuroraKysely(
+  connection: UnirouteAuroraConnection,
+  tuning: UnirouteAuroraPoolTuning,
+  logger: {warn: (message: string) => void}
+): Kysely<DataIngestionAuroraDB> {
+  const {behindRdsProxy, ...credentials} = connection;
+  if (!behindRdsProxy) {
+    return createDataIngestionAuroraKysely({...credentials, ...tuning});
+  }
+  return createDataIngestionAuroraKyselyFromPool(
+    createProxiedUnirouteAuroraPool(credentials, tuning, logger)
+  );
+}
+
+/**
+ * The proxy-path pool: no `statement_timeout` startup parameter, the
+ * bound is SET per connection. A failed SET is logged and the connection
+ * is kept — an unbounded read is the lesser evil next to a pool that
+ * can never connect, and the fetchers' own deadlines still apply.
+ */
+export function createProxiedUnirouteAuroraPool(
+  credentials: Omit<UnirouteAuroraConnection, 'behindRdsProxy'>,
+  tuning: UnirouteAuroraPoolTuning,
+  logger: {warn: (message: string) => void}
+): Pool {
+  const statementTimeoutMillis = tuning.statementTimeoutMillis;
+  if (
+    !Number.isInteger(statementTimeoutMillis) ||
+    statementTimeoutMillis <= 0
+  ) {
+    throw new Error(
+      `statementTimeoutMillis must be a positive integer, got ${statementTimeoutMillis}`
+    );
+  }
+  const pool = new Pool({
+    host: credentials.host,
+    database: credentials.database,
+    user: credentials.user,
+    password: credentials.password,
+    port: 5432,
+    max: tuning.max,
+    connectionTimeoutMillis: tuning.connectionTimeoutMillis,
+    idleTimeoutMillis: tuning.idleTimeoutMillis,
+    keepAlive: tuning.keepAlive,
+    ssl: credentials.ssl,
+  });
+  pool.on('connect', (client: PoolClient) => {
+    client
+      .query(`SET statement_timeout = ${statementTimeoutMillis}`)
+      .catch((error: unknown) => {
+        logger.warn(
+          `Aurora proxied connection: SET statement_timeout failed, statements on it are unbounded: ${
+            error instanceof Error ? error.name : typeof error
+          }`
+        );
+      });
+  });
+  return pool;
 }
 
 // Server-side statement_timeout for the cron's Aurora reads. The default
@@ -638,20 +734,24 @@ export function createUnirouteAuroraDbFromEnv(
   const connection = unirouteAuroraConnectionOptionsFromEnv(logger);
   if (!connection) return undefined;
 
-  return createDataIngestionAuroraKysely({
-    ...connection,
-    // The all-chains sweep is batch=50, while the two-minute Robinhood job
-    // must still acquire a connection. The fetch limiter below uses three
-    // slots and each provider holds at most ONE connection inside its slot
-    // (price + list ride the same slot), so one of these four connections is
-    // genuinely always free for the scoped fast job. Checkout should
-    // therefore be near-immediate: 30s is a safety margin that still fails
-    // fast relative to the 2-minute fast-job cadence (the previous 120s
-    // could stall a whole fast tick — security-gate finding on #12440).
-    max: 4,
-    connectionTimeoutMillis: 30_000,
-    statementTimeoutMillis: poolCachingAuroraStatementTimeoutMsFromEnv(logger),
-  });
+  return createUnirouteAuroraKysely(
+    connection,
+    {
+      // The all-chains sweep is batch=50, while the two-minute Robinhood job
+      // must still acquire a connection. The fetch limiter below uses three
+      // slots and each provider holds at most ONE connection inside its slot
+      // (price + list ride the same slot), so one of these four connections is
+      // genuinely always free for the scoped fast job. Checkout should
+      // therefore be near-immediate: 30s is a safety margin that still fails
+      // fast relative to the 2-minute fast-job cadence (the previous 120s
+      // could stall a whole fast tick — security-gate finding on #12440).
+      max: 4,
+      connectionTimeoutMillis: 30_000,
+      statementTimeoutMillis:
+        poolCachingAuroraStatementTimeoutMsFromEnv(logger),
+    },
+    logger
+  );
 }
 
 // --- Context adapter ---

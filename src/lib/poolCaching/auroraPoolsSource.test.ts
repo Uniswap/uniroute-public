@@ -25,6 +25,8 @@ import {
   targetKey,
   tvlGuardAnchorTokens,
   poolCachingAuroraStatementTimeoutMsFromEnv,
+  createProxiedUnirouteAuroraPool,
+  unirouteAuroraConnectionOptionsFromEnv,
   type TvlGuardWildcardRejection,
 } from './auroraPoolsSource';
 import {Context} from '@uniswap/lib-uni/context';
@@ -557,6 +559,123 @@ describe('poolCachingAuroraStatementTimeoutMsFromEnv', () => {
       expect(poolCachingAuroraStatementTimeoutMsFromEnv(logger)).toBe(30_000);
       expect(warnings).toHaveLength(1);
       expect(warnings[0]).toContain(`got "${raw}"`);
+    }
+  );
+});
+
+describe('unirouteAuroraConnectionOptionsFromEnv', () => {
+  const KEYS = [
+    'DATA_INGESTION_AURORA_HOST',
+    'DATA_INGESTION_AURORA_DATABASE',
+    'DATA_INGESTION_AURORA_USER',
+    'DATA_INGESTION_AURORA_UNIROUTE_PASSWORD',
+    'DATA_INGESTION_AURORA_SERVERNAME',
+  ] as const;
+  const saved = new Map<string, string | undefined>();
+
+  beforeEach(() => {
+    for (const key of KEYS) {
+      saved.set(key, process.env[key]);
+      delete process.env[key];
+    }
+    process.env.DATA_INGESTION_AURORA_HOST = 'lattice.example.internal';
+    process.env.DATA_INGESTION_AURORA_DATABASE = 'dataingestion';
+    process.env.DATA_INGESTION_AURORA_USER = 'staging_data_api_readonly';
+    process.env.DATA_INGESTION_AURORA_UNIROUTE_PASSWORD = 'test-password';
+  });
+
+  afterEach(() => {
+    for (const key of KEYS) {
+      const value = saved.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('marks the Lattice path, which dials an RDS Proxy, by the servername', () => {
+    process.env.DATA_INGESTION_AURORA_SERVERNAME = 'proxy.example.internal';
+    const connection = unirouteAuroraConnectionOptionsFromEnv(noopLogger);
+    expect(connection?.behindRdsProxy).toBe(true);
+    expect(connection?.host).toBe('lattice.example.internal');
+  });
+});
+
+describe('createProxiedUnirouteAuroraPool', () => {
+  const credentials = {
+    host: 'lattice.example.internal',
+    database: 'dataingestion',
+    user: 'staging_data_api_readonly',
+    password: 'test-password',
+    ssl: {rejectUnauthorized: true},
+  };
+  const tuning = {
+    max: 2,
+    connectionTimeoutMillis: 1500,
+    statementTimeoutMillis: 500,
+  };
+
+  // What pg hands the 'connect' listener: only `query` is consulted.
+  function fakeClient(result: Promise<unknown>) {
+    const queries: string[] = [];
+    return {
+      queries,
+      client: {
+        query: (sql: string) => {
+          queries.push(sql);
+          return result;
+        },
+      },
+    };
+  }
+
+  it('sets the statement timeout on every new connection instead of at startup', async () => {
+    const warnings: string[] = [];
+    const pool = createProxiedUnirouteAuroraPool(credentials, tuning, {
+      warn: message => warnings.push(message),
+    });
+    const {queries, client} = fakeClient(Promise.resolve({rows: []}));
+
+    // RDS Proxy rejects the startup parameter, so it must not be in the
+    // pool config at all; the SET is what bounds the session.
+    expect(pool.options.statement_timeout).toBeUndefined();
+    expect(pool.options.max).toBe(2);
+    expect(pool.options.connectionTimeoutMillis).toBe(1500);
+
+    pool.emit('connect', client);
+    await Promise.resolve();
+
+    expect(queries).toEqual(['SET statement_timeout = 500']);
+    expect(warnings).toEqual([]);
+    await pool.end();
+  });
+
+  it('keeps the connection and warns when the SET is rejected', async () => {
+    const warnings: string[] = [];
+    const pool = createProxiedUnirouteAuroraPool(credentials, tuning, {
+      warn: message => warnings.push(message),
+    });
+    const {client} = fakeClient(Promise.reject(new Error('proxy says no')));
+
+    pool.emit('connect', client);
+    await new Promise(resolve => setImmediate(resolve));
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('SET statement_timeout failed');
+    expect(warnings[0]).toContain('Error');
+    expect(warnings[0]).not.toContain('proxy says no');
+    await pool.end();
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    'refuses a statement timeout of %s',
+    statementTimeoutMillis => {
+      expect(() =>
+        createProxiedUnirouteAuroraPool(
+          credentials,
+          {...tuning, statementTimeoutMillis},
+          noopLogger
+        )
+      ).toThrow(/positive integer/);
     }
   );
 });
