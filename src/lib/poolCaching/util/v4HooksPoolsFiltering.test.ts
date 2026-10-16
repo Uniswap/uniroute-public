@@ -22,6 +22,7 @@ import {
 } from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {getMajorTokens, isMajorPair} from './majorTokens';
+import {computeV4PoolId} from './v4PoolIdFast';
 
 const mockLogger: Logger = {
   info: vi.fn(),
@@ -948,6 +949,157 @@ describe('v4HooksPoolsFiltering', () => {
           delete HOOKS_ADDRESSES_DENYLIST[ChainId.BASE];
         }
       }
+    });
+
+    describe('quoter-exempt hook family', () => {
+      // One real pool per hook, with literals from its on-chain Initialize
+      // event, deliberately not imported from the denylist module: the
+      // shipped denylist is the input under test.
+      const familyPools: Array<{
+        name: string;
+        chainId: ChainId;
+        hook: string;
+        poolId: string;
+        feeTier: string;
+        token0: [string, string];
+        token1: [string, string];
+      }> = [
+        {
+          name: 'Robinhood 0xa735 WETH/AAPL',
+          chainId: ChainId.ROBINHOOD,
+          hook: '0xa735d365630987d86789d5aefbd91b244a7feac0',
+          poolId:
+            '0x24312471cd459f2095fff775b900b9248d86c6d559ca4e50fe28fc129d981ca9',
+          feeTier: '1000',
+          token0: ['0x0bd7d308f8e1639fab988df18a8011f41eacad73', 'WETH'],
+          token1: ['0xaf3d76f1834a1d425780943c99ea8a608f8a93f9', 'AAPL'],
+        },
+        {
+          name: 'Robinhood 0x8e21 WETH/PONS',
+          chainId: ChainId.ROBINHOOD,
+          hook: '0x8e21aff7115d3a91259897db144db7fe841d6ac0',
+          poolId:
+            '0x7c14da8732f4c269320bfe95709b09ed54496e87393b4936d406b49f6239e563',
+          feeTier: '100',
+          token0: ['0x0bd7d308f8e1639fab988df18a8011f41eacad73', 'WETH'],
+          token1: ['0x39dbed3a2bd333467115de45665cc57f813c4571', 'PONS'],
+        },
+        {
+          name: 'Base 0x2940 WETH/Surplus',
+          chainId: ChainId.BASE,
+          hook: '0x2940c82a3be9ebf56946c488348bd3a413486ac0',
+          poolId:
+            '0x19e2c0b21a6967bc1563d7eba8b80b1284c0fc4f564a30e5a93dbd0101a7b503',
+          feeTier: '1000',
+          token0: ['0x4200000000000000000000000000000000000006', 'WETH'],
+          token1: ['0xc52aedec3374422d7510e294cfaa90799595cba3', 'Surplus'],
+        },
+        {
+          name: 'Base 0xff7a WETH/Surplus',
+          chainId: ChainId.BASE,
+          hook: '0xff7aaf1e66bf9f5ac479464c9643162e915ceac0',
+          poolId:
+            '0xb1f4f5b1f144cbdc7bbb1cd27228041f7c0fc39b4e82f0546a8aee3b8ddad99d',
+          feeTier: '1000',
+          token0: ['0x4200000000000000000000000000000000000006', 'WETH'],
+          token1: ['0xc52aedec3374422d7510e294cfaa90799595cba3', 'Surplus'],
+        },
+        {
+          name: 'Base 0xc634 WETH/AERO',
+          chainId: ChainId.BASE,
+          hook: '0xc6340a6e50a2c233e175c9b27ed8eea4e0196ac0',
+          poolId:
+            '0x775f43bd181e8abeeaf1ba3146cc7bf52ed4401cdfc93ae5e17279d478bc627b',
+          feeTier: '200',
+          token0: ['0x4200000000000000000000000000000000000006', 'WETH'],
+          token1: ['0x940181a94a35a4569e4529a3cdfb74e38fd98631', 'AERO'],
+        },
+        {
+          name: 'Mainnet 0xdc76 PEPE/WETH',
+          chainId: ChainId.MAINNET,
+          hook: '0xdc766448ff29b8cd12ae12d8252762d93ecd2ac0',
+          poolId:
+            '0xcc2bed5ca7ab0c93173ea0c894b280b42dc146671183fc2c27a6a3254e496fe3',
+          feeTier: '1000',
+          token0: ['0x6982508145454ce325ddbe47a25d4ec3d2311933', 'PEPE'],
+          token1: ['0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', 'WETH'],
+        },
+      ];
+      // Same permission bits (0x2ac0: before/after swap, no returnsDelta) on a
+      // hook that is not denylisted, so the pool shape alone is auto-admitted.
+      const sameFlagsUnlistedHook =
+        '0x0000000000000000000000000000000000002ac0';
+
+      const buildPool = (
+        row: (typeof familyPools)[number],
+        hooks: string,
+        id: string
+      ): V4SubgraphPool =>
+        createPool({
+          id,
+          hooks,
+          feeTier: row.feeTier,
+          tickSpacing: '1',
+          token0: {
+            id: row.token0[0],
+            symbol: row.token0[1],
+            name: row.token0[1],
+            decimals: '18',
+          },
+          token1: {
+            id: row.token1[0],
+            symbol: row.token1[1],
+            name: row.token1[1],
+            decimals: '18',
+          },
+          tvlETH: 100,
+        });
+
+      it.each(familyPools)('$name: pool id matches its PoolKey', row => {
+        expect(
+          computeV4PoolId(
+            row.token0[0],
+            row.token1[0],
+            Number(row.feeTier),
+            1,
+            row.hook
+          )
+        ).toBe(row.poolId);
+      });
+
+      it.each(familyPools)(
+        '$name: auto-admits the pool shape when the hook is not denylisted',
+        row => {
+          const control = buildPool(
+            row,
+            sameFlagsUnlistedHook,
+            '0x00000000000000000000000000000000000000000000000000000000000000c1'
+          );
+          const result = v4HooksPoolsFiltering(
+            row.chainId,
+            [control],
+            mockLogger,
+            mockMetric
+          );
+          expect(result.map(p => p.id)).toEqual([control.id]);
+        }
+      );
+
+      it.each(
+        familyPools.flatMap(row => [
+          {...row, casing: 'lowercase', hooks: row.hook},
+          {...row, casing: 'checksummed', hooks: utils.getAddress(row.hook)},
+        ])
+      )('$name: rejects the pool with the $casing hook address', row => {
+        const pool = buildPool(row, row.hooks, row.poolId);
+        const result = v4HooksPoolsFiltering(
+          row.chainId,
+          [pool],
+          mockLogger,
+          mockMetric
+        );
+        expect(result).toEqual([]);
+      });
     });
   });
 
