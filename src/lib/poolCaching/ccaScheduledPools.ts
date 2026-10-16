@@ -21,7 +21,7 @@ import {Address} from '../../models/address/Address';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
-import {hasCustomAccountingPermissions} from './util/v4HooksPoolsFiltering';
+import {blocksUnvettedHookAdmission} from './util/v4HooksPoolsFiltering';
 import {ChainId} from '../config';
 import {unirouteFetch} from '../unirouteFetch';
 
@@ -218,20 +218,21 @@ const hookBehavioralPermissionMemo = new Map<string, boolean>();
 // counts need a clean slate.
 export function clearHookPermissionMemoForTesting(): void {
   hookBehavioralPermissionMemo.clear();
-  hookCustomAccountingMemo.clear();
+  hookUnvettedAdmissionBlockedMemo.clear();
 }
 
 // Escape hatch: chains where hooked-launch auto-approval stays restricted to
-// routing-inert bits, overriding the default non-custom-accounting rule.
+// routing-inert bits, overriding the default rule (no swap or
+// custom-accounting bits).
 // Empty = the default applies everywhere.
 const CCA_INERT_ONLY_HOOK_CHAINS: ReadonlySet<number> = new Set();
 
 // Same memo rationale as hookBehavioralPermissionMemo (bits fixed at deploy
 // time; keyed on the raw string; throwing inputs uncached → fail closed).
-const hookCustomAccountingMemo = new Map<string, boolean>();
+const hookUnvettedAdmissionBlockedMemo = new Map<string, boolean>();
 
-function lacksCustomAccountingPermissions(hook: string): boolean {
-  const cached = hookCustomAccountingMemo.get(hook);
+function lacksUnvettedAdmissionBlockingPermissions(hook: string): boolean {
+  const cached = hookUnvettedAdmissionBlockedMemo.get(hook);
   if (cached !== undefined) {
     return cached;
   }
@@ -241,11 +242,11 @@ function lacksCustomAccountingPermissions(hook: string): boolean {
     // alone would happily decode bits out of short/garbage hex) — run it
     // first so malformed inputs fail closed exactly like the inert path.
     Hook.permissions(hook);
-    result = !hasCustomAccountingPermissions(hook);
+    result = !blocksUnvettedHookAdmission(hook);
   } catch {
     return false;
   }
-  hookCustomAccountingMemo.set(hook, result);
+  hookUnvettedAdmissionBlockedMemo.set(hook, result);
   return result;
 }
 
@@ -285,12 +286,13 @@ function hasNoBehavioralHookPermissions(hook: string): boolean {
  * 14 bits of the address — behavior a hook cannot have without declaring,
  * enforced by PoolManager at initialize).
  *
- * Default rule (needs the chainId arg): any hook WITHOUT custom-accounting
- * (returns-delta) bits — the same trust test the serving filter's
- * isAutoAllowlistedHook applies to launch-shaped (non-major-pair) pools, so
- * a registry entry never grants more than serve-time filtering would.
- * Behavioral-but-clean hooks can revert or fee-gate swaps (worst case: a
- * failed quote, routed around), but cannot alter settlement amounts.
+ * Default rule (needs the chainId arg): any hook WITHOUT swap (beforeSwap,
+ * afterSwap) or custom-accounting (returns-delta) bits — the same trust test
+ * (blocksUnvettedHookAdmission) the serving filter's isHooksPoolRoutable
+ * applies to unvetted hooks, so a registry entry never grants more than
+ * serve-time filtering would. The remaining behavioral hooks (liquidity,
+ * donate) are not called on a swap, so they cannot revert, reprice or
+ * discriminate on one.
  *
  * Without a chainId (or on CCA_INERT_ONLY_HOOK_CHAINS) the gate is
  * stricter: only hooks proven ROUTING-INERT — no swap, liquidity, donate,
@@ -330,19 +332,18 @@ export function isAutoApprovedCcaHook(
   if (hasNoBehavioralHookPermissions(hook)) {
     return true;
   }
-  // Default rule for behavioral hooks: approve when there are NO
+  // Default rule for behavioral hooks: approve when there are NO swap or
   // custom-accounting (returns-delta) bits — the serving filter's own trust
-  // test for launch-shaped pairs (v4HooksPoolsFiltering
-  // isAutoAllowlistedHook), so a registry entry never grants more than
-  // serve-time filtering would. Requires a chainId: the denylist is
-  // chain-scoped, so a chainless call cannot honor the kill switch and
-  // stays inert-only. The denylist re-check here is deliberate
-  // belt-and-suspenders — callers pair this with isDenylistedCcaHook, but
-  // the behavioral-hook trust must not depend on every future caller
-  // remembering to.
+  // test for unvetted hooks (blocksUnvettedHookAdmission), so a registry
+  // entry never grants more than serve-time filtering would. Requires a
+  // chainId: the denylist is chain-scoped, so a chainless call cannot honor
+  // the kill switch and stays inert-only. The denylist re-check here is
+  // deliberate belt-and-suspenders — callers pair this with
+  // isDenylistedCcaHook, but the behavioral-hook trust must not depend on
+  // every future caller remembering to.
   if (chainId !== undefined && !CCA_INERT_ONLY_HOOK_CHAINS.has(chainId)) {
     return (
-      lacksCustomAccountingPermissions(hook) &&
+      lacksUnvettedAdmissionBlockingPermissions(hook) &&
       !isDenylistedCcaHook(chainId, hook)
     );
   }
@@ -800,7 +801,7 @@ export async function buildCcaScheduledPools(
                 ) {
                   hookedAuctions.add(auction.address.toLowerCase());
                   logger.warn(
-                    'Skipping CCA pool with unapproved hook (custom-accounting bits, dynamic fee, or denylisted)',
+                    'Skipping CCA pool with unapproved hook (swap or custom-accounting bits, dynamic fee, or denylisted)',
                     {chainId, auction: auction.address, hook: info.hook}
                   );
                   metric.putMetric(

@@ -17,7 +17,7 @@ import {Logger} from '../sor-providers/util/log';
 import {IMetric} from '../sor-providers/util/metric';
 import {MetricLoggerUnit} from '../sor-providers/util/metric';
 import {isPoolFeeDynamic} from './isPoolFeeDynamic';
-import {getMajorTokens, isMajorPair} from './majorTokens';
+import {getMajorTokens} from './majorTokens';
 import {isStaticFeeWithinSanityCeiling} from './feeTierSanityCeiling';
 
 type V4PoolGroupingKey = string;
@@ -57,10 +57,24 @@ export function hasCustomAccountingPermissions(hookAddress: string): boolean {
   );
 }
 
-// Both unvetted admission gates — isHooksPoolRoutable (routable queue) and
-// isAutoAllowlistedHook (auto-admit fallback) — must reject dynamic-fee pools:
-// a hook can set its fee from a plain beforeSwap with no custom-accounting
-// permission bits, so permission checks alone cannot catch it. Matches against
+// Permission bits that keep a hook out of routing unless it is vetted
+// (HOOKS_ADDRESSES_ALLOWLIST, the permissioned registry, or a trusted ZLCA
+// factory). Shared by both unvetted admission paths: the snapshot's routable
+// queue (isHooksPoolRoutable) and the CCA scheduled-pools registry. A
+// beforeSwap or afterSwap hook is passed the swap's sender, so it can move
+// pool state (its own pool before the curve is priced, or another pool such
+// as the route's next hop afterwards) or revert for the router and not the
+// quoter; a custom-accounting hook overrides the swap amounts outright.
+export function blocksUnvettedHookAdmission(hookAddress: string): boolean {
+  return (
+    Hook.hasSwapPermissions(hookAddress) ||
+    hasCustomAccountingPermissions(hookAddress)
+  );
+}
+
+// The unvetted admission gate (isHooksPoolRoutable) must reject dynamic-fee
+// pools: on a dynamic-fee pool the hook controls the LP fee with no permission
+// bit required, so permission checks alone cannot catch it. Matches against
 // the pool id (ground truth) rather than the subgraph-reported feeTier string.
 function isDynamicFeePool(
   pool: V4SubgraphPool,
@@ -70,7 +84,7 @@ function isDynamicFeePool(
   const dynamic = isPoolFeeDynamic(pool);
   if (dynamic === undefined) {
     // Fail closed: a pool whose id cannot be derived (an unparseable address
-    // or tickSpacing) is treated as dynamic so both gates reject it.
+    // or tickSpacing) is treated as dynamic so the gate rejects it.
     logger?.error(
       `Error classifying dynamic fee for pool ${pool.id} on chain ${chainId}, treating as dynamic: pool key is outside the PoolKey domain`
     );
@@ -79,7 +93,11 @@ function isDynamicFeePool(
   return dynamic;
 }
 
-type HookPermissions = {swap: boolean; customAccounting: boolean};
+type HookPermissions = {
+  swap: boolean;
+  customAccounting: boolean;
+  unvettedAdmissionBlocked: boolean;
+};
 
 function isHooksPoolRoutable(
   pool: V4SubgraphPool,
@@ -108,8 +126,7 @@ function isHooksPoolRoutable(
   return (
     isFeeTierWithinSanityCeiling(pool) &&
     (pool.hooks === ADDRESS_ZERO ||
-      (!hookPermissions(pool.hooks).swap &&
-        !hookPermissions(pool.hooks).customAccounting &&
+      (!hookPermissions(pool.hooks).unvettedAdmissionBlocked &&
         !isDynamicFeePool(pool, chainId, logger)))
   );
 }
@@ -169,6 +186,7 @@ export function v4HooksPoolsFiltering(
       permissions = {
         swap: Hook.hasSwapPermissions(address),
         customAccounting: hasCustomAccountingPermissions(address),
+        unvettedAdmissionBlocked: blocksUnvettedHookAdmission(address),
       };
       hookPermissionsByAddress.set(address, permissions);
     }
@@ -213,21 +231,6 @@ export function v4HooksPoolsFiltering(
     const token0Known = token0Owned || majorTokens.has(token0);
     const token1Known = token1Owned || majorTokens.has(token1);
     return token0Known && token1Known;
-  };
-
-  // Auto-allowlisted: non-denylisted, non-zero-address hooks on non-major pairs
-  // without custom accounting or a dynamic fee. These get their own separate
-  // top-N TVL queue (parallel to routable hooks) to bound pool cache file size.
-  const isAutoAllowlistedHook = (pool: V4SubgraphPool): boolean => {
-    const hookAddress = pool.hooks.toLowerCase();
-    if (denylistedHooksAddresses.has(hookAddress)) return false;
-    if (hookAddress === ADDRESS_ZERO) return false;
-    if (hookPermissions(hookAddress).customAccounting) return false;
-    // The auto-admit path must not be laxer than vetted routable/explicit paths; it admitted ROUTE-1607 pools.
-    if (!isFeeTierWithinSanityCeiling(pool)) return false;
-    if (isMajorPair(pool.token0.id, pool.token1.id, majorTokens)) return false;
-    if (isDynamicFeePool(pool, chainId, logger)) return false;
-    return true;
   };
 
   // Shared logic for adding a pool to a top-N TVL priority queue map.
@@ -322,12 +325,6 @@ export function v4HooksPoolsFiltering(
     queueMap[key] = pq;
   };
 
-  // Separate top-N TVL queue for auto-allowlisted hooks
-  const autoAllowlistedPoolsByTokenPairsAndFees: Record<
-    V4PoolGroupingKey,
-    PriorityQueue<V4SubgraphPool>
-  > = {};
-
   pools.forEach((pool: V4SubgraphPool) => {
     if (denylistedHooksAddresses.has(pool.hooks.toLowerCase())) {
       return;
@@ -341,8 +338,6 @@ export function v4HooksPoolsFiltering(
 
     if (isHooksPoolRoutable(pool, chainId, logger, metric, hookPermissions)) {
       addPoolToQueue(pool, v4PoolsByTokenPairsAndFees);
-    } else if (isAutoAllowlistedHook(pool)) {
-      addPoolToQueue(pool, autoAllowlistedPoolsByTokenPairsAndFees);
     }
   });
 
@@ -353,21 +348,12 @@ export function v4HooksPoolsFiltering(
     }
   );
 
-  const topAutoAllowlistedPoolsByTvl: Array<V4SubgraphPool> = [];
-  Object.values(autoAllowlistedPoolsByTokenPairsAndFees).forEach(
-    (pq: PriorityQueue<V4SubgraphPool>) => {
-      topAutoAllowlistedPoolsByTvl.push(...pq.toArray());
-    }
-  );
-
-  // Create Set for O(1) lookups to find pools not already selected by either queue.
+  // Create Set for O(1) lookups to find pools the routable queue already selected.
   const selectedPoolIds = new Set(
-    topPoolsByTvl
-      .concat(topAutoAllowlistedPoolsByTvl)
-      .map(pool => pool.id.toLowerCase())
+    topPoolsByTvl.map(pool => pool.id.toLowerCase())
   );
 
-  // Append explicitly allowlisted hooks not already selected by either queue.
+  // Append explicitly allowlisted hooks not already selected by the routable queue.
   // The fee-tier ceiling still applies here: hook trust (allowlisting) and fee
   // sanity are independent axes — ADDRESS_ZERO itself is allowlisted on several
   // chains, so without this check a hookless pool rejected by
@@ -445,7 +431,6 @@ export function v4HooksPoolsFiltering(
   }
 
   return topPoolsByTvl
-    .concat(topAutoAllowlistedPoolsByTvl)
     .concat(explicitlyAllowlistedHooksPools)
     .concat(ownedPermissionedHooksPools);
 }

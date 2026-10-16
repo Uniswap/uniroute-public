@@ -33,10 +33,13 @@ const STRATEGY = '0xbbbb00000000000000000000000000000000bbbb';
 // are mined to (migrate()'s front-run fallback rewrites key.hooks to this).
 const INERT_STRATEGY = '0xb98766A35cdc28415be0767D4EA41e39fBA3e000';
 const INERT_HOOK = '0x1111111111111111111111111111111111112000';
-// Low bits 0x0080 = beforeSwap: behavioral but settlement-clean —
+// Low bits 0x0800 = beforeAddLiquidity: behavioral but not on the swap path —
 // auto-approved when a chainId is given, rejected by the chainless
 // (inert-only) rule.
-const SWAP_HOOK = '0x2222222222222222222222222222222222220080';
+const BEHAVIORAL_HOOK = '0x2222222222222222222222222222222222220800';
+// Low bits 0x0080 = beforeSwap, 0x0040 = afterSwap: never auto-approved.
+const BEFORE_SWAP_HOOK = '0x2222222222222222222222222222222222220080';
+const AFTER_SWAP_HOOK = '0x2222222222222222222222222222222222220040';
 
 const testLogger: Logger = {
   info: () => {},
@@ -79,19 +82,14 @@ describe('isAutoApprovedCcaHook', () => {
   });
 
   it('rejects swap-time and custom-accounting permission bits', () => {
-    expect(isAutoApprovedCcaHook(SWAP_HOOK)).toBe(false);
-    // afterSwap (0x0040).
-    expect(
-      isAutoApprovedCcaHook('0x2222222222222222222222222222222222220040')
-    ).toBe(false);
+    expect(isAutoApprovedCcaHook(BEFORE_SWAP_HOOK)).toBe(false);
+    expect(isAutoApprovedCcaHook(AFTER_SWAP_HOOK)).toBe(false);
     // beforeSwapReturnsDelta (0x0008): custom accounting.
     expect(
       isAutoApprovedCcaHook('0x2222222222222222222222222222222222220008')
     ).toBe(false);
-    // beforeAddLiquidity (0x0800).
-    expect(
-      isAutoApprovedCcaHook('0x2222222222222222222222222222222222220800')
-    ).toBe(false);
+    // beforeAddLiquidity (0x0800): behavioral, so not inert.
+    expect(isAutoApprovedCcaHook(BEHAVIORAL_HOOK)).toBe(false);
     // Initialize bit alongside a swap bit is still rejected.
     expect(
       isAutoApprovedCcaHook('0x2222222222222222222222222222222222222080')
@@ -103,32 +101,36 @@ describe('isAutoApprovedCcaHook', () => {
     expect(isAutoApprovedCcaHook('0x1234')).toBe(false);
   });
 
-  describe('behavioral non-custom-accounting hooks (chainId given)', () => {
+  describe('behavioral hooks without swap or custom-accounting bits (chainId given)', () => {
     const ROBINHOOD = 4663;
     // afterSwapReturnsDelta (0x0004): custom accounting.
     const DELTA_HOOK = '0x2222222222222222222222222222222222220084';
 
     it('approves them on any chain by default', () => {
-      expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, ROBINHOOD)).toBe(true);
-      expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, 1)).toBe(true);
-      expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, 8453)).toBe(true);
-      // afterSwap (0x0040) and beforeAddLiquidity (0x0800): behavioral but
-      // settlement-clean — the serving filter's own launch-pair trust test.
+      expect(isAutoApprovedCcaHook(BEHAVIORAL_HOOK, 10000, ROBINHOOD)).toBe(
+        true
+      );
+      expect(isAutoApprovedCcaHook(BEHAVIORAL_HOOK, 10000, 1)).toBe(true);
+      expect(isAutoApprovedCcaHook(BEHAVIORAL_HOOK, 10000, 8453)).toBe(true);
+      // beforeDonate (0x0020): not on the swap path — the serving filter's
+      // own trust test for unvetted hooks.
       expect(
         isAutoApprovedCcaHook(
-          '0x2222222222222222222222222222222222220040',
-          10000,
-          ROBINHOOD
-        )
-      ).toBe(true);
-      expect(
-        isAutoApprovedCcaHook(
-          '0x2222222222222222222222222222222222220800',
+          '0x2222222222222222222222222222222222220020',
           10000,
           ROBINHOOD
         )
       ).toBe(true);
     });
+
+    it.each([BEFORE_SWAP_HOOK, AFTER_SWAP_HOOK])(
+      'rejects swap callback hook %s on every chain',
+      hook => {
+        expect(isAutoApprovedCcaHook(hook, 10000, ROBINHOOD)).toBe(false);
+        expect(isAutoApprovedCcaHook(hook, 10000, 1)).toBe(false);
+        expect(isAutoApprovedCcaHook(hook, 10000, 8453)).toBe(false);
+      }
+    );
 
     it('still rejects custom-accounting bits', () => {
       expect(isAutoApprovedCcaHook(DELTA_HOOK, 10000, ROBINHOOD)).toBe(false);
@@ -143,17 +145,21 @@ describe('isAutoApprovedCcaHook', () => {
     });
 
     it('still rejects a dynamic-fee registration', () => {
-      expect(isAutoApprovedCcaHook(SWAP_HOOK, 0x800000, ROBINHOOD)).toBe(false);
+      expect(isAutoApprovedCcaHook(BEHAVIORAL_HOOK, 0x800000, ROBINHOOD)).toBe(
+        false
+      );
     });
 
     it('denylist wins over the default trust', () => {
       const prior = HOOKS_ADDRESSES_DENYLIST[ROBINHOOD];
       HOOKS_ADDRESSES_DENYLIST[ROBINHOOD] = [
         ...(prior ?? []),
-        SWAP_HOOK.toLowerCase(),
+        BEHAVIORAL_HOOK.toLowerCase(),
       ];
       try {
-        expect(isAutoApprovedCcaHook(SWAP_HOOK, 10000, ROBINHOOD)).toBe(false);
+        expect(isAutoApprovedCcaHook(BEHAVIORAL_HOOK, 10000, ROBINHOOD)).toBe(
+          false
+        );
       } finally {
         if (prior === undefined) delete HOOKS_ADDRESSES_DENYLIST[ROBINHOOD];
         else HOOKS_ADDRESSES_DENYLIST[ROBINHOOD] = prior;
@@ -958,18 +964,18 @@ describe('buildCcaScheduledPools', () => {
     ).toHaveLength(1);
   });
 
-  it('publishes a Robinhood launch with a behavioral non-custom-accounting hook (widened per-chain rule)', async () => {
+  it('publishes a Robinhood launch with a behavioral hook without swap or custom-accounting bits (widened per-chain rule)', async () => {
     config = {...config, chainIds: [4663]};
     pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
-    initializerInfo = {...initializerInfo, hook: SWAP_HOOK};
+    initializerInfo = {...initializerInfo, hook: BEHAVIORAL_HOOK};
 
     await buildCcaScheduledPools(testLogger, metric, config, deps);
 
     const entries = writtenEntries(4663);
     expect(entries).toHaveLength(1);
-    expect(entries[0].hooks).toBe(SWAP_HOOK.toLowerCase());
+    expect(entries[0].hooks).toBe(BEHAVIORAL_HOOK.toLowerCase());
     expect(entries[0].id).toBe(
-      computeCcaPoolId(ZERO, UNI, 10000, 200, SWAP_HOOK)
+      computeCcaPoolId(ZERO, UNI, 10000, 200, BEHAVIORAL_HOOK)
     );
     expect(
       metric.metrics.filter(
@@ -977,6 +983,24 @@ describe('buildCcaScheduledPools', () => {
       )
     ).toHaveLength(0);
   });
+
+  it.each([BEFORE_SWAP_HOOK, AFTER_SWAP_HOOK])(
+    'skips swap callback hook %s on Robinhood',
+    async hook => {
+      config = {...config, chainIds: [4663]};
+      pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
+      initializerInfo = {...initializerInfo, hook};
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(writtenEntries(4663)).toHaveLength(0);
+      expect(
+        metric.metrics.filter(
+          m => m.key === 'CcaScheduledPools.hookedLaunchSkipped'
+        )
+      ).toHaveLength(1);
+    }
+  );
 
   it('still skips a custom-accounting hook on Robinhood', async () => {
     config = {...config, chainIds: [4663]};

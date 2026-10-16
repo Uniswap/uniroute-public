@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {ChainId} from '@uniswap/sdk-core';
-import {getMajorTokens, isMajorPair} from './majorTokens';
+import {getMajorTokens} from './majorTokens';
 import {v4SubgraphUrlOverride} from '../cacheConfig';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -126,29 +126,5 @@ describe('getMajorTokens env extensions', () => {
     const baseMajors = getMajorTokens(ChainId.BASE);
     expect(baseMajors.has('0xeeee')).toBe(true);
     expect(baseMajors.has('42')).toBe(false);
-  });
-});
-
-describe('isMajorPair', () => {
-  it('matches case-insensitively against the lowercased major set', () => {
-    const majors = getMajorTokens(ChainId.MAINNET);
-    expect(
-      isMajorPair(
-        '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', // WETH, checksummed
-        '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', // USDC, checksummed
-        majors
-      )
-    ).toBe(true);
-  });
-
-  it('rejects pairs with a non-major leg', () => {
-    const majors = getMajorTokens(ChainId.MAINNET);
-    expect(
-      isMajorPair(
-        '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', // WETH
-        '0x1f9840a85d5af5bf1d1762f925bdaddc4201f984', // UNI (not a major)
-        majors
-      )
-    ).toBe(false);
   });
 });

@@ -2,6 +2,7 @@ import {describe, it, expect, vi} from 'vitest';
 import {utils} from 'ethers';
 import {
   v4HooksPoolsFiltering,
+  blocksUnvettedHookAdmission,
   hasCustomAccountingPermissions,
 } from './v4HooksPoolsFiltering';
 import {ChainId, Token} from '@uniswap/sdk-core';
@@ -21,7 +22,6 @@ import {
   HOOKS_ADDRESSES_ALLOWLIST,
 } from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
-import {getMajorTokens, isMajorPair} from './majorTokens';
 import {computeV4PoolId} from './v4PoolIdFast';
 
 const mockLogger: Logger = {
@@ -104,6 +104,33 @@ describe('hasCustomAccountingPermissions', () => {
   });
 });
 
+describe('blocksUnvettedHookAdmission', () => {
+  it('blocks swap and custom-accounting bits', () => {
+    // beforeSwap (0x80), afterSwap (0x40), beforeSwapReturnsDelta (0x08),
+    // afterSwapReturnsDelta (0x04), before+afterSwap (0xc0).
+    for (const hook of [
+      '0x0000000000000000000000000000000000000080',
+      '0x0000000000000000000000000000000000000040',
+      '0x0000000000000000000000000000000000000008',
+      '0x0000000000000000000000000000000000000004',
+      '0x00000000000000000000000000000000000000c0',
+    ]) {
+      expect(blocksUnvettedHookAdmission(hook)).toBe(true);
+    }
+  });
+
+  it('does not block hookless or non-swap bits', () => {
+    // beforeAddLiquidity (0x0800), beforeInitialize (0x2000).
+    for (const hook of [
+      ADDRESS_ZERO,
+      '0x0000000000000000000000000000000000000800',
+      '0x0000000000000000000000000000000000002000',
+    ]) {
+      expect(blocksUnvettedHookAdmission(hook)).toBe(false);
+    }
+  });
+});
+
 describe('v4HooksPoolsFiltering', () => {
   describe('major pair hook allowlisting', () => {
     const hookWithoutSwapPermissions =
@@ -138,9 +165,8 @@ describe('v4HooksPoolsFiltering', () => {
 
     it('drops non-routable non-allowlisted hook on major pair', () => {
       // Hook with beforeSwap permission (0x80) — non-routable due to swap permissions.
-      // On a major pair (WETH/USDC on mainnet) and NOT in the explicit allowlist.
-      // Should be excluded: not routable (fails Phase 1), not auto-allowlisted
-      // (major pair fails isAutoAllowlistedHook), not explicitly allowlisted (Phase 3).
+      // On a major pair (WETH/USDC on mainnet) and NOT in the explicit allowlist,
+      // so nothing admits it.
       const hookWithSwapPermissions =
         '0x0000000000000000000000000000000000000080';
       const pool = createPool({
@@ -296,21 +322,41 @@ describe('v4HooksPoolsFiltering', () => {
     expect(result.length).toBe(1);
   });
 
-  it('auto-allowlists non-major hooked pools even when non-routable', () => {
-    const nonRoutableHook = '0x0000000000000000000000000000000000000080';
-    const pool = createPool({
-      hooks: nonRoutableHook,
-      tvlETH: 100,
-      feeTier: '3000',
-    });
-    const result = v4HooksPoolsFiltering(
-      ChainId.MAINNET,
-      [pool],
-      mockLogger,
-      mockMetric
-    );
-    expect(result.length).toBe(1);
-  });
+  it.each([
+    ['beforeSwap', '0x0000000000000000000000000000000000000080'],
+    ['afterSwap', '0x0000000000000000000000000000000000000040'],
+    ['before+afterSwap', '0x00000000000000000000000000000000000000c0'],
+  ])(
+    'does not admit a non-allowlisted non-major hooked pool with %s',
+    (_name, hook) => {
+      const pool = createPool({hooks: hook, tvlETH: 100, feeTier: '3000'});
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric
+      );
+      expect(result).toEqual([]);
+    }
+  );
+
+  it.each([
+    ['beforeSwap', '0x0000000000000000000000000000000000000080'],
+    ['afterSwap', '0x0000000000000000000000000000000000000040'],
+  ])(
+    'still admits a %s hook pool once the hook is allowlisted',
+    (_name, hook) => {
+      const pool = createPool({hooks: hook, tvlETH: 100, feeTier: '3000'});
+      const result = v4HooksPoolsFiltering(
+        ChainId.MAINNET,
+        [pool],
+        mockLogger,
+        mockMetric,
+        new Set([hook])
+      );
+      expect(result.map(p => p.id)).toEqual([pool.id]);
+    }
+  );
 
   it('includes allowlisted hooks pools even if not in top TVL set', () => {
     const topTvlPool = createPool({
@@ -390,20 +436,20 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result.length).toBe(1);
     });
 
-    it('auto-allowlists Zora hook on non-BASE chain when pair is not major-major', () => {
+    it('does not admit the Zora hook on a chain where it is not allowlisted', () => {
       const pool = createPool({
         hooks: ZORA_CREATOR_HOOK_ON_BASE_v1,
         tvlETH: 0.002,
         tvlUSD: 4,
       });
-      // On MAINNET the pair is not major-major in this fixture, so the hook is auto-allowlisted.
+      // The hook has swap callbacks and is allowlisted on BASE only.
       const result = v4HooksPoolsFiltering(
         ChainId.MAINNET,
         [pool],
         mockLogger,
         mockMetric
       );
-      expect(result.length).toBe(1);
+      expect(result).toEqual([]);
     });
 
     it('includes Zora post hook v2_4_0 variant on BASE via allowlist', () => {
@@ -802,15 +848,17 @@ describe('v4HooksPoolsFiltering', () => {
       expect(result).toEqual([]);
     });
 
-    describe('auto-allowlist path', () => {
-      const hookWithSwapPermission =
-        '0x0000000000000000000000000000000000000080';
+    describe('non-allowlisted hooked path', () => {
+      // beforeAddLiquidity only (0x0800): no swap bits, so the hook is
+      // routable without an allowlist entry and only the fee checks apply.
+      const hookWithoutSwapPermission =
+        '0x0000000000000000000000000000000000000800';
 
       it.each(['999000', '8388600'])(
         'excludes a non-major hooked pool with incident fee tier %s',
         feeTier => {
           const pool = createPool({
-            hooks: hookWithSwapPermission,
+            hooks: hookWithoutSwapPermission,
             feeTier,
             tvlETH: 100,
           });
@@ -824,9 +872,9 @@ describe('v4HooksPoolsFiltering', () => {
         }
       );
 
-      it('admits an auto-allowlisted pool at the sanity ceiling boundary', () => {
+      it('admits a non-allowlisted hooked pool at the sanity ceiling boundary', () => {
         const pool = createPool({
-          hooks: hookWithSwapPermission,
+          hooks: hookWithoutSwapPermission,
           feeTier: '110000',
           tvlETH: 100,
         });
@@ -839,9 +887,9 @@ describe('v4HooksPoolsFiltering', () => {
         expect(result.map(p => p.id)).toContain(pool.id);
       });
 
-      it('rejects an auto-allowlisted pool just above the sanity ceiling boundary', () => {
+      it('rejects a non-allowlisted hooked pool just above the sanity ceiling boundary', () => {
         const pool = createPool({
-          hooks: hookWithSwapPermission,
+          hooks: hookWithoutSwapPermission,
           feeTier: '110001',
           tvlETH: 100,
         });
@@ -856,7 +904,7 @@ describe('v4HooksPoolsFiltering', () => {
 
       it('does not treat the dynamic-fee sentinel as an above-ceiling static fee', () => {
         const pool = createPool({
-          hooks: hookWithSwapPermission,
+          hooks: hookWithoutSwapPermission,
           feeTier: String(DYNAMIC_FEE_FLAG),
           tvlETH: 100,
         });
@@ -1026,7 +1074,11 @@ describe('v4HooksPoolsFiltering', () => {
         },
       ];
       // Same permission bits (0x2ac0: before/after swap, no returnsDelta) on a
-      // hook that is not denylisted, so the pool shape alone is auto-admitted.
+      // hook that is not denylisted. Swap callbacks keep both out of the
+      // unvetted path, so the denylist is load-bearing only once a hook is allowlisted;
+      // the dynamic ZLCA set stands in for that allowlist entry (the filter
+      // admits it exactly like a static one) without mutating the shipped
+      // registry.
       const sameFlagsUnlistedHook =
         '0x0000000000000000000000000000000000002ac0';
 
@@ -1067,19 +1119,33 @@ describe('v4HooksPoolsFiltering', () => {
         ).toBe(row.poolId);
       });
 
+      const controlPoolId =
+        '0x00000000000000000000000000000000000000000000000000000000000000c1';
+
       it.each(familyPools)(
-        '$name: auto-admits the pool shape when the hook is not denylisted',
+        '$name: does not admit the pool shape without an allowlist entry (swap bits)',
         row => {
-          const control = buildPool(
-            row,
-            sameFlagsUnlistedHook,
-            '0x00000000000000000000000000000000000000000000000000000000000000c1'
-          );
+          const control = buildPool(row, sameFlagsUnlistedHook, controlPoolId);
           const result = v4HooksPoolsFiltering(
             row.chainId,
             [control],
             mockLogger,
             mockMetric
+          );
+          expect(result).toEqual([]);
+        }
+      );
+
+      it.each(familyPools)(
+        '$name: admits the pool shape when an allowlisted hook is not denylisted',
+        row => {
+          const control = buildPool(row, sameFlagsUnlistedHook, controlPoolId);
+          const result = v4HooksPoolsFiltering(
+            row.chainId,
+            [control],
+            mockLogger,
+            mockMetric,
+            new Set([sameFlagsUnlistedHook])
           );
           expect(result.map(p => p.id)).toEqual([control.id]);
         }
@@ -1090,16 +1156,20 @@ describe('v4HooksPoolsFiltering', () => {
           {...row, casing: 'lowercase', hooks: row.hook},
           {...row, casing: 'checksummed', hooks: utils.getAddress(row.hook)},
         ])
-      )('$name: rejects the pool with the $casing hook address', row => {
-        const pool = buildPool(row, row.hooks, row.poolId);
-        const result = v4HooksPoolsFiltering(
-          row.chainId,
-          [pool],
-          mockLogger,
-          mockMetric
-        );
-        expect(result).toEqual([]);
-      });
+      )(
+        '$name: rejects the pool with the $casing hook address even when allowlisted',
+        row => {
+          const pool = buildPool(row, row.hooks, row.poolId);
+          const result = v4HooksPoolsFiltering(
+            row.chainId,
+            [pool],
+            mockLogger,
+            mockMetric,
+            new Set([row.hooks])
+          );
+          expect(result).toEqual([]);
+        }
+      );
     });
   });
 
@@ -1518,16 +1588,16 @@ describe('v4HooksPoolsFiltering', () => {
     });
   });
 
-  describe('auto-allowlisted hooks compete in top-N TVL queue', () => {
-    it('caps auto-allowlisted hook pools per token pair + fee via top TVL', () => {
-      // 15 pools with a non-routable auto-allowlisted hook (has beforeSwap permission
-      // but no custom accounting, non-major pair) — same token pair and fee tier.
-      // Only the top 10 by TVL should survive; the rest are not in the explicit
-      // allowlist so they should not be re-added in Phase 2.
-      const hookWithBeforeSwap = '0x0000000000000000000000000000000000000080';
+  describe('non-allowlisted hooked pools compete in the routable top-N queue', () => {
+    it('caps non-allowlisted hooked pools per token pair + fee via top TVL', () => {
+      // 15 pools with a non-allowlisted hook that has no swap or custom-accounting
+      // bits (beforeAddLiquidity, 0x0800) on one token pair and fee tier. Only
+      // the top 10 by TVL survive; the hook is not in the explicit allowlist, so
+      // the rest are not re-added.
+      const hookWithoutSwap = '0x0000000000000000000000000000000000000800';
       const pools = Array.from({length: 15}, (_, i) =>
         createPool({
-          hooks: hookWithBeforeSwap,
+          hooks: hookWithoutSwap,
           tvlETH: i + 1,
           token0: {
             id: '0x00000000000000000000000000000000000000a1',
@@ -1554,65 +1624,6 @@ describe('v4HooksPoolsFiltering', () => {
       // Verify the top 10 by TVL are kept (tvlETH 6-15)
       const tvls = result.map(p => p.tvlETH).sort((a, b) => a - b);
       expect(tvls).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    });
-
-    it('routable and auto-allowlisted hooks use separate top-N queues', () => {
-      // 15 routable ADDRESS_ZERO pools and 15 auto-allowlisted hook pools,
-      // all sharing the same token pair + fee tier.
-      // Each queue independently keeps its top 10.
-      const hookWithBeforeSwap = '0x0000000000000000000000000000000000000080';
-      const token0 = {
-        id: '0x00000000000000000000000000000000000000a1',
-        symbol: 'A',
-        name: 'A',
-        decimals: '18',
-      };
-      const token1 = {
-        id: '0x00000000000000000000000000000000000000a2',
-        symbol: 'B',
-        name: 'B',
-        decimals: '18',
-      };
-
-      const routablePools = Array.from({length: 15}, (_, i) =>
-        createPool({
-          hooks: ADDRESS_ZERO,
-          tvlETH: i + 1,
-          token0,
-          token1,
-          feeTier: '3000',
-        })
-      );
-      const autoAllowlistedPools = Array.from({length: 15}, (_, i) =>
-        createPool({
-          hooks: hookWithBeforeSwap,
-          tvlETH: i + 1,
-          token0,
-          token1,
-          feeTier: '3000',
-        })
-      );
-
-      const result = v4HooksPoolsFiltering(
-        ChainId.MAINNET,
-        [...routablePools, ...autoAllowlistedPools],
-        mockLogger,
-        mockMetric
-      );
-
-      // Routable queue: top 10 by TVL (6-15) + 5 ADDRESS_ZERO re-added via explicit allowlist = 15
-      // Auto-allowlisted queue: top 10 by TVL (6-15), not in explicit allowlist = 10
-      // Total = 25
-      expect(result.length).toBe(25);
-
-      const routableResults = result.filter(p => p.hooks === ADDRESS_ZERO);
-      const autoResults = result.filter(p => p.hooks === hookWithBeforeSwap);
-      expect(routableResults.length).toBe(15);
-      expect(autoResults.length).toBe(10);
-
-      // Verify top-10 by TVL kept for auto-allowlisted
-      const autoTvls = autoResults.map(p => p.tvlETH).sort((a, b) => a - b);
-      expect(autoTvls).toEqual([6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     });
   });
 
@@ -1703,7 +1714,6 @@ describe('v4HooksPoolsFiltering', () => {
         mockMetric
       );
 
-      const majorTokens = getMajorTokens(ChainId.BASE);
       const allowlistedHooks = new Set(
         (HOOKS_ADDRESSES_ALLOWLIST[ChainId.BASE] ?? []).map(hook =>
           hook.toLowerCase()
@@ -1714,7 +1724,7 @@ describe('v4HooksPoolsFiltering', () => {
         if (hook === ADDRESS_ZERO) {
           return true;
         }
-        if (!isMajorPair(pool.token0.id, pool.token1.id, majorTokens)) {
+        if (!blocksUnvettedHookAdmission(hook)) {
           return true;
         }
         return allowlistedHooks.has(hook);
@@ -1928,8 +1938,8 @@ describe('permissioned-hook pools (Superstate PA↔PA)', () => {
 });
 
 describe('v4HooksPoolsFiltering dynamic ZLCA hooks', () => {
-  // Custom-accounting flags (BeforeSwapReturnsDelta) — never routable and
-  // never auto-allowlisted, so admission requires (dynamic) allowlisting.
+  // Custom-accounting flags (BeforeSwapReturnsDelta) — never routable
+  // unvetted, so admission requires (dynamic) allowlisting.
   const customAccountingHook = '0x0000000000000000000000000000000000000008';
 
   const majorPairPool = () =>
@@ -2026,10 +2036,10 @@ describe('v4HooksPoolsFiltering dynamic ZLCA per-hook pool cap', () => {
   });
 });
 
-describe('dynamic fee hooks excluded from auto-allowlist', () => {
-  // beforeSwap-only permission bit (no custom-accounting returns-delta bits),
-  // so absent the dynamic-fee check this would auto-allowlist on any non-major pair.
-  const dynamicFeeHook = '0x0000000000000000000000000000000000000080';
+describe('dynamic fee hooks excluded from unvetted admission', () => {
+  // beforeAddLiquidity only (0x0800): no swap or custom-accounting bits, so
+  // absent the dynamic-fee check this would be routable on any pair.
+  const dynamicFeeHook = '0x0000000000000000000000000000000000000800';
   const tickSpacing = 60;
 
   const nonMajorToken0 = {
@@ -2081,7 +2091,7 @@ describe('dynamic fee hooks excluded from auto-allowlist', () => {
     });
   };
 
-  it('rejects a dynamic-fee hook on a non-major pair on mainnet (previously auto-allowlisted)', () => {
+  it('rejects a dynamic-fee hook on a non-major pair on mainnet', () => {
     const pool = buildDynamicFeePool(ChainId.MAINNET);
     const result = v4HooksPoolsFiltering(
       ChainId.MAINNET,
@@ -2103,7 +2113,7 @@ describe('dynamic fee hooks excluded from auto-allowlist', () => {
     expect(result).toEqual([]);
   });
 
-  it('still auto-allowlists the same hook/pair shape when the pool is not actually dynamic-fee (regression)', () => {
+  it('still admits the same hook/pair shape when the pool is not actually dynamic-fee (regression)', () => {
     const pool = createPool({
       hooks: dynamicFeeHook,
       feeTier: '3000',
@@ -2121,8 +2131,8 @@ describe('dynamic fee hooks excluded from auto-allowlist', () => {
     expect(result.length).toBe(1);
   });
 
-  // Trusted bypasses are deliberately untouched by this fix — only the
-  // unvetted auto-allowlist fallback gained the dynamic-fee check.
+  // Trusted bypasses are deliberately untouched — only the unvetted path
+  // applies the dynamic-fee check.
   it('still admits a genuinely dynamic-fee hook when it is in the dynamic ZLCA set (trusted bypass unaffected)', () => {
     const pool = buildDynamicFeePool(ChainId.MAINNET);
     const result = v4HooksPoolsFiltering(
@@ -2182,7 +2192,7 @@ describe('dynamic fee hooks excluded from auto-allowlist', () => {
   it('fails closed on an unclassifiable pool (invalid token address) instead of throwing and aborting the batch', () => {
     // Token construction throws on the address itself, so the 18-decimal
     // fallback throws too — isDynamicFeePool must treat the pool as dynamic
-    // (rejected from both gates), not propagate and kill the whole filter run.
+    // (rejected by the unvetted gate), not propagate and kill the whole filter run.
     const unclassifiablePool = createPool({
       hooks: dynamicFeeHook,
       feeTier: '3000',

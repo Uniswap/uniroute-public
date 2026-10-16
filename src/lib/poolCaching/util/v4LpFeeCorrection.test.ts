@@ -1562,10 +1562,10 @@ describe('correction interacting with v4HooksPoolsFiltering', () => {
 
   const TOKEN0 = '0x0000000000000000000000000000000000000011';
   const TOKEN1 = '0x0000000000000000000000000000000000000022';
-  // Low 14 bits encode hook permissions; 0x080 is BEFORE_SWAP with no
-  // returns-delta bits, which routes a pool to the auto-allowlist queue
-  // instead of the main one.
-  const SWAP_HOOK = '0x0000000000000000000000000000000000000080';
+  // Low 14 bits encode hook permissions; 0x0800 is BEFORE_ADD_LIQUIDITY with
+  // no swap or returns-delta bits, so the pool competes in the routable TVL
+  // queue, and the hook is not allowlisted, so nothing re-admits it.
+  const UNVETTED_HOOK = '0x0000000000000000000000000000000000000800';
 
   const filterPool = (
     id: string,
@@ -1628,13 +1628,13 @@ describe('correction interacting with v4HooksPoolsFiltering', () => {
     expect(survivors(corrected).size).toBe(11);
   });
 
-  it('merging can evict an auto-allowlisted hooked pool, which is not re-admitted', async () => {
-    const {atTrueFee, drifted} = buildGroup(SWAP_HOOK);
+  it('merging can evict a non-allowlisted hooked pool, which is not re-admitted', async () => {
+    const {atTrueFee, drifted} = buildGroup(UNVETTED_HOOK);
     const corrected = await correct([...atTrueFee, drifted]);
     expect(corrected.find(p => p.id === '0xdrifted')?.feeTier).toBe('3000');
 
-    // A hook that is only AUTO-allowlisted gets no explicit-allowlist append,
-    // so here the cap really does bind: this is the one snapshot-membership
+    // A non-allowlisted hook gets no explicit-allowlist append, so here the
+    // cap really does bind: this is the one snapshot-membership
     // regression the correction can cause.
     const kept = survivors(corrected);
     expect(kept.size).toBe(10);
@@ -1642,8 +1642,14 @@ describe('correction interacting with v4HooksPoolsFiltering', () => {
   });
 
   it('eviction is by TVL, not by whether the pool was corrected', async () => {
-    const {atTrueFee} = buildGroup(SWAP_HOOK);
-    const richDrifted = filterPool('0xdrifted', '3499', '60', 9999, SWAP_HOOK);
+    const {atTrueFee} = buildGroup(UNVETTED_HOOK);
+    const richDrifted = filterPool(
+      '0xdrifted',
+      '3499',
+      '60',
+      9999,
+      UNVETTED_HOOK
+    );
     const kept = survivors(await correct([...atTrueFee, richDrifted]));
     expect(kept.size).toBe(10);
     expect(kept.has('0xdrifted')).toBe(true);
@@ -1652,8 +1658,8 @@ describe('correction interacting with v4HooksPoolsFiltering', () => {
 
   it('a merge that stays under the cap keeps every pool', async () => {
     const corrected = await correct([
-      filterPool('0xpool0', '3000', '60', 100, SWAP_HOOK),
-      filterPool('0xdrifted', '3499', '10', 1, SWAP_HOOK),
+      filterPool('0xpool0', '3000', '60', 100, UNVETTED_HOOK),
+      filterPool('0xdrifted', '3499', '10', 1, UNVETTED_HOOK),
     ]);
     expect(survivors(corrected)).toEqual(new Set(['0xpool0', '0xdrifted']));
   });

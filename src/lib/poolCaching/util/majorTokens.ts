@@ -232,14 +232,3 @@ export function getMajorTokens(chainId: ChainId): Set<string> {
     defaults.concat(additions).map(address => address.toLowerCase())
   );
 }
-
-export function isMajorPair(
-  token0Address: string,
-  token1Address: string,
-  majorTokens: Set<string>
-): boolean {
-  return (
-    majorTokens.has(token0Address.toLowerCase()) &&
-    majorTokens.has(token1Address.toLowerCase())
-  );
-}
