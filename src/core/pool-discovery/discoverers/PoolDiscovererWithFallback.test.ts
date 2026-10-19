@@ -12,7 +12,15 @@ import {
   IUniRouteServiceConfig,
 } from '../../../lib/config';
 import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
-import {V2PoolInfo, V3PoolInfo, V4PoolInfo} from '../interface';
+import {
+  IPoolDiscoverer,
+  UniPoolInfo,
+  V2PoolInfo,
+  V3PoolInfo,
+  V4PoolInfo,
+} from '../interface';
+import {NoSuchKey} from '@aws-sdk/client-s3';
+import {utils} from 'ethers';
 import {Address} from '../../../models/address/Address';
 import {USDC_MAINNET, USDT_MAINNET} from '../../../lib/tokenUtils';
 import {ITopPoolsSelector, PoolsForTokensCacheDirective} from '../interface';
@@ -548,6 +556,202 @@ describe('PoolDiscovererWithFallback', () => {
         expect(primaryDiscoverer.getPoolsForTokens).toHaveBeenCalledTimes(1);
         expect(fallbackDiscoverer.getPoolsForTokens).toHaveBeenCalledTimes(1);
       });
+    });
+  });
+});
+
+class FakeRejectingDiscoverer<TPool extends UniPoolInfo>
+  implements IPoolDiscoverer<TPool>
+{
+  constructor(private readonly failure: () => Promise<never>) {}
+  getPools(): Promise<TPool[]> {
+    return this.failure();
+  }
+  getPoolsForTokens(): Promise<TPool[]> {
+    return this.failure();
+  }
+}
+
+class FakeResolvingDiscoverer<TPool extends UniPoolInfo>
+  implements IPoolDiscoverer<TPool>
+{
+  constructor(private readonly pools: TPool[]) {}
+  getPools(): Promise<TPool[]> {
+    return Promise.resolve(this.pools);
+  }
+  getPoolsForTokens(): Promise<TPool[]> {
+    return Promise.resolve(this.pools);
+  }
+}
+
+describe('PoolDiscovererWithFallback primary-failure log fields', () => {
+  const serviceConfig: IUniRouteServiceConfig = getUniRouteTestConfig();
+  const tokenIn = new Address(USDC_MAINNET.address);
+  const tokenOut = new Address(USDT_MAINNET.address);
+  const SECRET_PATH = 'v2/0123456789abcdef-secret-key';
+
+  // Each failure is produced by the real library that throws it in prod, not
+  // a hand-built object with the shape this code expects.
+  function ethersServerError(): Error {
+    return new utils.Logger('web/5.7.1').makeError(
+      'missing response',
+      utils.Logger.errors.SERVER_ERROR,
+      {
+        requestBody: '{"method":"eth_call","params":[{"data":"0xdeadbeef"}]}',
+        requestMethod: 'POST',
+        url: `https://rpc.provider.example/${SECRET_PATH}`,
+      }
+    );
+  }
+
+  function invalidUrlError(): unknown {
+    try {
+      new URL('not a url');
+    } catch (error) {
+      return error;
+    }
+    throw new Error('expected new URL to throw');
+  }
+
+  async function warnFieldsFor(
+    failure: () => Promise<never>,
+    call: 'getPools' | 'getPoolsForTokens'
+  ): Promise<Record<string, unknown>> {
+    const ctx = buildTestContext();
+    const discoverer = new PoolDiscovererWithFallbackV2(
+      serviceConfig,
+      new FakeRejectingDiscoverer<V2PoolInfo>(failure),
+      new FakeResolvingDiscoverer<V2PoolInfo>([mockV2Pool])
+    );
+    const pools =
+      call === 'getPools'
+        ? await discoverer.getPools(ChainId.MAINNET, Protocol.V2, ctx)
+        : await discoverer.getPoolsForTokens(
+            ChainId.MAINNET,
+            Protocol.V2,
+            tokenIn,
+            tokenOut,
+            new TestTopPoolsSelectorV2(),
+            undefined,
+            false,
+            EMPTY_NAMESPACE_CONTEXT,
+            ctx
+          );
+    expect(pools).toEqual([mockV2Pool]);
+
+    const warns = ctx.logger.outputs.filter(o => o.prefix === 'WARN:');
+    expect(warns).toHaveLength(1);
+    const fields: Record<string, unknown> = warns[0].extra;
+    // The serving logger writes fields with JSON semantics; anything that
+    // does not survive a round trip (a nested Error becomes `{}`) is lost.
+    expect(JSON.parse(JSON.stringify(fields))).toEqual(fields);
+    expect(Object.values(fields).some(v => v instanceof Error)).toBe(false);
+    return fields;
+  }
+
+  it.each(['getPools', 'getPoolsForTokens'] as const)(
+    '%s logs the error name and message as flat fields',
+    async call => {
+      const fields = await warnFieldsFor(
+        () =>
+          Promise.reject(new Error('Snapshot memo deny-list payload missing')),
+        call
+      );
+      expect(fields).toMatchObject({
+        chainId: ChainId.MAINNET,
+        protocol: Protocol.V2,
+        errorName: 'Error',
+        errorMessage: 'Snapshot memo deny-list payload missing',
+      });
+      expect(fields).not.toHaveProperty('error');
+      expect(fields).not.toHaveProperty('errorCode');
+    }
+  );
+
+  it('keeps tokenIn/tokenOut on the per-token warn', async () => {
+    const fields = await warnFieldsFor(
+      () => Promise.reject(new Error('boom')),
+      'getPoolsForTokens'
+    );
+    expect(fields).toMatchObject({
+      tokenIn: tokenIn.toString(),
+      tokenOut: tokenOut.toString(),
+    });
+  });
+
+  it('drops the URL path and request body an ethers error carries', async () => {
+    const fields = await warnFieldsFor(
+      () => Promise.reject(ethersServerError()),
+      'getPoolsForTokens'
+    );
+    expect(fields).toMatchObject({
+      errorName: 'Error',
+      errorMessage: 'missing response',
+      errorCode: 'SERVER_ERROR',
+    });
+    const serialized = JSON.stringify(fields);
+    expect(serialized).not.toContain(SECRET_PATH);
+    expect(serialized).not.toContain('0xdeadbeef');
+  });
+
+  it('carries a Node error code alongside the name', async () => {
+    const fields = await warnFieldsFor(
+      () => Promise.reject(invalidUrlError()),
+      'getPools'
+    );
+    expect(fields).toMatchObject({
+      errorName: 'TypeError',
+      errorCode: 'ERR_INVALID_URL',
+    });
+  });
+
+  it('names an AWS SDK service exception by its class name', async () => {
+    const fields = await warnFieldsFor(
+      () =>
+        Promise.reject(
+          new NoSuchKey({
+            message: 'The specified key does not exist.',
+            $metadata: {httpStatusCode: 404},
+          })
+        ),
+      'getPools'
+    );
+    expect(fields).toMatchObject({
+      errorName: 'NoSuchKey',
+      errorMessage: 'The specified key does not exist.',
+    });
+  });
+
+  it('logs a non-Error rejection without serializing the thrown value', async () => {
+    const fields = await warnFieldsFor(
+      () => Promise.reject({apiKey: 'not-an-error-object'}),
+      'getPoolsForTokens'
+    );
+    expect(fields).toMatchObject({
+      errorName: 'object',
+      errorMessage: 'Unknown error',
+    });
+    expect(JSON.stringify(fields)).not.toContain('not-an-error-object');
+  });
+
+  it('still propagates the fallback failure after logging the primary one', async () => {
+    const ctx = buildTestContext();
+    const discoverer = new PoolDiscovererWithFallbackV2(
+      serviceConfig,
+      new FakeRejectingDiscoverer<V2PoolInfo>(() =>
+        Promise.reject(new Error('primary down'))
+      ),
+      new FakeRejectingDiscoverer<V2PoolInfo>(() =>
+        Promise.reject(new Error('fallback down'))
+      )
+    );
+    await expect(
+      discoverer.getPools(ChainId.MAINNET, Protocol.V2, ctx)
+    ).rejects.toThrow('fallback down');
+    const warns = ctx.logger.outputs.filter(o => o.prefix === 'WARN:');
+    expect(warns[0].extra).toMatchObject({
+      errorName: 'Error',
+      errorMessage: 'primary down',
     });
   });
 });

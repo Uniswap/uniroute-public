@@ -10,18 +10,40 @@ import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
 import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
-import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
 import {IUniRouteServiceConfig} from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
+import {summarizeBatchError} from '../../../stores/quote/OnChainQuoteFetchError';
+
+type PrimaryFailureLogFields = {
+  errorName: string;
+  errorMessage: string;
+  errorCode?: string;
+};
+
+/**
+ * Flattens a primary-discoverer failure into string log fields. The serving
+ * logger serializes only an Error passed as its own argument; one nested in
+ * the fields object reaches pino as `{}` and Datadog drops it. The message is
+ * reduced by `summarizeBatchError` (ethers details block cut, URLs reduced to
+ * their origin, length capped) so provider text cannot carry a key into logs.
+ */
+function toPrimaryFailureLogFields(error: unknown): PrimaryFailureLogFields {
+  const {message, code} = summarizeBatchError(error);
+  return {
+    errorName: error instanceof Error ? error.name : typeof error,
+    errorMessage: message,
+    ...(code !== undefined ? {errorCode: code} : {}),
+  };
+}
 
 abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
   implements IPoolDiscoverer<TPoolInfo>
 {
   constructor(
     protected serviceConfig: IUniRouteServiceConfig,
-    protected primaryDiscoverer: BaseCachingPoolDiscoverer<TPoolInfo>,
-    protected fallbackDiscoverer: BaseCachingPoolDiscoverer<TPoolInfo>
+    protected primaryDiscoverer: IPoolDiscoverer<TPoolInfo>,
+    protected fallbackDiscoverer: IPoolDiscoverer<TPoolInfo>
   ) {}
 
   public async getPools(
@@ -52,7 +74,7 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
       ctx.logger.warn('Primary discoverer failed, falling back', {
         chainId,
         protocol,
-        error,
+        ...toPrimaryFailureLogFields(error),
       });
     }
 
@@ -119,7 +141,7 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
         protocol,
         tokenIn: tokenIn.toString(),
         tokenOut: tokenOut.toString(),
-        error,
+        ...toPrimaryFailureLogFields(error),
       });
     }
 
@@ -149,8 +171,8 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
 export class PoolDiscovererWithFallbackV2 extends BasePoolDiscovererWithFallback<V2PoolInfo> {
   constructor(
     serviceConfig: IUniRouteServiceConfig,
-    primaryDiscoverer: BaseCachingPoolDiscoverer<V2PoolInfo>,
-    fallbackDiscoverer: BaseCachingPoolDiscoverer<V2PoolInfo>
+    primaryDiscoverer: IPoolDiscoverer<V2PoolInfo>,
+    fallbackDiscoverer: IPoolDiscoverer<V2PoolInfo>
   ) {
     super(serviceConfig, primaryDiscoverer, fallbackDiscoverer);
   }
@@ -159,8 +181,8 @@ export class PoolDiscovererWithFallbackV2 extends BasePoolDiscovererWithFallback
 export class PoolDiscovererWithFallbackV3 extends BasePoolDiscovererWithFallback<V3PoolInfo> {
   constructor(
     serviceConfig: IUniRouteServiceConfig,
-    primaryDiscoverer: BaseCachingPoolDiscoverer<V3PoolInfo>,
-    fallbackDiscoverer: BaseCachingPoolDiscoverer<V3PoolInfo>
+    primaryDiscoverer: IPoolDiscoverer<V3PoolInfo>,
+    fallbackDiscoverer: IPoolDiscoverer<V3PoolInfo>
   ) {
     super(serviceConfig, primaryDiscoverer, fallbackDiscoverer);
   }
@@ -169,8 +191,8 @@ export class PoolDiscovererWithFallbackV3 extends BasePoolDiscovererWithFallback
 export class PoolDiscovererWithFallbackV4 extends BasePoolDiscovererWithFallback<V4PoolInfo> {
   constructor(
     serviceConfig: IUniRouteServiceConfig,
-    primaryDiscoverer: BaseCachingPoolDiscoverer<V4PoolInfo>,
-    fallbackDiscoverer: BaseCachingPoolDiscoverer<V4PoolInfo>
+    primaryDiscoverer: IPoolDiscoverer<V4PoolInfo>,
+    fallbackDiscoverer: IPoolDiscoverer<V4PoolInfo>
   ) {
     super(serviceConfig, primaryDiscoverer, fallbackDiscoverer);
   }
