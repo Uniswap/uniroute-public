@@ -4,7 +4,7 @@
 
 import {Hook, HookOptions} from '@uniswap/v4-sdk';
 import {
-  getAdapterHookConfig,
+  isAdapterOwnedByHook,
   getPermissionedHookAddresses,
 } from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {HOOKS_ADDRESSES_ALLOWLIST} from './hooksAddressesAllowlist';
@@ -204,9 +204,6 @@ export function v4HooksPoolsFiltering(
   const permissionedHookAddresses = new Set(
     getPermissionedHookAddresses(chainId).map(hook => hook.toLowerCase())
   );
-  const isOwnedAdapter = (token: string, hookAddress: string): boolean =>
-    getAdapterHookConfig(chainId, token)?.deployment.hookAddress ===
-    hookAddress;
   // A permissioned-hook pool is admissible only if its PoolKey is fully bounded:
   //   - hook ∈ permissioned registry,
   //   - feeTier/tickSpacing ∈ the canonical V4 set (what quickRoute probes),
@@ -225,8 +222,8 @@ export function v4HooksPoolsFiltering(
     }
     const token0 = pool.token0.id.toLowerCase();
     const token1 = pool.token1.id.toLowerCase();
-    const token0Owned = isOwnedAdapter(token0, hookAddress);
-    const token1Owned = isOwnedAdapter(token1, hookAddress);
+    const token0Owned = isAdapterOwnedByHook(chainId, token0, hookAddress);
+    const token1Owned = isAdapterOwnedByHook(chainId, token1, hookAddress);
     if (!token0Owned && !token1Owned) return false;
     const token0Known = token0Owned || majorTokens.has(token0);
     const token1Known = token1Owned || majorTokens.has(token1);
