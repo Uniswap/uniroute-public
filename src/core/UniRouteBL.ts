@@ -131,6 +131,14 @@ import {
   filterRoutesWithFotIntermediaryTokens,
   isValidRoute,
 } from '../lib/poolUtils';
+import {
+  dropRoutesThroughRefusedPools,
+  intermediaryTransfersOfRoute,
+  poolProbeTargetsForRoutes,
+  RouteEnds,
+  v4PoolManagerAddressOf,
+} from '../lib/fotPoolProbeRoutes';
+import {IPoolTransferProbe} from '../stores/fee-on-transfer/pool-probe/PoolTransferProbe';
 import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
@@ -254,7 +262,8 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly tokenProvider: ITokenProvider,
     private readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
     private readonly stateOverrideResolver: StateOverrideResolver,
-    private readonly erc4626WrapperRegistry?: Erc4626WrapperRegistrySource
+    private readonly erc4626WrapperRegistry?: Erc4626WrapperRegistrySource,
+    private readonly poolTransferProbe?: IPoolTransferProbe
   ) {
     this.blockNumberCache = new BlockNumberCache(
       serviceConfig.BlockNumberCache.TtlMs,
@@ -1710,7 +1719,81 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       );
     }
-    return filteredRoutes;
+    return this.dropRoutesThroughRefusedFotPools(
+      ctx,
+      chain,
+      filteredRoutes,
+      tokenInCurrencyInfo,
+      tokenOutCurrencyInfo,
+      tradeType
+    );
+  }
+
+  /**
+   * Drops routes that move an intermediary token through a pool which taxes
+   * or refuses that transfer — a tax or gate keyed on one pool's address,
+   * which the per-token fee above cannot see. Only the direction the route
+   * moves the token is checked: out of the pool that produces it, into the
+   * pool that consumes it. On a timeout or an RPC failure every route
+   * survives.
+   */
+  private async dropRoutesThroughRefusedFotPools(
+    ctx: Context,
+    chain: Chain,
+    routes: RouteBasic<Pool>[],
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType
+  ): Promise<RouteBasic<Pool>[]> {
+    const probe = this.poolTransferProbe;
+    if (!probe || routes.length === 0 || !probe.appliesTo(chain.chainId, ctx)) {
+      return routes;
+    }
+    const ends: RouteEnds = {
+      tokenIn: tokenInCurrencyInfo.wrappedAddress,
+      tokenOut: tokenOutCurrencyInfo.wrappedAddress,
+      wrappedNative: chain.wrappedNativeToken,
+      v4PoolManager: v4PoolManagerAddressOf(chain),
+    };
+    const unwalkable = routes.filter(
+      route => intermediaryTransfersOfRoute(route, ends) === undefined
+    ).length;
+    if (unwalkable > 0) {
+      // Such a route is kept unprobed; it means a path that does not chain
+      // from tokenIn, which nothing upstream should produce.
+      void ctx.metrics
+        .count(buildMetricKey('FotPoolProbeUnwalkableRoute'), unwalkable, {
+          tags: [
+            `chain:${ChainId[chain.chainId]}`,
+            'status:failure',
+            'reason:unchained_path',
+          ],
+        })
+        .catch(() => undefined);
+    }
+    const targets = poolProbeTargetsForRoutes(routes, ends);
+    if (targets.length === 0) return routes;
+
+    const measurements = await probe.measurements(chain, targets, ctx);
+    const kept = dropRoutesThroughRefusedPools(routes, ends, measurements);
+    if (kept.length < routes.length) {
+      // Fire-and-forget: the routes are already filtered, and a metrics
+      // failure must not fail the quote.
+      void ctx.metrics
+        .count(
+          buildMetricKey('FotPoolRoutesFiltered'),
+          routes.length - kept.length,
+          {
+            tags: [
+              `chain:${ChainId[chain.chainId]}`,
+              `tradeType:${tradeType}`,
+              'status:success',
+            ],
+          }
+        )
+        .catch(() => undefined);
+    }
+    return kept;
   }
 
   /**

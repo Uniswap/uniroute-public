@@ -181,6 +181,16 @@ export interface IUniRouteServiceConfig {
     // token is served without a fee.
     DeadlineMs: number;
   };
+  PoolTransferProbe: {
+
+    // holder), so a pool is simulated at most once per TTL.
+    CacheTtlSeconds: number;
+    // Milliseconds a quote waits for the simulation of its uncached
+    // intermediary pools before serving their routes unfiltered.
+    DeadlineMs: number;
+    // Distinct (token, holder) pairs one quote may look up.
+    MaxTargetsPerRequest: number;
+  };
   PoolDiscovery: {
     // Cache NO_HOOKS pool lists under distinct keys instead of bypassing the
     // pools-for-tokens cache (NO_HOOKS only — HOOKS_ONLY lists are
@@ -383,6 +393,11 @@ export const getUniRouteSyncConfig = (
       CacheTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       DeadlineMs: __PLACEHOLDER__,
     },
+    PoolTransferProbe: {
+      CacheTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      DeadlineMs: __PLACEHOLDER__,
+      MaxTargetsPerRequest: __PLACEHOLDER__,
+    },
     PoolDiscovery: {
       PoolsForTokensHooksVariantCacheEnabled:
         getPoolsForTokensHooksVariantCacheEnabled(),
@@ -503,6 +518,11 @@ export const getQuickRouteSyncConfig = (
     FeeProbe: {
       CacheTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
       DeadlineMs: __PLACEHOLDER__,
+    },
+    PoolTransferProbe: {
+      CacheTtlSeconds: __PLACEHOLDER__ * __PLACEHOLDER__ * __PLACEHOLDER__,
+      DeadlineMs: __PLACEHOLDER__,
+      MaxTargetsPerRequest: __PLACEHOLDER__,
     },
     PoolDiscovery: {
       PoolsForTokensHooksVariantCacheEnabled:

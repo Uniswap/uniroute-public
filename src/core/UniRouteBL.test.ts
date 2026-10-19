@@ -94,6 +94,13 @@ import {Protocol} from '../models/pool/Protocol';
 import {Pool} from '../models/pool/Pool';
 import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
+import {IPoolTransferProbe} from '../stores/fee-on-transfer/pool-probe/PoolTransferProbe';
+import {
+  PoolProbeTarget,
+  poolProbeTargetKey,
+  TransferMeasurement,
+  TransferVerdict,
+} from '../stores/fee-on-transfer/pool-probe/TransferSimulationSource';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
 import {
   EMPTY_NAMESPACE_CONTEXT,
@@ -7638,6 +7645,168 @@ describe('UniRouteBL', () => {
 
         expect(quoteStrategy.receivedRoutes).toEqual([[]]);
         expect(testCtx.metrics.countStore[fotFilteredMetric]).toBe(1);
+      });
+
+      describe('intermediary pools refused by the pool transfer probe', () => {
+        // The same routes, but the intermediary carries no per-token fee:
+        // only the pool it is routed through refuses it, as BTCs' BTCB pair
+        // does on BSC.
+        const plainHandler = new FotTokenHandler(new Set());
+        const refusingPool = new Address(
+          '0x3333333333333333333333333333333333333333'
+        );
+        const poolFilteredMetric = buildMetricKey('FotPoolRoutesFiltered');
+
+        class FakePoolTransferProbe implements IPoolTransferProbe {
+          readonly requests: PoolProbeTarget[][] = [];
+          constructor(
+            private readonly chains: ReadonlySet<number>,
+            private readonly answers: Map<string, TransferMeasurement>
+          ) {}
+
+          appliesTo(chainId: number): boolean {
+            return this.chains.has(chainId);
+          }
+
+          async measurements(
+            _chain: Chain,
+            targets: readonly PoolProbeTarget[]
+          ): Promise<Map<string, TransferMeasurement>> {
+            this.requests.push([...targets]);
+            return this.answers;
+          }
+        }
+
+        const buildProbedBL = (
+          probe: IPoolTransferProbe,
+          quoteStrategy: MockedQuoteStrategy
+        ): UniRouteBL =>
+          new UniRouteBL(
+            serviceConfig,
+            redisCache,
+            chainRepository,
+            poolDiscoverer,
+            freshPoolDetailsWrapper,
+            plainHandler,
+            quoteFetcher,
+            quoteSelector,
+            routeQuoteAllocator,
+            gasEstimateProvider,
+            noGasConverter,
+            new FotIntermediaryRoutesRepository(true),
+            cachedRoutesRepository,
+            noRouteCacheRepository,
+            quoteStrategy,
+            dummySimulator,
+            quoteRequestValidator,
+            tokenProvider,
+            mockedRpcProviderMap,
+            stateOverrideResolver,
+            undefined,
+            probe
+          );
+
+        const clean = {verdict: 'clean' as const, lossBps: 0};
+        // The route sends the intermediary INTO the refusing pool.
+        const refusedBy = (
+          verdict: TransferVerdict,
+          direction: 'out' | 'into' = 'into'
+        ): Map<string, TransferMeasurement> =>
+          new Map([
+            [
+              poolProbeTargetKey(
+                new Address(intermediaryFotToken),
+                refusingPool
+              ),
+              {
+                out: clean,
+                into: clean,
+                [direction]: {verdict, lossBps: 0},
+              },
+            ],
+          ]);
+
+        it.each(['fee', 'blocked'] as const)(
+          'drops the route whose intermediary pool is %s',
+          async verdict => {
+            const probe = new FakePoolTransferProbe(
+              new Set([ChainId.MAINNET]),
+              refusedBy(verdict)
+            );
+            const quoteStrategy = new RecordingQuoteStrategy();
+            const testCtx = buildTestContext();
+
+            const response = await buildProbedBL(probe, quoteStrategy).quote(
+              testCtx,
+              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            );
+
+            expect(response.error).toBeUndefined();
+            expect(
+              quoteStrategy.receivedRoutes[0].map(route =>
+                route.path.map(pool => pool.address.toString())
+              )
+            ).toEqual([[directPoolAddress]]);
+            expect(testCtx.metrics.countStore[poolFilteredMetric]).toBe(1);
+            // Both hops of the intermediary route, holder by holder.
+            expect(
+              probe.requests[0].map(target => target.holder.lowerCased)
+            ).toEqual([
+              '0x2222222222222222222222222222222222222222',
+              refusingPool.lowerCased,
+            ]);
+          }
+        );
+
+        it('keeps the route when the pool refuses only the direction the route does not use', async () => {
+          const probe = new FakePoolTransferProbe(
+            new Set([ChainId.MAINNET]),
+            refusedBy('fee', 'out')
+          );
+          const quoteStrategy = new RecordingQuoteStrategy();
+
+          await buildProbedBL(probe, quoteStrategy).quote(
+            buildTestContext(),
+            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          );
+
+          expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+        });
+
+        it('keeps every route when the probe has no verdict', async () => {
+          const probe = new FakePoolTransferProbe(
+            new Set([ChainId.MAINNET]),
+            new Map()
+          );
+          const quoteStrategy = new RecordingQuoteStrategy();
+          const testCtx = buildTestContext();
+
+          await buildProbedBL(probe, quoteStrategy).quote(
+            testCtx,
+            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          );
+
+          expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+          expect(
+            testCtx.metrics.countStore[poolFilteredMetric]
+          ).toBeUndefined();
+        });
+
+        it('does not consult the probe on a chain outside its selection', async () => {
+          const probe = new FakePoolTransferProbe(
+            new Set([ChainId.BNB]),
+            refusedBy('fee')
+          );
+          const quoteStrategy = new RecordingQuoteStrategy();
+
+          await buildProbedBL(probe, quoteStrategy).quote(
+            buildTestContext(),
+            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          );
+
+          expect(probe.requests).toEqual([]);
+          expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+        });
       });
     });
   });
