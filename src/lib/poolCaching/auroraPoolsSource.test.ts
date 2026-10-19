@@ -3937,6 +3937,7 @@ describe('AuroraV3PoolsProvider', () => {
       token1PriceUsd: 1,
     }));
     const metric = new FakeMetric();
+    const infos: Array<{message: string; extra: unknown}> = [];
     const pools = await new AuroraV3PoolsProvider(
       ROBINHOOD,
       0.01,
@@ -3947,7 +3948,12 @@ describe('AuroraV3PoolsProvider', () => {
           v3Row({poolAddress: '0xaaa', tvlUsd: 2500}),
         ]),
         prices: freshPrices(),
-        logger: noopLogger,
+        logger: {
+          ...noopLogger,
+          info: (message, extra) => {
+            infos.push({message, extra});
+          },
+        },
         metric,
       },
       true
@@ -3956,6 +3962,48 @@ describe('AuroraV3PoolsProvider', () => {
     expect(
       metric.byKey('CachePools.aurora.tvl_guard_top100_displaced')
     ).toEqual([expect.objectContaining({value: 1})]);
+    expect(
+      infos.filter(({message}) =>
+        message.startsWith('Aurora TVL guard top-100 displacement')
+      )
+    ).toEqual([
+      {
+        message: `Aurora TVL guard top-100 displacement ${ROBINHOOD}:V3: 1`,
+        extra: {
+          applied: true,
+          displacedSample: [
+            expect.stringMatching(/^0xzzz[01]:40000\.00:\d+\.\d{2}$/),
+          ],
+        },
+      },
+    ]);
+  });
+
+  it('logs no displacement sample when the guard displaces nothing', async () => {
+    const infos: string[] = [];
+    await new AuroraV3PoolsProvider(
+      ROBINHOOD,
+      0.01,
+      {
+        routablePools: new FakeV3RoutablePools([
+          v3Row({poolAddress: '0xreal', tvlUsd: 2500}),
+        ]),
+        prices: freshPrices(),
+        logger: {
+          ...noopLogger,
+          info: message => {
+            infos.push(message);
+          },
+        },
+        metric: new FakeMetric(),
+      },
+      true
+    ).getPools();
+    expect(
+      infos.filter(message =>
+        message.startsWith('Aurora TVL guard top-100 displacement')
+      )
+    ).toEqual([]);
   });
 
   it.each([false, true])(

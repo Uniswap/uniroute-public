@@ -1183,7 +1183,26 @@ abstract class BaseAuroraPoolsProvider<
         );
       const rawTop = topIds('raw');
       const guardedTop = topIds('guarded');
-      const displaced = [...rawTop].filter(id => !guardedTop.has(id)).length;
+      const displacedPools = rankedPools
+        .filter(pool => rawTop.has(pool.id) && !guardedTop.has(pool.id))
+        .sort((a, b) => b.raw - a.raw);
+      const displaced = displacedPools.length;
+      if (displaced > 0) {
+        // The count alone cannot tell a displaced junk-priced pool from a
+        // real one, so a gate review needs the ids to look them up.
+        this.deps.logger.info(
+          `Aurora TVL guard top-100 displacement ${targetKey(this.chainId, protocol)}: ${displaced}`,
+          {
+            applied: this.applyTvlGuard,
+            displacedSample: displacedPools
+              .slice(0, SAMPLE_SIZE)
+              .map(
+                pool =>
+                  `${pool.id}:${pool.raw.toFixed(2)}:${pool.guarded.toFixed(2)}`
+              ),
+          }
+        );
+      }
       this.deps.metric.putMetric(
         'CachePools.aurora.tvl_guard_top100_displaced',
         displaced,
