@@ -1129,7 +1129,7 @@ export class UniRouteBL implements IUniRoutedBL {
     const [tokensInfo, blockNumber, gasPriceResult] = await Promise.all([
       // Timed separately from the sibling RPC arms so the composite
       // GetTokensAndBlockNumber tail splits into the token branch vs
-      // block/gas branch (the token arm is a Redis → GraphQL → on-chain
+      // block/gas branch (the token arm is a Redis → Aurora → on-chain
       // cascade with very different tail behavior than one eth_ RPC).
       withLatencyMetric('GetTokens', ctx, rpcMetricTags, () =>
         this.tokenHandler.getTokens(

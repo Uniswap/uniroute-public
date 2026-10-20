@@ -159,7 +159,7 @@ export interface IUniRouteServiceConfig {
     // The TTL for the token cache entry.
     TokenCacheEntryTtlSeconds: number;
     // TTL for negative token cache entries ("this address is definitively
-    // not an ERC-__PLACEHOLDER__"), written only when BOTH the GQL and on-chain sources
+    // not an ERC-__PLACEHOLDER__"), written only when BOTH the Aurora and on-chain sources
     // assert nonexistence — never on transient errors. Kept short so a
     // just-deployed token is not blackholed. __PLACEHOLDER__ disables negative caching
     // entirely (status quo). Kill switch: set
