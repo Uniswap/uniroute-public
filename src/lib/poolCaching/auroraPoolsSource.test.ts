@@ -45,7 +45,11 @@ import {
 } from './sor-providers';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
-import type {RoutablePoolsService} from '@uniswap/lib-data-ingestion-aurora';
+import {
+  POOL_STATS_V3_UNPRICED_INDEX,
+  PoolStatsIndexMissingError,
+  type RoutablePoolsService,
+} from '@uniswap/lib-data-ingestion-aurora';
 
 const noopLogger: Logger = {
   info: () => {},
@@ -259,6 +263,7 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     'POOL_CACHING_AURORA_PRIMARY_TARGETS',
     'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_TARGETS',
+    'POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
     'DD_ENV',
@@ -305,11 +310,15 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
       prefilterTargets: new Set(),
       prefilterWildcardIgnored: false,
+      prefilterUnpricedTargets: new Set<string>(),
+      prefilterUnpricedRejected: new Map(),
     });
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '130:v2,1:V2';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
       prefilterTargets: new Set(['130:V2', '1:V2']),
       prefilterWildcardIgnored: false,
+      prefilterUnpricedTargets: new Set<string>(),
+      prefilterUnpricedRejected: new Map(),
     });
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '*';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
@@ -321,6 +330,85 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
       prefilterTargets: new Set(['130:V2']),
       prefilterWildcardIgnored: true,
     });
+  });
+
+  it('keeps an unpriced target only for a pre-filtered V3 combo, and rejects the rest by reason', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3,8453:V2';
+    process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS =
+      '8453:v3,8453:V2,1:V3,base:V3,*';
+    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
+      prefilterUnpricedTargets: new Set(['8453:V3']),
+      prefilterUnpricedRejected: new Map([
+        ['8453:V2', 'unpriced_not_v3'],
+        ['1:V3', 'unpriced_not_prefiltered'],
+        ['BASE:V3', 'unpriced_not_prefiltered'],
+        ['*', 'unpriced_wildcard'],
+      ]),
+    });
+    process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS = '*';
+    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
+      prefilterUnpricedTargets: new Set(),
+      prefilterUnpricedRejected: new Map([['*', 'unpriced_wildcard']]),
+    });
+  });
+
+  it('reports every rejected unpriced target on every apply run', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '8453:V3';
+    process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3';
+    process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS =
+      '*,8453:V2,1:V3,8453:V3';
+    const metric = new FakeMetric();
+    const warnings: Array<[string, unknown]> = [];
+    const logger: Logger = {
+      ...noopLogger,
+      warn: (message, fields) => warnings.push([message, fields]),
+    };
+    class FakeRoutablePools extends FakeV2RoutablePools {
+      async listAllV3RoutablePools() {
+        return [];
+      }
+      async listAllV4RoutablePools() {
+        return [];
+      }
+    }
+    for (let run = 0; run < 2; run++) {
+      applyAuroraPoolSources(
+        [],
+        {
+          trackedEthThresholdFor: () => 0.025,
+          untrackedUsdThresholdFor: () => Number.MAX_VALUE,
+        },
+        logger,
+        metric,
+        {
+          providerDeps: {
+            routablePools: new FakeRoutablePools([]),
+            prices: {batchGet: async () => new Map()},
+            logger,
+            metric,
+          },
+        }
+      );
+    }
+    const perRun = [
+      ['*', 'unpriced_wildcard'],
+      ['8453:V2', 'unpriced_not_v3'],
+      ['1:V3', 'unpriced_not_prefiltered'],
+    ];
+    expect(metric.byKey('CachePools.aurora.prefilter_config_rejected')).toEqual(
+      [...perRun, ...perRun].map(([, reason]) => ({
+        key: 'CachePools.aurora.prefilter_config_rejected',
+        value: 1,
+        tags: {reason},
+      }))
+    );
+    expect(warnings).toEqual(
+      [...perRun, ...perRun].map(([target, reason]) => [
+        'Aurora pre-filter unpriced target ignored',
+        {target, reason},
+      ])
+    );
   });
 
   it('reports a pre-filter wildcard on every apply run', () => {
@@ -681,13 +769,18 @@ describe('createProxiedUnirouteAuroraPool', () => {
 });
 
 describe('refusePrefilteredV3Primary', () => {
-  const configWith = (prefilterTargets: ReadonlySet<string>) => ({
+  const configWith = (
+    prefilterTargets: ReadonlySet<string>,
+    prefilterUnpricedTargets: ReadonlySet<string> = new Set<string>()
+  ) => ({
     shadowTargets: new Set<string>(),
     primaryTargets: new Set<string>(),
     tvlGuardTargets: new Set<string>(),
     tvlGuardTargetsWildcardRejection: undefined,
     prefilterTargets,
     prefilterWildcardIgnored: false,
+    prefilterUnpricedTargets,
+    prefilterUnpricedRejected: new Map(),
     minPoolCountRatio: 0.5,
     minPoolCountByTarget: new Map<string, number>(),
     minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -724,6 +817,24 @@ describe('refusePrefilteredV3Primary', () => {
         },
       }),
     ]);
+  });
+
+  it('keeps a pre-filtered V3 primary that also reads its unpriced liquid pools', () => {
+    const metric = new FakeMetric();
+    const key = targetKey(8453, Protocol.V3);
+    const config = configWith(new Set([key]), new Set([key]));
+
+    expect(
+      refusePrefilteredV3Primary(
+        'primary',
+        config,
+        8453,
+        Protocol.V3,
+        noopLogger,
+        metric
+      )
+    ).toBe('primary');
+    expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([]);
   });
 
   const keptCases: Array<[string, 'primary' | 'shadow', number, Protocol]> = [
@@ -771,6 +882,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       tvlGuardTargetsWildcardRejection: undefined,
       prefilterTargets: new Set<string>(),
       prefilterWildcardIgnored: false,
+      prefilterUnpricedTargets: new Set<string>(),
+      prefilterUnpricedRejected: new Map(),
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -806,6 +919,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       tvlGuardTargetsWildcardRejection: undefined,
       prefilterTargets: new Set<string>(),
       prefilterWildcardIgnored: false,
+      prefilterUnpricedTargets: new Set<string>(),
+      prefilterUnpricedRejected: new Map(),
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set([targetKey(4663, Protocol.V4)]),
@@ -849,6 +964,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       tvlGuardTargetsWildcardRejection: undefined,
       prefilterTargets: new Set<string>(),
       prefilterWildcardIgnored: false,
+      prefilterUnpricedTargets: new Set<string>(),
+      prefilterUnpricedRejected: new Map(),
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -877,6 +994,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       tvlGuardTargetsWildcardRejection: undefined,
       prefilterTargets: new Set<string>(),
       prefilterWildcardIgnored: false,
+      prefilterUnpricedTargets: new Set<string>(),
+      prefilterUnpricedRejected: new Map(),
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map([[targetKey(4663, Protocol.V4), 40000]]),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -4819,7 +4938,10 @@ describe('AuroraV2PoolsProvider', () => {
         {
           chainId: 8453,
           minTvlUsd: 0,
-          poolStatsPrefilter: {minPoolStatsTvlUsd: 1},
+          poolStatsPrefilter: {
+            minPoolStatsTvlUsd: 1,
+            includeUnpricedLiquidPools: false,
+          },
         },
       ]);
 
@@ -5829,8 +5951,181 @@ describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () =>
       {
         chainId: 8453,
         minTvlUsd: 0,
-        poolStatsPrefilter: {minPoolStatsTvlUsd: 1},
+        poolStatsPrefilter: {
+          minPoolStatsTvlUsd: 1,
+          includeUnpricedLiquidPools: false,
+        },
       },
+    ]);
+  });
+});
+
+describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
+  const keys = [
+    'POOL_CACHING_AURORA_SHADOW_TARGETS',
+    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
+    'POOL_CACHING_AURORA_PREFILTER_TARGETS',
+    'POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS',
+    'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
+  ];
+  const saved = new Map<string, string | undefined>();
+  beforeEach(() => {
+    for (const key of keys) saved.set(key, process.env[key]);
+  });
+  afterEach(() => {
+    for (const key of keys) {
+      const value = saved.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  class FakeRoutablePools
+    implements
+      Pick<
+        RoutablePoolsService,
+        | 'listAllV2RoutablePools'
+        | 'listAllV3RoutablePools'
+        | 'listAllV4RoutablePools'
+        | 'batchGetPoolVolumeUsd30d'
+      >
+  {
+    readonly v3Options: Array<
+      Parameters<RoutablePoolsService['listAllV3RoutablePools']>[1]
+    > = [];
+    constructor(private readonly v3Error: Error | undefined = undefined) {}
+    async batchGetPoolVolumeUsd30d() {
+      return new Map<string, number>();
+    }
+    async listAllV2RoutablePools() {
+      return [];
+    }
+    async listAllV3RoutablePools(
+      _ctx: Parameters<RoutablePoolsService['listAllV3RoutablePools']>[0],
+      options: Parameters<RoutablePoolsService['listAllV3RoutablePools']>[1]
+    ) {
+      this.v3Options.push(options);
+      if (this.v3Error) throw this.v3Error;
+      return [];
+    }
+    async listAllV4RoutablePools() {
+      return [];
+    }
+  }
+
+  const subgraphPools = [
+    v3Pool('0x0000000000000000000000000000000000000b03', 5000),
+  ];
+
+  async function runBaseV3Primary(
+    routablePools: FakeRoutablePools,
+    metric: FakeMetric,
+    logger: Logger
+  ): Promise<V3SubgraphPool[]> {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '8453:V3';
+    process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3';
+    process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS = '8453:V3';
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"8453:V3":1}';
+    const baseV3 = {
+      chainId: 8453,
+      protocol: Protocol.V3,
+      provider: fakeProvider<V3SubgraphPool>([subgraphPools]),
+    };
+    applyAuroraPoolSources(
+      [baseV3],
+      {
+        trackedEthThresholdFor: () => 0.025,
+        untrackedUsdThresholdFor: () => Number.MAX_VALUE,
+      },
+      logger,
+      metric,
+      {
+        scopedRun: true,
+        providerDeps: {
+          routablePools,
+          prices: {
+            batchGet: async (_ctx, tokens) =>
+              new Map(
+                tokens.map(({chainId, address}) => [
+                  `${chainId}_${WRAPPED_NATIVE_BY_CHAIN.get(chainId)}`,
+                  {
+                    chainId,
+                    tokenAddress: address,
+                    priceUsd: 2000,
+                    timestamp: new Date(),
+                    updatedAt: new Date(),
+                  },
+                ])
+              ),
+          },
+          logger,
+          metric,
+        },
+      }
+    );
+    const pools = await baseV3.provider.getPools();
+    await settlePendingAuroraShadowsForTesting();
+    return pools;
+  }
+
+  it('serves Base V3 in primary and asks the lib for the unpriced liquid pools', async () => {
+    const metric = new FakeMetric();
+    const routablePools = new FakeRoutablePools();
+
+    expect(await runBaseV3Primary(routablePools, metric, noopLogger)).toEqual(
+      subgraphPools
+    );
+
+    expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([]);
+    // Primary ran: the empty Aurora read is under the floor of 1, so the
+    // tick falls back to the subgraph, which only a primary combo does.
+    expect(metric.byKey('CachePools.aurora.fallback')).toHaveLength(1);
+    expect(routablePools.v3Options).toEqual([
+      {
+        chainId: 8453,
+        minTvlUsd: 0,
+        poolStatsPrefilter: {
+          minPoolStatsTvlUsd: 1,
+          includeUnpricedLiquidPools: true,
+        },
+      },
+    ]);
+  });
+
+  it('serves the subgraph and reports index_missing while the lib refuses the unpriced read', async () => {
+    const metric = new FakeMetric();
+    const warnings: Array<[string, unknown]> = [];
+    const logger: Logger = {
+      ...noopLogger,
+      warn: (message, fields) => warnings.push([message, fields]),
+    };
+    const routablePools = new FakeRoutablePools(
+      new PoolStatsIndexMissingError(POOL_STATS_V3_UNPRICED_INDEX)
+    );
+
+    expect(await runBaseV3Primary(routablePools, metric, logger)).toEqual(
+      subgraphPools
+    );
+
+    expect(
+      metric.byKey('CachePools.aurora.prefilter_unpriced_rejected')
+    ).toEqual([
+      {
+        key: 'CachePools.aurora.prefilter_unpriced_rejected',
+        value: 1,
+        tags: {chainId: '8453', protocol: 'V3', reason: 'index_missing'},
+      },
+    ]);
+    expect(warnings).toContainEqual([
+      'Aurora pre-filter unpriced read refused — index missing or invalid',
+      {target: '8453:V3', index: POOL_STATS_V3_UNPRICED_INDEX},
+    ]);
+    expect(metric.byKey('CachePools.aurora.served')).toEqual([]);
+    expect(metric.byKey('CachePools.aurora.fallback')).toEqual([
+      expect.objectContaining({
+        tags: expect.objectContaining({reason: 'error'}),
+      }),
     ]);
   });
 });

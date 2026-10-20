@@ -49,6 +49,8 @@ import {
   canonicalTokenKey,
   type CurrentTokenPricesService,
   type DataIngestionAuroraDB,
+  type ListV3RoutablePoolsOptions,
+  PoolStatsIndexMissingError,
   type RoutablePoolsService,
   type V4RoutablePool,
 } from '@uniswap/lib-data-ingestion-aurora';
@@ -267,6 +269,14 @@ export type TvlGuardWildcardRejection =
   | 'wildcard_in_prod'
   | 'wildcard_unknown_environment';
 
+// Why an unpriced pre-filter target was dropped: a wildcard (the branch is
+// enabled per combo), a non-V3 key (only V3 has the branch), or a key whose
+// combo is not pre-filtered (the branch extends the pre-filtered read).
+export type PrefilterUnpricedRejection =
+  | 'unpriced_wildcard'
+  | 'unpriced_not_v3'
+  | 'unpriced_not_prefiltered';
+
 export interface AuroraPoolsSourceConfig {
   // 'all' (env value "*") or a set of `${chainId}:${PROTOCOL}` keys.
   shadowTargets: 'all' | ReadonlySet<string>;
@@ -275,6 +285,13 @@ export interface AuroraPoolsSourceConfig {
   prefilterTargets: ReadonlySet<string>;
   // A lossy pre-filter requires explicit per-combo selection.
   prefilterWildcardIgnored: boolean;
+  // Pre-filtered V3 combos whose read also takes the pools nothing prices
+  // (the exact_zero family). Explicit keys only, and only for a V3 combo
+  // that is also in prefilterTargets; any other entry is dropped into
+  // prefilterUnpricedRejected. The lib refuses the read until
+  // pool_stats_v3_chain_unpriced_idx is valid.
+  prefilterUnpricedTargets: ReadonlySet<string>;
+  prefilterUnpricedRejected: ReadonlyMap<string, PrefilterUnpricedRejection>;
   // Prod enables the guard per combo after its shadow soak; rejecting `*`
   // keeps an all-combo typo in shadow everywhere and makes it observable.
   tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
@@ -304,6 +321,28 @@ function parseTargets(raw: string | undefined): 'all' | ReadonlySet<string> {
       .map(entry => entry.trim().toUpperCase())
       .filter(entry => entry.length > 0)
   );
+}
+
+function parsePrefilterUnpricedTargets(
+  raw: string | undefined,
+  prefilterTargets: ReadonlySet<string>
+): {
+  targets: ReadonlySet<string>;
+  rejected: ReadonlyMap<string, PrefilterUnpricedRejection>;
+} {
+  const parsed = parseTargets(raw);
+  const entries = parsed === 'all' ? ['*'] : [...parsed];
+  const targets = new Set<string>();
+  const rejected = new Map<string, PrefilterUnpricedRejection>();
+  for (const key of entries) {
+    if (key === '*') rejected.set(key, 'unpriced_wildcard');
+    else if (!key.endsWith(`:${Protocol.V3}`)) {
+      rejected.set(key, 'unpriced_not_v3');
+    } else if (!prefilterTargets.has(key)) {
+      rejected.set(key, 'unpriced_not_prefiltered');
+    } else targets.add(key);
+  }
+  return {targets, rejected};
 }
 
 // JSON map of targetKey -> absolute floor, e.g. '{"4663:V4":40000}'. Keys are
@@ -386,6 +425,10 @@ export function auroraPoolsSourceConfigFromEnv(
     parsedPrefilterTargets === 'all'
       ? new Set<string>()
       : new Set([...parsedPrefilterTargets].filter(key => key !== '*'));
+  const prefilterUnpriced = parsePrefilterUnpricedTargets(
+    process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS,
+    prefilterTargets
+  );
   const setEnvironments = environments
     .map(value => value?.trim().toLowerCase())
     .filter((value): value is string => Boolean(value));
@@ -409,6 +452,8 @@ export function auroraPoolsSourceConfigFromEnv(
       : parsedTvlGuardTargets,
     prefilterTargets,
     prefilterWildcardIgnored,
+    prefilterUnpricedTargets: prefilterUnpriced.targets,
+    prefilterUnpricedRejected: prefilterUnpriced.rejected,
     tvlGuardTargetsWildcardRejection,
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
@@ -483,7 +528,8 @@ export function resolveAuroraModeWithPrimaryFloor(
 // null or zero pool_stats.tvl_usd, so the candidate query drops them, and no
 // index on pool_stats reaches them without a sequential scan (Base V3 holds
 // ~299k). Top-100 parity cannot see the loss because those pools never rank,
-// so such a combo stays shadow-only until the family has its own read.
+// so such a combo stays shadow-only unless it also reads that family
+// (prefilterUnpricedTargets).
 export function refusePrefilteredV3Primary(
   mode: AuroraTargetMode,
   config: AuroraPoolsSourceConfig,
@@ -496,7 +542,8 @@ export function refusePrefilteredV3Primary(
   if (
     mode !== 'primary' ||
     protocol !== Protocol.V3 ||
-    !config.prefilterTargets.has(key)
+    !config.prefilterTargets.has(key) ||
+    config.prefilterUnpricedTargets.has(key)
   ) {
     return mode;
   }
@@ -1561,12 +1608,44 @@ export class AuroraV3PoolsProvider
     deps: AuroraProviderDeps<'listAllV3RoutablePools'>,
     applyTvlGuard = false,
     // Lossy candidate pre-filter for chains whose full read exceeds the
-    // statement timeout (Base); same shape as V2's.
-    private readonly poolStatsPrefilter:
-      | {minPoolStatsTvlUsd: number}
-      | undefined = undefined
+    // statement timeout (Base); same shape as V2's, plus the opt-in read of
+    // the unpriced liquid pools the floor drops.
+    private readonly poolStatsPrefilter: ListV3RoutablePoolsOptions['poolStatsPrefilter'] = undefined
   ) {
     super(chainId, trackedEthThreshold, deps, applyTvlGuard);
+  }
+
+  // The lib refuses an unpriced read whose index is missing or invalid. The
+  // error still propagates, so a primary tick serves the subgraph, which
+  // carries the exact_zero family, rather than a read that drops it.
+  private async listPools(ctx: Context) {
+    try {
+      return await this.deps.routablePools.listAllV3RoutablePools(ctx, {
+        chainId: this.chainId as ExtendedChainId,
+        minTvlUsd: 0,
+        ...(this.poolStatsPrefilter
+          ? {poolStatsPrefilter: this.poolStatsPrefilter}
+          : {}),
+      });
+    } catch (err) {
+      if (err instanceof PoolStatsIndexMissingError) {
+        this.deps.metric.putMetric(
+          'CachePools.aurora.prefilter_unpriced_rejected',
+          1,
+          MetricLoggerUnit.Count,
+          {
+            chainId: String(this.chainId),
+            protocol: String(Protocol.V3),
+            reason: 'index_missing',
+          }
+        );
+        this.deps.logger.warn(
+          'Aurora pre-filter unpriced read refused — index missing or invalid',
+          {target: targetKey(this.chainId, Protocol.V3), index: err.indexName}
+        );
+      }
+      throw err;
+    }
   }
 
   async getPools(): Promise<V3SubgraphPool[]> {
@@ -1578,13 +1657,7 @@ export class AuroraV3PoolsProvider
     // provider invariant as V4.
     const {nativePrice, pools} = await this.withFetchSlot(async () => ({
       nativePrice: await this.nativeUsdPrice(ctx),
-      pools: await this.deps.routablePools.listAllV3RoutablePools(ctx, {
-        chainId: this.chainId as ExtendedChainId,
-        minTvlUsd: 0,
-        ...(this.poolStatsPrefilter
-          ? {poolStatsPrefilter: this.poolStatsPrefilter}
-          : {}),
-      }),
+      pools: await this.listPools(ctx),
     }));
 
     const result: V3SubgraphPool[] = [];
@@ -2677,6 +2750,15 @@ export function applyAuroraPoolSources<
       'Aurora pre-filter targets wildcard ignored — list explicit combos'
     );
   }
+  for (const [target, reason] of config.prefilterUnpricedRejected) {
+    metric.putMetric(
+      'CachePools.aurora.prefilter_config_rejected',
+      1,
+      MetricLoggerUnit.Count,
+      {reason}
+    );
+    logger.warn('Aurora pre-filter unpriced target ignored', {target, reason});
+  }
   const skippedTargets = new Set<string>();
   for (const {chainId, protocol} of chainProtocols) {
     const key = targetKey(chainId, protocol);
@@ -2816,7 +2898,11 @@ export function applyAuroraPoolSources<
           providerDeps,
           applyTvlGuard,
           config.prefilterTargets.has(key)
-            ? {minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD}
+            ? {
+                minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD,
+                includeUnpricedLiquidPools:
+                  config.prefilterUnpricedTargets.has(key),
+              }
             : undefined
         ),
         chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
