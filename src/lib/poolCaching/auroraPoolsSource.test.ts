@@ -264,6 +264,7 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS',
+    'POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
     'DD_ENV',
@@ -312,6 +313,8 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
     });
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '130:v2,1:V2';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
@@ -319,6 +322,8 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
     });
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '*';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
@@ -329,6 +334,29 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
       prefilterTargets: new Set(['130:V2']),
       prefilterWildcardIgnored: true,
+    });
+  });
+
+  it('requires explicit primary parity targets and keeps entries beside a wildcard', () => {
+    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
+    });
+    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '1:v3,4663:V3';
+    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
+      primaryParityTargets: new Set(['1:V3', '4663:V3']),
+      primaryParityWildcardIgnored: false,
+    });
+    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '*';
+    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
+      primaryParityTargets: new Set(),
+      primaryParityWildcardIgnored: true,
+    });
+    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '*,1:V3';
+    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
+      primaryParityTargets: new Set(['1:V3']),
+      primaryParityWildcardIgnored: true,
     });
   });
 
@@ -781,6 +809,8 @@ describe('refusePrefilteredV3Primary', () => {
     prefilterWildcardIgnored: false,
     prefilterUnpricedTargets,
     prefilterUnpricedRejected: new Map(),
+    primaryParityTargets: new Set<string>(),
+    primaryParityWildcardIgnored: false,
     minPoolCountRatio: 0.5,
     minPoolCountByTarget: new Map<string, number>(),
     minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -884,6 +914,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -921,6 +953,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set([targetKey(4663, Protocol.V4)]),
@@ -966,6 +1000,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map<string, number>(),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -996,6 +1032,8 @@ describe('resolveAuroraModeWithPrimaryFloor', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
+      primaryParityTargets: new Set<string>(),
+      primaryParityWildcardIgnored: false,
       minPoolCountRatio: 0.5,
       minPoolCountByTarget: new Map([[targetKey(4663, Protocol.V4), 40000]]),
       minPoolCountFloorInvalidKeys: new Set<string>(),
@@ -1960,6 +1998,86 @@ describe('AuroraSourcedProvider primary mode', () => {
     expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
       'low_count'
     );
+  });
+
+  describe('with primary parity', () => {
+    afterEach(settlePendingAuroraShadowsForTesting);
+
+    const mkParity = (
+      aurora: ISubgraphProvider<V3SubgraphPool>,
+      subgraph: ISubgraphProvider<V3SubgraphPool>,
+      metric: FakeMetric
+    ) =>
+      new AuroraSourcedProvider(
+        'primary',
+        aurora,
+        subgraph,
+        1,
+        Protocol.V3,
+        0.5,
+        0,
+        noopLogger,
+        metric,
+        true
+      );
+
+    it('serves Aurora and diffs the served pools against the subgraph in the background', async () => {
+      const aurora = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
+      const subgraph = fakeProvider([[v3Pool('0x1', 90), v3Pool('0x3', 80)]]);
+      const metric = new FakeMetric();
+
+      const pools = await mkParity(aurora, subgraph, metric).getPools();
+      await settlePendingAuroraShadowsForTesting();
+
+      expect(pools.map(p => p.id)).toEqual(['0x1', '0x2']);
+      expect(subgraph.calls).toBe(1);
+      expect(metric.byKey('CachePools.parity.missing_top100')).toEqual([
+        expect.objectContaining({
+          value: 1,
+          tags: {chainId: '1', protocol: 'V3', mode: 'primary'},
+        }),
+      ]);
+      expect(metric.byKey('CachePools.aurora.primary_parity_skipped')).toEqual(
+        []
+      );
+    });
+
+    it('still serves Aurora and counts a subgraph failure', async () => {
+      const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
+      const subgraph = fakeProvider<V3SubgraphPool>([
+        new Error('subgraph down'),
+      ]);
+      const metric = new FakeMetric();
+
+      const pools = await mkParity(aurora, subgraph, metric).getPools();
+      await settlePendingAuroraShadowsForTesting();
+
+      expect(pools.map(p => p.id)).toEqual(['0x1']);
+      expect(metric.byKey('CachePools.parity.missing_top100')).toEqual([]);
+      expect(metric.byKey('CachePools.aurora.primary_parity_skipped')).toEqual([
+        expect.objectContaining({
+          tags: expect.objectContaining({reason: 'subgraph_error'}),
+        }),
+      ]);
+    });
+
+    it('skips the comparison while the previous one is still pending', async () => {
+      const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
+      const subgraph = deferredProvider<V3SubgraphPool>();
+      const metric = new FakeMetric();
+      const provider = mkParity(aurora, subgraph, metric);
+
+      await provider.getPools();
+      const second = await provider.getPools();
+      subgraph.resolve([v3Pool('0x1', 100)]);
+
+      expect(second.map(p => p.id)).toEqual(['0x1']);
+      expect(metric.byKey('CachePools.aurora.primary_parity_skipped')).toEqual([
+        expect.objectContaining({
+          tags: expect.objectContaining({reason: 'previous_pending'}),
+        }),
+      ]);
+    });
   });
 });
 
@@ -5957,6 +6075,138 @@ describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () =>
         },
       },
     ]);
+  });
+});
+
+describe('primary parity at the applyAuroraPoolSources boundary', () => {
+  const keys = [
+    'POOL_CACHING_AURORA_SHADOW_TARGETS',
+    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
+    'POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS',
+    'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
+  ];
+  const saved = new Map<string, string | undefined>();
+  beforeEach(() => {
+    for (const key of keys) saved.set(key, process.env[key]);
+    resetAuroraPoolCountBaselinesForTesting();
+  });
+  afterEach(async () => {
+    await settlePendingAuroraShadowsForTesting();
+    for (const key of keys) {
+      const value = saved.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  class FakeMainnetRoutablePools extends FakeV3RoutablePools {
+    async listAllV2RoutablePools() {
+      return [];
+    }
+    async listAllV4RoutablePools() {
+      return [];
+    }
+  }
+
+  const MAINNET_WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+  const mainnetV3Row = {
+    poolAddress: '0x0000000000000000000000000000000000000a01',
+    token0Address: MAINNET_WETH,
+    token1Address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    feeTier: 3000,
+    tickSpacing: 60,
+    liquidity: '42',
+    tvlUsd: 4000,
+    sqrtPriceX96: '0',
+    tvlToken0: '0',
+    tvlToken1: '0',
+    token0PriceUsd: null,
+    token1PriceUsd: null,
+    token0Decimals: 18,
+    token1Decimals: 6,
+    token0Symbol: 'WETH',
+    token1Symbol: 'USDC',
+    token0Name: 'Wrapped Ether',
+    token1Name: 'USD Coin',
+    stateAsOfTimestamp: new Date(),
+  };
+
+  const wire = (metric: FakeMetric) => {
+    const mainnetV3 = {
+      chainId: 1,
+      protocol: Protocol.V3,
+      provider: fakeProvider<V3SubgraphPool>([
+        [v3Pool('0x0000000000000000000000000000000000000b01', 5000)],
+      ]),
+    };
+    applyAuroraPoolSources(
+      [mainnetV3],
+      {
+        trackedEthThresholdFor: () => 0.025,
+        untrackedUsdThresholdFor: () => Number.MAX_VALUE,
+      },
+      noopLogger,
+      metric,
+      {
+        scopedRun: true,
+        providerDeps: {
+          routablePools: new FakeMainnetRoutablePools([mainnetV3Row]),
+          prices: {
+            batchGet: async (_ctx, tokens) =>
+              new Map(
+                tokens.map(({chainId, address}) => [
+                  `${chainId}_${WRAPPED_NATIVE_BY_CHAIN.get(chainId)}`,
+                  {
+                    chainId,
+                    tokenAddress: address,
+                    priceUsd: 2000,
+                    timestamp: new Date(),
+                    updatedAt: new Date(),
+                  },
+                ])
+              ),
+          },
+          logger: noopLogger,
+          metric,
+        },
+      }
+    );
+    return mainnetV3;
+  };
+
+  it('serves Aurora for a listed primary combo and reports its parity with mode:primary', async () => {
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '1:V3';
+    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '1:v3';
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"1:V3":1}';
+    const metric = new FakeMetric();
+    const mainnetV3 = wire(metric);
+
+    const pools = await mainnetV3.provider.getPools();
+    await settlePendingAuroraShadowsForTesting();
+
+    expect(pools.map(pool => pool.id)).toEqual([
+      '0x0000000000000000000000000000000000000a01',
+    ]);
+    expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+    expect(metric.byKey('CachePools.parity.subgraph_count')).toEqual([
+      expect.objectContaining({
+        value: 1,
+        tags: expect.objectContaining({chainId: '1', mode: 'primary'}),
+      }),
+    ]);
+  });
+
+  it('reports no parity for a primary combo that is not listed', async () => {
+    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '1:V3';
+    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"1:V3":1}';
+    const metric = new FakeMetric();
+    const mainnetV3 = wire(metric);
+
+    await mainnetV3.provider.getPools();
+    await settlePendingAuroraShadowsForTesting();
+
+    expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+    expect(metric.byKey('CachePools.parity.subgraph_count')).toEqual([]);
   });
 });
 

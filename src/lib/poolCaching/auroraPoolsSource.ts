@@ -292,6 +292,12 @@ export interface AuroraPoolsSourceConfig {
   // pool_stats_v3_chain_unpriced_idx is valid.
   prefilterUnpricedTargets: ReadonlySet<string>;
   prefilterUnpricedRejected: ReadonlyMap<string, PrefilterUnpricedRejection>;
+  // Primary combos that also fetch the subgraph in the background and diff
+  // it against the served Aurora pools, so a guarded primary ranking keeps a
+  // parity signal. Explicit keys only: a wildcard would send every primary
+  // combo back to the subgraph, so `*` is ignored.
+  primaryParityTargets: ReadonlySet<string>;
+  primaryParityWildcardIgnored: boolean;
   // Prod enables the guard per combo after its shadow soak; rejecting `*`
   // keeps an all-combo typo in shadow everywhere and makes it observable.
   tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
@@ -429,6 +435,15 @@ export function auroraPoolsSourceConfigFromEnv(
     process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS,
     prefilterTargets
   );
+  const parsedPrimaryParityTargets = parseTargets(
+    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS
+  );
+  const primaryParityWildcardIgnored =
+    parsedPrimaryParityTargets === 'all' || parsedPrimaryParityTargets.has('*');
+  const primaryParityTargets =
+    parsedPrimaryParityTargets === 'all'
+      ? new Set<string>()
+      : new Set([...parsedPrimaryParityTargets].filter(key => key !== '*'));
   const setEnvironments = environments
     .map(value => value?.trim().toLowerCase())
     .filter((value): value is string => Boolean(value));
@@ -454,6 +469,8 @@ export function auroraPoolsSourceConfigFromEnv(
     prefilterWildcardIgnored,
     prefilterUnpricedTargets: prefilterUnpriced.targets,
     prefilterUnpricedRejected: prefilterUnpriced.rejected,
+    primaryParityTargets,
+    primaryParityWildcardIgnored,
     tvlGuardTargetsWildcardRejection,
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
@@ -2401,7 +2418,10 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     // 0 = no absolute floor for this target (ratio guard only).
     private readonly minPoolCount: number,
     private readonly logger: Logger,
-    private readonly metric: IMetric
+    private readonly metric: IMetric,
+    // Primary only: also diff the served pools against the subgraph in the
+    // background (POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS).
+    private readonly primaryParity = false
   ) {}
 
   private get tags(): Record<string, string> {
@@ -2454,6 +2474,7 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
           MetricLoggerUnit.Count,
           this.tags
         );
+        if (this.primaryParity) this.startPrimaryParity(pools, args);
         return pools;
       }
     } catch (err) {
@@ -2498,7 +2519,36 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     return subgraphPromise;
   }
 
-  // Never rejects: a subgraph failure is the caller's to report, and an
+  // The served pools carry the TVL that serving ranks by, guarded where the
+  // guard applies, so this measures the served ranking against the
+  // subgraph's. It never delays or changes what is served.
+  private startPrimaryParity(
+    servedPools: TPool[],
+    args: Parameters<ISubgraphProvider<TPool>['getPools']>
+  ): void {
+    const key = targetKey(this.chainId, this.protocol);
+    if (pendingAuroraShadowByTarget.has(key)) {
+      this.metric.putMetric(
+        'CachePools.aurora.primary_parity_skipped',
+        1,
+        MetricLoggerUnit.Count,
+        {...this.tags, reason: 'previous_pending'}
+      );
+      return;
+    }
+    const subgraphPromise = Promise.resolve().then(() =>
+      this.subgraph.getPools(...args)
+    );
+    const comparison = this.compareShadow(
+      subgraphPromise,
+      Promise.resolve(servedPools)
+    );
+    pendingAuroraShadowByTarget.set(key, comparison);
+    void comparison.finally(() => pendingAuroraShadowByTarget.delete(key));
+  }
+
+  // Never rejects. In shadow mode a subgraph failure is the caller's to
+  // report; in primary mode nothing else sees it, so it is counted here. An
   // Aurora failure is counted as shadow_error.
   private async compareShadow(
     subgraphPromise: Promise<TPool[]>,
@@ -2508,7 +2558,17 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
       subgraphPromise,
       auroraPromise,
     ]);
-    if (subgraphResult.status === 'rejected') return;
+    if (subgraphResult.status === 'rejected') {
+      if (this.mode === 'primary') {
+        this.metric.putMetric(
+          'CachePools.aurora.primary_parity_skipped',
+          1,
+          MetricLoggerUnit.Count,
+          {...this.tags, reason: 'subgraph_error'}
+        );
+      }
+      return;
+    }
     const subgraphPools = subgraphResult.value;
 
     try {
@@ -2750,6 +2810,17 @@ export function applyAuroraPoolSources<
       'Aurora pre-filter targets wildcard ignored — list explicit combos'
     );
   }
+  if (config.primaryParityWildcardIgnored) {
+    metric.putMetric(
+      'CachePools.aurora.primary_parity_config_rejected',
+      1,
+      MetricLoggerUnit.Count,
+      {reason: 'wildcard'}
+    );
+    logger.warn(
+      'Aurora primary parity targets wildcard ignored — list explicit combos'
+    );
+  }
   for (const [target, reason] of config.prefilterUnpricedRejected) {
     metric.putMetric(
       'CachePools.aurora.prefilter_config_rejected',
@@ -2846,6 +2917,8 @@ export function applyAuroraPoolSources<
       logger,
       metric
     );
+    const primaryParity =
+      mode === 'primary' && config.primaryParityTargets.has(key);
 
     if (!AURORA_SUPPORTED_TARGETS.has(key)) {
       logger.warn(
@@ -2887,7 +2960,8 @@ export function applyAuroraPoolSources<
         config.minPoolCountRatio,
         config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
         logger,
-        metric
+        metric,
+        primaryParity
       );
     } else if (protocol === Protocol.V3) {
       chainProtocol.provider = new AuroraSourcedProvider(
@@ -2911,7 +2985,8 @@ export function applyAuroraPoolSources<
         config.minPoolCountRatio,
         config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
         logger,
-        metric
+        metric,
+        primaryParity
       );
     } else if (protocol === Protocol.V2) {
       chainProtocol.provider = new AuroraSourcedProvider(
@@ -2935,7 +3010,8 @@ export function applyAuroraPoolSources<
         config.minPoolCountRatio,
         config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
         logger,
-        metric
+        metric,
+        primaryParity
       );
     } else {
       logger.warn(
