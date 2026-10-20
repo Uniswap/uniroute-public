@@ -321,6 +321,13 @@ export interface IUniRouteServiceConfig {
     // parallel, so wall time ≈ slowest batch) at the cost of more
     // concurrent RPC calls — tune per chain with provider telemetry.
     multicallBatchSizeByChain: Record<number, number>;
+    // Per-chain multicall gas-limit-per-call override (env
+    // MULTICALL_GAS_LIMIT_BY_CHAIN, e.g. '{"__PLACEHOLDER__":__PLACEHOLDER__}'). Unset chains
+    // keep their chain-default limit. A route that cannot be quoted runs
+    // until it exhausts this limit, so on a chain with many unquotable
+    // routes most of a batch's gas is spent returning nothing. Lowering it
+    // does not touch quotes that succeed; watch SuccessfulRoutesRatio.
+    multicallGasLimitByChain: Record<number, number>;
   };
   L1L2GasCostFetcher: {
     // Enable L1 gas cost fetching for Optimism Stack chains (careful, will cause latency increase)
@@ -459,6 +466,9 @@ export const getUniRouteSyncConfig = (
       multicallBatchSizeByChain: parsePositiveIntRecordEnvOrEmpty(
         'MULTICALL_BATCH_SIZE_BY_CHAIN'
       ),
+      multicallGasLimitByChain: parsePositiveIntRecordEnvOrEmpty(
+        'MULTICALL_GAS_LIMIT_BY_CHAIN'
+      ),
     },
     L1L2GasCostFetcher: {
       // Note: Enabling this will increase latency, use caution. We need some better mechanism for calldata generation - it's too costly (rpc calls, fresh pool details per candidate).
@@ -580,6 +590,9 @@ export const getQuickRouteSyncConfig = (
       minBatchSize: __PLACEHOLDER__,
       multicallBatchSizeByChain: parsePositiveIntRecordEnvOrEmpty(
         'MULTICALL_BATCH_SIZE_BY_CHAIN'
+      ),
+      multicallGasLimitByChain: parsePositiveIntRecordEnvOrEmpty(
+        'MULTICALL_GAS_LIMIT_BY_CHAIN'
       ),
     },
     L1L2GasCostFetcher: {
