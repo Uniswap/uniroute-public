@@ -34,6 +34,7 @@ import {
   ArbitrumGasDataProvider,
 } from '../gas/gas-data-provider';
 import {BaseProvider} from '@ethersproject/providers';
+import {BigNumber} from '@ethersproject/bignumber';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
 import {UNISWAP_AGG_HOOK_ON_TEMPO} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
 
@@ -89,7 +90,11 @@ class TestGasEstimateProvider extends GasEstimateProvider {
     );
   }
 
-  async getCurrentGasPrice(_ctx: Context, _chainId: ChainId): Promise<number> {
+  async getCurrentGasPrice(
+    _ctx: Context,
+    _chainId: ChainId,
+    _blockNumber?: number
+  ): Promise<number> {
     return 30000000000; // 30 gwei
   }
 
@@ -554,6 +559,390 @@ function runStrategyTests(
         );
 
         expect(bestQuoteCandidates.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('gas price read', () => {
+      const metricTags = ['chain:MAINNET', 'tradeType:EXACT_IN'];
+      const pool = () =>
+        new V2Pool(
+          tokenInAddress,
+          tokenOutAddress,
+          new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+          BigInt('1000000000000'),
+          BigInt('1000000000000')
+        );
+
+      // Records when the gas price is requested relative to when the quote
+      // fetch settles; the fetch settles a macrotask later so a read that
+      // only starts once the quotes are in lands after it.
+      class RecordingGasEstimateProvider extends TestGasEstimateProvider {
+        constructor(
+          private readonly order: string[],
+          private readonly failure?: Error
+        ) {
+          super();
+        }
+
+        override async getCurrentGasPrice(
+          ctx: Context,
+          chainId: ChainId,
+          blockNumber?: number
+        ): Promise<number> {
+          this.order.push('gasPrice');
+          if (this.failure) {
+            throw this.failure;
+          }
+          return super.getCurrentGasPrice(ctx, chainId, blockNumber);
+        }
+      }
+
+      class SlowQuoteFetcher extends TestQuoteFetcher {
+        constructor(
+          private readonly order: string[],
+          quotes: QuoteBasic[]
+        ) {
+          super(quotes);
+        }
+
+        override async fetchQuotes(
+          ...args: Parameters<TestQuoteFetcher['fetchQuotes']>
+        ): Promise<QuoteBasic[]> {
+          await new Promise(resolve => setTimeout(resolve, 5));
+          this.order.push('quotes');
+          return super.fetchQuotes(...args);
+        }
+      }
+
+      class RecordingOrbitGasDataProvider extends ArbitrumGasDataProvider {
+        constructor(
+          private readonly order: string[],
+          private readonly failure?: Error
+        ) {
+          super(new JsonRpcProvider() as BaseProvider);
+        }
+
+        override async getGasData(): Promise<ArbitrumGasData> {
+          this.order.push('orbitGas');
+          if (this.failure) {
+            throw this.failure;
+          }
+          return {
+            perL2TxFee: BigNumber.from(1),
+            perL1CalldataFee: BigNumber.from(1),
+            perArbGasTotal: BigNumber.from(1),
+          };
+        }
+      }
+
+      // Hands every gas price read the promise the test controls, and
+      // records the block each read was pinned to plus the L2 gas data each
+      // estimate was handed, so a test can hold the read open and later
+      // check what reached the estimate.
+      class ControlledGasEstimateProvider extends TestGasEstimateProvider {
+        readonly gasPriceReads: Array<{
+          chainId: ChainId;
+          blockNumber: number | undefined;
+        }> = [];
+        readonly l2GasDataPerEstimate: Array<ArbitrumGasData | undefined> = [];
+
+        constructor(private readonly gasPriceWei: Promise<number>) {
+          super();
+        }
+
+        override getCurrentGasPrice(
+          _ctx: Context,
+          chainId: ChainId,
+          blockNumber?: number
+        ): Promise<number> {
+          this.gasPriceReads.push({chainId, blockNumber});
+          return this.gasPriceWei;
+        }
+
+        override estimateGas(
+          ...args: Parameters<TestGasEstimateProvider['estimateGas']>
+        ): Promise<GasDetails> {
+          this.l2GasDataPerEstimate.push(args[10]);
+          return super.estimateGas(...args);
+        }
+      }
+
+      // Hands every Orbit gas read the promise the test controls.
+      class ControlledOrbitGasDataProvider extends ArbitrumGasDataProvider {
+        gasDataReads = 0;
+
+        constructor(private readonly gasData: Promise<ArbitrumGasData>) {
+          super(new JsonRpcProvider() as BaseProvider);
+        }
+
+        override getGasData(): Promise<ArbitrumGasData> {
+          this.gasDataReads += 1;
+          return this.gasData;
+        }
+      }
+
+      // Records the block each quote fetch was pinned to; resolves at once.
+      class RecordingQuoteFetcher extends TestQuoteFetcher {
+        readonly fetchedAtBlocks: Array<number | undefined> = [];
+
+        override fetchQuotes(
+          ...args: Parameters<TestQuoteFetcher['fetchQuotes']>
+        ): Promise<QuoteBasic[]> {
+          this.fetchedAtBlocks.push(args[8]);
+          return super.fetchQuotes(...args);
+        }
+      }
+
+      const createDeferred = <T>() => {
+        let resolve: (value: T) => void = () => {};
+        let reject: (reason: unknown) => void = () => {};
+        const promise = new Promise<T>((promiseResolve, promiseReject) => {
+          resolve = promiseResolve;
+          reject = promiseReject;
+        });
+        return {promise, resolve, reject};
+      };
+
+      // Lets every already-settled promise chain run to its next pending
+      // await, so the search is observed where it actually blocks.
+      const settlePendingWork = () =>
+        new Promise<void>(resolve => setImmediate(resolve));
+
+      const heldReadBlockNumber = 21000000;
+
+      const arbitrum = new Chain(
+        ChainId.ARBITRUM,
+        'Arbitrum',
+        NativeCurrency.ETH,
+        new Address('0x82aF49447D8a07e3bd95BD0d56f35241523fBab1'),
+        new Address('0x1F98431c8aD98523631AE4a59f267346ea31F984'),
+        new Address('0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6'),
+        new Address('0x5BA1e12693Dc8F9c48aAD8770482f4739bEeD696'),
+        1000000,
+        75,
+        new Address('0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f')
+      );
+
+      const buildStrategy = (
+        order: string[],
+        failures: {gasPrice?: Error; orbitGas?: Error} = {}
+      ): BaseQuoteStrategy =>
+        new strategyClass(
+          new SlowQuoteFetcher(order, [
+            new QuoteBasic(
+              new RouteBasic(Protocol.V2, [pool()], 100),
+              BigInt('1234567890'),
+              undefined
+            ),
+          ]),
+          new RecordingGasEstimateProvider(order, failures.gasPrice),
+          new TestGasConverter(),
+          new RouteQuoteAllocator(),
+          new SimpleQuoteSelector(),
+          new TokenHandlerMock(),
+          new Map([
+            [
+              ChainId.ARBITRUM,
+              new RecordingOrbitGasDataProvider(order, failures.orbitGas),
+            ],
+          ]),
+          {} as IFreshPoolDetailsWrapper
+        );
+
+      const findCandidates = (
+        strategy: BaseQuoteStrategy,
+        config: IUniRouteServiceConfig = serviceConfig,
+        quotedChain: Chain = chain,
+        blockNumber?: number
+      ) =>
+        strategy.findBestQuoteCandidates(
+          buildTestContext(),
+          quotedChain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          config,
+          [new RouteBasic(Protocol.V2, [pool()])],
+          new Map(),
+          metricTags,
+          blockNumber
+        );
+
+      it('requests the gas price before the quote fetch settles', async () => {
+        const order: string[] = [];
+
+        const candidates = await findCandidates(buildStrategy(order));
+
+        expect(order).toEqual(['gasPrice', 'quotes']);
+        expect(candidates.length).toBeGreaterThan(0);
+        expect(candidates[0].quotes[0].gasDetails?.gasPriceInWei).toBe(
+          30000000000n
+        );
+      });
+
+      it('fails the search when the gas price read fails, after the quotes settle', async () => {
+        const order: string[] = [];
+        const failure = new Error('eth_gasPrice timed out');
+
+        await expect(
+          findCandidates(buildStrategy(order, {gasPrice: failure}))
+        ).rejects.toBe(failure);
+        expect(order).toEqual(['gasPrice', 'quotes']);
+      });
+
+      it('requests the Orbit gas constants before the quote fetch settles', async () => {
+        const order: string[] = [];
+
+        const candidates = await findCandidates(
+          buildStrategy(order),
+          serviceConfig,
+          arbitrum
+        );
+
+        expect(serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled).toBe(true);
+        expect(order).toEqual(['gasPrice', 'orbitGas', 'quotes']);
+        expect(candidates.length).toBeGreaterThan(0);
+      });
+
+      it('fails the search when the Orbit gas read fails, after the quotes settle', async () => {
+        const order: string[] = [];
+        const failure = new Error('ArbGasInfo read timed out');
+
+        await expect(
+          findCandidates(
+            buildStrategy(order, {orbitGas: failure}),
+            serviceConfig,
+            arbitrum
+          )
+        ).rejects.toBe(failure);
+        expect(order).toEqual(['gasPrice', 'orbitGas', 'quotes']);
+      });
+
+      it('does not read the Orbit gas constants when the L2 gas fetcher is disabled', async () => {
+        const order: string[] = [];
+
+        await findCandidates(
+          buildStrategy(order),
+          {
+            ...serviceConfig,
+            L1L2GasCostFetcher: {
+              ...serviceConfig.L1L2GasCostFetcher,
+              ArbitrumEnabled: false,
+            },
+          },
+          arbitrum
+        );
+
+        expect(order).toEqual(['gasPrice', 'quotes']);
+      });
+
+      it('does not read the gas price when gas estimation is disabled', async () => {
+        const order: string[] = [];
+
+        const candidates = await findCandidates(buildStrategy(order), {
+          ...serviceConfig,
+          GasEstimation: {...serviceConfig.GasEstimation, Enabled: false},
+        });
+
+        expect(order).toEqual(['quotes']);
+        expect(candidates.length).toBeGreaterThan(0);
+      });
+
+      // The ordering tests above also pass when the gas read is awaited in
+      // full before the quote fetch starts, which is still serial. These two
+      // hold the read open, so the fetch can only be observed if it started
+      // without waiting for the read.
+      it('starts the quote fetch while the gas price read is still pending', async () => {
+        const gasPriceRead = createDeferred<number>();
+        const gasEstimateProvider = new ControlledGasEstimateProvider(
+          gasPriceRead.promise
+        );
+        const quoteFetcher = new RecordingQuoteFetcher();
+        const strategy = new strategyClass(
+          quoteFetcher,
+          gasEstimateProvider,
+          new TestGasConverter(),
+          new RouteQuoteAllocator(),
+          new SimpleQuoteSelector(),
+          new TokenHandlerMock(),
+          new Map(),
+          {} as IFreshPoolDetailsWrapper
+        );
+
+        const search = findCandidates(
+          strategy,
+          serviceConfig,
+          chain,
+          heldReadBlockNumber
+        );
+        await settlePendingWork();
+
+        // `gasPriceRead.resolve` has not been called, so a fetch recorded by
+        // now started while the read was pending.
+        expect(quoteFetcher.fetchedAtBlocks).toEqual([heldReadBlockNumber]);
+        expect(gasEstimateProvider.gasPriceReads).toEqual([
+          {chainId: ChainId.MAINNET, blockNumber: heldReadBlockNumber},
+        ]);
+
+        gasPriceRead.resolve(42000000000);
+        const candidates = await search;
+
+        expect(candidates.length).toBeGreaterThan(0);
+        expect(candidates[0].quotes[0].gasDetails?.gasPriceInWei).toBe(
+          42000000000n
+        );
+      });
+
+      it('starts the quote fetch while the Orbit gas read is still pending', async () => {
+        const orbitGasRead = createDeferred<ArbitrumGasData>();
+        const orbitGasDataProvider = new ControlledOrbitGasDataProvider(
+          orbitGasRead.promise
+        );
+        const gasEstimateProvider = new ControlledGasEstimateProvider(
+          Promise.resolve(30000000000)
+        );
+        const quoteFetcher = new RecordingQuoteFetcher();
+        const strategy = new strategyClass(
+          quoteFetcher,
+          gasEstimateProvider,
+          new TestGasConverter(),
+          new RouteQuoteAllocator(),
+          new SimpleQuoteSelector(),
+          new TokenHandlerMock(),
+          new Map([[ChainId.ARBITRUM, orbitGasDataProvider]]),
+          {} as IFreshPoolDetailsWrapper
+        );
+
+        const search = findCandidates(
+          strategy,
+          serviceConfig,
+          arbitrum,
+          heldReadBlockNumber
+        );
+        await settlePendingWork();
+
+        // `orbitGasRead.resolve` has not been called, so a fetch recorded by
+        // now started while the read was pending.
+        expect(serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled).toBe(true);
+        expect(orbitGasDataProvider.gasDataReads).toBe(1);
+        expect(quoteFetcher.fetchedAtBlocks).toEqual([heldReadBlockNumber]);
+        expect(gasEstimateProvider.gasPriceReads).toEqual([
+          {chainId: ChainId.ARBITRUM, blockNumber: heldReadBlockNumber},
+        ]);
+
+        const orbitGasData: ArbitrumGasData = {
+          perL2TxFee: BigNumber.from(7),
+          perL1CalldataFee: BigNumber.from(11),
+          perArbGasTotal: BigNumber.from(13),
+        };
+        orbitGasRead.resolve(orbitGasData);
+        const candidates = await search;
+
+        expect(candidates.length).toBeGreaterThan(0);
+        expect(gasEstimateProvider.l2GasDataPerEstimate).toHaveLength(1);
+        expect(gasEstimateProvider.l2GasDataPerEstimate[0]).toBe(orbitGasData);
       });
     });
 
