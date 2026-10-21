@@ -13,21 +13,71 @@ import {Permit2__factory} from '../../../../abis/src/generated/contracts';
 import {Context} from '@uniswap/lib-uni/context';
 import {TradeType} from '../../../models/quote/TradeType';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
-import {ChainId} from '../../../lib/config';
+import {
+  ChainId,
+  TAG_STATUS_FAILURE,
+  TAG_STATUS_SUCCESS,
+} from '../../../lib/config';
 import {CurrencyInfo} from '../../../models/currency/CurrencyInfo';
 import {SimulationStatus} from '../ISimulator';
 import {
+  classifySimulationException,
   describeSimulationException,
+  extractRevertData,
   isSimulationBackendUnavailable,
   simulationExceptionLogFields,
 } from './simulationErrorBreakDown';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
 import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
+import {
+  BalanceOverrideRefusalReason,
+  describeBalanceOverrideRefusal,
+  NATIVE_BALANCE_OVERRIDE_ASSET,
+} from './balanceOverride';
 
 export enum SwapType {
   UNIVERSAL_ROUTER,
   SWAP_ROUTER_02, // Not supported in UniRoute
 }
+
+// Raw names like SimulationBalanceCheckSkipped without the UniRouteService.Metric prefix
+// A seeded run that executed is status success with the swap's outcome, reverts included, and one that never ran is a failure with a reason
+const METRIC_SEEDED_BALANCE_SIMULATION = 'SimulationSeededBalance';
+// Underfunded senders answered without a seeded run, by reason
+const METRIC_SEEDED_BALANCE_SKIPPED = 'SimulationSeededBalanceSkipped';
+
+const INSUFFICIENT_BALANCE_DESCRIPTION =
+  'User does not have sufficient balance to simulate.';
+const OVERRIDE_INSUFFICIENT_DESCRIPTION =
+  'State override sets account balance below needed amount.';
+const SEED_REFUSED_DESCRIPTION =
+  'User does not have sufficient balance and the simulation could not seed it.';
+const SEEDED_SIMULATION_SUCCESS_DESCRIPTION =
+  'Simulation succeeded with a seeded balance; user does not have sufficient balance.';
+
+/** Why an underfunded sender was answered without a seeded run */
+export enum SeededSkipReason {
+  DISABLED = 'disabled',
+  CHAIN_UNSUPPORTED = 'chain_unsupported',
+  BALANCE_UNKNOWN = 'balance_unknown',
+  OVERRIDE_INSUFFICIENT = 'override_insufficient',
+}
+
+/** A seeded run that threw before executing, with no revert data */
+const SEEDED_REASON_EXCEPTION = 'exception';
+type SeededRunFailureReason =
+  | BalanceOverrideRefusalReason
+  | SimulationStatus
+  | typeof SEEDED_REASON_EXCEPTION;
+
+/** Statuses of a run that never executed the swap */
+const SIMULATION_NOT_RUN_STATUSES: ReadonlySet<SimulationStatus> = new Set([
+  SimulationStatus.UNATTEMPTED,
+  SimulationStatus.UNKNOWN,
+  SimulationStatus.NOT_SUPPORTED,
+  SimulationStatus.NOT_APPROVED,
+  SimulationStatus.SYSTEM_DOWN,
+]);
 
 /**
  * Result of the pre-sim balance-override probe (`evaluateBalanceOverride`).
@@ -49,6 +99,8 @@ export enum UserBalanceCheck {
   Insufficient = 'insufficient',
   /** The balance read never reached a node; the balance is unknown. */
   BackendUnavailable = 'backend-unavailable',
+  /** The node answered but the balance could not be read, so nothing is known about it */
+  Unknown = 'unknown',
 }
 
 /** The quote split with a simulation that produced no gas estimate. */
@@ -67,6 +119,25 @@ export function withZeroGasSimulationResult(
       description,
     },
   };
+}
+
+/** Counts without awaiting so a metrics failure can never change a simulation answer */
+export function countInBackground(
+  ctx: Context,
+  metric: string,
+  tags: string[]
+): void {
+  void Promise.resolve()
+    .then(() => ctx.metrics.count(metric, 1, {tags}))
+    .catch(() => undefined);
+}
+
+/** Flags a result as coming from a seeded run so the BL can cap seeded attempts per request */
+function markSeeded(quoteSplit: QuoteSplit): QuoteSplit {
+  const {simulationResult} = quoteSplit;
+  return simulationResult === undefined
+    ? quoteSplit
+    : {...quoteSplit, simulationResult: {...simulationResult, seeded: true}};
 }
 
 // Swap options for Universal Router and Permit2.
@@ -102,7 +173,8 @@ export abstract class Simulator {
    */
   constructor(
     provider: JsonRpcProvider,
-    protected chainId: ChainId
+    protected chainId: ChainId,
+    protected readonly seededBalanceEnabled: boolean
   ) {
     this.provider = provider;
   }
@@ -135,17 +207,12 @@ export abstract class Simulator {
       ctx.logger.info(
         'Authoritative balance override is below needed amount; skipping sim.'
       );
-      return {
-        ...quoteSplit,
-        simulationResult: {
-          estimatedGasUsed: 0n,
-          estimatedGasUsedInQuoteToken: 0n,
-          estimatedGasUsedInUSD: 0,
-          status: SimulationStatus.INSUFFICIENT_BALANCE,
-          description:
-            'State override sets account balance below needed amount.',
-        },
-      };
+      this.countSeededSkip(ctx, SeededSkipReason.OVERRIDE_INSUFFICIENT);
+      return withZeroGasSimulationResult(
+        quoteSplit,
+        SimulationStatus.INSUFFICIENT_BALANCE,
+        OVERRIDE_INSUFFICIENT_DESCRIPTION
+      );
     }
 
     if (balanceOverrideOutcome === BalanceOverrideOutcome.Sufficient) {
@@ -177,13 +244,37 @@ export abstract class Simulator {
       );
     }
 
-    if (userBalance === UserBalanceCheck.Insufficient) {
-      // User-input issue (insufficient balance) surfaced to caller — log at warn, not error.
-      ctx.logger.warn('User does not have sufficient balance to simulate.');
+    if (userBalance === UserBalanceCheck.Unknown) {
+      // A read error says nothing about the wallet, so nothing is seeded on it
+      ctx.logger.warn(INSUFFICIENT_BALANCE_DESCRIPTION);
+      this.countSeededSkip(ctx, SeededSkipReason.BALANCE_UNKNOWN);
       return withZeroGasSimulationResult(
         quoteSplit,
         SimulationStatus.INSUFFICIENT_BALANCE,
-        'User does not have sufficient balance to simulate.'
+        INSUFFICIENT_BALANCE_DESCRIPTION
+      );
+    }
+
+    if (userBalance === UserBalanceCheck.Insufficient) {
+      const skipReason = this.seededRunSkipReason();
+      if (skipReason !== undefined) {
+        ctx.logger.warn(INSUFFICIENT_BALANCE_DESCRIPTION);
+        this.countSeededSkip(ctx, skipReason);
+        return withZeroGasSimulationResult(
+          quoteSplit,
+          SimulationStatus.INSUFFICIENT_BALANCE,
+          INSUFFICIENT_BALANCE_DESCRIPTION
+        );
+      }
+      return this.simulateWithSeededBalance(
+        fromAddress,
+        swapOptions,
+        quoteSplit,
+        tokenInCurrencyInfo,
+        ctx,
+        gasPrice,
+        blockNumber,
+        stateOverrides
       );
     }
 
@@ -201,22 +292,207 @@ export abstract class Simulator {
         stateOverrides
       );
     } catch (e) {
-      const {status, logFields} = describeSimulationException(
-        e,
-        quoteSplit.swapInfo!.tokenInWrappedAddress,
-        quoteSplit.swapInfo!.tokenOutWrappedAddress
-      );
-      ctx.logger.error('Error simulating transaction', logFields);
-      return withZeroGasSimulationResult(
-        quoteSplit,
-        status,
-        status === SimulationStatus.SYSTEM_DOWN
-          ? 'Simulation backend unavailable'
-          : 'Error simulating transaction'
-      );
+      return this.describeFailedSimulation(e, quoteSplit, ctx);
     }
   }
 
+  /** Why an underfunded sender keeps the plain INSUFFICIENT_BALANCE answer, undefined when the seeded run goes ahead */
+  private seededRunSkipReason(): SeededSkipReason | undefined {
+    if (!this.seededBalanceEnabled) {
+      return SeededSkipReason.DISABLED;
+    }
+    if (!this.supportsSimulation()) {
+      return SeededSkipReason.CHAIN_UNSUPPORTED;
+    }
+    return undefined;
+  }
+
+  /** Whether this simulator has a backend for the chain, a seeded run is pointless without one */
+  protected abstract supportsSimulation(): boolean;
+
+  /** Checks the route with unirpc seeding tokenIn for a sender that cannot fund the swap */
+  private async simulateWithSeededBalance(
+    fromAddress: string,
+    swapOptions: SwapOptionsUniversalRouter,
+    quoteSplit: QuoteSplit,
+    tokenInCurrencyInfo: CurrencyInfo,
+    ctx: Context,
+    gasPrice?: bigint,
+    blockNumber?: number,
+    stateOverrides?: ResolvedStateOverride[]
+  ): Promise<QuoteSplit> {
+    // A permissioned token is pulled on its underlying, so that is what the seed must fund
+    const asset = tokenInCurrencyInfo.isNative
+      ? NATIVE_BALANCE_OVERRIDE_ASSET
+      : getUnderlyingPermissionedTokenOrSelf(
+          tokenInCurrencyInfo.wrappedAddress.address,
+          this.chainId
+        );
+    ctx.logger.info(
+      'User does not have sufficient balance; simulating with a seeded balance.'
+    );
+    let simulated: QuoteSplit;
+    try {
+      simulated = await this.simulateTransaction(
+        fromAddress,
+        swapOptions,
+        quoteSplit,
+        ctx,
+        gasPrice,
+        blockNumber,
+        stateOverrides,
+        asset
+      );
+    } catch (e) {
+      // The provider rethrows every seeded failure unclassified, so the seeded policy lives here
+      return markSeeded(this.describeSeededThrow(e, quoteSplit, ctx));
+    }
+    return markSeeded(this.reportSeededRun(simulated, ctx));
+  }
+
+  /** A seeded throw is a refused seed, an outage, a revert that executed, or an exception before execution */
+  private describeSeededThrow(
+    error: unknown,
+    quoteSplit: QuoteSplit,
+    ctx: Context
+  ): QuoteSplit {
+    const refusal = describeBalanceOverrideRefusal(error);
+    if (refusal !== undefined) {
+      // Only unirpc's own refusal text is static enough to log
+      ctx.logger.warn('Balance override refused; simulation not supported', {
+        reason: refusal.reason,
+        ...(refusal.reason === BalanceOverrideRefusalReason.REFUSED && {
+          upstreamMessage: refusal.message,
+        }),
+      });
+      this.countSeededSimulation(ctx, TAG_STATUS_FAILURE, refusal.reason);
+      return withZeroGasSimulationResult(
+        quoteSplit,
+        SimulationStatus.NOT_SUPPORTED,
+        SEED_REFUSED_DESCRIPTION
+      );
+    }
+    const status = classifySimulationException(
+      error,
+      quoteSplit.swapInfo!.tokenInWrappedAddress,
+      quoteSplit.swapInfo!.tokenOutWrappedAddress
+    );
+    if (status === SimulationStatus.SYSTEM_DOWN) {
+      ctx.logger.error(
+        'Seeded simulation backend unavailable',
+        simulationExceptionLogFields(error)
+      );
+      this.countSeededSimulation(ctx, TAG_STATUS_FAILURE, status);
+      return withZeroGasSimulationResult(
+        quoteSplit,
+        status,
+        'Simulation backend unavailable'
+      );
+    }
+    if (extractRevertData(error) !== undefined) {
+      // The swap executed and reverted, which is the answer the caller needs
+      ctx.logger.warn('Seeded simulation reverted', {simulationStatus: status});
+      return this.reportSeededRun(
+        withZeroGasSimulationResult(
+          quoteSplit,
+          status,
+          'Error simulating transaction'
+        ),
+        ctx
+      );
+    }
+    // No revert data means the swap never executed, so it is not a route failure
+    ctx.logger.warn(
+      'Seeded simulation threw before executing; route unverified',
+      simulationExceptionLogFields(error)
+    );
+    this.countSeededSimulation(
+      ctx,
+      TAG_STATUS_FAILURE,
+      SEEDED_REASON_EXCEPTION
+    );
+    return withZeroGasSimulationResult(
+      quoteSplit,
+      SimulationStatus.INSUFFICIENT_BALANCE,
+      INSUFFICIENT_BALANCE_DESCRIPTION
+    );
+  }
+
+  /** Counts the seeded run and turns an executed SUCCESS into INSUFFICIENT_BALANCE */
+  private reportSeededRun(simulated: QuoteSplit, ctx: Context): QuoteSplit {
+    const {simulationResult} = simulated;
+    if (
+      simulationResult === undefined ||
+      SIMULATION_NOT_RUN_STATUSES.has(simulationResult.status)
+    ) {
+      this.countSeededSimulation(
+        ctx,
+        TAG_STATUS_FAILURE,
+        simulationResult?.status ?? SimulationStatus.UNATTEMPTED
+      );
+      return simulated;
+    }
+    this.countSeededSimulation(
+      ctx,
+      TAG_STATUS_SUCCESS,
+      undefined,
+      simulationResult.status
+    );
+    if (simulationResult.status !== SimulationStatus.SUCCESS) {
+      return simulated;
+    }
+    return {
+      ...simulated,
+      simulationResult: {
+        ...simulationResult,
+        status: SimulationStatus.INSUFFICIENT_BALANCE,
+        description: SEEDED_SIMULATION_SUCCESS_DESCRIPTION,
+      },
+    };
+  }
+
+  private countSeededSimulation(
+    ctx: Context,
+    statusTag: string,
+    reason?: SeededRunFailureReason,
+    outcome?: SimulationStatus
+  ): void {
+    countInBackground(ctx, METRIC_SEEDED_BALANCE_SIMULATION, [
+      `chain:${this.chainId}`,
+      statusTag,
+      ...(reason === undefined ? [] : [`reason:${reason}`]),
+      ...(outcome === undefined ? [] : [`outcome:${outcome}`]),
+    ]);
+  }
+
+  private countSeededSkip(ctx: Context, reason: SeededSkipReason): void {
+    countInBackground(ctx, METRIC_SEEDED_BALANCE_SKIPPED, [
+      `chain:${this.chainId}`,
+      `reason:${reason}`,
+    ]);
+  }
+
+  private describeFailedSimulation(
+    error: unknown,
+    quoteSplit: QuoteSplit,
+    ctx: Context
+  ): QuoteSplit {
+    const {status, logFields} = describeSimulationException(
+      error,
+      quoteSplit.swapInfo!.tokenInWrappedAddress,
+      quoteSplit.swapInfo!.tokenOutWrappedAddress
+    );
+    ctx.logger.error('Error simulating transaction', logFields);
+    return withZeroGasSimulationResult(
+      quoteSplit,
+      status,
+      status === SimulationStatus.SYSTEM_DOWN
+        ? 'Simulation backend unavailable'
+        : 'Error simulating transaction'
+    );
+  }
+
+  /** fundSenderAsset names the asset unirpc seeds every sender with, and a seeded run rethrows every failure for the base class to classify */
   protected abstract simulateTransaction(
     fromAddress: string,
     swapOptions: SwapOptionsUniversalRouter,
@@ -224,7 +500,8 @@ export abstract class Simulator {
     ctx: Context,
     gasPrice?: bigint,
     blockNumber?: number,
-    stateOverrides?: ResolvedStateOverride[]
+    stateOverrides?: ResolvedStateOverride[],
+    fundSenderAsset?: string
   ): Promise<QuoteSplit>;
 
   /**
@@ -330,7 +607,7 @@ export abstract class Simulator {
         return UserBalanceCheck.BackendUnavailable;
       }
       ctx.logger.error('Error while checking user balance', {e});
-      return UserBalanceCheck.Insufficient;
+      return UserBalanceCheck.Unknown;
     }
   }
 

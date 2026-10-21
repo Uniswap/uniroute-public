@@ -37,6 +37,20 @@ export interface SimulationResult {
   estimatedGasUsedInUSD: number;
   status: SimulationStatus;
   description?: string;
+  /** Set when the run seeded the sender balance through unirpc */
+  seeded?: boolean;
+}
+
+/** True when the swap executed and measured gas, which includes INSUFFICIENT_BALANCE from a seeded run */
+export function hasSimulatedGasEstimate(
+  result?: SimulationResult
+): result is SimulationResult {
+  return (
+    result !== undefined &&
+    (result.status === SimulationStatus.SUCCESS ||
+      result.status === SimulationStatus.INSUFFICIENT_BALANCE) &&
+    result.estimatedGasUsedInQuoteToken !== 0n
+  );
 }
 
 export interface ISimulator {

@@ -142,7 +142,9 @@ export function extractRevertData(
 // JSON-RPC error codes are numbers. A nested error with a string code is an
 // ethers error of its own (an unparseable body, a malformed result), not a
 // node's answer.
-function findJsonRpcError(value: unknown): Record<string, unknown> | undefined {
+export function findJsonRpcError(
+  value: unknown
+): Record<string, unknown> | undefined {
   if (!isRecord(value)) {
     return undefined;
   }

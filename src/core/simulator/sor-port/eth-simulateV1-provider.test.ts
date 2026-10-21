@@ -1,4 +1,4 @@
-import {describe, beforeEach, it, expect, vi, afterEach} from 'vitest';
+import {describe, beforeEach, it, expect, vi, afterEach, Mock} from 'vitest';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {utils} from 'ethers';
 import {
@@ -29,6 +29,16 @@ import {Protocol} from '../../../models/pool/Protocol';
 import {BEACON_CHAIN_DEPOSIT_ADDRESS} from '../../../lib/helpers';
 import {hasNativeToken} from '../../../lib/tokenUtils';
 
+import {
+  captureEthersRpcError,
+  UNIRPC_ALL_PROVIDERS_FAILED,
+  UNIRPC_BALANCE_OVERRIDE_REFUSED,
+} from '../../../../tests/test-utils/ethersRpcErrors';
+import {
+  NATIVE_BALANCE_OVERRIDE_ASSET,
+  SeededProviderFactory,
+} from './balanceOverride';
+
 // Mock the ERC20 and Permit2 factories
 vi.mock('../../../../abis/src/generated/contracts', () => ({
   ERC20__factory: {
@@ -48,6 +58,8 @@ vi.mock('../../../../abis/src/generated/contracts', () => ({
 describe('eth-simulateV1-provider', () => {
   describe('EthSimulateV1Simulator', () => {
     let provider: JsonRpcProvider;
+    let seededProvider: JsonRpcProvider;
+    let seededProviderFor: Mock<SeededProviderFactory>;
     let gasConverter: GasConverter;
     let ethEstimateGasSimulator: EthEstimateGasSimulator;
     let simulator: EthSimulateV1Simulator;
@@ -116,6 +128,9 @@ describe('eth-simulateV1-provider', () => {
     beforeEach(() => {
       provider = new JsonRpcProvider();
       provider.send = vi.fn();
+      seededProvider = new JsonRpcProvider();
+      seededProvider.send = vi.fn();
+      seededProviderFor = vi.fn<SeededProviderFactory>(() => seededProvider);
 
       gasConverter = {
         getGasCostInQuoteTokenBasedOnGasCostInWei: vi
@@ -133,12 +148,15 @@ describe('eth-simulateV1-provider', () => {
         provider,
         gasConverter,
         ethEstimateGasSimulator,
-        [ChainId.MAINNET]
+        [ChainId.MAINNET],
+        seededProviderFor,
+        true
       );
 
       ctx = {
         logger: {
           info: vi.fn(),
+          warn: vi.fn(),
           error: vi.fn(),
           debug: vi.fn(),
         },
@@ -230,7 +248,12 @@ describe('eth-simulateV1-provider', () => {
           'UniRpcV2.Simulation.Latency.dist',
           expect.any(Number),
           {
-            tags: ['chain:1', 'status:success', 'simType:eth_simulateV1'],
+            tags: [
+              'chain:1',
+              'status:success',
+              'simType:eth_simulateV1',
+              'seeded:false',
+            ],
           }
         );
 
@@ -238,7 +261,12 @@ describe('eth-simulateV1-provider', () => {
           'UniRpcV2.Simulation.Request',
           1,
           {
-            tags: ['chain:1', 'status:success', 'simType:eth_simulateV1'],
+            tags: [
+              'chain:1',
+              'status:success',
+              'simType:eth_simulateV1',
+              'seeded:false',
+            ],
           }
         );
       });
@@ -270,6 +298,7 @@ describe('eth-simulateV1-provider', () => {
               'chain:1',
               'status:success',
               'simType:eth_simulateV1',
+              'seeded:false',
               'swapSteps:true',
             ],
           }
@@ -283,6 +312,8 @@ describe('eth-simulateV1-provider', () => {
           gasConverter,
           ethEstimateGasSimulator,
           [ChainId.AVAX],
+          seededProviderFor,
+          true,
           'unirpc_simulateV0'
         );
 
@@ -316,6 +347,7 @@ describe('eth-simulateV1-provider', () => {
               `chain:${ChainId.AVAX}`,
               'status:success',
               'simType:unirpc_simulateV0',
+              'seeded:false',
             ],
           }
         );
@@ -480,7 +512,12 @@ describe('eth-simulateV1-provider', () => {
           'UniRpcV2.Simulation.Request',
           1,
           {
-            tags: ['chain:1', 'status:failure', 'simType:eth_simulateV1'],
+            tags: [
+              'chain:1',
+              'status:failure',
+              'simType:eth_simulateV1',
+              'seeded:false',
+            ],
           }
         );
       });
@@ -550,7 +587,12 @@ describe('eth-simulateV1-provider', () => {
           'UniRpcV2.Simulation.Request',
           1,
           {
-            tags: ['chain:1', 'status:failure', 'simType:eth_simulateV1'],
+            tags: [
+              'chain:1',
+              'status:failure',
+              'simType:eth_simulateV1',
+              'seeded:false',
+            ],
           }
         );
       });
@@ -644,7 +686,8 @@ describe('eth-simulateV1-provider', () => {
           ctx: Context,
           gasPrice?: bigint,
           blockNumber?: number,
-          stateOverrides?: ResolvedStateOverride[]
+          stateOverrides?: ResolvedStateOverride[],
+          fundSenderAsset?: string
         ) => Promise<QuoteSplit>;
       };
 
@@ -735,7 +778,9 @@ describe('eth-simulateV1-provider', () => {
           provider,
           gasConverter,
           ethEstimateGasSimulator,
-          [ChainId.MAINNET]
+          [ChainId.MAINNET],
+          seededProviderFor,
+          true
         );
         const quoteSplit = createQuoteSplit(true);
         vi.mocked(ethEstimateGasSimulator.ethEstimateGas).mockResolvedValue(
@@ -855,7 +900,9 @@ describe('eth-simulateV1-provider', () => {
             provider,
             gasConverter,
             ethEstimateGasSimulator,
-            [chainId]
+            [chainId],
+            seededProviderFor,
+            true
           );
           mockTokenApproved(guardedSimulator, false);
           vi.mocked(provider.send).mockRejectedValue(
@@ -1053,7 +1100,9 @@ describe('eth-simulateV1-provider', () => {
           provider,
           gasConverter,
           ethEstimateGasSimulator,
-          [ChainId.MAINNET]
+          [ChainId.MAINNET],
+          seededProviderFor,
+          true
         );
         const quoteSplit = createQuoteSplit(false);
         mockTokenApproved(unsupportedChainSimulator, false);
@@ -1067,6 +1116,184 @@ describe('eth-simulateV1-provider', () => {
         expect(result.simulationResult?.status).toBe(
           SimulationStatus.NOT_SUPPORTED
         );
+      });
+
+      describe('seeded sender (fundSenderAsset)', () => {
+        const okCall = {
+          returnData: '0x',
+          logs: [],
+          gasUsed: '50000',
+          status: '0x1',
+        };
+        const successBundleResult = [
+          {
+            calls: [
+              okCall,
+              {...okCall, gasUsed: '60000'},
+              {...okCall, gasUsed: '150000'},
+            ],
+          },
+        ];
+        const revertBundleResult = [
+          {
+            calls: [
+              okCall,
+              okCall,
+              {
+                error: {
+                  code: 3,
+                  message: 'execution reverted',
+                  data: `0x8b063d73${'0'.repeat(128)}`,
+                },
+              },
+            ],
+          },
+        ];
+
+        const simulateSeeded = (
+          fundSenderAsset: string | undefined,
+          tokenInIsNative = false
+        ) =>
+          simulator.simulateTransaction(
+            USER_ADDRESS,
+            swapOptions,
+            createQuoteSplit(tokenInIsNative),
+            ctx,
+            undefined,
+            undefined,
+            undefined,
+            fundSenderAsset
+          );
+
+        it('runs the bundle on the provider for the asset and skips the fast path', async () => {
+          // Approved, so an unseeded run would take the eth_estimateGas fast path
+          mockTokenApproved(simulator, true);
+          vi.mocked(seededProvider.send).mockResolvedValue(successBundleResult);
+
+          const result = await simulateSeeded(USDC_ADDRESS);
+
+          expect(seededProviderFor).toHaveBeenCalledWith(USDC_ADDRESS);
+          expect(seededProvider.send).toHaveBeenCalledWith('eth_simulateV1', [
+            expect.anything(),
+            'latest',
+          ]);
+          expect(provider.send).not.toHaveBeenCalled();
+          expect(ethEstimateGasSimulator.ethEstimateGas).not.toHaveBeenCalled();
+          expect(result.simulationResult?.status).toBe(
+            SimulationStatus.SUCCESS
+          );
+          expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
+          expect(ctx.metrics.count).toHaveBeenCalledWith(
+            'UniRpcV2.Simulation.Request',
+            1,
+            {
+              tags: [
+                'chain:1',
+                'status:success',
+                'simType:eth_simulateV1',
+                'seeded:true',
+              ],
+            }
+          );
+        });
+
+        it('stays on the injected provider without a seed', async () => {
+          mockTokenApproved(simulator, true);
+          vi.mocked(ethEstimateGasSimulator.ethEstimateGas).mockRejectedValue(
+            new Error('estimateGas down')
+          );
+          vi.mocked(provider.send).mockResolvedValue(successBundleResult);
+
+          await simulateSeeded(undefined);
+
+          expect(seededProviderFor).not.toHaveBeenCalled();
+          expect(provider.send).toHaveBeenCalled();
+        });
+
+        it('counts a seeded failure and rethrows it unclassified, refusal included', async () => {
+          const refusal = await captureEthersRpcError(
+            UNIRPC_BALANCE_OVERRIDE_REFUSED,
+            rpcProvider =>
+              rpcProvider.send('eth_simulateV1', [{blockStateCalls: []}])
+          );
+          vi.mocked(seededProvider.send).mockRejectedValue(refusal);
+
+          await expect(simulateSeeded(USDC_ADDRESS)).rejects.toBe(refusal);
+
+          expect(ctx.metrics.count).toHaveBeenCalledWith(
+            'UniRpcV2.Simulation.Request',
+            1,
+            {
+              tags: [
+                'chain:1',
+                'status:failure',
+                'simType:eth_simulateV1',
+                'seeded:true',
+              ],
+            }
+          );
+          expect(ctx.logger.error).not.toHaveBeenCalled();
+        });
+
+        it('does not fall back to eth_estimateGas for a seeded native input when the backend is down', async () => {
+          const outage = await captureEthersRpcError(
+            UNIRPC_ALL_PROVIDERS_FAILED,
+            rpcProvider =>
+              rpcProvider.send('eth_simulateV1', [{blockStateCalls: []}])
+          );
+          vi.mocked(seededProvider.send).mockRejectedValue(outage);
+
+          await expect(
+            simulateSeeded(NATIVE_BALANCE_OVERRIDE_ASSET, true)
+          ).rejects.toBe(outage);
+
+          expect(ethEstimateGasSimulator.ethEstimateGas).not.toHaveBeenCalled();
+        });
+
+        it('tags a seeded revert seeded:true and logs it at warn', async () => {
+          vi.mocked(seededProvider.send).mockResolvedValue(revertBundleResult);
+
+          const result = await simulateSeeded(USDC_ADDRESS);
+
+          expect(result.simulationResult?.status).toBe(
+            SimulationStatus.SLIPPAGE_TOO_LOW
+          );
+          expect(ctx.metrics.count).toHaveBeenCalledWith(
+            'UniRpcV2.Simulation.Request',
+            1,
+            {
+              tags: [
+                'chain:1',
+                'status:failure',
+                'simType:eth_simulateV1',
+                'seeded:true',
+              ],
+            }
+          );
+          expect(ctx.logger.warn).toHaveBeenCalledWith(
+            'eth_simulateV1 returned error',
+            expect.objectContaining({seeded: true})
+          );
+          expect(ctx.logger.error).not.toHaveBeenCalled();
+        });
+
+        it('keeps a -32602 on an unseeded run as a FAILED simulation', async () => {
+          mockTokenApproved(simulator, true);
+          vi.mocked(ethEstimateGasSimulator.ethEstimateGas).mockRejectedValue(
+            new Error('estimateGas down')
+          );
+          vi.mocked(provider.send).mockRejectedValue(
+            await captureEthersRpcError(
+              UNIRPC_BALANCE_OVERRIDE_REFUSED,
+              rpcProvider =>
+                rpcProvider.send('eth_simulateV1', [{blockStateCalls: []}])
+            )
+          );
+
+          const result = await simulateSeeded(undefined);
+
+          expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        });
       });
     });
 
@@ -1160,7 +1387,9 @@ describe('eth-simulateV1-provider', () => {
           provider,
           gasConverter,
           ethEstimateGasSimulator,
-          [ChainId.MAINNET]
+          [ChainId.MAINNET],
+          seededProviderFor,
+          true
         );
 
         expect(sim).toBeInstanceOf(EthSimulateV1Simulator);

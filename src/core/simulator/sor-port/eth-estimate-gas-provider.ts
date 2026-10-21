@@ -28,8 +28,13 @@ export class EthEstimateGasSimulator extends Simulator {
     provider: JsonRpcProvider,
     gasConverter: GasConverter
   ) {
-    super(provider, chainId);
+    // eth_estimateGas cannot carry a seed, so this simulator never seeds
+    super(provider, chainId, false);
     this.gasConverter = gasConverter;
+  }
+
+  protected supportsSimulation(): boolean {
+    return false;
   }
 
   async ethEstimateGas(

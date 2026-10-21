@@ -92,7 +92,11 @@ import {
 import {BigNumber} from '@ethersproject/bignumber';
 import {Protocol} from '../models/pool/Protocol';
 import {Pool} from '../models/pool/Pool';
-import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
+import {
+  TokenTransferMode,
+  UniversalRouterVersion,
+} from '@uniswap/universal-router-sdk';
+import {Percent} from '@uniswap/sdk-core';
 import {SwapOptionsFactory} from './swap/SwapOptionsFactory';
 import {IPoolTransferProbe} from '../stores/fee-on-transfer/pool-probe/PoolTransferProbe';
 import {
@@ -101,7 +105,10 @@ import {
   TransferMeasurement,
   TransferVerdict,
 } from '../stores/fee-on-transfer/pool-probe/TransferSimulationSource';
-import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
+import {
+  SwapOptionsUniversalRouter,
+  SwapType,
+} from './simulator/sor-port/simulation-provider';
 import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
@@ -348,6 +355,27 @@ class FailingSimulator implements ISimulator {
         estimatedGasUsedInUSD: 0,
         status: this.status,
         description: 'Simulation failed for testing',
+      },
+    };
+  }
+}
+
+// INSUFFICIENT_BALANCE from a seeded run that executed and measured gas
+class SeededBalanceSimulator implements ISimulator {
+  async simulate(
+    chainId: ChainId,
+    swapOptions: unknown,
+    quoteSplit: QuoteSplit
+  ): Promise<QuoteSplit> {
+    return {
+      ...quoteSplit,
+      simulationResult: {
+        estimatedGasUsed: 170000n,
+        estimatedGasUsedInQuoteToken: 2000000n,
+        estimatedGasUsedInUSD: 1.5,
+        status: SimulationStatus.INSUFFICIENT_BALANCE,
+        description:
+          'Simulation succeeded with a seeded balance; user does not have sufficient balance.',
       },
     };
   }
@@ -2881,6 +2909,73 @@ describe('UniRouteBL', () => {
       buildSwapMethodParametersSpy.mockRestore();
     });
 
+    it('stops simulating candidates after MaxSeededAttempts seeded reverts', async () => {
+      const request = new QuoteRequest({
+        ...baseRequest,
+        tradeType: 'EXACT_IN',
+        simulateFromAddress: '0x1234567890123456789012345678901234567890',
+        recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        slippageTolerance: 5,
+      });
+
+      const buildTradeSpy = vi
+        .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+        .mockImplementation(mockBuildTrade);
+      const buildSwapMethodParametersSpy = vi
+        .spyOn(
+          await import('../lib/methodParameters'),
+          'buildSwapMethodParameters'
+        )
+        .mockImplementation(mockBuildSwapMethodParameters);
+
+      const cappedConfig = {
+        ...serviceConfig,
+        Simulation: {
+          ...serviceConfig.Simulation,
+          Enabled: true,
+          TopNQuotes: 3,
+          MaxSeededAttempts: 2,
+        },
+      };
+
+      let attempts = 0;
+      // Every candidate reverts on a seeded run, three candidates are available
+      const seededRevertSimulator: ISimulator = {
+        simulate: async (chainId, swapOptions, quoteSplit) => {
+          attempts++;
+          return {
+            ...quoteSplit,
+            simulationResult: {
+              estimatedGasUsed: 0n,
+              estimatedGasUsedInQuoteToken: 0n,
+              estimatedGasUsedInUSD: 0,
+              status: SimulationStatus.FAILED,
+              description: 'seeded revert',
+              seeded: true,
+            },
+          };
+        },
+      };
+
+      const uniRouteBL = buildBL(
+        new MockedMultiQuoteStrategy([
+          buildSplit(poolAddresses[0], 1000n),
+          buildSplit(poolAddresses[1], 900n),
+          buildSplit(poolAddresses[2], 800n),
+        ]),
+        cappedConfig,
+        seededRevertSimulator
+      );
+
+      const response = await uniRouteBL.quote(ctx, request);
+
+      expect(attempts).toBe(2);
+      expect(response.simulationStatus).equals(SimulationStatus.FAILED);
+
+      buildTradeSpy.mockRestore();
+      buildSwapMethodParametersSpy.mockRestore();
+    });
+
     it('excludes candidates whose trade build failed', async () => {
       const request = new QuoteRequest({
         ...baseRequest,
@@ -4425,6 +4520,127 @@ describe('UniRouteBL', () => {
       buildSwapMethodParametersSpy.mockRestore();
     });
 
+    describe('INSUFFICIENT_BALANCE gas handling', () => {
+      const singleQuoteWithHeuristicGas = () =>
+        new QuoteSplit([
+          new QuoteBasic(
+            new RouteBasic(Protocol.V2, [
+              new V2Pool(
+                new Address(baseRequest.tokenInAddress),
+                new Address(baseRequest.tokenOutAddress),
+                new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+            ]),
+            BigInt('1234567890'),
+            undefined,
+            {
+              gasUse: BigInt('150000'),
+              gasPriceInWei: BigInt('30000000000'),
+              gasCostInWei: BigInt('4500000000000000'),
+              gasCostInEth: 0.0045,
+              gasCostInQuoteToken: BigInt('1000000'),
+            }
+          ),
+        ]);
+
+      const quoteWithSimulator = async (simulator: ISimulator) => {
+        const simulationEnabledConfig = {
+          ...serviceConfigAsync,
+          Simulation: {
+            ...serviceConfigAsync.Simulation,
+            Enabled: true,
+          },
+        };
+        const SEEDED_SWAPPER = '0x1234567890123456789012345678901234567890';
+        const request = new QuoteRequest({
+          ...baseRequest,
+          tradeType: 'EXACT_IN',
+          simulateFromAddress: SEEDED_SWAPPER,
+          recipient: SEEDED_SWAPPER,
+          slippageTolerance: 20,
+        });
+        const buildTradeSpy = vi
+          .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+          .mockImplementation(mockBuildTrade);
+        const buildSwapMethodParametersSpy = vi
+          .spyOn(
+            await import('../lib/methodParameters'),
+            'buildSwapMethodParameters'
+          )
+          .mockImplementation(mockBuildSwapMethodParameters);
+        const seededSwapOptions: SwapOptionsUniversalRouter = {
+          type: SwapType.UNIVERSAL_ROUTER,
+          urVersion: UniversalRouterVersion.V2_0,
+          simulate: {fromAddress: SEEDED_SWAPPER},
+          slippageTolerance: new Percent(20, 100),
+          tokenTransferMode: TokenTransferMode.Permit2,
+        };
+        const swapOptionsSpy = vi
+          .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
+          .mockReturnValue(seededSwapOptions);
+        const uniRouteBL = new UniRouteBL(
+          simulationEnabledConfig,
+          redisCache,
+          chainRepository,
+          poolDiscoverer,
+          freshPoolDetailsWrapper,
+          tokenHandler,
+          quoteFetcher,
+          quoteSelector,
+          routeQuoteAllocator,
+          gasEstimateProvider,
+          noGasConverter,
+          routeRepository,
+          cachedRoutesRepository,
+          noRouteCacheRepository,
+          new MockedQuoteStrategy(singleQuoteWithHeuristicGas()),
+          simulator,
+          quoteRequestValidator,
+          tokenProvider,
+          mockedRpcProviderMap,
+          stateOverrideResolver
+        );
+        try {
+          return await uniRouteBL.quote(ctx, request, {
+            universalRouterVersion: UniversalRouterVersion.V2_0,
+          });
+        } finally {
+          swapOptionsSpy.mockRestore();
+          buildTradeSpy.mockRestore();
+          buildSwapMethodParametersSpy.mockRestore();
+        }
+      };
+
+      it('applies the gas of a seeded-balance run to the response like a SUCCESS', async () => {
+        const response = await quoteWithSimulator(new SeededBalanceSimulator());
+
+        expect(response.simulationStatus).equals(
+          SimulationStatus.INSUFFICIENT_BALANCE
+        );
+        expect(response.simulationError).toBe(true);
+        expect(response.gasUseEstimate).equals('170000');
+        expect(response.gasUseEstimateQuote).equals('2000000');
+        expect(response.gasUseEstimateUSD).equals('1.5');
+        // EXACT_IN subtracts the simulated gas in quote token from totalQuoteAmount
+        expect(response.quoteGasAdjusted).equals('1232567890');
+      });
+
+      it('keeps the heuristic gas when INSUFFICIENT_BALANCE carries none (the run did not execute)', async () => {
+        const response = await quoteWithSimulator(
+          new FailingSimulator(SimulationStatus.INSUFFICIENT_BALANCE)
+        );
+
+        expect(response.simulationStatus).equals(
+          SimulationStatus.INSUFFICIENT_BALANCE
+        );
+        expect(response.gasUseEstimate).equals('150000');
+        expect(response.gasUseEstimateQuote).equals('1000000');
+        expect(response.quoteGasAdjusted).equals('1233567890');
+      });
+    });
+
     it('should scale gasUseEstimateUSD proportionally with CHAIN_TO_GAS_LIMIT_MAP when simulation FAILS', async () => {
       // Verifies that gasUseEstimateUSD is also scaled proportionally, not left as the
       // raw gasCostInUSD from the original gas estimate.
@@ -4644,6 +4860,7 @@ describe('UniRouteBL', () => {
       Simulation: {
         TopNQuotes: 3,
         Enabled: true,
+        MaxSeededAttempts: 2,
       },
     };
 

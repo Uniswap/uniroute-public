@@ -1,7 +1,11 @@
 import {describe, expect, it} from 'vitest';
 import {readFileSync} from 'fs';
 import path from 'path';
-import {isSimulationError, SimulationStatus} from './ISimulator';
+import {
+  hasSimulatedGasEstimate,
+  isSimulationError,
+  SimulationStatus,
+} from './ISimulator';
 import {SimulationStatus as ProtoSimulationStatus} from '../../../gen/uniroute/v1/api_pb';
 
 const PROTO_ENUM_VALUE_PREFIX = 'SIMULATION_STATUS_';
@@ -70,5 +74,46 @@ describe('isSimulationError', () => {
 
   it('is false when no simulation result exists', () => {
     expect(isSimulationError(undefined)).toBe(false);
+  });
+});
+
+describe('hasSimulatedGasEstimate', () => {
+  const withGas = (status: SimulationStatus) => ({
+    estimatedGasUsed: 150000n,
+    estimatedGasUsedInQuoteToken: 2000n,
+    estimatedGasUsedInUSD: 3.5,
+    status,
+  });
+
+  it('is true for an executed swap: SUCCESS, or INSUFFICIENT_BALANCE from a seeded run', () => {
+    expect(hasSimulatedGasEstimate(withGas(SimulationStatus.SUCCESS))).toBe(
+      true
+    );
+    expect(
+      hasSimulatedGasEstimate(withGas(SimulationStatus.INSUFFICIENT_BALANCE))
+    ).toBe(true);
+  });
+
+  it('is false for an INSUFFICIENT_BALANCE that never ran', () => {
+    expect(
+      hasSimulatedGasEstimate({
+        ...withGas(SimulationStatus.INSUFFICIENT_BALANCE),
+        estimatedGasUsed: 0n,
+        estimatedGasUsedInQuoteToken: 0n,
+      })
+    ).toBe(false);
+  });
+
+  it('is false for every other status and for no result', () => {
+    for (const status of Object.values(SimulationStatus)) {
+      if (
+        status === SimulationStatus.SUCCESS ||
+        status === SimulationStatus.INSUFFICIENT_BALANCE
+      ) {
+        continue;
+      }
+      expect(hasSimulatedGasEstimate(withGas(status))).toBe(false);
+    }
+    expect(hasSimulatedGasEstimate(undefined)).toBe(false);
   });
 });

@@ -27,6 +27,7 @@ import {
 } from '../../../../abis/src/generated/contracts';
 
 import {
+  countInBackground,
   Simulator,
   SwapOptionsUniversalRouter,
   SwapType,
@@ -49,6 +50,7 @@ import {
   breakDownSimulationError,
   describeSimulationException,
 } from './simulationErrorBreakDown';
+import {SeededProviderFactory} from './balanceOverride';
 import {permit2Address} from '@uniswap/permit2-sdk';
 import {constants} from 'ethers';
 import {getUniversalRouterAddress} from '../../../lib/universalRouterAddress';
@@ -125,6 +127,7 @@ export class EthSimulateV1Simulator extends Simulator {
   private simulationSupportedChains: ChainId[];
   private readonly rpcMethod: SimulateRpcMethod;
   private readonly simTypeTag: string;
+  private readonly seededProviderFor: SeededProviderFactory;
 
   constructor(
     chainId: ChainId,
@@ -132,14 +135,21 @@ export class EthSimulateV1Simulator extends Simulator {
     gasConverter: GasConverter,
     ethEstimateGasSimulator: EthEstimateGasSimulator,
     simulationSupportedChains: ChainId[],
+    seededProviderFor: SeededProviderFactory,
+    seededBalanceEnabled: boolean,
     rpcMethod: SimulateRpcMethod = 'eth_simulateV1'
   ) {
-    super(provider, chainId);
+    super(provider, chainId, seededBalanceEnabled);
     this.gasConverter = gasConverter;
     this.ethEstimateGasSimulator = ethEstimateGasSimulator;
     this.simulationSupportedChains = simulationSupportedChains;
+    this.seededProviderFor = seededProviderFor;
     this.rpcMethod = rpcMethod;
     this.simTypeTag = `simType:${rpcMethod}`;
+  }
+
+  protected supportsSimulation(): boolean {
+    return this.simulationSupportedChains.includes(this.chainId);
   }
 
   async ethSimulateV1(
@@ -149,12 +159,14 @@ export class EthSimulateV1Simulator extends Simulator {
     ctx: Context,
     gasPrice?: bigint,
     blockNumber?: number,
-    stateOverrides?: ResolvedStateOverride[]
+    stateOverrides?: ResolvedStateOverride[],
+    fundSenderAsset?: string
   ): Promise<QuoteSplit> {
     let estimatedGasUsed: bigint;
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
       // Tag swapsteps-mode simulations so their success rate is sliceable.
+      const seededTag = `seeded:${fundSenderAsset !== undefined}`;
       const swapStepsTags: string[] = swapOptions.universalRouterSwapsteps
         ? ['swapSteps:true']
         : [];
@@ -258,8 +270,13 @@ export class EthSimulateV1Simulator extends Simulator {
           methodParameters: quoteSplit.swapInfo!.methodParameters,
           useProxy: useUniversalRouterProxy,
           callCount: expectedCallCount,
+          fundSenderAsset,
         }
       );
+      const rpc =
+        fundSenderAsset === undefined
+          ? this.provider
+          : this.seededProviderFor(fundSenderAsset);
       try {
         const overrideMap = encodeGethStateOverrides(stateOverrides);
         const blockStateCall: BlockStateCall = {
@@ -272,7 +289,7 @@ export class EthSimulateV1Simulator extends Simulator {
 
         const before = Date.now();
 
-        const result = (await this.provider.send(this.rpcMethod, [
+        const result = (await rpc.send(this.rpcMethod, [
           blockStateCalls,
           blockNumber ? '0x' + blockNumber.toString(16) : 'latest',
         ])) as Array<ResultCall>;
@@ -294,12 +311,22 @@ export class EthSimulateV1Simulator extends Simulator {
               : undefined;
 
           if (swapCallError) {
-            ctx.logger.error(`${this.rpcMethod} returned error`, {
+            const revertFields = {
               result,
               error: swapCallError,
               chain: this.chainId,
               swapSteps: swapOptions.universalRouterSwapsteps === true,
-            });
+              seeded: fundSenderAsset !== undefined,
+            };
+            // A revert from a wallet that could not trade anyway is expected, not an error
+            if (fundSenderAsset === undefined) {
+              ctx.logger.error(
+                `${this.rpcMethod} returned error`,
+                revertFields
+              );
+            } else {
+              ctx.logger.warn(`${this.rpcMethod} returned error`, revertFields);
+            }
           }
 
           await ctx.metrics.dist(
@@ -310,6 +337,7 @@ export class EthSimulateV1Simulator extends Simulator {
                 `chain:${this.chainId}`,
                 TAG_STATUS_FAILURE,
                 this.simTypeTag,
+                seededTag,
               ],
             }
           );
@@ -319,6 +347,7 @@ export class EthSimulateV1Simulator extends Simulator {
               `chain:${this.chainId}`,
               TAG_STATUS_FAILURE,
               this.simTypeTag,
+              seededTag,
               ...swapStepsTags,
             ],
           });
@@ -360,6 +389,7 @@ export class EthSimulateV1Simulator extends Simulator {
               `chain:${this.chainId}`,
               TAG_STATUS_SUCCESS,
               this.simTypeTag,
+              seededTag,
             ],
           }
         );
@@ -369,6 +399,7 @@ export class EthSimulateV1Simulator extends Simulator {
             `chain:${this.chainId}`,
             TAG_STATUS_SUCCESS,
             this.simTypeTag,
+            seededTag,
             ...swapStepsTags,
           ],
         });
@@ -396,6 +427,17 @@ export class EthSimulateV1Simulator extends Simulator {
           );
         }
       } catch (e) {
+        // A seeded failure is counted here and goes up unclassified, the base class owns the seeded policy
+        if (fundSenderAsset !== undefined) {
+          countInBackground(ctx, METRIC_UNIRPC_SIMULATION_REQUEST, [
+            `chain:${this.chainId}`,
+            TAG_STATUS_FAILURE,
+            this.simTypeTag,
+            seededTag,
+            ...swapStepsTags,
+          ]);
+          throw e;
+        }
         const {status, logFields} = describeSimulationException(
           e,
           quoteSplit.swapInfo!.tokenInWrappedAddress,
@@ -408,6 +450,7 @@ export class EthSimulateV1Simulator extends Simulator {
             `chain:${this.chainId}`,
             TAG_STATUS_FAILURE,
             this.simTypeTag,
+            seededTag,
             ...swapStepsTags,
           ],
         });
@@ -467,14 +510,17 @@ export class EthSimulateV1Simulator extends Simulator {
     gasPrice?: bigint,
 
     blockNumber?: number,
-    stateOverrides?: ResolvedStateOverride[]
+    stateOverrides?: ResolvedStateOverride[],
+    fundSenderAsset?: string
   ): Promise<QuoteSplit> {
     const hasOverrides = !!stateOverrides && stateOverrides.length > 0;
-    const canEstimateGas = !hasOverrides && hasNativeToken(this.chainId);
+    // A seeded sender stays on the bundle because only the bundle carries the seed and simulates the missing approvals
+    const canEstimateGas =
+      !hasOverrides &&
+      fundSenderAsset === undefined &&
+      hasNativeToken(this.chainId);
     const nativeInput = quoteSplit.swapInfo?.tokenInIsNative;
-    const supportsSimulation = this.simulationSupportedChains.includes(
-      this.chainId
-    );
+    const supportsSimulation = this.supportsSimulation();
 
     // Native input uses the bundle's executed gasUsed, which is what the
     // user is charged. eth_estimateGas returns a gas limit instead, so use
@@ -540,7 +586,8 @@ export class EthSimulateV1Simulator extends Simulator {
       ctx,
       gasPrice,
       blockNumber,
-      stateOverrides
+      stateOverrides,
+      fundSenderAsset
     );
     if (
       canEstimateGas &&

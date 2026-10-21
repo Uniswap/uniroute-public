@@ -87,6 +87,7 @@ import {usdGasTokensByChain} from './gas/gas-helpers';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
 import {
+  hasSimulatedGasEstimate,
   isSimulationError,
   ISimulator,
   SimulationStatus,
@@ -2737,15 +2738,12 @@ export class UniRouteBL implements IUniRoutedBL {
     // Create route string by joining all quote routes
     const routeString = routeStringForQuoteSplit(quoteSplit);
 
-    // If simulation succeeded, update quoteGasAdjusted amount and gas estimates
+    // A simulation that executed the swap replaces the heuristic gas estimates whether the sender was funded or seeded
     let finalQuoteGasAdjusted = quoteGasAdjusted;
     let finalGasUseEstimate = totalGasUse;
     let finalGasUseEstimateQuote = gasCostInQuoteToken;
     let finalGasUseEstimateUSD = gasCostInUSD;
-    if (
-      quoteSplit.simulationResult?.status === SimulationStatus.SUCCESS &&
-      quoteSplit.simulationResult.estimatedGasUsedInQuoteToken !== 0n
-    ) {
+    if (hasSimulatedGasEstimate(quoteSplit.simulationResult)) {
       // TODO: estimatedGasUsedInQuoteToken might go negative (https://linear.app/uniswap/issue/ROUTE-453)
       if (tradeType === TradeType.ExactIn) {
         finalQuoteGasAdjusted =
@@ -2763,7 +2761,7 @@ export class UniRouteBL implements IUniRoutedBL {
         quoteSplit.simulationResult.estimatedGasUsedInUSD;
 
       ctx.logger.debug(
-        'Simulation succeeded - updating quoteGasAdjusted amount',
+        'Simulation gas applied - updating quoteGasAdjusted amount',
         {
           quoteGasAdjusted: quoteGasAdjusted.toString(),
           finalQuoteGasAdjusted: finalQuoteGasAdjusted.toString(),
@@ -3390,6 +3388,7 @@ export class UniRouteBL implements IUniRoutedBL {
     let simulationAttempts = 0;
     let simulationSuccesses = 0;
     let simulationFailures = 0;
+    let seededFailures = 0;
     const failedRoutes: string[] = [];
     // Splits whose trade could not be built/encoded (logged individually at
     // the failure site) — tracked separately from simulation failures so the
@@ -3749,6 +3748,19 @@ export class UniRouteBL implements IUniRoutedBL {
             chain: chain.chainId,
             swapSteps: universalRouterSwapsteps,
           });
+          // Each seeded attempt is a full bundle for a wallet that cannot trade yet, so FAILED seeded runs stop the search at the cap
+          if (simulatedQuote.simulationResult?.seeded === true) {
+            seededFailures++;
+            if (
+              seededFailures >= this.serviceConfig.Simulation.MaxSeededAttempts
+            ) {
+              ctx.logger.warn('Seeded simulation attempts exhausted', {
+                seededFailures,
+                chain: chain.chainId,
+              });
+              break;
+            }
+          }
         } else {
           // SYSTEM_DOWN counts as a failure but still ends the loop: further
           // candidates would hit the same unavailable backend.

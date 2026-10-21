@@ -303,6 +303,8 @@ export interface IUniRouteServiceConfig {
   Simulation: {
     TopNQuotes: number;
     Enabled: boolean;
+    /** Seeded runs ending FAILED allowed per request before the candidate search stops */
+    MaxSeededAttempts: number;
   };
   TopPoolsSelector: {
     PoolSelectionConfig: Record<ChainId, IPoolSelectionConfig>;
@@ -455,6 +457,7 @@ export const getUniRouteSyncConfig = (
     Simulation: {
       TopNQuotes: __PLACEHOLDER__,
       Enabled: true,
+      MaxSeededAttempts: __PLACEHOLDER__,
     },
     TopPoolsSelector: {
       PoolSelectionConfig: poolSelectionConfig,
@@ -580,6 +583,7 @@ export const getQuickRouteSyncConfig = (
     Simulation: {
       TopNQuotes: __PLACEHOLDER__,
       Enabled: false,
+      MaxSeededAttempts: __PLACEHOLDER__,
     },
     TopPoolsSelector: {
       PoolSelectionConfig: poolSelectionConfig,
