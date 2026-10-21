@@ -456,6 +456,8 @@ export const GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET =
   '0x0000113dcf4add69999fad8f20f2b63f979bfcc0';
 export const GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM =
   '0x630e9cac0fff557bd3a01daa111ed253c771bcc0';
+export const VOLATILE_PAIR_HOOK_ON_MAINNET =
+  '0x000022ec4ebd6b12294396e852e4c3876b253cc0';
 export const ETIM_TAX_HOOK_ON_MAINNET =
   '0x41a9bf2969af822942a553babd6d8dda0dff80cc';
 export const ASH_HOOK_ON_MAINNET = '0xebac1d1a384d3ae1a162fdf30788fcfa228380cc';
@@ -656,6 +658,7 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [DUALPOOL_HOOK_ON_MAINNET]: {gasOverheadPerHop: 3_000_000n},
     [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: {gasOverheadPerHop: 250_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: {gasOverheadPerHop: 50_000n},
+    [VOLATILE_PAIR_HOOK_ON_MAINNET]: {gasOverheadPerHop: 50_000n},
     // Pool is 1:1 with equal decimals, so slot0's 2^96 placeholder is already
     // correct — no sqrtPriceFromQuoter needed.
     [FLETH_HOOK_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
@@ -1687,6 +1690,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FORGE_HOOK_ON_MAINNET,
     DOPPLER_HOOK_INITIALIZER_ON_MAINNET,
     GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET,
+    VOLATILE_PAIR_HOOK_ON_MAINNET,
     FEW_V4_SHELL_HOOK_ON_MAINNET,
     FEW_V4_SHELL_HOOK_ON_MAINNET_2,
     FEW_V4_SHELL_HOOK_ON_MAINNET_3,
