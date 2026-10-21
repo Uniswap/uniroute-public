@@ -38,6 +38,33 @@ export const POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES =
   POOLS_FOR_TOKENS_CACHE_BYTES_PER_POOL_ESTIMATE *
   POOLS_FOR_TOKENS_CACHE_SIZE_SAFETY_MULTIPLIER;
 
+interface SnapshotMemoEntry<TPool> {
+  source: string;
+  parsed: TPool[];
+  fetchedAtMs: number;
+  // What a refresh built the entry from — the discoverer's source version
+  // tag and the deny-list payload `parsed` was filtered with — so a later
+  // refresh over the same inputs can keep the entry instead of rebuilding
+  // it (see loadSnapshot). `sourceVersion` is absent when the discoverer
+  // has no version or the load did not succeed, so the entry is never
+  // offered for reuse.
+  sourceVersion?: string;
+  globalSet?: Set<string>;
+}
+
+export enum SnapshotLoadStatus {
+  UNCHANGED = 'unchanged',
+  LOADED = 'loaded',
+}
+
+export type SnapshotLoad<TPool> =
+  | {status: SnapshotLoadStatus.UNCHANGED}
+  | {
+      status: SnapshotLoadStatus.LOADED;
+      pools: TPool[];
+      sourceVersion?: string;
+    };
+
 // Base class for pool discoverers that fetch pools from a remote source and caches them.
 // Will be used in the future to fetch/cache pools from different sources (e.g. subgraph, s3, indexer etc.).
 // All pools (returned by `_getPools`) will be lazily fetched from the remote source and cached.
@@ -67,7 +94,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // size is bounded by the (chainId, protocol) keys this discoverer serves.
   private readonly snapshotParseMemo = new Map<
     string,
-    {source: string; parsed: TPool[]; fetchedAtMs: number}
+    SnapshotMemoEntry<TPool>
   >();
 
   // In-flight fetches joinable for coalescing. Entries older than the join
@@ -271,18 +298,95 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     return parsed;
   }
 
+  /**
+   * Loads the snapshot for (chainId, protocol). `knownVersion` is the source
+   * version the memoized snapshot was built from, passed only while that
+   * entry is still usable (same deny-list payload); a discoverer that can
+   * tell its source has not changed since — an S3 conditional GET — answers
+   * `unchanged` instead of loading, and the memoized entry is kept in place
+   * of fetching, parsing, filtering and stringifying the same multi-MB
+   * snapshot again on the event loop. A loaded result carries the version
+   * its pools came from, or none when the discoverer has no version or the
+   * load did not succeed, so the next refresh loads unconditionally. The
+   * default always loads through `_getPools`.
+   */
+  protected async loadSnapshot(
+    chainId: ChainId,
+    protocol: Protocol,
+    _knownVersion: string | undefined,
+    ctx: Context
+  ): Promise<SnapshotLoad<TPool>> {
+    return {
+      status: SnapshotLoadStatus.LOADED,
+      pools: await this._getPools(chainId, protocol, ctx),
+    };
+  }
+
   private async loadAndCachePools(
     cacheKey: string,
     chainId: ChainId,
     protocol: Protocol,
     ctx: Context
   ): Promise<TPool[]> {
-    let retrievedPools = await this._getPools(chainId, protocol, ctx);
+    // Read once per refresh, and only when a reuse is possible: the full
+    // path below filters with the same payload the entry is compared
+    // against, and a discoverer without a version adds no awaits here.
+    const memo = this.snapshotParseMemo.get(cacheKey);
+    let prefetchedGlobalSet: Set<string> | undefined;
+    let knownVersion: string | undefined;
+    if (this.snapshotMemoEnabled && memo?.sourceVersion !== undefined) {
+      const {globalSet} =
+        await this.featureGatedTokensRepository.getSnapshot(ctx);
+      prefetchedGlobalSet = globalSet;
+      if (memo.globalSet === globalSet) {
+        knownVersion = memo.sourceVersion;
+      }
+    }
+
+    const load = await this.loadSnapshot(chainId, protocol, knownVersion, ctx);
+    if (knownVersion !== undefined) {
+      // `unavailable`: the conditional load came back without a version,
+      // so the fetch did not succeed and the next refresh is unconditional.
+      const result =
+        load.status === SnapshotLoadStatus.UNCHANGED
+          ? 'unchanged'
+          : load.sourceVersion === undefined
+            ? 'unavailable'
+            : 'changed';
+      await ctx.metrics.count(
+        buildMetricKey('PoolDiscoverer.SnapshotSourceCheck'),
+        1,
+        {
+          tags: [
+            `chain:${ChainId[chainId]}`,
+            `protocol:${protocol}`,
+            'status:success',
+            `result:${result}`,
+          ],
+        }
+      );
+    }
+    if (load.status === SnapshotLoadStatus.UNCHANGED) {
+      if (memo === undefined || knownVersion === undefined) {
+        throw new Error('Snapshot reported unchanged without a known version');
+      }
+      // The cache keeps the string the memo already holds, so the next read
+      // is a pointer-equal memo hit, and the stale-serve window restarts
+      // from this confirmation.
+      await this.getPoolsCache.set(cacheKey, memo.source, {
+        ttl: this.getPoolsCacheTtlSeconds(chainId),
+      });
+      this.snapshotParseMemo.set(cacheKey, {...memo, fetchedAtMs: Date.now()});
+      return memo.parsed;
+    }
+
+    let retrievedPools = load.pools;
     let retrievedPoolsStr: string;
     let memoGlobalSet: Set<string> | undefined;
     if (this.snapshotMemoEnabled) {
-      const {globalSet} =
-        await this.featureGatedTokensRepository.getSnapshot(ctx);
+      const globalSet =
+        prefetchedGlobalSet ??
+        (await this.featureGatedTokensRepository.getSnapshot(ctx)).globalSet;
       memoGlobalSet = globalSet;
       const filtered = BaseCachingPoolDiscoverer.filterByDenySet(
         retrievedPools,
@@ -326,10 +430,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       }
     );
     await this.getPoolsCache.set(cacheKey, retrievedPoolsStr, {
-      ttl:
-        this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
-          chainId
-        ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds,
+      ttl: this.getPoolsCacheTtlSeconds(chainId),
     });
 
     if (this.snapshotMemoEnabled) {
@@ -340,6 +441,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         source: retrievedPoolsStr,
         parsed: retrievedPools,
         fetchedAtMs: Date.now(),
+        sourceVersion: load.sourceVersion,
+        globalSet: memoGlobalSet,
       });
       // Seed both memos with the exact string written to the cache so the
       // first post-miss read is a memo hit. Re-filtering with the same
@@ -352,6 +455,14 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     }
 
     return retrievedPools;
+  }
+
+  private getPoolsCacheTtlSeconds(chainId: ChainId): number {
+    return (
+      this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
+        chainId
+      ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds
+    );
   }
 
   private getOrStartSnapshotRefresh(
@@ -397,7 +508,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
   // entry back so they can serve `parsed` without re-reading the memo.
   private getServableStaleSnapshot(
     cacheKey: string
-  ): {source: string; parsed: TPool[]; fetchedAtMs: number} | undefined {
+  ): SnapshotMemoEntry<TPool> | undefined {
     const memo = this.snapshotParseMemo.get(cacheKey);
     if (
       this.snapshotSwrEnabled &&

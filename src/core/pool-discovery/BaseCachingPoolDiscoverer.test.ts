@@ -2,6 +2,8 @@ import {describe, beforeEach, it, expect, vi} from 'vitest';
 import {
   BaseCachingPoolDiscoverer,
   POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES,
+  SnapshotLoad,
+  SnapshotLoadStatus,
 } from './BaseCachingPoolDiscoverer';
 import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
@@ -175,6 +177,65 @@ class ClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
 
   protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
     return [];
+  }
+}
+
+// Answers `unchanged` when asked about the version it currently serves, the
+// way S3 answers 304 to If-None-Match on the same ETag, and records what it
+// was asked about.
+class VersionedPoolDiscoverer extends ClosurePoolDiscoverer {
+  public readonly knownVersions: (string | undefined)[] = [];
+
+  constructor(
+    serviceConfig: IUniRouteServiceConfig,
+    getPoolsCache: IRedisCache<string, string>,
+    getPoolsForTokensCache: IRedisCache<string, string>,
+    loadPools: () => Promise<UniPoolInfo[]>,
+    public sourceVersion: string | undefined,
+    featureGatedTokensRepository?: FeatureGatedTokensRepository
+  ) {
+    super(
+      serviceConfig,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      loadPools,
+      featureGatedTokensRepository
+    );
+  }
+
+  protected override async loadSnapshot(
+    _chainId: ChainId,
+    _protocol: Protocol,
+    knownVersion: string | undefined,
+    _ctx: Context
+  ): Promise<SnapshotLoad<UniPoolInfo>> {
+    this.knownVersions.push(knownVersion);
+    if (knownVersion !== undefined && knownVersion === this.sourceVersion) {
+      return {status: SnapshotLoadStatus.UNCHANGED};
+    }
+    return {
+      status: SnapshotLoadStatus.LOADED,
+      pools: await this._getPools(),
+      sourceVersion: this.sourceVersion,
+    };
+  }
+}
+
+// Hands out the same deny-list payload until `globalSet` is reassigned, the
+// way the real repository shares one content-addressed payload per list.
+class SwitchableDenyListRepository extends FeatureGatedTokensRepository {
+  public globalSet = new Set<string>();
+
+  constructor() {
+    super(
+      {fetchAll: async () => ({tokens: [], skippedUnsupportedChains: 0})},
+      {fetch: async () => []}
+    );
+  }
+
+  override async getSnapshot(snapshotCtx: Context) {
+    const base = await super.getSnapshot(snapshotCtx);
+    return {...base, globalSet: this.globalSet};
   }
 }
 
@@ -1547,6 +1608,177 @@ describe('BaseCachingPoolDiscoverer', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('refresh over an unchanged source', () => {
+    const memoConfig: IUniRouteServiceConfig = {
+      ...serviceConfig,
+      PoolDiscovery: {
+        ...serviceConfig.PoolDiscovery,
+        SnapshotMemoEnabled: true,
+      },
+    };
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V4;
+    const pools = [
+      {
+        id: 'pool',
+        feeTier: '3000',
+        tickSpacing: '1',
+        hooks: '0x1111111111111111111111111111111111111111',
+        liquidity: '1000',
+        token0: {id: '0x1111111111111111111111111111111111111111'},
+        token1: {id: '0x2222222222222222222222222222222222222222'},
+        tvlETH: 1000,
+        tvlUSD: 1000,
+      },
+    ];
+
+    const buildDiscoverer = (
+      sourceVersion: string | undefined,
+      config: IUniRouteServiceConfig = memoConfig,
+      featureGatedTokensRepository?: FeatureGatedTokensRepository
+    ) => {
+      const load = vi.fn(async () => structuredClone(pools));
+      const discoverer = new VersionedPoolDiscoverer(
+        config,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        load,
+        sourceVersion,
+        featureGatedTokensRepository
+      );
+      return {discoverer, load};
+    };
+
+    const sourceCheckResults = () =>
+      vi
+        .mocked(ctx.metrics.count)
+        .mock.calls.filter(([key]) =>
+          String(key).includes('SnapshotSourceCheck')
+        )
+        .map(([, , options]) => options);
+
+    it('keeps the memoized snapshot while the source version and deny list are unchanged', async () => {
+      const {discoverer, load} = buildDiscoverer('"etag-1"');
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(1);
+      // The cold load has nothing to compare against, so it is unconditional.
+      expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+      const writes = vi.mocked(getPoolsCache.set).mock.calls;
+      expect(writes).toHaveLength(2);
+      // The same string object, so the next read is a parse-memo hit.
+      expect(writes[1][1]).toBe(writes[0][1]);
+      expect(sourceCheckResults()).toEqual([
+        expect.objectContaining({
+          tags: expect.arrayContaining([
+            'status:success',
+            'result:unchanged',
+            `chain:${ChainId[chainId]}`,
+            `protocol:${protocol}`,
+          ]),
+        }),
+      ]);
+    });
+
+    it('reloads when the source version changes', async () => {
+      const {discoverer, load} = buildDiscoverer('"etag-1"');
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.sourceVersion = '"etag-2"';
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+      expect(sourceCheckResults()).toEqual([
+        expect.objectContaining({
+          tags: expect.arrayContaining(['status:success', 'result:changed']),
+        }),
+      ]);
+    });
+
+    it('counts a conditional load that came back without a version as unavailable, then reloads unconditionally', async () => {
+      const {discoverer, load} = buildDiscoverer('"etag-1"');
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      // The source stops reporting a version, as a failed fetch does.
+      discoverer.sourceVersion = undefined;
+      await discoverer.prewarm(chainId, protocol, ctx);
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(3);
+      expect(discoverer.knownVersions).toEqual([
+        undefined,
+        '"etag-1"',
+        undefined,
+      ]);
+      expect(sourceCheckResults()).toEqual([
+        expect.objectContaining({
+          tags: expect.arrayContaining([
+            'status:success',
+            'result:unavailable',
+          ]),
+        }),
+      ]);
+    });
+
+    it('never offers an entry loaded without a version for reuse', async () => {
+      const {discoverer, load} = buildDiscoverer(undefined);
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(discoverer.knownVersions).toEqual([undefined, undefined]);
+      expect(sourceCheckResults()).toHaveLength(0);
+    });
+
+    it('reloads unconditionally after a load that recorded no version, then reuses the next one', async () => {
+      // A failed S3 fetch loads an empty snapshot with no version; the next
+      // refresh must not re-arm it.
+      const {discoverer, load} = buildDiscoverer(undefined);
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.sourceVersion = '"etag-1"';
+      await discoverer.prewarm(chainId, protocol, ctx);
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(discoverer.knownVersions).toEqual([
+        undefined,
+        undefined,
+        '"etag-1"',
+      ]);
+    });
+
+    it('reloads unconditionally when the deny list changes under the same source version', async () => {
+      const denyList = new SwitchableDenyListRepository();
+      const {discoverer, load} = buildDiscoverer(
+        '"etag-1"',
+        memoConfig,
+        denyList
+      );
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      denyList.globalSet = new Set(['0xdead']);
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(discoverer.knownVersions).toEqual([undefined, undefined]);
+    });
+
+    it('never offers a version when the snapshot memo is off', async () => {
+      const {discoverer, load} = buildDiscoverer('"etag-1"', serviceConfig);
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      await discoverer.prewarm(chainId, protocol, ctx);
+
+      expect(load).toHaveBeenCalledTimes(2);
+      expect(discoverer.knownVersions).toEqual([undefined, undefined]);
     });
   });
 

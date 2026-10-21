@@ -3,12 +3,20 @@ import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
 import {Protocol} from '../../../models/pool/Protocol';
 import {Address} from '../../../models/address/Address';
-import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
+import {
+  BaseCachingPoolDiscoverer,
+  SnapshotLoad,
+  SnapshotLoadStatus,
+} from '../BaseCachingPoolDiscoverer';
 import {FeatureGatedTokensRepository} from '../../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../../lib/CanonicalPools';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../../lib/config';
-import {S3Client, GetObjectCommand} from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  GetObjectCommand,
+  GetObjectCommandOutput,
+} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 import {promisify} from 'node:util';
 import _ from 'lodash';
@@ -60,6 +68,41 @@ interface V4PoolData extends V3PoolData {
   isExternalLiquidity?: boolean;
 }
 
+// GetObject with IfNoneMatch answers 304 for an unchanged object, which the
+// SDK surfaces as a thrown service exception carrying the HTTP status.
+function isS3NotModified(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    '$metadata' in error &&
+    typeof error.$metadata === 'object' &&
+    error.$metadata !== null &&
+    'httpStatusCode' in error.$metadata &&
+    error.$metadata.httpStatusCode === 304
+  );
+}
+
+// A snapshot's source version is the object's ETag joined with the runtime
+// inputs of the load-time filter; an ETag never contains the separator.
+const SNAPSHOT_VERSION_SEPARATOR = '|';
+
+function encodeSnapshotVersion(etag: string, filterVersion: string): string {
+  return `${etag}${SNAPSHOT_VERSION_SEPARATOR}${filterVersion}`;
+}
+
+function decodeSnapshotVersion(
+  version: string
+): {etag: string; filterVersion: string} | undefined {
+  const separatorAt = version.indexOf(SNAPSHOT_VERSION_SEPARATOR);
+  if (separatorAt < 0) {
+    return undefined;
+  }
+  return {
+    etag: version.slice(0, separatorAt),
+    filterVersion: version.slice(separatorAt + 1),
+  };
+}
+
 export const S3_POOL_CACHE_KEY = (
   baseKey: string,
   chain: ChainId,
@@ -97,11 +140,55 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     rawPool: TPoolData
   ): TPoolInfo | undefined;
 
+  // Inputs of forceSelectSpecialPools that can change at runtime, as a
+  // comparable string; the base filter has none.
+  protected snapshotFilterVersion(_chainId: ChainId): string {
+    return '';
+  }
+
+  // A conditional GET on the known ETag, but only while the filter inputs
+  // it was filtered with still hold: a changed hook set needs the object
+  // re-filtered even when S3 would answer 304.
+  protected override async loadSnapshot(
+    chainId: ChainId,
+    protocol: Protocol,
+    knownVersion: string | undefined,
+    ctx: Context
+  ): Promise<SnapshotLoad<TPoolInfo>> {
+    const filterVersion = this.snapshotFilterVersion(chainId);
+    const known =
+      knownVersion === undefined
+        ? undefined
+        : decodeSnapshotVersion(knownVersion);
+    const ifNoneMatch =
+      known?.filterVersion === filterVersion ? known.etag : undefined;
+    const load = await this.fetchSnapshot(chainId, protocol, ifNoneMatch, ctx);
+    // The hook set moved while the request was in flight, so the unchanged
+    // object still has to be filtered again.
+    if (
+      load.status === SnapshotLoadStatus.UNCHANGED &&
+      this.snapshotFilterVersion(chainId) !== filterVersion
+    ) {
+      return this.fetchSnapshot(chainId, protocol, undefined, ctx);
+    }
+    return load;
+  }
+
   protected override async _getPools(
     chainId: ChainId,
     protocol: Protocol,
     ctx: Context
   ): Promise<TPoolInfo[]> {
+    const load = await this.fetchSnapshot(chainId, protocol, undefined, ctx);
+    return load.status === SnapshotLoadStatus.LOADED ? load.pools : [];
+  }
+
+  private async fetchSnapshot(
+    chainId: ChainId,
+    protocol: Protocol,
+    ifNoneMatch: string | undefined,
+    ctx: Context
+  ): Promise<SnapshotLoad<TPoolInfo>> {
     // Guard before try/catch so programming errors propagate instead of being swallowed
     if (!this.supportedProtocols.includes(protocol)) {
       throw new Error(`Unsupported protocol: ${protocol}`);
@@ -119,12 +206,22 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         protocol
       );
       const before = Date.now();
-      const response = await this.s3.send(
-        new GetObjectCommand({
-          Bucket: this.serviceConfig.S3.poolBucketName,
-          Key: s3Key,
-        })
-      );
+      let response: GetObjectCommandOutput;
+      try {
+        response = await this.s3.send(
+          new GetObjectCommand({
+            Bucket: this.serviceConfig.S3.poolBucketName,
+            Key: s3Key,
+            IfNoneMatch: ifNoneMatch,
+          })
+        );
+      } catch (error) {
+        if (ifNoneMatch === undefined || !isS3NotModified(error)) {
+          throw error;
+        }
+        success = true;
+        return {status: SnapshotLoadStatus.UNCHANGED};
+      }
       const after = Date.now();
 
       ctx.logger.debug(
@@ -143,7 +240,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
       if (!bodyStream) {
         ctx.logger.warn('No pools data found in S3', {chainId, protocol});
-        return [];
+        return {status: SnapshotLoadStatus.LOADED, pools: []};
       }
 
       const poolsBytes = await bodyStream.transformToByteArray();
@@ -186,6 +283,9 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         {bucket: this.serviceConfig.S3.poolBucketName, key: s3Key}
       );
 
+      // Read with no await between here and the filter below, so the
+      // version stored with this snapshot is exactly what the filter used.
+      const filterVersion = this.snapshotFilterVersion(chainId);
       // Keep only pools with > `TrackedEthThreshold` TVL
       // TODO: In the future we might consider removing all filtering from here (and just trust whatever is in the S3)
       // as we already do similar filtering there
@@ -238,14 +338,21 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       );
 
       success = true;
-      return filteredPools;
+      return {
+        status: SnapshotLoadStatus.LOADED,
+        pools: filteredPools,
+        sourceVersion:
+          response.ETag === undefined
+            ? undefined
+            : encodeSnapshotVersion(response.ETag, filterVersion),
+      };
     } catch (error) {
       ctx.logger.error('Error fetching pools from S3', {
         chainId,
         protocol,
         error,
       });
-      return [];
+      return {status: SnapshotLoadStatus.LOADED, pools: []};
     } finally {
       metricTags.push(`status:${success ? 'success' : 'error'}`);
       await ctx.metrics.count(
@@ -406,6 +513,12 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
 
   protected override getDiscovererName(): string {
     return 'S3SubgraphPoolDiscovererV4';
+  }
+
+  // The TVL-bypass set grows with the dynamic ZLCA hook refresher
+  // independently of the S3 object.
+  protected override snapshotFilterVersion(chainId: ChainId): string {
+    return [...(getTvlBypassHookAddresses(chainId) ?? [])].sort().join(',');
   }
 
   public override async getPoolsForTokens(

@@ -4,7 +4,7 @@ import {
   S3SubgraphPoolDiscovererV4,
 } from './S3SubgraphPoolDiscoverer';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
-import {S3Client} from '@aws-sdk/client-s3';
+import {GetObjectCommand, S3Client} from '@aws-sdk/client-s3';
 import {IRedisCache} from '@uniswap/lib-cache';
 import {
   getUniRouteTestConfig,
@@ -244,6 +244,136 @@ describe('S3SubgraphPoolDiscoverer', () => {
         FeatureGatedTokensRepository.empty(),
         s3Client
       );
+    });
+
+    describe('snapshot refresh over an unchanged object', () => {
+      const memoConfig: IUniRouteServiceConfig = {
+        ...mockConfig,
+        PoolDiscovery: {
+          ...mockConfig.PoolDiscovery,
+          SnapshotMemoEnabled: true,
+        },
+      };
+      const gzippedData = readTestData('v4-pools.json.gz');
+      // The SDK surfaces S3's 304 as a thrown error carrying the status.
+      const notModified = () =>
+        Object.assign(new Error('Not Modified'), {
+          $metadata: {httpStatusCode: 304},
+        });
+      // Serves the object under `etag()`, answering 304 to a matching
+      // If-None-Match the way S3 does, and counts the full downloads.
+      const serveObject = (etag: () => string, failing: () => boolean) => {
+        let downloads = 0;
+        vi.mocked(s3Client.send).mockImplementation((async (
+          command: unknown
+        ) => {
+          if (failing()) {
+            throw new Error('s3 down');
+          }
+          if (
+            command instanceof GetObjectCommand &&
+            command.input.IfNoneMatch === etag()
+          ) {
+            throw notModified();
+          }
+          downloads += 1;
+          return {...createMockResponse(gzippedData), ETag: etag()};
+        }) as never);
+        return {downloads: () => downloads};
+      };
+      const ifNoneMatchSent = () =>
+        vi
+          .mocked(s3Client.send)
+          .mock.calls.flatMap(([command]) =>
+            command instanceof GetObjectCommand
+              ? [command.input.IfNoneMatch]
+              : []
+          );
+      const cacheWrites = () =>
+        vi.mocked(getPoolsCache.set).mock.calls.map(([, value]) => value);
+
+      it('keeps the parsed snapshot while a conditional GET answers 304 on the same ETag', async () => {
+        let etag = '"etag-1"';
+        const {downloads} = serveObject(
+          () => etag,
+          () => false
+        );
+        const memoDiscoverer = new S3SubgraphPoolDiscovererV4(
+          memoConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          FeatureGatedTokensRepository.empty(),
+          s3Client
+        );
+
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        // The cold load is unconditional; the refresh asks about its ETag.
+        expect(ifNoneMatchSent()).toEqual([undefined, '"etag-1"']);
+        expect(downloads()).toBe(1);
+        expect(cacheWrites()).toHaveLength(2);
+
+        etag = '"etag-2"';
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(ifNoneMatchSent()).toEqual([undefined, '"etag-1"', '"etag-1"']);
+        expect(downloads()).toBe(2);
+      });
+
+      it('reloads unconditionally after a failed fetch instead of re-arming the empty snapshot', async () => {
+        let failing = true;
+        const {downloads} = serveObject(
+          () => '"etag-1"',
+          () => failing
+        );
+        const memoDiscoverer = new S3SubgraphPoolDiscovererV4(
+          memoConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          FeatureGatedTokensRepository.empty(),
+          s3Client
+        );
+
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(cacheWrites()).toEqual(['[]']);
+
+        failing = false;
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(ifNoneMatchSent()).toEqual([undefined, undefined]);
+        expect(downloads()).toBe(1);
+        expect(JSON.parse(cacheWrites()[1]).length).toBeGreaterThan(0);
+
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(ifNoneMatchSent()).toEqual([undefined, undefined, '"etag-1"']);
+        expect(downloads()).toBe(1);
+      });
+
+      it('re-filters an unchanged object when the load-time filter inputs change', async () => {
+        class FilterVersionedDiscoverer extends S3SubgraphPoolDiscovererV4 {
+          public filterVersion = 'hooks-a';
+          protected override snapshotFilterVersion(): string {
+            return this.filterVersion;
+          }
+        }
+        const {downloads} = serveObject(
+          () => '"etag-1"',
+          () => false
+        );
+        const memoDiscoverer = new FilterVersionedDiscoverer(
+          memoConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          FeatureGatedTokensRepository.empty(),
+          s3Client
+        );
+
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        memoDiscoverer.filterVersion = 'hooks-b';
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+
+        expect(ifNoneMatchSent()).toEqual([undefined, '"etag-1"', undefined]);
+        expect(downloads()).toBe(2);
+      });
     });
 
     it('should correctly parse V4 pools from gzipped data', async () => {
