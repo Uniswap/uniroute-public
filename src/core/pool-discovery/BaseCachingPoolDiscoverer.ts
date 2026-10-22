@@ -65,6 +65,13 @@ export enum SnapshotLoadStatus {
   LOADED = 'loaded',
 }
 
+enum SnapshotSourceCheckResult {
+  UNCHANGED = 'unchanged',
+  SUPERSEDED = 'superseded',
+  CHANGED = 'changed',
+  UNAVAILABLE = 'unavailable',
+}
+
 export type SnapshotLoad<TPool> =
   | {status: SnapshotLoadStatus.UNCHANGED}
   | {
@@ -334,6 +341,32 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     };
   }
 
+  // Counts conditional loads only. A failed load records no version, so the
+  // refreshes after it are unconditional: `unavailable` fires once per
+  // outage, and S3SubgraphPoolDiscoverer.Call{status:error} is the
+  // per-refresh failure signal.
+  private async recordSnapshotSourceCheck(
+    chainId: ChainId,
+    protocol: Protocol,
+    result: SnapshotSourceCheckResult,
+    ctx: Context
+  ): Promise<void> {
+    const failed = result === SnapshotSourceCheckResult.UNAVAILABLE;
+    await ctx.metrics.count(
+      buildMetricKey('PoolDiscoverer.SnapshotSourceCheck'),
+      1,
+      {
+        tags: [
+          `chain:${ChainId[chainId]}`,
+          `protocol:${protocol}`,
+          `status:${failed ? 'failure' : 'success'}`,
+          `result:${result}`,
+          ...(failed ? ['reason:source_unavailable'] : []),
+        ],
+      }
+    );
+  }
+
   private async loadAndCachePools(
     cacheKey: string,
     chainId: ChainId,
@@ -356,40 +389,65 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     }
 
     const load = await this.loadSnapshot(chainId, protocol, knownVersion, ctx);
-    if (knownVersion !== undefined) {
-      // `unavailable`: the conditional load came back without a version,
-      // so the fetch did not succeed and the next refresh is unconditional.
-      const result =
-        load.status === SnapshotLoadStatus.UNCHANGED
-          ? 'unchanged'
-          : load.sourceVersion === undefined
-            ? 'unavailable'
-            : 'changed';
-      await ctx.metrics.count(
-        buildMetricKey('PoolDiscoverer.SnapshotSourceCheck'),
-        1,
-        {
-          tags: [
-            `chain:${ChainId[chainId]}`,
-            `protocol:${protocol}`,
-            'status:success',
-            `result:${result}`,
-          ],
-        }
-      );
-    }
     if (load.status === SnapshotLoadStatus.UNCHANGED) {
       if (memo === undefined || knownVersion === undefined) {
         throw new Error('Snapshot reported unchanged without a known version');
       }
+      // Defer only to a successful load of different content: a concurrent
+      // 304 re-arms the same source, and a failed load records no version,
+      // so this confirmed snapshot replaces it.
+      const current = this.snapshotParseMemo.get(cacheKey);
+      const currentVersioned =
+        current?.sourceVersion !== undefined ? current : undefined;
+      if (
+        currentVersioned !== undefined &&
+        currentVersioned.source !== memo.source
+      ) {
+        ctx.logger.warn(
+          `[${this.discovererName}] Snapshot unchanged, but a newer refresh replaced the memo; keeping the newer entry`,
+          {cacheKey, chainId, protocol}
+        );
+        await this.recordSnapshotSourceCheck(
+          chainId,
+          protocol,
+          SnapshotSourceCheckResult.SUPERSEDED,
+          ctx
+        );
+        return currentVersioned.parsed;
+      }
+      // Same content under a newer version (S3 rewrote identical bytes
+      // under a new ETag): keep that version, so the next check asks about
+      // it instead of downloading the object again.
+      const confirmed = currentVersioned ?? memo;
       // The cache keeps the string the memo already holds, so the next read
       // is a pointer-equal memo hit, and the stale-serve window restarts
-      // from this confirmation.
-      await this.getPoolsCache.set(cacheKey, memo.source, {
+      // from this confirmation. Both writes are issued before any await,
+      // and the full-load path publishes in the same order, so the check
+      // above sees every versioned entry still in the memo.
+      this.snapshotParseMemo.set(cacheKey, {
+        ...confirmed,
+        fetchedAtMs: Date.now(),
+      });
+      await this.getPoolsCache.set(cacheKey, confirmed.source, {
         ttl: this.getPoolsCacheTtlSeconds(chainId),
       });
-      this.snapshotParseMemo.set(cacheKey, {...memo, fetchedAtMs: Date.now()});
-      return memo.parsed;
+      await this.recordSnapshotSourceCheck(
+        chainId,
+        protocol,
+        SnapshotSourceCheckResult.UNCHANGED,
+        ctx
+      );
+      return confirmed.parsed;
+    }
+    if (knownVersion !== undefined) {
+      await this.recordSnapshotSourceCheck(
+        chainId,
+        protocol,
+        load.sourceVersion === undefined
+          ? SnapshotSourceCheckResult.UNAVAILABLE
+          : SnapshotSourceCheckResult.CHANGED,
+        ctx
+      );
     }
 
     let retrievedPools = load.pools;
@@ -441,10 +499,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         cacheKey,
       }
     );
-    await this.getPoolsCache.set(cacheKey, retrievedPoolsStr, {
-      ttl: this.getPoolsCacheTtlSeconds(chainId),
-    });
-
+    // Publish the memo before awaiting the cache write, the same order as
+    // the 304 path: a 304 that resumes during the write then sees this
+    // entry and does not write the older string over it. This assumes the
+    // in-process cache (InMemoryRedisCache stores before it returns), so
+    // the memo and the cache entry change in the same tick.
     if (this.snapshotMemoEnabled) {
       if (memoGlobalSet === undefined) {
         throw new Error('Snapshot memo deny-list payload missing');
@@ -465,6 +524,9 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       this.complianceFilterMemo.set(retrievedPools, byDenySet);
       markPoolsArrayMemoStable(retrievedPools);
     }
+    await this.getPoolsCache.set(cacheKey, retrievedPoolsStr, {
+      ttl: this.getPoolsCacheTtlSeconds(chainId),
+    });
 
     // Last, once the snapshot is published to both the memo and the cache.
     if (memoGlobalSet !== undefined) {
@@ -550,11 +612,12 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       //
       // Caveat: an aged-out fetch is not cancelled (the S3 SDK has no socket
       // timeout), so if it eventually resolves it still runs loadAndCachePools
-      // to completion and can overwrite the newer fetch's cache + parse-memo
-      // entry with older data, re-stamping fetchedAtMs as fresh. This is
-      // bounded (requires a >SNAPSHOT_REFRESH_JOIN_MAX_AGE_MS hang that later
-      // succeeds) and self-heals on the next refresh; a fetch-start timestamp
-      // or a registration guard on the write path would close it fully.
+      // to completion. A late 304 checks for a newer entry before it writes,
+      // but a late full load can still overwrite the newer fetch's cache +
+      // parse-memo entry with older data, re-stamping fetchedAtMs as fresh.
+      // This is bounded (requires a >SNAPSHOT_REFRESH_JOIN_MAX_AGE_MS hang
+      // that later succeeds) and self-heals on the next refresh; a
+      // fetch-start sequence on the full-load write path would close it.
       if (this.snapshotRefreshPromises.get(cacheKey) === entry) {
         this.snapshotRefreshPromises.delete(cacheKey);
       }

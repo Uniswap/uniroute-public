@@ -192,6 +192,7 @@ class ClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
 // was asked about.
 class VersionedPoolDiscoverer extends ClosurePoolDiscoverer {
   public readonly knownVersions: (string | undefined)[] = [];
+  public conditionalLoadGate: Promise<void> | undefined;
 
   constructor(
     serviceConfig: IUniRouteServiceConfig,
@@ -218,6 +219,9 @@ class VersionedPoolDiscoverer extends ClosurePoolDiscoverer {
   ): Promise<SnapshotLoad<UniPoolInfo>> {
     this.knownVersions.push(knownVersion);
     if (knownVersion !== undefined && knownVersion === this.sourceVersion) {
+      if (this.conditionalLoadGate !== undefined) {
+        await this.conditionalLoadGate;
+      }
       return {status: SnapshotLoadStatus.UNCHANGED};
     }
     return {
@@ -1680,6 +1684,9 @@ describe('BaseCachingPoolDiscoverer', () => {
       expect(writes).toHaveLength(2);
       // The same string object, so the next read is a parse-memo hit.
       expect(writes[1][1]).toBe(writes[0][1]);
+      await discoverer.prewarm(chainId, protocol, ctx);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(getPoolsCache.set)).toHaveBeenCalledTimes(3);
       expect(sourceCheckResults()).toEqual([
         expect.objectContaining({
           tags: expect.arrayContaining([
@@ -1689,7 +1696,205 @@ describe('BaseCachingPoolDiscoverer', () => {
             `protocol:${protocol}`,
           ]),
         }),
+        expect.objectContaining({
+          tags: expect.arrayContaining(['status:success', 'result:unchanged']),
+        }),
       ]);
+    });
+
+    it('keeps a newer memo and cache entry when an older conditional refresh answers unchanged', async () => {
+      const newerPools = [{...pools[0], id: 'newer-pool'}];
+      let loadedPools = pools;
+      const gate = createDeferred<void>();
+      const discoverer = new VersionedPoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => structuredClone(loadedPools),
+        '"etag-1"'
+      );
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.conditionalLoadGate = gate.promise;
+      const olderRefresh = discoverer.getPools(chainId, protocol, ctx);
+      await vi.waitFor(() => {
+        expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+      });
+
+      discoverer.sourceVersion = '"etag-2"';
+      loadedPools = newerPools;
+      const newerResult = await discoverer.getPools(chainId, protocol, ctx);
+      expect(newerResult).toEqual(newerPools);
+
+      gate.resolve(undefined);
+      expect(await olderRefresh).toBe(newerResult);
+      const writes = vi.mocked(getPoolsCache.set).mock.calls;
+      expect(writes).toHaveLength(2);
+      expect(writes[1][1]).toBe(JSON.stringify(newerPools));
+      expect(ctx.logger.warn).toHaveBeenCalledWith(
+        '[ClosurePoolDiscoverer] Snapshot unchanged, but a newer refresh replaced the memo; keeping the newer entry',
+        {
+          cacheKey: discoverer.getPoolsCacheKey(chainId, protocol),
+          chainId,
+          protocol,
+        }
+      );
+      expect(sourceCheckResults()).toEqual([
+        expect.objectContaining({
+          tags: expect.arrayContaining(['status:success', 'result:changed']),
+        }),
+        expect.objectContaining({
+          tags: expect.arrayContaining(['status:success', 'result:superseded']),
+        }),
+      ]);
+
+      discoverer.conditionalLoadGate = undefined;
+      await discoverer.prewarm(chainId, protocol, ctx);
+      expect(discoverer.knownVersions).toEqual([
+        undefined,
+        '"etag-1"',
+        '"etag-1"',
+        '"etag-2"',
+      ]);
+      expect(vi.mocked(getPoolsCache.set).mock.calls[2][1]).toBe(
+        JSON.stringify(newerPools)
+      );
+    });
+
+    it('keeps a newer full load when an older 304 resumes while its cache write is in flight', async () => {
+      const newerPools = [{...pools[0], id: 'newer-pool'}];
+      let loadedPools = pools;
+      const gate = createDeferred<void>();
+      const newerCacheWrite = createDeferred<void>();
+      const discoverer = new VersionedPoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => structuredClone(loadedPools),
+        '"etag-1"'
+      );
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.conditionalLoadGate = gate.promise;
+      const olderRefresh = discoverer.getPools(chainId, protocol, ctx);
+      await vi.waitFor(() => {
+        expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+      });
+
+      discoverer.sourceVersion = '"etag-2"';
+      loadedPools = newerPools;
+      vi.mocked(getPoolsCache.set).mockImplementationOnce(
+        () => newerCacheWrite.promise
+      );
+      const newerRefresh = discoverer.getPools(chainId, protocol, ctx);
+      await vi.waitFor(() => {
+        expect(vi.mocked(getPoolsCache.set)).toHaveBeenCalledTimes(2);
+      });
+
+      gate.resolve(undefined);
+      const olderResult = await olderRefresh;
+      newerCacheWrite.resolve(undefined);
+      expect(olderResult).toBe(await newerRefresh);
+      expect(olderResult).toEqual(newerPools);
+      const writes = vi.mocked(getPoolsCache.set).mock.calls;
+      expect(writes).toHaveLength(2);
+      expect(writes[1][1]).toBe(JSON.stringify(newerPools));
+    });
+
+    it('keeps the newer version when an older 304 confirms the same content', async () => {
+      const gate = createDeferred<void>();
+      const {discoverer, load} = buildDiscoverer('"etag-1"');
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.conditionalLoadGate = gate.promise;
+      const olderRefresh = discoverer.getPools(chainId, protocol, ctx);
+      await vi.waitFor(() => {
+        expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+      });
+
+      // The object is rewritten with identical bytes under a new ETag.
+      discoverer.sourceVersion = '"etag-2"';
+      await discoverer.getPools(chainId, protocol, ctx);
+      expect(load).toHaveBeenCalledTimes(2);
+
+      gate.resolve(undefined);
+      await olderRefresh;
+      discoverer.conditionalLoadGate = undefined;
+      await discoverer.prewarm(chainId, protocol, ctx);
+      expect(discoverer.knownVersions).toEqual([
+        undefined,
+        '"etag-1"',
+        '"etag-1"',
+        '"etag-2"',
+      ]);
+      expect(load).toHaveBeenCalledTimes(2);
+    });
+
+    it('re-arms the snapshot without a warning when two conditional refreshes both answer unchanged', async () => {
+      const gate = createDeferred<void>();
+      const {discoverer, load} = buildDiscoverer('"etag-1"');
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.conditionalLoadGate = gate.promise;
+      const firstRefresh = discoverer.getPools(chainId, protocol, ctx);
+      const secondRefresh = discoverer.getPools(chainId, protocol, ctx);
+      await vi.waitFor(() => {
+        expect(discoverer.knownVersions).toEqual([
+          undefined,
+          '"etag-1"',
+          '"etag-1"',
+        ]);
+      });
+
+      gate.resolve(undefined);
+      const [firstResult, secondResult] = await Promise.all([
+        firstRefresh,
+        secondRefresh,
+      ]);
+      expect(secondResult).toBe(firstResult);
+      expect(load).toHaveBeenCalledTimes(1);
+      const writes = vi.mocked(getPoolsCache.set).mock.calls;
+      expect(writes).toHaveLength(3);
+      expect(writes[2][1]).toBe(writes[0][1]);
+      expect(ctx.logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('a newer refresh replaced the memo'),
+        expect.anything()
+      );
+    });
+
+    it('restores the confirmed snapshot when a newer refresh failed and recorded no version', async () => {
+      let loadedPools = pools;
+      const gate = createDeferred<void>();
+      const discoverer = new VersionedPoolDiscoverer(
+        memoConfig,
+        getPoolsCache,
+        getPoolsForTokensCache,
+        async () => structuredClone(loadedPools),
+        '"etag-1"'
+      );
+
+      await discoverer.prewarm(chainId, protocol, ctx);
+      discoverer.conditionalLoadGate = gate.promise;
+      const olderRefresh = discoverer.getPools(chainId, protocol, ctx);
+      await vi.waitFor(() => {
+        expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+      });
+
+      // A failed fetch loads an empty list and records no version.
+      discoverer.sourceVersion = undefined;
+      loadedPools = [];
+      expect(await discoverer.getPools(chainId, protocol, ctx)).toEqual([]);
+
+      gate.resolve(undefined);
+      expect(await olderRefresh).toEqual(pools);
+      const writes = vi.mocked(getPoolsCache.set).mock.calls;
+      expect(writes).toHaveLength(3);
+      expect(writes[1][1]).toBe('[]');
+      expect(writes[2][1]).toBe(writes[0][1]);
+      expect(ctx.logger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining('a newer refresh replaced the memo'),
+        expect.anything()
+      );
     });
 
     it('reloads when the source version changes', async () => {
@@ -1726,8 +1931,9 @@ describe('BaseCachingPoolDiscoverer', () => {
       expect(sourceCheckResults()).toEqual([
         expect.objectContaining({
           tags: expect.arrayContaining([
-            'status:success',
+            'status:failure',
             'result:unavailable',
+            'reason:source_unavailable',
           ]),
         }),
       ]);

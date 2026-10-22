@@ -199,6 +199,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     const poolCallStartTime = Date.now();
     const metricTags = [`chain:${ChainId[chainId]}`, `protocol:${protocol}`];
     let success = false;
+    let shouldEmitDownloadMetrics = true;
 
     try {
       // Fetch gzipped data from S3
@@ -221,7 +222,16 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         if (ifNoneMatch === undefined || !isS3NotModified(error)) {
           throw error;
         }
-        success = true;
+        // No object was downloaded, so the download metrics skip a 304. It
+        // gets its own latency, so a slow conditional GET stays visible.
+        shouldEmitDownloadMetrics = false;
+        void ctx.metrics
+          .count(
+            buildMetricKey('S3SubgraphPoolDiscoverer.NotModified.Latency'),
+            Date.now() - before,
+            {tags: metricTags}
+          )
+          .catch(() => undefined);
         return {status: SnapshotLoadStatus.UNCHANGED};
       }
       const after = Date.now();
@@ -356,21 +366,23 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       });
       return {status: SnapshotLoadStatus.LOADED, pools: []};
     } finally {
-      metricTags.push(`status:${success ? 'success' : 'error'}`);
-      await ctx.metrics.count(
-        buildMetricKey('S3SubgraphPoolDiscoverer.Call'),
-        1,
-        {
-          tags: metricTags,
-        }
-      );
-      await ctx.metrics.dist(
-        buildMetricKey('S3SubgraphPoolDiscoverer.Latency.dist'),
-        Date.now() - poolCallStartTime,
-        {
-          tags: metricTags,
-        }
-      );
+      if (shouldEmitDownloadMetrics) {
+        metricTags.push(`status:${success ? 'success' : 'error'}`);
+        await ctx.metrics.count(
+          buildMetricKey('S3SubgraphPoolDiscoverer.Call'),
+          1,
+          {
+            tags: metricTags,
+          }
+        );
+        await ctx.metrics.dist(
+          buildMetricKey('S3SubgraphPoolDiscoverer.Latency.dist'),
+          Date.now() - poolCallStartTime,
+          {
+            tags: metricTags,
+          }
+        );
+      }
     }
   }
 

@@ -319,6 +319,87 @@ describe('S3SubgraphPoolDiscoverer', () => {
         expect(downloads()).toBe(2);
       });
 
+      it('counts downloads and errors but excludes 304s from download metrics', async () => {
+        let failing = false;
+        serveObject(
+          () => '"etag-1"',
+          () => failing
+        );
+        const memoDiscoverer = new S3SubgraphPoolDiscovererV4(
+          memoConfig,
+          getPoolsCache,
+          getPoolsForTokensCache,
+          FeatureGatedTokensRepository.empty(),
+          s3Client
+        );
+        const countSpy = vi.spyOn(mockContext.metrics, 'count');
+        const distSpy = vi.spyOn(mockContext.metrics, 'dist');
+        const downloadCalls = () =>
+          countSpy.mock.calls.filter(([key]) =>
+            String(key).includes('S3SubgraphPoolDiscoverer.Call')
+          );
+        const downloadLatencies = () =>
+          distSpy.mock.calls.filter(([key]) =>
+            String(key).includes('S3SubgraphPoolDiscoverer.Latency.dist')
+          );
+
+        try {
+          await memoDiscoverer.prewarm(
+            ChainId.MAINNET,
+            Protocol.V4,
+            mockContext
+          );
+          expect(downloadCalls()).toHaveLength(1);
+          expect(downloadCalls()[0][2]).toEqual({
+            tags: ['chain:MAINNET', 'protocol:v4', 'status:success'],
+          });
+          expect(downloadLatencies()).toHaveLength(1);
+          expect(downloadLatencies()[0][2]).toEqual({
+            tags: ['chain:MAINNET', 'protocol:v4', 'status:success'],
+          });
+          expect(
+            countSpy.mock.calls.filter(([key]) =>
+              String(key).includes('NotModified.Latency')
+            )
+          ).toHaveLength(0);
+
+          countSpy.mockClear();
+          distSpy.mockClear();
+          await memoDiscoverer.prewarm(
+            ChainId.MAINNET,
+            Protocol.V4,
+            mockContext
+          );
+          expect(downloadCalls()).toHaveLength(0);
+          expect(downloadLatencies()).toHaveLength(0);
+          const notModifiedLatencies = countSpy.mock.calls.filter(([key]) =>
+            String(key).includes('S3SubgraphPoolDiscoverer.NotModified.Latency')
+          );
+          expect(notModifiedLatencies).toHaveLength(1);
+          expect(notModifiedLatencies[0][2]).toEqual({
+            tags: ['chain:MAINNET', 'protocol:v4'],
+          });
+
+          failing = true;
+          await memoDiscoverer.prewarm(
+            ChainId.MAINNET,
+            Protocol.V4,
+            mockContext
+          );
+          expect(downloadCalls()).toHaveLength(1);
+          expect(downloadCalls()[0][2]).toEqual({
+            tags: ['chain:MAINNET', 'protocol:v4', 'status:error'],
+          });
+          expect(downloadLatencies()).toHaveLength(1);
+          expect(downloadLatencies()[0][2]).toEqual({
+            tags: ['chain:MAINNET', 'protocol:v4', 'status:error'],
+          });
+        } finally {
+          countSpy.mockRestore();
+          distSpy.mockRestore();
+        }
+      });
+
       it('reloads unconditionally after a failed fetch instead of re-arming the empty snapshot', async () => {
         let failing = true;
         const {downloads} = serveObject(
