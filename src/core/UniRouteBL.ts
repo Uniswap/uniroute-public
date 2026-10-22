@@ -1,6 +1,7 @@
 import {isGasConversionTrustworthy} from './quote/selector/gasConversionTrust';
 import {Context} from '@uniswap/lib-uni/context';
 import {CurrencyAmount, TradeType as SdkTradeType} from '@uniswap/sdk-core';
+import {CanonicalPools} from '../lib/CanonicalPools';
 import {
   DebugInfo,
   DebugRouteCandidate,
@@ -236,6 +237,9 @@ function routeStringForQuoteSplit(quoteSplit: QuoteSplit): string {
 function totalQuoteAmountForQuoteSplit(quoteSplit: QuoteSplit): bigint {
   return quoteSplit.quotes.reduce((sum, quote) => sum + quote.amount, 0n);
 }
+
+/** Split cap for quotes into a transfer-locked token (`applySingleRouteForLockedOutput`). */
+const LOCKED_OUTPUT_MAX_SPLITS = 1;
 
 export class UniRouteBL implements IUniRoutedBL {
   // Config-derived internal state (same pattern as QuoteBestSplitFinder's
@@ -657,9 +661,13 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes,
         protocols
       );
-      const effectiveConfig = this.applyRequestRoutingTimeBudget(
-        baseEffectiveConfig,
-        request.maxRoutingTimeMs
+      const effectiveConfig = this.applySingleRouteForLockedOutput(
+        this.applyRequestRoutingTimeBudget(
+          baseEffectiveConfig,
+          request.maxRoutingTimeMs
+        ),
+        chain.chainId,
+        tokenOutCurrencyInfo
       );
       // Budget-capped gets its own tag value so a cache-hit quote with a
       // caller budget doesn't start reading as `reduced`.
@@ -1627,6 +1635,35 @@ export class UniRouteBL implements IUniRoutedBL {
       RouteFinder: {
         ...config.RouteFinder,
         RouteSplitTimeoutMs: maxRoutingTimeMs,
+      },
+    };
+  }
+
+  /**
+   * A split quote pays its output from the Universal Router's balance (final
+   * sweep), which a transfer-locked token rejects; a single route pays
+   * straight from the PoolManager. So quotes into a canonical-pools token
+   * stop at `LOCKED_OUTPUT_MAX_SPLITS`.
+   */
+  private applySingleRouteForLockedOutput(
+    config: IUniRouteServiceConfig,
+    chainId: ChainId,
+    tokenOutCurrencyInfo: CurrencyInfo
+  ): IUniRouteServiceConfig {
+    if (
+      config.RouteFinder.MaxSplits <= LOCKED_OUTPUT_MAX_SPLITS ||
+      !CanonicalPools.hasEntry(
+        chainId,
+        tokenOutCurrencyInfo.wrappedAddress.address
+      )
+    ) {
+      return config;
+    }
+    return {
+      ...config,
+      RouteFinder: {
+        ...config.RouteFinder,
+        MaxSplits: LOCKED_OUTPUT_MAX_SPLITS,
       },
     };
   }

@@ -3664,6 +3664,87 @@ describe('UniRouteBL', () => {
     });
   });
 
+  describe('single-route quotes into a transfer-locked output token', () => {
+    const FWA = '0xa0df17b5ac76ababa36e1450e2cbcd18a620c845';
+    // Captures the RouteFinder config the pipeline hands the strategy.
+    class ConfigCapturingStrategy extends MockedQuoteStrategy {
+      maxSplitsSeen: number | undefined;
+      override async findBestQuoteCandidates(
+        ctx: Context,
+        chain: Chain,
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo,
+        amount: bigint,
+        tradeType: TradeType,
+        protocols: Protocol[],
+        config: IUniRouteServiceConfig,
+        routes: RouteBasic<Pool>[],
+        tokensInfo: Map<string, Erc20Token | null>,
+        metricTags: string[]
+      ): Promise<QuoteSplit[]> {
+        this.maxSplitsSeen = config.RouteFinder.MaxSplits;
+        return super.findBestQuoteCandidates(
+          ctx,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          amount,
+          tradeType,
+          protocols,
+          config,
+          routes,
+          tokensInfo,
+          metricTags
+        );
+      }
+    }
+    const quoteInto = async (tokenOutAddress: string) => {
+      const strategy = new ConfigCapturingStrategy();
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        strategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+      await uniRouteBL.quote(
+        ctx,
+        new QuoteRequest({
+          ...baseRequest,
+          tradeType: 'EXACT_IN',
+          tokenOutAddress,
+        })
+      );
+      return strategy.maxSplitsSeen;
+    };
+
+    it('caps the split search at one route when the output token has a canonical-pools entry', async () => {
+      expect(serviceConfig.RouteFinder.MaxSplits).toBeGreaterThan(1);
+      expect(await quoteInto(FWA)).toBe(1);
+    });
+
+    it('keeps the configured split cap for any other output token', async () => {
+      expect(await quoteInto(baseRequest.tokenOutAddress)).toBe(
+        serviceConfig.RouteFinder.MaxSplits
+      );
+    });
+  });
+
   describe('swapsteps simulation calldata (Fork A)', () => {
     const WETH = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
     const DAI = '0x6B175474E89094C44Da98b954EedeAC495271d0F';

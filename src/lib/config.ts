@@ -726,6 +726,8 @@ export const TAG_STATUS_FAILURE = 'status:failure';
 
 export enum MetricFailureReason {
   RPC_ERROR = 'rpc_error',
+  /** A periodic pass was skipped because the previous one is still running. */
+  IN_FLIGHT = 'in_flight',
   REDIS_READ_ERROR = 'redis_read_error',
   SQS_SEND_ERROR = 'sqs_send_error',
   ZLCA_QUOTER_PRICE_UNAVAILABLE = 'zlca_quoter_price_unavailable',
