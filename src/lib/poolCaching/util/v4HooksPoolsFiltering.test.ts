@@ -23,6 +23,11 @@ import {
 } from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {computeV4PoolId} from './v4PoolIdFast';
+import {
+  PermissionedHookDeployment,
+  PERMISSIONED_HOOK_STUB_BYTECODE,
+  PERMISSIONED_HOOKS_BY_CHAIN,
+} from '@uniswap/lib-sharedconfig/permissionedTokens';
 
 const mockLogger: Logger = {
   info: vi.fn(),
@@ -1934,6 +1939,133 @@ describe('permissioned-hook pools (Superstate PA↔PA)', () => {
     expect(result.map(p => p.id.toLowerCase())).toContain(
       paWethPool.id.toLowerCase()
     );
+  });
+});
+
+// sharedconfig has no keccak dependency, so the registry writes each listed
+// pool id next to its PoolKey and this test pins the pairing: a key whose
+// hash is not a listed id, or an id with no key, cannot ship.
+describe('permissioned registry pool keys hash to the listed pool ids', () => {
+  for (const [chainId, deployments] of Object.entries(
+    PERMISSIONED_HOOKS_BY_CHAIN
+  )) {
+    for (const deployment of deployments ?? []) {
+      it(`chain ${chainId} hook ${deployment.hookAddress}`, () => {
+        const ids = (deployment.poolKeys ?? []).map(key =>
+          computeV4PoolId(
+            key.currency0,
+            key.currency1,
+            key.fee,
+            key.tickSpacing,
+            deployment.hookAddress
+          )
+        );
+        expect(ids).not.toContain(undefined);
+        expect(new Set(ids)).toEqual(new Set(deployment.poolIds ?? []));
+      });
+    }
+  }
+});
+
+// A hook that prices swaps itself (Groma's GroPrimaryMarketHook) lists its
+// pools explicitly: its pool has fee 0, a non-major counter-token and zero
+// liquidity, so it passes none of the rule checks.
+describe('permissioned-hook pools listed by pool id', () => {
+  const GROMA_HOOK = '0xe14faba2f92e9f48b36ba6dd08bbc69333a80888';
+  const V4GRO = '0x7d8621c0fc41c96020ef2ab33bdd46982d86da29';
+  const GROMA_TEST_USDC = '0x9ccc7a9e88bc07e0eb3e419126e60f841564a375';
+  const GROMA_POOL_ID =
+    '0x9de38da27a2495727b234e823a1da72a6a8d9ab98f6fad1d7ef2a6f012e0e790';
+  const SEPOLIA_PERMISSIONED_HOOK =
+    '0x51247e2291d290d17c08813a175ac86465ede8c0';
+  const deployments: PermissionedHookDeployment[] = [
+    {
+      hookAddress: GROMA_HOOK,
+      allowedWrappersSlot: 8n,
+      emitNativeFunding: true,
+      poolIds: [GROMA_POOL_ID],
+      adapters: [{address: V4GRO, decimals: 18}],
+    },
+    {
+      hookAddress: SEPOLIA_PERMISSIONED_HOOK,
+      hookStubBytecode: PERMISSIONED_HOOK_STUB_BYTECODE,
+      allowedWrappersSlot: 8n,
+      emitNativeFunding: true,
+      adapters: [],
+    },
+  ];
+  // The pool id is uppercased so the match must normalize casing.
+  const createGromaPool = (overrides: Partial<V4SubgraphPool> = {}) =>
+    createPool({
+      id: GROMA_POOL_ID.toUpperCase().replace('0X', '0x'),
+      hooks: GROMA_HOOK,
+      feeTier: '0',
+      tickSpacing: '1',
+      liquidity: '0',
+      tvlETH: 0,
+      tvlUSD: 0,
+      token0: {id: V4GRO, symbol: 'v4GRO', name: 'v4GRO', decimals: '18'},
+      token1: {
+        id: GROMA_TEST_USDC,
+        symbol: 'tUSDC',
+        name: 'Groma test USDC',
+        decimals: '6',
+      },
+      ...overrides,
+    });
+  const filter = (pools: V4SubgraphPool[]) =>
+    v4HooksPoolsFiltering(
+      ChainId.SEPOLIA,
+      pools,
+      mockLogger,
+      mockMetric,
+      undefined,
+      deployments
+    ).map(p => p.id.toLowerCase());
+
+  const tests: {
+    name: string;
+    pool: V4SubgraphPool;
+    admitted: boolean;
+  }[] = [
+    {
+      name: 'admits the listed pool despite fee 0, a non-major counter-token and zero liquidity',
+      pool: createGromaPool(),
+      admitted: true,
+    },
+    {
+      name: 'drops an unlisted pool on the same hook and adapter',
+      pool: createGromaPool({id: '0x' + '1'.repeat(64)}),
+      admitted: false,
+    },
+    {
+      name: 'drops the listed id when the pool sits on a hook that does not own its adapter',
+      pool: createGromaPool({hooks: SEPOLIA_PERMISSIONED_HOOK}),
+      admitted: false,
+    },
+  ];
+
+  for (const test of tests) {
+    it(test.name, () => {
+      expect(filter([test.pool]).includes(test.pool.id.toLowerCase())).toBe(
+        test.admitted
+      );
+    });
+  }
+
+  it('the listed id is the keccak of the v4GRO/tUSDC fee-0 PoolKey on the Groma hook', () => {
+    expect(computeV4PoolId(V4GRO, GROMA_TEST_USDC, 0, 1, GROMA_HOOK)).toBe(
+      GROMA_POOL_ID
+    );
+  });
+
+  it('admits the Groma pool from the shared registry (no injected deployments)', () => {
+    const pool = createGromaPool();
+    expect(
+      v4HooksPoolsFiltering(ChainId.SEPOLIA, [pool], mockLogger, mockMetric)
+        .map(p => p.id.toLowerCase())
+        .includes(GROMA_POOL_ID)
+    ).toBe(true);
   });
 });
 

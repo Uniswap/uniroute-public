@@ -169,29 +169,6 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     // directly, bypassing the V4Quoter which fails for these pools.
     const {aggHookRoutes, otherRoutes} = partitionAggHookRoutes(pctRoutes);
 
-    // Neither the gas price nor the Orbit gas constants depend on the quotes,
-    // so their RPCs run alongside the quote multicall instead of after it.
-    // The no-op catches only keep an early rejection from being reported as
-    // unhandled while the quotes are in flight; the awaits below still throw
-    // it.
-    const gasPriceWeiPromise: Promise<number> = serviceConfig.GasEstimation
-      .Enabled
-      ? this.gasEstimateProvider.getCurrentGasPrice(
-          ctx,
-          chain.chainId,
-          blockNumber
-        )
-      : Promise.resolve(0);
-    void gasPriceWeiPromise.catch(() => {});
-    const orbitGasDataProvider = this.arbitrumGasDataProviders.get(
-      chain.chainId
-    );
-    const arbitrumGasDataPromise: Promise<ArbitrumGasData | undefined> =
-      orbitGasDataProvider && serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled
-        ? orbitGasDataProvider.getGasData(ctx)
-        : Promise.resolve(undefined);
-    void arbitrumGasDataPromise.catch(() => {});
-
     const fetchQuotesStartTime = Date.now();
     ctx.logger.debug('Starting fetchQuotes', {
       totalPctRoutes: pctRoutes.length,
@@ -278,13 +255,28 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     // Update quotes with gas estimation details
     const gasEstimateStartTime = Date.now();
     ctx.logger.debug('Starting gasEstimate');
-    const gasPriceWei = await gasPriceWeiPromise;
+    const gasPriceWei = serviceConfig.GasEstimation.Enabled
+      ? await this.gasEstimateProvider.getCurrentGasPrice(
+          ctx,
+          chain.chainId,
+          blockNumber
+        )
+      : 0;
 
     // Below information is only needed when dealing with Arbitrum Orbit or
     // Optimism Stack chains in order to calculate L2 gas costs accurately. We
     // need to update the quotes with fresh pool details so that we can
     // generate the correct calldata for L2 gas estimation.
-    const arbitrumGasData = await arbitrumGasDataPromise;
+    const orbitGasDataProvider = this.arbitrumGasDataProviders.get(
+      chain.chainId
+    );
+    let arbitrumGasData: ArbitrumGasData | undefined = undefined;
+    if (
+      orbitGasDataProvider &&
+      serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled
+    ) {
+      arbitrumGasData = await orbitGasDataProvider.getGasData(ctx);
+    }
     if (
       (orbitGasDataProvider &&
         serviceConfig.L1L2GasCostFetcher.ArbitrumEnabled &&

@@ -4,8 +4,10 @@
 
 import {Hook, HookOptions} from '@uniswap/v4-sdk';
 import {
-  isAdapterOwnedByHook,
+  getAdapterHookConfig,
   getPermissionedHookAddresses,
+  getPermissionedHookDeployments,
+  PermissionedHookDeployment,
 } from '@uniswap/lib-sharedconfig/permissionedTokens';
 import {HOOKS_ADDRESSES_ALLOWLIST} from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
@@ -144,7 +146,10 @@ export function v4HooksPoolsFiltering(
   // Factory-discovered ZLCA hooks (dynamicZlcaHooks.ts), admitted exactly
   // like explicit allowlist entries. Denylist still wins — both via the
   // per-pool early return and the explicit-allowlist append's guard.
-  dynamicZlcaHooks?: ReadonlySet<string>
+  dynamicZlcaHooks?: ReadonlySet<string>,
+  permissionedDeployments: readonly PermissionedHookDeployment[] = getPermissionedHookDeployments(
+    chainId
+  )
 ): Array<V4SubgraphPool> {
   const v4PoolsByTokenPairsAndFees: Record<
     V4PoolGroupingKey,
@@ -202,8 +207,21 @@ export function v4HooksPoolsFiltering(
   // permissioned subgraph query could ingest an unbounded set of arbitrary pools
   // initialized under a permissioned hook and bloat the snapshot.
   const permissionedHookAddresses = new Set(
-    getPermissionedHookAddresses(chainId).map(hook => hook.toLowerCase())
+    getPermissionedHookAddresses(chainId, permissionedDeployments).map(hook =>
+      hook.toLowerCase()
+    )
   );
+  const ownerDeployment = (
+    token: string,
+    hookAddress: string
+  ): PermissionedHookDeployment | undefined => {
+    const deployment = getAdapterHookConfig(
+      chainId,
+      token,
+      permissionedDeployments
+    )?.deployment;
+    return deployment?.hookAddress === hookAddress ? deployment : undefined;
+  };
   // A permissioned-hook pool is admissible only if its PoolKey is fully bounded:
   //   - hook ∈ permissioned registry,
   //   - feeTier/tickSpacing ∈ the canonical V4 set (what quickRoute probes),
@@ -213,17 +231,29 @@ export function v4HooksPoolsFiltering(
   // canonical(fee,tickSpacing) — finite and attacker-uninflatable — so the
   // no-TVL-floor subgraph query cannot bloat the snapshot. Partner base tokens
   // not in the default majors are added via V4_HOOKS_EXTRA_MAJOR_TOKENS (config).
+  // A pool id the owning deployment lists explicitly is admitted before those
+  // rules: the list is curated in the registry, so it is bounded the same way.
   const isAdmissiblePermissionedPool = (pool: V4SubgraphPool): boolean => {
     const hookAddress = pool.hooks.toLowerCase();
     if (!permissionedHookAddresses.has(hookAddress)) return false;
+    const token0 = pool.token0.id.toLowerCase();
+    const token1 = pool.token1.id.toLowerCase();
+    const token0Owner = ownerDeployment(token0, hookAddress);
+    const token1Owner = ownerDeployment(token1, hookAddress);
+    const poolId = pool.id.toLowerCase();
+    if (
+      [token0Owner, token1Owner].some(
+        owner => owner?.poolIds?.some(listed => listed === poolId) === true
+      )
+    ) {
+      return true;
+    }
     // Canonical V4 (feeTier → tickSpacing) pairs only; reject nonstandard keys.
     if (CANONICAL_V4_FEE_TICK_SPACINGS[pool.feeTier] !== pool.tickSpacing) {
       return false;
     }
-    const token0 = pool.token0.id.toLowerCase();
-    const token1 = pool.token1.id.toLowerCase();
-    const token0Owned = isAdapterOwnedByHook(chainId, token0, hookAddress);
-    const token1Owned = isAdapterOwnedByHook(chainId, token1, hookAddress);
+    const token0Owned = token0Owner !== undefined;
+    const token1Owned = token1Owner !== undefined;
     if (!token0Owned && !token1Owned) return false;
     const token0Known = token0Owned || majorTokens.has(token0);
     const token1Known = token1Owned || majorTokens.has(token1);
