@@ -1,14 +1,18 @@
+import {IChainFeatures} from '@uniswap/lib-chain-features';
 import {ChainId} from '../../../lib/config';
 import {GasDetails} from '../../../models/gas/GasDetails';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {BigNumber} from '@ethersproject/bignumber';
 import {
+  gasRegimeForChain,
   BASE_SWAP_COST,
   COST_PER_HOP,
   COST_PER_INIT_TICK,
   COST_PER_UNINIT_TICK,
   SINGLE_HOP_OVERHEAD,
   TOKEN_OVERHEAD,
+  V2_BASE_SWAP_COST,
+  V2_COST_PER_EXTRA_HOP,
 } from '../gas-costs';
 import {getGasToken} from '../../../lib/tokenUtils';
 import {CurrencyAmount} from '@uniswap/sdk-core';
@@ -20,10 +24,6 @@ import {Protocol} from '../../../models/pool/Protocol';
 import {Pool} from '../../../models/pool/Pool';
 import {aggHookGasCalibrationAdjustment} from '../aggHookGasCalibration';
 import {zlcaHookGasAdjustment} from '../zlcaHookGasCalibration';
-
-// V2-specific constants
-const COST_PER_EXTRA_HOP_V2 = BigNumber.from(50000);
-const BASE_SWAP_COST_V2 = BigNumber.from(135000);
 
 export class MixedGasEstimator extends BaseGasEstimator {
   /**
@@ -62,6 +62,7 @@ export class MixedGasEstimator extends BaseGasEstimator {
   constructor(
     protected readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
     protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    protected readonly chainFeatures: IChainFeatures,
     aggHookGasCalibrationEnabled = false,
     v4UseQuoterGasAsBase = false
   ) {
@@ -75,6 +76,7 @@ export class MixedGasEstimator extends BaseGasEstimator {
     chainId: ChainId,
     gasPriceWei: number
   ): Promise<GasDetails> {
+    const regime = gasRegimeForChain(chainId, this.chainFeatures);
     // When V4_USE_QUOTER_GAS_AS_BASE is on AND the mixed quote
     // carries a positive `gasEstimate` (from MixedQuoter V1 or V2),
     // use that as the base gas use for the whole route. It already
@@ -147,18 +149,18 @@ export class MixedGasEstimator extends BaseGasEstimator {
         case Protocol.V2:
           // V2 gas calculation
           baseGasUse = baseGasUse
-            .add(COST_PER_EXTRA_HOP_V2.mul(section.length - 1))
-            .add(BASE_SWAP_COST_V2);
+            .add(V2_COST_PER_EXTRA_HOP(regime).mul(section.length - 1))
+            .add(V2_BASE_SWAP_COST(regime));
           break;
 
         case Protocol.V3:
         case Protocol.V4:
           // V3/V4 gas calculation
-          hopsGasUse = COST_PER_HOP(chainId).mul(hops);
+          hopsGasUse = COST_PER_HOP(chainId, regime).mul(hops);
 
           // Add single hop overhead if section is single hop
           if (hops.eq(1)) {
-            hopsGasUse = hopsGasUse.add(SINGLE_HOP_OVERHEAD(chainId));
+            hopsGasUse = hopsGasUse.add(SINGLE_HOP_OVERHEAD(chainId, regime));
           }
 
           // Create a route object for the section for token overhead calculation
@@ -181,13 +183,13 @@ export class MixedGasEstimator extends BaseGasEstimator {
           baseGasUse = baseGasUse
             .add(hopsGasUse)
             .add(tokenOverhead)
-            .add(BASE_SWAP_COST(chainId));
+            .add(BASE_SWAP_COST(chainId, regime));
           break;
       }
     });
 
     // Add tick crossing costs
-    const tickGasUse = COST_PER_INIT_TICK(chainId).mul(
+    const tickGasUse = COST_PER_INIT_TICK(chainId, regime).mul(
       totalInitializedTicksCrossed
     );
     const uninitializedTickGasUse = COST_PER_UNINIT_TICK.mul(0);

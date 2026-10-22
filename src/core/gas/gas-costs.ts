@@ -1,4 +1,5 @@
 import brotli from 'brotli';
+import {ChainFeature, IChainFeatures} from '@uniswap/lib-chain-features';
 import {estimateL1Gas, estimateL1GasCost} from '@eth-optimism/sdk';
 import {BigNumber} from '@ethersproject/bignumber';
 import {Currency, Percent, TradeType} from '@uniswap/sdk-core';
@@ -32,8 +33,40 @@ import {UniversalRouterVersion} from '@uniswap/universal-router-sdk';
 // Cost for crossing an uninitialized tick.
 export const COST_PER_UNINIT_TICK = BigNumber.from(0);
 
+export type GasRegime = 'osaka' | 'amsterdam';
+
+export const AMSTERDAM_GAS_FEATURES: readonly ChainFeature[] = [
+  'EIP_8037',
+  'EIP_8038',
+  'EIP_2780',
+  'EIP_7976',
+];
+
+export function gasRegimeForChain(
+  chainId: ChainId,
+  chainFeatures: IChainFeatures
+): GasRegime {
+  return chainFeatures.hasAll(chainId, AMSTERDAM_GAS_FEATURES)
+    ? 'amsterdam'
+    : 'osaka';
+}
+
+// The four repricing EIPs were measured together, so they select one gas regime.
+// The Amsterdam values are fitted to Universal Router receipts on a Glamsterdam mainnet fork at
+// block 26,007,350 (recipient already holding the output token). V4 shares the
+// V3 constants, so hookless V4 (measured 155,000 to 207,000 single hop) is not
+// fitted separately. The base cost and the single hop overhead did not move
+// in the fit and are the same on both forks.
+export const BASE_SWAP_COST = (id: ChainId, regime: GasRegime): BigNumber => {
+  switch (regime) {
+    case 'osaka':
+    case 'amsterdam':
+      return perChainBaseSwapCost(id);
+  }
+};
+
 //l2 execution fee on optimism is roughly the same as mainnet
-export const BASE_SWAP_COST = (id: ChainId): BigNumber => {
+const perChainBaseSwapCost = (id: ChainId): BigNumber => {
   switch (id) {
     case ChainId.MAINNET:
     case ChainId.SEPOLIA:
@@ -67,7 +100,19 @@ export const BASE_SWAP_COST = (id: ChainId): BigNumber => {
       return BigNumber.from(2000);
   }
 };
-export const COST_PER_INIT_TICK = (id: ChainId): BigNumber => {
+export const COST_PER_INIT_TICK = (
+  id: ChainId,
+  regime: GasRegime
+): BigNumber => {
+  switch (regime) {
+    case 'osaka':
+      return osakaCostPerInitTick(id);
+    case 'amsterdam':
+      return BigNumber.from(46000);
+  }
+};
+
+const osakaCostPerInitTick = (id: ChainId): BigNumber => {
   switch (id) {
     case ChainId.MAINNET:
     case ChainId.SEPOLIA:
@@ -103,7 +148,16 @@ export const COST_PER_INIT_TICK = (id: ChainId): BigNumber => {
   }
 };
 
-export const COST_PER_HOP = (id: ChainId): BigNumber => {
+export const COST_PER_HOP = (id: ChainId, regime: GasRegime): BigNumber => {
+  switch (regime) {
+    case 'osaka':
+      return osakaCostPerHop(id);
+    case 'amsterdam':
+      return BigNumber.from(165000);
+  }
+};
+
+const osakaCostPerHop = (id: ChainId): BigNumber => {
   switch (id) {
     case ChainId.MAINNET:
     case ChainId.SEPOLIA:
@@ -138,8 +192,35 @@ export const COST_PER_HOP = (id: ChainId): BigNumber => {
   }
 };
 
-export const SINGLE_HOP_OVERHEAD = (_id: ChainId): BigNumber => {
-  return BigNumber.from(15000);
+export const SINGLE_HOP_OVERHEAD = (
+  _id: ChainId,
+  regime: GasRegime
+): BigNumber => {
+  switch (regime) {
+    case 'osaka':
+    case 'amsterdam':
+      return BigNumber.from(15000);
+  }
+};
+
+export const V2_BASE_SWAP_COST = (regime: GasRegime): BigNumber => {
+  switch (regime) {
+    case 'osaka':
+      return BigNumber.from(135000);
+    case 'amsterdam':
+      return BigNumber.from(178000);
+  }
+};
+
+export const V2_COST_PER_EXTRA_HOP = (regime: GasRegime): BigNumber => {
+  switch (regime) {
+    case 'osaka':
+      return BigNumber.from(50000);
+    case 'amsterdam':
+      // No two hop V2 row was measured. This is the Osaka 50,000 scaled by
+      // the measured single hop ratio 178,000 / 135,000.
+      return BigNumber.from(66000);
+  }
 };
 
 export const TOKEN_OVERHEAD = (id: ChainId, route: RouteBasic): BigNumber => {

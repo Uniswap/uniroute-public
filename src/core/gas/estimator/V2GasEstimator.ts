@@ -1,3 +1,9 @@
+import {
+  gasRegimeForChain,
+  V2_BASE_SWAP_COST,
+  V2_COST_PER_EXTRA_HOP,
+} from '../gas-costs';
+import {IChainFeatures} from '@uniswap/lib-chain-features';
 import {ChainId} from '../../../lib/config';
 import {CurrencyAmount} from '@uniswap/sdk-core';
 import {getGasToken} from '../../../lib/tokenUtils';
@@ -8,15 +14,10 @@ import {BaseGasEstimator} from './BaseGasEstimator';
 import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
 
 export class V2GasEstimator extends BaseGasEstimator {
-  // Constant cost for doing any swap regardless of pools.
-  protected readonly BASE_SWAP_COST = BigInt(135000);
-
-  // Constant per extra hop in the route.
-  protected readonly COST_PER_EXTRA_HOP = BigInt(50000);
-
   constructor(
     protected readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
-    protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
+    protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    protected readonly chainFeatures: IChainFeatures
   ) {
     super(rpcProviderMap, freshPoolDetailsWrapper);
   }
@@ -26,10 +27,14 @@ export class V2GasEstimator extends BaseGasEstimator {
     chainId: ChainId,
     gasPriceWei: number
   ): Promise<GasDetails> {
+    const regime = gasRegimeForChain(chainId, this.chainFeatures);
     const hops = quote.route.path.length;
 
-    const gasUse =
-      this.BASE_SWAP_COST + this.COST_PER_EXTRA_HOP * BigInt(hops - 1);
+    const gasUse = BigInt(
+      V2_BASE_SWAP_COST(regime)
+        .add(V2_COST_PER_EXTRA_HOP(regime).mul(hops - 1))
+        .toString()
+    );
     const totalGasCostWei = BigInt(gasPriceWei) * gasUse;
     const weth = getGasToken(chainId);
     const gasCostInEth = CurrencyAmount.fromRawAmount(

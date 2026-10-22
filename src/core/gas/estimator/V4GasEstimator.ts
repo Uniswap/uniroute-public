@@ -1,3 +1,4 @@
+import {IChainFeatures} from '@uniswap/lib-chain-features';
 import {ChainId} from '../../../lib/config';
 import {GasDetails} from '../../../models/gas/GasDetails';
 import {JsonRpcProvider} from '@ethersproject/providers';
@@ -59,10 +60,11 @@ export class V4GasEstimator extends V3GasEstimator {
   constructor(
     protected readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
     protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    protected readonly chainFeatures: IChainFeatures,
     aggHookGasCalibrationEnabled = false,
     v4UseQuoterGasAsBase = false
   ) {
-    super(rpcProviderMap, freshPoolDetailsWrapper);
+    super(rpcProviderMap, freshPoolDetailsWrapper, chainFeatures);
     this.AGG_HOOK_GAS_CALIBRATION_ENABLED = aggHookGasCalibrationEnabled;
     this.V4_USE_QUOTER_GAS_AS_BASE = v4UseQuoterGasAsBase;
   }

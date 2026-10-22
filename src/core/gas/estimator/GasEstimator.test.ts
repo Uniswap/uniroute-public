@@ -14,9 +14,19 @@ import {V2Pool} from '../../../models/pool/V2Pool';
 import {V3Pool} from '../../../models/pool/V3Pool';
 import {V4Pool} from '../../../models/pool/V4Pool';
 import {Address} from '../../../models/address/Address';
-import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWrapper';
+import {FakeFreshPoolDetailsWrapper} from './test/FakeFreshPoolDetailsWrapper';
+import {ChainFeatures} from '@uniswap/lib-chain-features';
+import {
+  forcedChainFeatures,
+  osakaFeatures,
+  amsterdamFeatures,
+} from './test/chainFeatures';
 import {Protocol} from '../../../models/pool/Protocol';
 import {ERC4626_WRAPPER_GAS_PER_CHAIN} from '../erc4626WrapperHookGasCalibration';
+
+const osakaChainFeatures = forcedChainFeatures('osaka');
+const amsterdamChainFeatures = forcedChainFeatures('amsterdam');
+const freshPoolDetailsWrapper = new FakeFreshPoolDetailsWrapper();
 
 describe('GasEstimators', () => {
   const mockProvider = new Map<ChainId, JsonRpcProvider>();
@@ -72,10 +82,183 @@ describe('GasEstimators', () => {
     BigInt(0)
   );
 
+  describe('Amsterdam heuristics', () => {
+    const v2Estimator = new V2GasEstimator(
+      mockProvider,
+      freshPoolDetailsWrapper,
+      amsterdamChainFeatures
+    );
+    const v3Estimator = new V3GasEstimator(
+      mockProvider,
+      freshPoolDetailsWrapper,
+      amsterdamChainFeatures
+    );
+    const v4Estimator = new V4GasEstimator(
+      mockProvider,
+      freshPoolDetailsWrapper,
+      amsterdamChainFeatures,
+      false,
+      false
+    );
+    const mixedEstimator = new MixedGasEstimator(
+      mockProvider,
+      freshPoolDetailsWrapper,
+      amsterdamChainFeatures,
+      false,
+      false
+    );
+
+    it.each([
+      {
+        name: 'V2 single hop',
+        estimator: v2Estimator,
+        route: new RouteBasic(Protocol.V2, [v2Pool1]),
+        ticks: [],
+        expected: 178_000n,
+      },
+      {
+        name: 'V2 two hops',
+        estimator: v2Estimator,
+        route: new RouteBasic(Protocol.V2, [v2Pool1, v2Pool2]),
+        ticks: [],
+        expected: 244_000n,
+      },
+      {
+        name: 'V3 single hop without crossings',
+        estimator: v3Estimator,
+        route: new RouteBasic(Protocol.V3, [v3Pool1]),
+        ticks: [1],
+        expected: 182_000n,
+      },
+      {
+        name: 'V3 single hop with 79 crossings',
+        estimator: v3Estimator,
+        route: new RouteBasic(Protocol.V3, [v3Pool1]),
+        ticks: [80],
+        expected: 3_816_000n,
+      },
+      {
+        name: 'V3 two hops with one crossing',
+        estimator: v3Estimator,
+        route: new RouteBasic(Protocol.V3, [v3Pool1, v3Pool2]),
+        ticks: [1, 2],
+        expected: 378_000n,
+      },
+      {
+        name: 'V4 heuristic single hop',
+        estimator: v4Estimator,
+        route: new RouteBasic(Protocol.V4, [v4Pool1]),
+        ticks: [],
+        expected: 182_000n,
+      },
+      // Each protocol section gets single-hop overhead: 2 * (2,000 + 165,000 + 15,000) + 46,000.
+      {
+        name: 'Mixed V3 then V4 with one crossing',
+        estimator: mixedEstimator,
+        route: new RouteBasic(Protocol.MIXED, [v3Pool1, v4Pool1]),
+        ticks: [2],
+        expected: 410_000n,
+      },
+      {
+        name: 'Mixed V2 two-hop section then V3',
+        estimator: mixedEstimator,
+        route: new RouteBasic(Protocol.MIXED, [v2Pool1, v2Pool2, v3Pool1]),
+        ticks: [1],
+        expected: 426_000n,
+      },
+    ])(
+      'pins $name to $expected gas',
+      async ({estimator, route, ticks, expected}) => {
+        const quote = new QuoteBasic(
+          route,
+          1000n,
+          {initializedTicksCrossedList: ticks},
+          undefined
+        );
+        const result = await estimator.estimateRouteGas(
+          quote,
+          ChainId.MAINNET,
+          1000
+        );
+        expect(result.gasUse).toBe(expected);
+      }
+    );
+
+    it('switches regimes at wall-clock activation on the same estimator instance', async () => {
+      const activation = 100;
+      let now = activation - 1;
+      const chainFeatures = new ChainFeatures({
+        now: () => now,
+        fetchChainFeatures: async () => ({
+          chains: [
+            {
+              chainId: String(ChainId.MAINNET),
+              features: osakaFeatures,
+              observedAt: '1',
+              next: {
+                activationTime: String(activation),
+                features: amsterdamFeatures,
+                status: 'ACTIVATION_STATUS_SCHEDULED',
+              },
+            },
+          ],
+        }),
+      });
+      await chainFeatures.refresh();
+      const estimator = new V3GasEstimator(
+        mockProvider,
+        freshPoolDetailsWrapper,
+        chainFeatures
+      );
+      const quote = new QuoteBasic(
+        new RouteBasic(Protocol.V3, [v3Pool1]),
+        1000n,
+        {initializedTicksCrossedList: [1]},
+        undefined
+      );
+      expect(
+        (await estimator.estimateRouteGas(quote, ChainId.MAINNET, 1000)).gasUse
+      ).toBe(97_000n);
+      now = activation;
+      expect(
+        (await estimator.estimateRouteGas(quote, ChainId.MAINNET, 1000)).gasUse
+      ).toBe(182_000n);
+    });
+
+    it.each([V4GasEstimator, MixedGasEstimator])(
+      'preserves the quoter base across forks for %s',
+      async Estimator => {
+        const quote = new QuoteBasic(
+          new RouteBasic(Protocol.V4, [v4Pool1]),
+          1000n,
+          {initializedTicksCrossedList: [80], gasEstimate: 154_933n},
+          undefined
+        );
+        for (const chainFeatures of [
+          osakaChainFeatures,
+          amsterdamChainFeatures,
+        ]) {
+          const estimator = new Estimator(
+            mockProvider,
+            freshPoolDetailsWrapper,
+            chainFeatures,
+            false,
+            true
+          );
+          expect(
+            (await estimator.estimateRouteGas(quote, ChainId.MAINNET, 1000))
+              .gasUse
+          ).toBe(154_933n);
+        }
+      }
+    );
+  });
+
   describe('V2GasEstimator', () => {
     const v2Estimator = new V2GasEstimator(
       mockProvider,
-      {} as IFreshPoolDetailsWrapper
+      freshPoolDetailsWrapper,
+      osakaChainFeatures
     );
 
     it('should estimate gas for single hop V2 route', async () => {
@@ -110,7 +293,8 @@ describe('GasEstimators', () => {
   describe('V3GasEstimator', () => {
     const v3Estimator = new V3GasEstimator(
       mockProvider,
-      {} as IFreshPoolDetailsWrapper
+      freshPoolDetailsWrapper,
+      osakaChainFeatures
     );
 
     it('should estimate gas for single hop V3 route', async () => {
@@ -136,7 +320,8 @@ describe('GasEstimators', () => {
   describe('V4GasEstimator', () => {
     const v4Estimator = new V4GasEstimator(
       mockProvider,
-      {} as IFreshPoolDetailsWrapper
+      freshPoolDetailsWrapper,
+      osakaChainFeatures
     );
 
     it('should estimate gas for single hop V4 route', async () => {
@@ -172,7 +357,8 @@ describe('GasEstimators', () => {
       it('should NOT apply calibration when kill-switch is off (default)', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper
+          freshPoolDetailsWrapper,
+          osakaChainFeatures
         );
         const route = new RouteBasic(Protocol.V4, [v4PoolWithFluidHook]);
         const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
@@ -189,7 +375,8 @@ describe('GasEstimators', () => {
       it('should apply FluidDexT1 calibration when kill-switch is on', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true
         );
         const route = new RouteBasic(Protocol.V4, [v4PoolWithFluidHook]);
@@ -212,7 +399,8 @@ describe('GasEstimators', () => {
       it('should NOT apply calibration when kill-switch is on but no agg hook present', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true
         );
         const route = new RouteBasic(Protocol.V4, [v4Pool1]);
@@ -247,7 +435,8 @@ describe('GasEstimators', () => {
       it('applies the overhead on the heuristic path with no kill-switch', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper
+          freshPoolDetailsWrapper,
+          osakaChainFeatures
         );
         const route = new RouteBasic(Protocol.V4, [v4PoolWithZlcaHook]);
         const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
@@ -268,7 +457,8 @@ describe('GasEstimators', () => {
       it('does NOT double-apply on the quoter-gas base path', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true // v4UseQuoterGasAsBase
         );
@@ -300,7 +490,8 @@ describe('GasEstimators', () => {
         try {
           const heuristicEstimator = new V4GasEstimator(
             mockProvider,
-            {} as IFreshPoolDetailsWrapper
+            freshPoolDetailsWrapper,
+            osakaChainFeatures
           );
           const route = new RouteBasic(Protocol.V4, [v4PoolWithZlcaHook]);
           const heuristicQuote = new QuoteBasic(
@@ -322,7 +513,8 @@ describe('GasEstimators', () => {
 
           const quoterEstimator = new V4GasEstimator(
             mockProvider,
-            {} as IFreshPoolDetailsWrapper,
+            freshPoolDetailsWrapper,
+            osakaChainFeatures,
             false,
             true
           );
@@ -351,7 +543,8 @@ describe('GasEstimators', () => {
       it('leaves no-hook V4 routes unchanged', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper
+          freshPoolDetailsWrapper,
+          osakaChainFeatures
         );
         const route = new RouteBasic(Protocol.V4, [v4Pool1]);
         const quote = new QuoteBasic(route, BigInt(1000), undefined, undefined);
@@ -383,7 +576,8 @@ describe('GasEstimators', () => {
       it('uses heuristic when V4_USE_QUOTER_GAS_AS_BASE is off (default)', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper
+          freshPoolDetailsWrapper,
+          osakaChainFeatures
         );
         const route = new RouteBasic(Protocol.V4, [v4Pool1]);
         const quote = new QuoteBasic(
@@ -406,7 +600,8 @@ describe('GasEstimators', () => {
       it('uses V4Quoter return as base when flag is on and gasEstimate is present', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false, // calibration off
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -431,7 +626,8 @@ describe('GasEstimators', () => {
       it('falls back to heuristic when flag is on but quoter gasEstimate is missing', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );
@@ -451,7 +647,8 @@ describe('GasEstimators', () => {
       it('falls back to heuristic when flag is on but quoter gasEstimate is zero', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );
@@ -475,7 +672,8 @@ describe('GasEstimators', () => {
       it('quoter base + agg-hook calibration compose: 250k + 172k = 422k for FluidDexT1', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true, // calibration on
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -500,7 +698,8 @@ describe('GasEstimators', () => {
       it('quoter base only (calibration off) on agg-hook route uses quoter value without overhead', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false, // calibration off
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -525,7 +724,8 @@ describe('GasEstimators', () => {
       it('flag off + calibration on (the legacy PR #8587 state) keeps the heuristic baseline behavior', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true, // calibration on
           false // V4_USE_QUOTER_GAS_AS_BASE off — pre-fix state
         );
@@ -557,7 +757,8 @@ describe('GasEstimators', () => {
       it('falls back to per-protocol quoter-gas constant for agg-hook routes with no v3QuoterResponseDetails', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true, // calibration on
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -577,7 +778,8 @@ describe('GasEstimators', () => {
       it('agg-hook fallback applies even when calibration is off (still better than heuristic)', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false, // calibration off
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -597,7 +799,8 @@ describe('GasEstimators', () => {
       it('non-agg-hook V4 route without quoter gasEstimate still falls back to heuristic', async () => {
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );
@@ -629,7 +832,8 @@ describe('GasEstimators', () => {
         );
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );
@@ -666,7 +870,8 @@ describe('GasEstimators', () => {
         );
         const estimator = new V4GasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true, // calibration on
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -688,15 +893,18 @@ describe('GasEstimators', () => {
   describe('MixedGasEstimator', () => {
     const mixedEstimator = new MixedGasEstimator(
       mockProvider,
-      {} as IFreshPoolDetailsWrapper
+      freshPoolDetailsWrapper,
+      osakaChainFeatures
     );
     const v2Estimator = new V2GasEstimator(
       mockProvider,
-      {} as IFreshPoolDetailsWrapper
+      freshPoolDetailsWrapper,
+      osakaChainFeatures
     );
     const v3Estimator = new V3GasEstimator(
       mockProvider,
-      {} as IFreshPoolDetailsWrapper
+      freshPoolDetailsWrapper,
+      osakaChainFeatures
     );
 
     it('should estimate gas for mixed V2-V3 route', async () => {
@@ -857,7 +1065,8 @@ describe('GasEstimators', () => {
       it('should NOT apply calibration when kill-switch is off (default)', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper
+          freshPoolDetailsWrapper,
+          osakaChainFeatures
         );
         const route = new RouteBasic(Protocol.MIXED, [
           v3Pool1,
@@ -882,7 +1091,8 @@ describe('GasEstimators', () => {
       it('should apply per-protocol overhead to V4 agg-hook leg when kill-switch is on', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true
         );
         const route = new RouteBasic(Protocol.MIXED, [
@@ -909,7 +1119,8 @@ describe('GasEstimators', () => {
       it('sums per-leg overhead across multi-protocol V4 legs in a mixed route', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true
         );
         const route = new RouteBasic(Protocol.MIXED, [
@@ -934,12 +1145,14 @@ describe('GasEstimators', () => {
       it('should NOT apply calibration on a non-mainnet chainId', async () => {
         const calibratedEstimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true
         );
         const baselineEstimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false
         );
         const route = new RouteBasic(Protocol.MIXED, [
@@ -989,7 +1202,8 @@ describe('GasEstimators', () => {
       it('uses heuristic when V4_USE_QUOTER_GAS_AS_BASE is off (default)', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper
+          freshPoolDetailsWrapper,
+          osakaChainFeatures
         );
         const route = new RouteBasic(Protocol.MIXED, [
           v3Pool1,
@@ -1015,7 +1229,8 @@ describe('GasEstimators', () => {
       it('uses MixedQuoter return as base when flag is on and gasEstimate is present', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );
@@ -1042,7 +1257,8 @@ describe('GasEstimators', () => {
       it('falls back to heuristic when flag is on but quoter gasEstimate is missing', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );
@@ -1064,7 +1280,8 @@ describe('GasEstimators', () => {
       it('quoter base + agg-hook calibration compose on mixed route: 400k + 172k = 572k', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true, // calibration on
           true // V4_USE_QUOTER_GAS_AS_BASE on
         );
@@ -1091,7 +1308,8 @@ describe('GasEstimators', () => {
       it('flag off + calibration on (pre-fix #8587 state) preserves heuristic-baseline behavior', async () => {
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           true, // calibration on
           false // flag off — pre-fix
         );
@@ -1131,7 +1349,8 @@ describe('GasEstimators', () => {
         );
         const estimator = new MixedGasEstimator(
           mockProvider,
-          {} as IFreshPoolDetailsWrapper,
+          freshPoolDetailsWrapper,
+          osakaChainFeatures,
           false,
           true
         );

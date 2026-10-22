@@ -1,8 +1,10 @@
+import {IChainFeatures} from '@uniswap/lib-chain-features';
 import {ChainId} from '../../../lib/config';
 import {GasDetails} from '../../../models/gas/GasDetails';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {BigNumber} from '@ethersproject/bignumber';
 import {
+  gasRegimeForChain,
   BASE_SWAP_COST,
   COST_PER_HOP,
   COST_PER_INIT_TICK,
@@ -19,7 +21,8 @@ import {IFreshPoolDetailsWrapper} from '../../../stores/pool/FreshPoolDetailsWra
 export class V3GasEstimator extends BaseGasEstimator {
   constructor(
     protected readonly rpcProviderMap: Map<ChainId, JsonRpcProvider>,
-    protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
+    protected readonly freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    protected readonly chainFeatures: IChainFeatures
   ) {
     super(rpcProviderMap, freshPoolDetailsWrapper);
   }
@@ -29,17 +32,18 @@ export class V3GasEstimator extends BaseGasEstimator {
     chainId: ChainId,
     gasPriceWei: number
   ) {
+    const regime = gasRegimeForChain(chainId, this.chainFeatures);
     const totalInitializedTicksCrossed = this.totalInitializedTicksCrossed(
       quote.v3QuoterResponseDetails?.initializedTicksCrossedList || []
     );
     const totalHops = BigNumber.from(quote.route.path.length);
 
-    let hopsGasUse = COST_PER_HOP(chainId).mul(totalHops);
+    let hopsGasUse = COST_PER_HOP(chainId, regime).mul(totalHops);
 
     // We have observed that this algorithm tends to underestimate single hop swaps.
     // We add a buffer in the case of a single hop swap.
     if (totalHops.eq(1)) {
-      hopsGasUse = hopsGasUse.add(SINGLE_HOP_OVERHEAD(chainId));
+      hopsGasUse = hopsGasUse.add(SINGLE_HOP_OVERHEAD(chainId, regime));
     }
 
     // Some tokens have extremely expensive transferFrom functions, which causes
@@ -47,7 +51,7 @@ export class V3GasEstimator extends BaseGasEstimator {
     // adjustment.
     const tokenOverhead = TOKEN_OVERHEAD(chainId, quote.route);
 
-    const tickGasUse = COST_PER_INIT_TICK(chainId).mul(
+    const tickGasUse = COST_PER_INIT_TICK(chainId, regime).mul(
       totalInitializedTicksCrossed
     );
     const uninitializedTickGasUse = COST_PER_UNINIT_TICK.mul(0);
@@ -61,7 +65,7 @@ export class V3GasEstimator extends BaseGasEstimator {
     */
 
     // base estimate gas used based on chainId estimates for hops and ticks gas useage
-    const baseGasUse = BASE_SWAP_COST(chainId)
+    const baseGasUse = BASE_SWAP_COST(chainId, regime)
       .add(hopsGasUse)
       .add(tokenOverhead)
       .add(tickGasUse)
