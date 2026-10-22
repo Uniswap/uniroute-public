@@ -591,6 +591,15 @@ export const DUALPOOL_HOOK_ON_MAINNET =
 export const SLIPSTREAM_AGG_HOOK_ON_BASE =
   '0xa1dfe862f1111f5e9d466fd4d7297d7d4fa76888';
 
+// Groma's GroPrimaryMarketHook (groma-dev/gromacoin), source-verified on
+// Etherscan (solc 0.8.26). Mints and redeems GRO at NAV inside `beforeSwap`
+// against its v4GRO permissions adapter, so its pool holds no liquidity; it
+// gates swaps on the adapter allowlist (ERC-3643/T-REX identity
+// verification), so swaps revert for non-verified accounts and need UR 2.2+.
+// Sepolia testnet deploy. Declared above ZLCA_HOOKS_PER_CHAIN, which
+// references it at module load.
+export const GRO_PERMISSIONED_HOOK_ON_SEPOLIA =
+  '0xe14faba2f92e9f48b36ba6dd08bbc69333a80888';
 // flETH 1:1 ETH-wrapper hooks (flETHHooks). Defined here (above ZLCA_HOOKS_PER_CHAIN)
 // because they are referenced in that map. Identical source across Ethereum,
 // Unichain, Robinhood, Ink, Arbitrum (Base is a separate earlier build).
@@ -616,7 +625,9 @@ export const FLETH_HOOK_ON_ARBITRUM =
  * standard V4Quoter prices them fine.
  *
  * Do not add a hook whose pools can involve permissioned or
- * compliance-sensitive tokens — this list applies no known-token bounding.
+ * compliance-sensitive tokens — this list applies no known-token bounding —
+ * unless the hook is also a `PERMISSIONED_HOOKS_BY_CHAIN` deployment, whose
+ * pool admission bounds its pools instead.
  *
  * The map value is the hook's per-hop gas overhead (gas units): a ZLCA entry
  * carries this gas figure, unlike a plain `HOOKS_ADDRESSES_ALLOWLIST` entry.
@@ -687,6 +698,10 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     // Pool initialized at the exact 1e12 raw ratio (2^96 / 1e6), so slot0 is
     // already right — no sqrtPriceFromQuoter (see the constant's doc).
     [NATIVE_USDC_CONVERTER_HOOK_ON_ARC]: {gasOverheadPerHop: 250_000n},
+  },
+  [ChainId.SEPOLIA]: {
+    // The hook's `maxGas()` reports 100000.
+    [GRO_PERMISSIONED_HOOK_ON_SEPOLIA]: {gasOverheadPerHop: 100_000n},
   },
 };
 
@@ -1450,14 +1465,6 @@ export const BASTION_HOOK_ON_ROBINHOOD =
   '0xa8027e71ade2523536220a56e45047770bf73ae4';
 export const LAUNCH_TAX_HOOK_ON_ROBINHOOD_2 =
   '0xbb91434507908e1b37d36b46b8106633a3da20cc';
-// GRO permissioned pool (groma-dev/gromacoin). Uniswap's canonical
-// v4-periphery permissionedPools adapter parameterized with
-// GroAllowlistChecker, which gates swaps on ERC-3643/T-REX identity
-// verification (identityRegistry.isVerified). Added by operator decision:
-// Sepolia testnet deploy, NOT source-verified on-chain, and a KYC-gated
-// permissioned pool (swaps revert for non-verified accounts; needs UR 2.2+).
-export const GRO_PERMISSIONED_HOOK_ON_SEPOLIA =
-  '0xe14faba2f92e9f48b36ba6dd08bbc69333a80888';
 export const TAMA_DYNAMIC_FEE_HOOK_ON_MONAD =
   '0x14a233aacbfa823d2fad13b3e52ee3ddbc6c9080';
 export const TAMA_DYNAMIC_FEE_HOOK_ON_ARC =
