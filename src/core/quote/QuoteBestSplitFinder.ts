@@ -15,6 +15,11 @@ import {
 } from '../../lib/observability';
 import {getProtocolForAggHookAddress} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {V4Pool} from '../../models/pool/V4Pool';
+import {
+  assertValidSliceMs,
+  DEFAULT_EVENT_LOOP_SLICE_MS,
+  EventLoopSlicer,
+} from '../../lib/eventLoopSlicer';
 
 export class QuoteBestSplitFinder<TPool extends Pool>
   implements IQuoteBestSplitFinder<TPool>
@@ -239,6 +244,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   // Instrumentation only; selection output is unchanged.
   private readonly SHADOW_CHECKPOINT_MS: number;
 
+  // The split DFS (generateCombinationsForLevel) awaits only itself
+  // (microtasks), so without a yield it would hold the event loop until it
+  // finishes or reaches its RouteSplitTimeoutMs budget (up to 30 s on the
+  // async config) while every other request on the process waits. It hands the loop back
+  // (setImmediate, via EventLoopSlicer) after each slice of this many ms.
+  // Sliced on performance.now so the timeout's Date.now reads are untouched.
+  private readonly splitSearchYieldSliceMs: number;
+
   constructor(
     aggHookPartitionToleranceBps = 0n,
     aggHookPartitionGasToleranceUnits = 0n,
@@ -247,7 +260,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     aggHookPartitionUseProjectedGasAdjGate = false,
     aggHookProjectedLossToleranceQT = 0n,
     splitFinderBoundedGrowthEnabled = false,
-    shadowCheckpointMs = 0
+    shadowCheckpointMs = 0,
+    splitSearchYieldSliceMs = DEFAULT_EVENT_LOOP_SLICE_MS
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
@@ -261,6 +275,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     this.AGG_HOOK_PROJECTED_LOSS_TOLERANCE_QT = aggHookProjectedLossToleranceQT;
     this.SPLIT_FINDER_BOUNDED_GROWTH_ENABLED = splitFinderBoundedGrowthEnabled;
     this.SHADOW_CHECKPOINT_MS = shadowCheckpointMs;
+    assertValidSliceMs(splitSearchYieldSliceMs);
+    this.splitSearchYieldSliceMs = splitSearchYieldSliceMs;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -2653,6 +2669,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       }
     }
 
+    const eventLoopSlicer = new EventLoopSlicer(this.splitSearchYieldSliceMs);
+
     // Helper function to generate combinations level by level
     const generateCombinationsForLevel = async (
       splitLevel: number,
@@ -2665,6 +2683,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         earlyExitReason = 'timeout';
         return;
       }
+      await eventLoopSlicer.yieldIfSliceElapsed();
 
       // If we've reached our target split level and used exactly 100%, add the combination
       if (splitLevel === 0 && remainingPercentage === 0) {

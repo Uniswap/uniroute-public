@@ -22,6 +22,7 @@ import {Pool} from '../../models/pool/Pool';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {Erc20Token} from '../../models/token/Erc20Token';
 import {QuoteBestSplitFinder} from '../quote/QuoteBestSplitFinder';
+import {DEFAULT_EVENT_LOOP_SLICE_MS} from '../../lib/eventLoopSlicer';
 import {IQuoteFetcher} from '../../stores/quote/IQuoteFetcher';
 import {IGasEstimateProvider} from '../gas/estimator/GasEstimateProvider';
 import {IGasConverter} from '../gas/converter/IGasConverter';
@@ -80,7 +81,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     tokenHandler: ITokenHandler,
     arbitrumGasDataProviders: Map<ChainId, ArbitrumGasDataProvider>,
     freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
-    rpcProviderMap?: Map<ChainId, JsonRpcProvider>
+    rpcProviderMap?: Map<ChainId, JsonRpcProvider>,
+    splitSearchYieldSliceMs = DEFAULT_EVENT_LOOP_SLICE_MS
   ) {
     super(
       quoteFetcher,
@@ -132,7 +134,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       useProjectedGasAdjGate,
       0n,
       boundedGrowthEnabled,
-      shadowCheckpointMs
+      shadowCheckpointMs,
+      splitSearchYieldSliceMs
     );
     this.rpcProviderMap = rpcProviderMap ?? new Map();
   }

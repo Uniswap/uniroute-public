@@ -117,6 +117,45 @@ describe('QuoteBestSplitFinder', () => {
         : {}),
     }) as QuoteBasic;
 
+  const createFinderWithYieldSlice = (
+    splitSearchYieldSliceMs: number
+  ): QuoteBestSplitFinder<MockPool> =>
+    new QuoteBestSplitFinder<MockPool>(
+      0n,
+      0n,
+      0n,
+      false,
+      false,
+      0n,
+      false,
+      0,
+      splitSearchYieldSliceMs
+    );
+
+  // Six routes over distinct pools with concave outputs, so the DFS explores
+  // and ranks real multi-leg combinations up to four legs, and a search that
+  // yields on every step runs for hundreds of milliseconds.
+  const createConcaveSixRouteQuotes = (): Map<number, QuoteBasic[]> => {
+    const pools = Array.from({length: 6}, (_, r) =>
+      createMockPool(mockToken0, mockToken1, `0x${String(r + 1).repeat(40)}`)
+    );
+    const percentageToQuotes = new Map<number, QuoteBasic[]>();
+    for (let pct = 5; pct <= 100; pct += 5) {
+      percentageToQuotes.set(
+        pct,
+        pools
+          .map((pool, r) =>
+            createMockQuote(
+              createMockRoute([pool], pct),
+              BigInt(Math.round(1e6 * pct * (1 - pct / (180 + 40 * r))))
+            )
+          )
+          .sort((x, y) => (y.amount > x.amount ? 1 : -1))
+      );
+    }
+    return percentageToQuotes;
+  };
+
   describe('findBestSplits', () => {
     it('should throw error for invalid percentage step', async () => {
       const percentageToQuotes = new Map<number, QuoteBasic[]>();
@@ -457,6 +496,169 @@ describe('QuoteBestSplitFinder', () => {
       );
 
       dateNowSpy.mockRestore();
+    });
+
+    it('rejects an invalid yield slice at construction', () => {
+      expect(() => createFinderWithYieldSlice(-1)).toThrow(
+        'sliceMs must be >= 0'
+      );
+      expect(() => createFinderWithYieldSlice(Number.NaN)).toThrow(
+        'sliceMs must be >= 0'
+      );
+    });
+
+    it('hands the event loop back while the split search runs', async () => {
+      const pool = createMockPool(
+        mockToken0,
+        mockToken1,
+        '0x7777777777777777777777777777777777777777'
+      );
+      const quotes = Array.from({length: 20}, (_, i) =>
+        createMockQuote(
+          createMockRoute([pool], 5 * (i + 1)),
+          BigInt(100 * (i + 1))
+        )
+      );
+      const percentageToQuotes = new Map<number, QuoteBasic[]>();
+      for (let i = 5; i <= 100; i += 5) {
+        percentageToQuotes.set(i, quotes);
+      }
+      const run = async (splitSearchYieldSliceMs: number) => {
+        const slicedFinder = createFinderWithYieldSlice(
+          splitSearchYieldSliceMs
+        );
+        const events: string[] = [];
+        setImmediate(() => events.push('timer'));
+        await slicedFinder.findBestSplits(
+          ChainId.MAINNET,
+          percentageToQuotes,
+          5,
+          3,
+          100,
+          60_000,
+          TradeType.ExactIn,
+          [],
+          mockContext
+        );
+        events.push('search done');
+        await new Promise<void>(resolve => setImmediate(resolve));
+        return events;
+      };
+      // a search shorter than its slice runs through in one go
+      expect(await run(60_000)).toEqual(['search done', 'timer']);
+      // slicing on every step lets the pending timer run mid-search
+      expect(await run(0)).toEqual(['timer', 'search done']);
+    });
+
+    it('finds the same splits whether or not it yields', async () => {
+      const percentageToQuotes = createConcaveSixRouteQuotes();
+      const search = async (splitSearchYieldSliceMs: number) => {
+        const slicedFinder = createFinderWithYieldSlice(
+          splitSearchYieldSliceMs
+        );
+        const splits = await slicedFinder.findBestSplits(
+          ChainId.MAINNET,
+          percentageToQuotes,
+          5,
+          4,
+          100,
+          60_000,
+          TradeType.ExactIn,
+          [],
+          mockContext
+        );
+        return splits.map(split =>
+          split.map(
+            route => `${route.path[0]?.address.address}@${route.percentage}`
+          )
+        );
+      };
+      const unsliced = await search(60_000);
+      expect(unsliced.some(split => split.length >= 3)).toBe(true);
+      expect(await search(0)).toEqual(unsliced);
+    });
+
+    it('finds the same splits when two yielding searches interleave on one finder', async () => {
+      const sixRouteQuotes = createConcaveSixRouteQuotes();
+      // A different input: only the four best quotes at each percentage.
+      const fourRouteQuotes = new Map(
+        [...sixRouteQuotes].map(([pct, quotes]) => [pct, quotes.slice(0, 4)])
+      );
+      const search = (
+        finder: QuoteBestSplitFinder<MockPool>,
+        percentageToQuotes: Map<number, QuoteBasic[]>
+      ) =>
+        finder
+          .findBestSplits(
+            ChainId.MAINNET,
+            percentageToQuotes,
+            5,
+            4,
+            100,
+            60_000,
+            TradeType.ExactIn,
+            [],
+            mockContext
+          )
+          .then(splits =>
+            splits.map(split =>
+              split.map(
+                route => `${route.path[0]?.address.address}@${route.percentage}`
+              )
+            )
+          );
+
+      const unslicedFinder = createFinderWithYieldSlice(60_000);
+      const expectedSix = await search(unslicedFinder, sixRouteQuotes);
+      const expectedFour = await search(unslicedFinder, fourRouteQuotes);
+
+      // With a 0 ms slice both searches yield at every node, so their DFS
+      // steps alternate on the one instance.
+      const slicedFinder = createFinderWithYieldSlice(0);
+      const [six, four] = await Promise.all([
+        search(slicedFinder, sixRouteQuotes),
+        search(slicedFinder, fourRouteQuotes),
+      ]);
+
+      expect(six).toEqual(expectedSix);
+      expect(four).toEqual(expectedFour);
+      expect(four).not.toEqual(six);
+    });
+
+    it('still stops at the timeout early-exit when the slice is 0, taking at least the timeout budget', async () => {
+      // A fully sliced search on this fixture runs for hundreds of ms, so the
+      // 20 ms budget below genuinely cuts it short.
+      const percentageToQuotes = createConcaveSixRouteQuotes();
+      const slicedFinder = createFinderWithYieldSlice(0);
+      // A small but non-trivial budget: large enough that Date.now()'s
+      // millisecond rounding (the same clock the timeout check itself reads)
+      // can't make a genuinely-elapsed-but-sub-tick search look like it beat
+      // the budget.
+      const timeoutMs = 20;
+      const startedAt = Date.now();
+      await slicedFinder.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        5,
+        4,
+        100,
+        timeoutMs,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+      const elapsedMs = Date.now() - startedAt;
+      // Never equality: the budget is a floor on wall-clock time, not an
+      // exact tick count.
+      expect(elapsedMs).toBeGreaterThanOrEqual(timeoutMs);
+
+      expect(vi.mocked(mockContext.metrics.count).mock.calls).toContainEqual([
+        expect.stringContaining('QuoteBestSplitFinder.EarlyExit'),
+        1,
+        expect.objectContaining({
+          tags: expect.arrayContaining(['earlyExitReason:timeout']),
+        }),
+      ]);
     });
 
     it('keeps descending past empty shallow levels and returns deep splits (huge-trade shape)', async () => {
