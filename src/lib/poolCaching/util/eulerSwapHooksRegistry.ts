@@ -10,10 +10,8 @@ import {ChainId} from '@uniswap/sdk-core';
  * entity resolves to, snapshotted before the subgraph shutoff; every entry
  * is in prod Aurora's v4_pool_metadata with a current_v4_pool_state row. The
  * pools are near-static, but a new EulerSwap pool is not picked up until it
- * is added here.
- *
- * TODO(ROUTE-1839): replace with on-chain enumeration of the EulerSwap
- * factories once their per-chain addresses are confirmed.
+ * is added here. EulerSwap is no longer developed, so this list is the
+ * complete set and stays code-owned rather than read from a factory.
  *
  * Addresses are stored EIP-55 checksummed, as data-ingestion writes them.
  */
