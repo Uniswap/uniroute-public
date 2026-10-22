@@ -276,14 +276,12 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           ctx
         );
       case Protocol.V4:
-        // Under HOOKS_ONLY the direct probe can only surface hooked PoolKey
-        // registry entries, and the registry deliberately excludes aggregator
-        // hooks — for an agg-hooks selector every probed pool would be
-        // discarded, so skip the RPC entirely.
-        if (
-          hooksOptions === HooksOptions.HOOKS_ONLY &&
-          topPoolsSelector.aggHooksOnly
-        ) {
+        // The direct probe only surfaces hookless pools (the canonical grid)
+        // and hooked PoolKey-registry entries, and the registry never admits
+        // aggregator hooks (isRegistryAdmissibleHook). An agg-hooks selector
+        // keeps aggregator-hook pools only, so under every hooksOptions it
+        // would discard everything the probe returns — skip the RPC.
+        if (topPoolsSelector.aggHooksOnly === true) {
           return [];
         }
         return this.v4DirectPoolDiscoverer.getPoolsForTokens(

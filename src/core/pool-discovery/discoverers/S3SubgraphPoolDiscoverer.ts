@@ -27,7 +27,7 @@ import {
 } from '../../../lib/poolCaching/ccaScheduledPools';
 import {CcaScheduledPoolsRepository} from '../CcaScheduledPoolsRepository';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
-import {ITopPoolsSelector} from '../interface';
+import {IPoolSnapshotWarmer, ITopPoolsSelector} from '../interface';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {
@@ -118,7 +118,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protected getPoolsCache: IRedisCache<string, string>,
     protected getPoolsForTokensCache: IRedisCache<string, string>,
     protected featureGatedTokensRepository: FeatureGatedTokensRepository,
-    protected readonly s3: S3Client
+    protected readonly s3: S3Client,
+    snapshotWarmer?: IPoolSnapshotWarmer
   ) {
     super(
       serviceConfig,
@@ -126,7 +127,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       getPoolsForTokensCache,
       featureGatedTokensRepository,
       'BaseS3SubgraphPoolDiscoverer',
-      [Protocol.V2, Protocol.V3, Protocol.V4]
+      [Protocol.V2, Protocol.V3, Protocol.V4],
+      snapshotWarmer
     );
   }
 
@@ -500,14 +502,16 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
     // Optional: CCA launch pools pre-registered at a known migrationBlock
     // (ROUTE-1134). Merged AFTER the caching layers so activation isn't
     // delayed by the pool-cache TTLs.
-    private readonly ccaScheduledPoolsRepository?: CcaScheduledPoolsRepository
+    private readonly ccaScheduledPoolsRepository?: CcaScheduledPoolsRepository,
+    snapshotWarmer?: IPoolSnapshotWarmer
   ) {
     super(
       serviceConfig,
       getPoolsCache,
       getPoolsForTokensCache,
       featureGatedTokensRepository,
-      s3
+      s3,
+      snapshotWarmer
     );
   }
 

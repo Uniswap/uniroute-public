@@ -14,6 +14,13 @@ import {
 import {Address} from '../../models/address/Address';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {EMPTY_NAMESPACE_CONTEXT} from '../../models/hooks/namespaces';
+import {AggHooksTopPoolsSelector} from './TopPoolsSelector';
+import {aggHooksPoolSelectionPerChainConfig} from '../../lib/config';
+import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {registryAdmissibleHookAddresses} from '../../lib/poolCaching/util/v4PoolKeyRegistryFormat';
+import {buildTestContext} from '@uniswap/lib-testhelpers';
+import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 
 const TOKEN_IN = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
 const TOKEN_OUT = new Address('0xdac17f958d2ee523a2206206994597c13d831ec7');
@@ -320,27 +327,6 @@ describe('PoolDiscoverer', () => {
 
       expect(v4PoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
       expect(v4DirectPoolDiscoverer.getPoolsForTokens).toHaveBeenCalled();
-    });
-
-    it('skips the V4 direct probe for HOOKS_ONLY with an agg-hooks selector', async () => {
-      // The registry deliberately excludes aggregator hooks, so under
-      // HOOKS_ONLY every direct-probed pool would be discarded by the
-      // agg-hooks selector — the probe is pure wasted RPC.
-      const selector = {...makeSelector(), aggHooksOnly: true};
-
-      await poolDiscoverer.getPoolsForTokens(
-        ChainId.MAINNET,
-        Protocol.V4,
-        TOKEN_IN,
-        TOKEN_OUT,
-        selector,
-        HooksOptions.HOOKS_ONLY,
-        false,
-        EMPTY_NAMESPACE_CONTEXT,
-        ctx
-      );
-
-      expect(v4DirectPoolDiscoverer.getPoolsForTokens).not.toHaveBeenCalled();
     });
 
     it('should throw for external protocol', async () => {
@@ -678,5 +664,168 @@ describe('PoolDiscoverer', () => {
         )
       ).rejects.toThrow('direct boom');
     });
+  });
+
+  describe('V4 direct probe under an agg-hooks selector', () => {
+    // Records every getPoolsForTokens call; returns `pools` as a probe would.
+    class RecordingDiscoverer<T extends UniPoolInfo>
+      implements IPoolDiscoverer<T>
+    {
+      public forTokensCalls = 0;
+      constructor(private readonly pools: T[]) {}
+      async getPools(): Promise<T[]> {
+        return [];
+      }
+      async getPoolsForTokens(): Promise<T[]> {
+        this.forTokensCalls += 1;
+        return this.pools;
+      }
+    }
+
+    const directProbePool = (id: string, hooks: string): V4PoolInfo => ({
+      id,
+      feeTier: '3000',
+      liquidity: '1000',
+      tickSpacing: '60',
+      hooks,
+      token0: {id: TOKEN_IN.address},
+      token1: {id: TOKEN_OUT.address},
+      tvlETH: 1000,
+      tvlUSD: 1000,
+    });
+
+    const build = (parallel: boolean) => {
+      vi.stubEnv(
+        'POOL_DISCOVERY_PARALLEL_DIRECT_ENABLED',
+        parallel ? 'true' : 'false'
+      );
+      const primary = new RecordingDiscoverer<V4PoolInfo>([
+        directProbePool('v4-primary', ADDRESS_ZERO),
+      ]);
+      const direct = new RecordingDiscoverer<UniPoolInfo>([
+        directProbePool('v4-direct', ADDRESS_ZERO),
+      ]);
+      const discoverer = new PoolDiscoverer(
+        new RecordingDiscoverer<V2PoolInfo>([]),
+        new RecordingDiscoverer<V3PoolInfo>([]),
+        primary,
+        new RecordingDiscoverer<UniPoolInfo>([]),
+        new RecordingDiscoverer<UniPoolInfo>([]),
+        direct
+      );
+      vi.unstubAllEnvs();
+      return {discoverer, primary, direct};
+    };
+
+    const passThroughSelector = (
+      aggHooksOnly: boolean
+    ): ITopPoolsSelector<UniPoolInfo> => ({
+      aggHooksOnly,
+      filterPools: async (pools: UniPoolInfo[]) => pools,
+    });
+
+    const hooksOptionCases = [
+      undefined,
+      HooksOptions.HOOKS_INCLUSIVE,
+      HooksOptions.NO_HOOKS,
+      HooksOptions.HOOKS_ONLY,
+    ];
+
+    describe.each([false, true])('parallel direct discovery %s', parallel => {
+      it.each(hooksOptionCases)(
+        'skips the direct probe for an agg-hooks selector (hooksOptions %s)',
+        async hooksOptions => {
+          const {discoverer, primary, direct} = build(parallel);
+          const result = await discoverer.getPoolsForTokens(
+            ChainId.MAINNET,
+            Protocol.V4,
+            TOKEN_IN,
+            TOKEN_OUT,
+            passThroughSelector(true),
+            hooksOptions,
+            true,
+            EMPTY_NAMESPACE_CONTEXT,
+            buildTestContext()
+          );
+          expect(direct.forTokensCalls).toBe(0);
+          expect(primary.forTokensCalls).toBe(1);
+          expect(result.map(pool => pool.id)).toEqual(['v4-primary']);
+        }
+      );
+
+      it.each(hooksOptionCases)(
+        'still runs the direct probe for the standard selector (hooksOptions %s)',
+        async hooksOptions => {
+          const {discoverer, direct} = build(parallel);
+          const result = await discoverer.getPoolsForTokens(
+            ChainId.MAINNET,
+            Protocol.V4,
+            TOKEN_IN,
+            TOKEN_OUT,
+            passThroughSelector(false),
+            hooksOptions,
+            false,
+            EMPTY_NAMESPACE_CONTEXT,
+            buildTestContext()
+          );
+          expect(direct.forTokensCalls).toBe(1);
+          expect(result.map(pool => pool.id)).toEqual([
+            'v4-primary',
+            'v4-direct',
+          ]);
+        }
+      );
+    });
+
+    // The skip is only route-identical because the agg-hooks selector would
+    // discard everything the direct probe can return: hookless canonical-grid
+    // pools and hooked registry entries, whose admissible hook set excludes
+    // every aggregator hook.
+    it.each(hooksOptionCases)(
+      'the agg-hooks selector discards every pool shape the direct probe returns (hooksOptions %s)',
+      async hooksOptions => {
+        const chainId = ChainId.MAINNET;
+        const registryHooks = registryAdmissibleHookAddresses(
+          chainId,
+          new Set([chainId]),
+          new Map()
+        );
+        expect(registryHooks.length).toBeGreaterThan(0);
+        const probePools = [ADDRESS_ZERO, ...registryHooks].map((hooks, i) =>
+          directProbePool(`probe-${i}`, hooks)
+        );
+        const selector = new AggHooksTopPoolsSelector(
+          aggHooksPoolSelectionPerChainConfig,
+          FeatureGatedTokensRepository.empty()
+        );
+        const filter = (pools: UniPoolInfo[]) =>
+          selector.filterPools(
+            pools,
+            chainId,
+            TOKEN_IN,
+            TOKEN_OUT,
+            Protocol.V4,
+            hooksOptions,
+            EMPTY_NAMESPACE_CONTEXT,
+            buildTestContext(),
+            {shouldUseCache: false}
+          );
+
+        expect(await filter(probePools)).toEqual([]);
+
+        // Control: the same selector keeps a pool on an aggregator hook, so
+        // the empty result above is about the hook set, not the pool shape.
+        if (hooksOptions !== HooksOptions.NO_HOOKS) {
+          const aggHook = Object.values(AGG_HOOKS_PER_CHAIN)
+            .flatMap(perChain => perChain?.[chainId] ?? [])
+            .at(0);
+          expect(aggHook).toBeDefined();
+          const aggPool = directProbePool('agg', aggHook ?? ADDRESS_ZERO);
+          expect((await filter([aggPool])).map(pool => pool.id)).toEqual([
+            'agg',
+          ]);
+        }
+      }
+    );
   });
 });

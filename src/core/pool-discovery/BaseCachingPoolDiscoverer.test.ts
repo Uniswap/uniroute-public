@@ -1,6 +1,7 @@
-import {describe, beforeEach, it, expect, vi} from 'vitest';
+import {afterEach, describe, beforeEach, it, expect, vi} from 'vitest';
 import {
   BaseCachingPoolDiscoverer,
+  EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS,
   POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES,
   SnapshotLoad,
   SnapshotLoadStatus,
@@ -9,6 +10,7 @@ import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {
+  IPoolSnapshotWarmer,
   isPoolsArrayMemoStable,
   ITopPoolsSelector,
   markPoolsForTokensUncacheable,
@@ -16,9 +18,13 @@ import {
   PoolsForTokensCacheSkipReason,
   UniPoolInfo,
 } from './interface';
-import {IRedisCache} from '@uniswap/lib-cache';
+import {IRedisCache, InMemoryRedisCache} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
-import {getUniRouteTestConfig, IUniRouteServiceConfig} from '../../lib/config';
+import {
+  buildMetricKey,
+  getUniRouteTestConfig,
+  IUniRouteServiceConfig,
+} from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../lib/CanonicalPools';
@@ -26,6 +32,7 @@ import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
 } from '../../models/hooks/namespaces';
+import {buildTestContext} from '@uniswap/lib-testhelpers';
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -1886,5 +1893,280 @@ describe('BaseCachingPoolDiscoverer', () => {
       ).rejects.toThrow('Unsupported protocol');
       expect(load).not.toHaveBeenCalled();
     });
+  });
+});
+
+// Pair discovery driven by a closure; counts how often discovery actually runs.
+class PairClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
+  public pairLoads = 0;
+  constructor(
+    serviceConfig: IUniRouteServiceConfig,
+    getPoolsForTokensCache: IRedisCache<string, string>,
+    private readonly loadPairPools: () => UniPoolInfo[]
+  ) {
+    super(
+      serviceConfig,
+      new InMemoryRedisCache<string, string>(),
+      getPoolsForTokensCache,
+      FeatureGatedTokensRepository.empty(),
+      'PairClosurePoolDiscoverer'
+    );
+  }
+
+  protected getDiscovererName(): string {
+    return 'PairClosurePoolDiscoverer';
+  }
+
+  protected async _getPools(): Promise<UniPoolInfo[]> {
+    return [];
+  }
+
+  protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
+    this.pairLoads += 1;
+    return this.loadPairPools();
+  }
+}
+
+describe('BaseCachingPoolDiscoverer empty pools-for-tokens entries', () => {
+  const T0 = 1_760_000_000_000;
+  const TOKEN_A = new Address('0x1111111111111111111111111111111111111111');
+  const TOKEN_B = new Address('0x2222222222222222222222222222222222222222');
+  const POOL: UniPoolInfo = {
+    id: '0x3333333333333333333333333333333333333333',
+    feeTier: '3000',
+    liquidity: '1000',
+    token0: {id: TOKEN_A.address},
+    token1: {id: TOKEN_B.address},
+    tvlETH: 1000,
+    tvlUSD: 1000,
+  };
+  const baseConfig = getUniRouteTestConfig();
+  const normalTtlSeconds =
+    baseConfig.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds;
+
+  const lookup = (
+    discoverer: PairClosurePoolDiscoverer,
+    selector: ITopPoolsSelector<UniPoolInfo> = new TestTopPoolsSelector(),
+    chainId: ChainId = ChainId.MAINNET
+  ) =>
+    discoverer.getPoolsForTokens(
+      chainId,
+      Protocol.V3,
+      TOKEN_A,
+      TOKEN_B,
+      selector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      buildTestContext()
+    );
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps the normal TTL longer than the empty-entry TTL', () => {
+    expect(normalTtlSeconds).toBeGreaterThan(
+      EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS
+    );
+  });
+
+  it('serves an empty result from cache within the empty TTL and re-discovers after it', async () => {
+    vi.useFakeTimers({toFake: ['Date'], now: T0});
+    let pairPools: UniPoolInfo[] = [];
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      new InMemoryRedisCache<string, string>(),
+      () => pairPools
+    );
+
+    expect(await lookup(discoverer)).toEqual([]);
+    expect(discoverer.pairLoads).toBe(1);
+
+    // A pool appears, but the empty entry is still within its TTL.
+    pairPools = [POOL];
+    vi.setSystemTime(
+      T0 + (EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS - 1) * 1000
+    );
+    expect(await lookup(discoverer)).toEqual([]);
+    expect(discoverer.pairLoads).toBe(1);
+
+    vi.setSystemTime(
+      T0 + (EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS + 1) * 1000
+    );
+    expect(await lookup(discoverer)).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(2);
+  });
+
+  it('keeps the normal TTL for non-empty results', async () => {
+    vi.useFakeTimers({toFake: ['Date'], now: T0});
+    let pairPools: UniPoolInfo[] = [POOL];
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      new InMemoryRedisCache<string, string>(),
+      () => pairPools
+    );
+    expect(await lookup(discoverer)).toEqual([POOL]);
+
+    pairPools = [];
+    vi.setSystemTime(
+      T0 + (EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS + 1) * 1000
+    );
+    expect(await lookup(discoverer)).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(1);
+
+    vi.setSystemTime(T0 + (normalTtlSeconds + 1) * 1000);
+    expect(await lookup(discoverer)).toEqual([]);
+    expect(discoverer.pairLoads).toBe(2);
+  });
+
+  it('caps the empty TTL at a shorter per-chain TTL', async () => {
+    vi.useFakeTimers({toFake: ['Date'], now: T0});
+    const perChainTtlSeconds = 10;
+    const config: IUniRouteServiceConfig = {
+      ...baseConfig,
+      RedisCache: {
+        ...baseConfig.RedisCache,
+        PoolsCacheEntryTtlSecondsByChain: {
+          [ChainId.MAINNET]: perChainTtlSeconds,
+        },
+      },
+    };
+    let pairPools: UniPoolInfo[] = [];
+    const discoverer = new PairClosurePoolDiscoverer(
+      config,
+      new InMemoryRedisCache<string, string>(),
+      () => pairPools
+    );
+    expect(await lookup(discoverer)).toEqual([]);
+    pairPools = [POOL];
+    vi.setSystemTime(T0 + (perChainTtlSeconds + 1) * 1000);
+    expect(await lookup(discoverer)).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(2);
+  });
+
+  it('does not cache an empty result the selector marks uncacheable', async () => {
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      new InMemoryRedisCache<string, string>(),
+      () => []
+    );
+    const selector = new CacheSuppressingTopPoolsSelector();
+    await lookup(discoverer, selector);
+    await lookup(discoverer, selector);
+    expect(discoverer.pairLoads).toBe(2);
+  });
+
+  it('re-discovers when a non-empty entry is filtered to empty on read', async () => {
+    const cache = new InMemoryRedisCache<string, string>();
+    const discoverer = new PairClosurePoolDiscoverer(baseConfig, cache, () => [
+      POOL,
+    ]);
+    expect(await lookup(discoverer)).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(1);
+
+    // TOKEN_A gains a canonical-pools entry that POOL is not part of, so the
+    // cached list filters to empty: that is not a stored negative entry.
+    CanonicalPools.__TEST_ONLY__injectTestData({
+      [ChainId.MAINNET]: {[TOKEN_A.address]: ['0xcanonical']},
+    });
+    try {
+      await lookup(discoverer);
+      expect(discoverer.pairLoads).toBe(2);
+    } finally {
+      CanonicalPools.__TEST_ONLY__injectTestData();
+    }
+  });
+});
+
+describe('BaseCachingPoolDiscoverer snapshot warmer', () => {
+  const baseConfig = getUniRouteTestConfig();
+  const chainId = ChainId.MAINNET;
+  const protocol = Protocol.V3;
+  const configWith = (skipReparse: boolean): IUniRouteServiceConfig => ({
+    ...baseConfig,
+    PoolDiscovery: {
+      ...baseConfig.PoolDiscovery,
+      SnapshotMemoEnabled: true,
+      SnapshotSkipReparseEnabled: skipReparse,
+    },
+  });
+  const pools: UniPoolInfo[] = [
+    {
+      id: '0x1',
+      feeTier: '3000',
+      liquidity: '1000',
+      token0: {id: '0xaaa1'},
+      token1: {id: '0xbbb1'},
+      tvlETH: 1000,
+      tvlUSD: 1000,
+    },
+  ];
+
+  class RecordingWarmer implements IPoolSnapshotWarmer {
+    public warmed: UniPoolInfo[][] = [];
+    constructor(private readonly fail = false) {}
+    async warmSnapshot(snapshot: UniPoolInfo[]): Promise<void> {
+      if (this.fail) {
+        throw new Error('warm failed');
+      }
+      this.warmed.push(snapshot);
+    }
+  }
+
+  class WarmedDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
+    constructor(config: IUniRouteServiceConfig, warmer: IPoolSnapshotWarmer) {
+      super(
+        config,
+        new InMemoryRedisCache<string, string>(),
+        new InMemoryRedisCache<string, string>(),
+        FeatureGatedTokensRepository.empty(),
+        'WarmedDiscoverer',
+        [Protocol.V3],
+        warmer
+      );
+    }
+    protected getDiscovererName(): string {
+      return 'WarmedDiscoverer';
+    }
+    protected async _getPools(): Promise<UniPoolInfo[]> {
+      return pools.map(pool => ({...pool}));
+    }
+    protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
+      return [];
+    }
+  }
+
+  it.each([true, false])(
+    'warms exactly the array it serves (skip-reparse %s)',
+    async skipReparse => {
+      const warmer = new RecordingWarmer();
+      const discoverer = new WarmedDiscoverer(configWith(skipReparse), warmer);
+
+      const served = await discoverer.getPools(
+        chainId,
+        protocol,
+        buildTestContext()
+      );
+
+      expect(warmer.warmed).toHaveLength(1);
+      expect(warmer.warmed[0]).toBe(served);
+      expect(isPoolsArrayMemoStable(served)).toBe(true);
+    }
+  );
+
+  it('serves the snapshot and reports a failure when the warmer throws', async () => {
+    const discoverer = new WarmedDiscoverer(
+      configWith(true),
+      new RecordingWarmer(true)
+    );
+    const testCtx = buildTestContext();
+
+    const served = await discoverer.getPools(chainId, protocol, testCtx);
+
+    expect(served.map(pool => pool.id)).toEqual(['0x1']);
+    expect(
+      testCtx.metrics.countStore[buildMetricKey('PoolDiscoverer.SnapshotWarm')]
+    ).toBe(1);
   });
 });

@@ -171,6 +171,23 @@ export async function trackPoolsForTokensCacheSkip(
   );
 }
 
+/**
+ * Precomputes per-snapshot selection state for a snapshot a discoverer has
+ * just published, so the first request against it does not build that state
+ * on its own latency. Implementations must produce exactly the state the
+ * request path would build lazily (selection results unchanged), and may
+ * reject; the caller degrades to lazy building.
+ */
+export interface IPoolSnapshotWarmer {
+  warmSnapshot(
+    pools: UniPoolInfo[],
+    unsupportedTokens: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<void>;
+}
+
 export interface ITopPoolsSelector<TPool extends UniPoolInfo> {
   // True for selectors that restrict the result to AGG_HOOKS pools
   // (AggHooksTopPoolsSelector). Post-selector additive merges (CCA scheduled

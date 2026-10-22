@@ -1,5 +1,6 @@
 import {Address} from '../../models/address/Address';
 import {
+  IPoolSnapshotWarmer,
   isPoolsArrayMemoStable,
   ITopPoolsSelector,
   markPoolsForTokensUncacheable,
@@ -122,6 +123,24 @@ export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
   return {tokenToPools};
 };
 
+// Lowercased ids of a token's pool list, memoized on the list's identity.
+// Index lists are never mutated after buildTokenPoolIndex, and a selection
+// view's index lives as long as its snapshot, so a hub token's id set (WETH,
+// native ETH, USDC: tens of thousands of pools on a large chain) is built
+// once per view rather than once per intersection — getTopPoolForTokens
+// alone intersects with the WETH and ETH lists for every intermediary token
+// of every request.
+const lowercasedPoolIdSetMemo = new WeakMap<UniPoolInfo[], Set<string>>();
+
+export const getLowercasedPoolIdSet = (pools: UniPoolInfo[]): Set<string> => {
+  let ids = lowercasedPoolIdSetMemo.get(pools);
+  if (ids === undefined) {
+    ids = new Set(pools.map(pool => pool.id.toLowerCase()));
+    lowercasedPoolIdSetMemo.set(pools, ids);
+  }
+  return ids;
+};
+
 // A token pair to look up, both addresses already lowercased.
 export type LowercasedTokenPair = {tokenALower: string; tokenBLower: string};
 
@@ -205,7 +224,9 @@ export function getMaxFilteredPoolCount(config: IPoolSelectionConfig): number {
   );
 }
 
-export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
+export class BasicTopPoolsSelector
+  implements ITopPoolsSelector<UniPoolInfo>, IPoolSnapshotWarmer
+{
   // Selection views memoized by (pools array, deny-list payload) identity.
   // Layer-1 memoization in BaseCachingPoolDiscoverer keeps both references
   // stable for the lifetime of a snapshot, so views rebuild exactly when the
@@ -215,6 +236,12 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     UniPoolInfo[],
     WeakMap<Set<string>, Map<string, SelectionView>>
   >();
+
+  // hooksOptions variants requests have asked a selection view for, per
+  // `${chainId}#${protocol}` (canonicalized like the view key, so at most
+  // three per V4 key and one per V2/V3 key). warmSnapshot prebuilds exactly
+  // these for a new snapshot.
+  private readonly requestedViewVariants = new Map<string, Set<HooksOptions>>();
 
   constructor(
     private readonly chainRepository: IChainRepository,
@@ -702,14 +729,25 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     return matchesHooksOptions(pool, protocol, hooksOptions);
   }
 
-  private async getOrBuildSelectionView(
+  // Canonicalized: hooksOptions only affects V4 filtering, and undefined is
+  // filter-identical to HOOKS_INCLUSIVE — collapsing those variants avoids
+  // building content-identical views per alias.
+  private static canonicalViewHooksOptions(
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined
+  ): HooksOptions {
+    return protocol === Protocol.V4
+      ? hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE
+      : HooksOptions.HOOKS_INCLUSIVE;
+  }
+
+  private getSelectionViewSlot(
     pools: UniPoolInfo[],
     unsupportedTokens: Set<string>,
     chainId: ChainId,
     protocol: Protocol,
-    hooksOptions: HooksOptions | undefined,
-    ctx: Context
-  ): Promise<SelectionView> {
+    hooksOptions: HooksOptions | undefined
+  ): {byVariant: Map<string, SelectionView>; variantKey: string} {
     let byDenySet = this.selectionViewMemo.get(pools);
     if (byDenySet === undefined) {
       byDenySet = new WeakMap();
@@ -720,29 +758,87 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       byVariant = new Map();
       byDenySet.set(unsupportedTokens, byVariant);
     }
-    // Canonicalized: hooksOptions only affects V4 filtering, and undefined
-    // is filter-identical to HOOKS_INCLUSIVE — collapsing those variants
-    // avoids building content-identical views per alias.
     const variantKey =
       protocol === Protocol.V4
-        ? `${chainId}#${protocol}#${hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE}`
+        ? `${chainId}#${protocol}#${BasicTopPoolsSelector.canonicalViewHooksOptions(protocol, hooksOptions)}`
         : `${chainId}#${protocol}`;
-    const existing = byVariant.get(variantKey);
-    if (existing !== undefined) {
-      await ctx.metrics.count(
-        buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
-        1,
-        {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:hit']}
-      );
-      return existing;
-    }
+    return {byVariant, variantKey};
+  }
 
-    // Build and publish before any await: the build below is fully
-    // synchronous, so with no suspension point between the memo read above
-    // and the set below, concurrent same-tick misses cannot each rebuild the
-    // view — the second caller sees the first one's entry. Metrics are
-    // emitted only after publication.
-    const buildStartTime = Date.now();
+  /**
+   * Prebuilds, for a snapshot a discoverer just published, the selection
+   * views requests have been using for this chain and protocol (the
+   * inclusive variant when none has been requested yet), so the first
+   * request after a snapshot swap does not pay the build. Views are keyed
+   * and built exactly as getOrBuildSelectionView would build them, so
+   * selection results are unchanged. Skipped wherever the request path
+   * would not use a view.
+   */
+  public async warmSnapshot(
+    pools: UniPoolInfo[],
+    unsupportedTokens: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<void> {
+    if (!this.snapshotMemoEnabled || !isPoolsArrayMemoStable(pools)) {
+      return;
+    }
+    if (protocol === Protocol.V4) {
+      const chain = await this.chainRepository.getChain(chainId);
+      if ((chain.permissionedHookAddresses?.length ?? 0) > 0) {
+        return;
+      }
+    }
+    const variants = this.requestedViewVariants.get(
+      `${chainId}#${protocol}`
+    ) ?? [HooksOptions.HOOKS_INCLUSIVE];
+    let built = 0;
+    for (const hooksOptions of variants) {
+      const {byVariant, variantKey} = this.getSelectionViewSlot(
+        pools,
+        unsupportedTokens,
+        chainId,
+        protocol,
+        hooksOptions
+      );
+      if (byVariant.has(variantKey)) {
+        continue;
+      }
+      const buildStartTime = Date.now();
+      byVariant.set(
+        variantKey,
+        BasicTopPoolsSelector.buildSelectionView(
+          pools,
+          unsupportedTokens,
+          chainId,
+          protocol,
+          hooksOptions,
+          ctx
+        )
+      );
+      built += 1;
+      await ctx.metrics.dist(
+        buildMetricKey('TopPoolsSelector.SelectionView.Build.Latency.dist'),
+        Date.now() - buildStartTime,
+        {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
+      );
+    }
+    await ctx.metrics.count(
+      buildMetricKey('TopPoolsSelector.SelectionView.Prebuild'),
+      built,
+      {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'status:success']}
+    );
+  }
+
+  private static buildSelectionView(
+    pools: UniPoolInfo[],
+    unsupportedTokens: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined,
+    ctx: Context
+  ): SelectionView {
     const aggHookAddressSet =
       BasicTopPoolsSelector.getAggHookAddressSet(chainId);
     const filteredUnsupportedPools =
@@ -764,7 +860,57 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
     const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
     const tvlSortedPools =
       BasicTopPoolsSelector.buildTvlSortedPools(filteredPools);
-    const view: SelectionView = {filteredPools, tokenPoolIndex, tvlSortedPools};
+    return {filteredPools, tokenPoolIndex, tvlSortedPools};
+  }
+
+  private async getOrBuildSelectionView(
+    pools: UniPoolInfo[],
+    unsupportedTokens: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined,
+    ctx: Context
+  ): Promise<SelectionView> {
+    const variantsKey = `${chainId}#${protocol}`;
+    let requested = this.requestedViewVariants.get(variantsKey);
+    if (requested === undefined) {
+      requested = new Set();
+      this.requestedViewVariants.set(variantsKey, requested);
+    }
+    requested.add(
+      BasicTopPoolsSelector.canonicalViewHooksOptions(protocol, hooksOptions)
+    );
+    const {byVariant, variantKey} = this.getSelectionViewSlot(
+      pools,
+      unsupportedTokens,
+      chainId,
+      protocol,
+      hooksOptions
+    );
+    const existing = byVariant.get(variantKey);
+    if (existing !== undefined) {
+      await ctx.metrics.count(
+        buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
+        1,
+        {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:hit']}
+      );
+      return existing;
+    }
+
+    // Build and publish before any await: the build below is fully
+    // synchronous, so with no suspension point between the memo read above
+    // and the set below, concurrent same-tick misses cannot each rebuild the
+    // view — the second caller sees the first one's entry. Metrics are
+    // emitted only after publication.
+    const buildStartTime = Date.now();
+    const view = BasicTopPoolsSelector.buildSelectionView(
+      pools,
+      unsupportedTokens,
+      chainId,
+      protocol,
+      hooksOptions,
+      ctx
+    );
     byVariant.set(variantKey, view);
     await ctx.metrics.count(
       buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
@@ -899,7 +1045,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       tokenPoolIndex.tokenToPools.get(tokenOut.address.toLowerCase()) || [];
 
     // Find intersection of pools containing both tokens
-    const tokenOutPoolIds = new Set(tokenOutPools.map(p => p.id.toLowerCase()));
+    const tokenOutPoolIds = getLowercasedPoolIdSet(tokenOutPools);
     const directPairs = BasicTopPoolsSelector.filterAndAddPools(
       tokenInPools.filter(pool => tokenOutPoolIds.has(pool.id.toLowerCase())),
       pool =>
@@ -1097,7 +1243,7 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
         tokenPoolIndex.tokenToPools.get(tokenAddress.toLowerCase()) || [];
 
       // Find intersection of pools containing both base token and target token
-      const tokenPoolIds = new Set(tokenPools.map(p => p.id.toLowerCase()));
+      const tokenPoolIds = getLowercasedPoolIdSet(tokenPools);
       const intersectionPools = baseTokenPools.filter(pool =>
         tokenPoolIds.has(pool.id.toLowerCase())
       );
@@ -1129,10 +1275,8 @@ export class BasicTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
       tokenPoolIndex.tokenToPools.get(token1Address.toLowerCase()) || [];
 
     // Find intersection of pools containing both tokens
-    const token0PoolIds = new Set(
-      (tokenPoolIndex.tokenToPools.get(token0Address.toLowerCase()) || []).map(
-        p => p.id.toLowerCase()
-      )
+    const token0PoolIds = getLowercasedPoolIdSet(
+      tokenPoolIndex.tokenToPools.get(token0Address.toLowerCase()) || []
     );
 
     const intersectionPools = token1Pools.filter(pool =>

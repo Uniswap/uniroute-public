@@ -13,6 +13,7 @@ import {
   getPoolTVL,
   buildTokenPoolIndex,
   findTopUnselectedPoolsForPairs,
+  getLowercasedPoolIdSet,
   getMaxFilteredPoolCount,
   MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
   METRIC_NON_CANONICAL_POOL,
@@ -27,7 +28,7 @@ import {
   DUALPOOL_HOOK_ON_MAINNET,
   LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
 } from '../../lib/poolCaching/util/hooksAddressesAllowlist';
-import {ChainId} from '../../lib/config';
+import {buildMetricKey, ChainId} from '../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
 import {Address} from '../../models/address/Address';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
@@ -1954,6 +1955,82 @@ describe('BasicTopPoolsSelector', () => {
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
     });
+
+    // The WETH-side id set is memoized per index list; these pin that the
+    // memo carries no selection state and cannot go stale across indexes.
+    const WETH_MAINNET = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+    const OTHER = '0x0000000000000000000000000000000000000003';
+    const wethPool = (id: string, tvl: number): UniPoolInfo => ({
+      ...mockV2Pool,
+      id,
+      token0: {id: WETH_MAINNET},
+      token1: {id: OTHER},
+      reserveUSD: tvl,
+      reserve: tvl,
+    });
+
+    it('applies each call its own selected set over a shared index', () => {
+      const index = buildTokenPoolIndex([
+        wethPool('0xAA', 200),
+        wethPool('0xbb', 100),
+      ]);
+      const first = BasicTopPoolsSelector.getTopPoolForTokens(
+        new Set<string>(),
+        WETH_MAINNET,
+        OTHER,
+        index
+      );
+      const second = BasicTopPoolsSelector.getTopPoolForTokens(
+        new Set<string>(['0xaa']),
+        WETH_MAINNET,
+        OTHER,
+        index
+      );
+      expect(first.map(pool => pool.id)).toEqual(['0xAA']);
+      expect(second.map(pool => pool.id)).toEqual(['0xbb']);
+    });
+
+    it('sees pools added in a newer index (no stale id set)', () => {
+      const older = buildTokenPoolIndex([wethPool('0xbb', 100)]);
+      BasicTopPoolsSelector.getTopPoolForTokens(
+        new Set<string>(),
+        WETH_MAINNET,
+        OTHER,
+        older
+      );
+      const newer = buildTokenPoolIndex([
+        wethPool('0xbb', 100),
+        wethPool('0xcc', 300),
+      ]);
+      const result = BasicTopPoolsSelector.getTopPoolForTokens(
+        new Set<string>(),
+        WETH_MAINNET,
+        OTHER,
+        newer
+      );
+      expect(result.map(pool => pool.id)).toEqual(['0xcc']);
+    });
+  });
+
+  describe('getLowercasedPoolIdSet', () => {
+    it('returns the lowercased ids, memoized per list', () => {
+      const list: UniPoolInfo[] = [
+        {...mockV2Pool, id: '0xAbC'},
+        {...mockV2Pool, id: '0xdef'},
+      ];
+      const ids = getLowercasedPoolIdSet(list);
+      expect([...ids]).toEqual(['0xabc', '0xdef']);
+      expect(getLowercasedPoolIdSet(list)).toBe(ids);
+    });
+
+    it('does not share a set between distinct lists with equal contents', () => {
+      const first: UniPoolInfo[] = [{...mockV2Pool, id: '0x1'}];
+      const second: UniPoolInfo[] = [{...mockV2Pool, id: '0x1'}];
+      expect(getLowercasedPoolIdSet(first)).not.toBe(
+        getLowercasedPoolIdSet(second)
+      );
+      expect(getLowercasedPoolIdSet([]).size).toBe(0);
+    });
   });
 
   describe('manuallyGenerateDirectPairs', () => {
@@ -3215,6 +3292,192 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
     expect(memoResult.map(p => p.id)).not.toContain('0xperm');
     expect(memoResult).toEqual(legacyResult);
     expect(memoDirective).toEqual(legacyDirective);
+  });
+
+  describe('warmSnapshot (selection-view prebuild)', () => {
+    const BUILD_METRIC = buildMetricKey(
+      'TopPoolsSelector.SelectionView.Build.Latency.dist'
+    );
+    const PREBUILD_METRIC = buildMetricKey(
+      'TopPoolsSelector.SelectionView.Prebuild'
+    );
+    const builds = (metricsCtx: TestContext) =>
+      metricsCtx.metrics.distStore.filter(
+        entry => entry.metric_name === BUILD_METRIC
+      ).length;
+    // V4 views are bypassed on chains with permissioned hooks (mainnet and
+    // Base among them), so V4 cases run on a chain without any.
+    const V4_VIEW_CHAIN = ChainId.ARBITRUM;
+    const select = (
+      selector: BasicTopPoolsSelector,
+      pools: UniPoolInfo[],
+      protocol: Protocol,
+      hooksOptions: HooksOptions | undefined,
+      selectCtx: Context,
+      pair: [Address, Address] = PAIRS[0],
+      chainId: ChainId = ChainId.MAINNET
+    ) =>
+      selector.filterPools(
+        pools,
+        chainId,
+        pair[0],
+        pair[1],
+        protocol,
+        hooksOptions,
+        EMPTY_NAMESPACE_CONTEXT,
+        selectCtx,
+        {shouldUseCache: true}
+      );
+
+    it('prebuilds the view the first request uses, with output identical to the legacy path', async () => {
+      const {globalSet} = await featureGatedTokensRepository.getSnapshot(ctx);
+      const universes: Array<[Protocol, UniPoolInfo[], ChainId]> = [
+        [Protocol.V2, stable(buildV2Universe()), ChainId.MAINNET],
+        [Protocol.V3, stable(buildV3Universe()), ChainId.MAINNET],
+        [Protocol.V4, stable(buildV4Universe()), V4_VIEW_CHAIN],
+      ];
+      for (const [protocol, pools, chainId] of universes) {
+        const warmCtx = buildTestContext();
+        await memoSelector.warmSnapshot(
+          pools,
+          globalSet,
+          chainId,
+          protocol,
+          warmCtx
+        );
+        expect(builds(warmCtx), `${protocol} warm`).toBe(1);
+        for (const pair of PAIRS) {
+          const requestCtx = buildTestContext();
+          const warmed = await select(
+            memoSelector,
+            pools,
+            protocol,
+            undefined,
+            requestCtx,
+            pair,
+            chainId
+          );
+          const legacy = await select(
+            legacySelector,
+            pools,
+            protocol,
+            undefined,
+            buildTestContext(),
+            pair,
+            chainId
+          );
+          expect(builds(requestCtx), `${protocol}`).toBe(0);
+          expect(warmed, `${protocol} ${pair[0]}`).toEqual(legacy);
+        }
+      }
+    });
+
+    it('prebuilds the hooksOptions variants requests have used for the chain and protocol', async () => {
+      const {globalSet} = await featureGatedTokensRepository.getSnapshot(ctx);
+      await select(
+        memoSelector,
+        stable(buildV4Universe()),
+        Protocol.V4,
+        HooksOptions.NO_HOOKS,
+        buildTestContext(),
+        PAIRS[0],
+        V4_VIEW_CHAIN
+      );
+
+      const next = stable(buildV4Universe());
+      const warmCtx = buildTestContext();
+      await memoSelector.warmSnapshot(
+        next,
+        globalSet,
+        V4_VIEW_CHAIN,
+        Protocol.V4,
+        warmCtx
+      );
+      expect(builds(warmCtx), 'warm').toBe(1);
+
+      const noHooksCtx = buildTestContext();
+      const noHooks = await select(
+        memoSelector,
+        next,
+        Protocol.V4,
+        HooksOptions.NO_HOOKS,
+        noHooksCtx,
+        PAIRS[0],
+        V4_VIEW_CHAIN
+      );
+      expect(builds(noHooksCtx), 'no-hooks request').toBe(0);
+      expect(noHooks).toEqual(
+        await select(
+          legacySelector,
+          next,
+          Protocol.V4,
+          HooksOptions.NO_HOOKS,
+          buildTestContext(),
+          PAIRS[0],
+          V4_VIEW_CHAIN
+        )
+      );
+
+      // Never requested, so not prebuilt: built lazily as before.
+      const inclusiveCtx = buildTestContext();
+      await select(
+        memoSelector,
+        next,
+        Protocol.V4,
+        undefined,
+        inclusiveCtx,
+        PAIRS[0],
+        V4_VIEW_CHAIN
+      );
+      expect(builds(inclusiveCtx), 'inclusive request').toBe(1);
+    });
+
+    it('builds nothing where the request path would not use a view', async () => {
+      const {globalSet} = await featureGatedTokensRepository.getSnapshot(ctx);
+      const cases: Array<[BasicTopPoolsSelector, UniPoolInfo[], ChainId]> = [
+        // Snapshot memo disabled.
+        [legacySelector, stable(buildV4Universe()), V4_VIEW_CHAIN],
+        // Array not marked memo-stable (per-request discoverer output).
+        [memoSelector, buildV4Universe(), V4_VIEW_CHAIN],
+        // Permissioned-hook chain: V4 views are bypassed there.
+        [memoSelector, stable(buildV4Universe()), ChainId.MAINNET],
+      ];
+      for (const [selector, pools, chainId] of cases) {
+        const warmCtx = buildTestContext();
+        await selector.warmSnapshot(
+          pools,
+          globalSet,
+          chainId,
+          Protocol.V4,
+          warmCtx
+        );
+        expect(builds(warmCtx)).toBe(0);
+        expect(warmCtx.metrics.countStore[PREBUILD_METRIC]).toBeUndefined();
+      }
+    });
+
+    it('does not rebuild a view that already exists', async () => {
+      const {globalSet} = await featureGatedTokensRepository.getSnapshot(ctx);
+      const pools = stable(buildV3Universe());
+      await select(
+        memoSelector,
+        pools,
+        Protocol.V3,
+        undefined,
+        buildTestContext()
+      );
+
+      const warmCtx = buildTestContext();
+      await memoSelector.warmSnapshot(
+        pools,
+        globalSet,
+        ChainId.MAINNET,
+        Protocol.V3,
+        warmCtx
+      );
+      expect(builds(warmCtx)).toBe(0);
+      expect(warmCtx.metrics.countStore[PREBUILD_METRIC]).toBe(0);
+    });
   });
 
   describe('getTopNPairsFromSorted', () => {

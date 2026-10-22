@@ -4,6 +4,7 @@ import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
 import {
   IPoolDiscoverer,
+  IPoolSnapshotWarmer,
   isPoolsArrayMemoStable,
   ITopPoolsSelector,
   markPoolsArrayMemoStable,
@@ -37,6 +38,13 @@ export const POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES =
   getMaxFilteredPoolCount(defaultPoolSelectionConfig) *
   POOLS_FOR_TOKENS_CACHE_BYTES_PER_POOL_ESTIMATE *
   POOLS_FOR_TOKENS_CACHE_SIZE_SAFETY_MULTIPLIER;
+
+// TTL ceiling for a pools-for-tokens entry whose selected list is empty. A
+// pair with no pools would otherwise re-run discovery (on-chain probes, a
+// full-snapshot filterPools) on every request; the short TTL bounds how late
+// a newly created pool, or a pair whose probe RPCs all failed transiently,
+// can surface.
+export const EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS = 60;
 
 interface SnapshotMemoEntry<TPool> {
   source: string;
@@ -85,7 +93,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       Protocol.V3,
       Protocol.V4,
       Protocol.MIXED,
-    ]
+    ],
+    // Optional: builds selection state for each newly published memoized
+    // snapshot (see IPoolSnapshotWarmer). Without it that state is built
+    // lazily by the first request against the snapshot.
+    private readonly snapshotWarmer?: IPoolSnapshotWarmer
   ) {}
 
   // Memoizes the parsed full-snapshot array per getPools cache key so a
@@ -454,7 +466,55 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       markPoolsArrayMemoStable(retrievedPools);
     }
 
+    // Last, once the snapshot is published to both the memo and the cache.
+    if (memoGlobalSet !== undefined) {
+      await this.warmSnapshotSafely(
+        retrievedPools,
+        memoGlobalSet,
+        chainId,
+        protocol,
+        ctx
+      );
+    }
     return retrievedPools;
+  }
+
+  // The warmer only moves work earlier; on failure the first request builds
+  // the same state lazily, so this never fails the refresh.
+  private async warmSnapshotSafely(
+    pools: TPool[],
+    globalSet: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    ctx: Context
+  ): Promise<void> {
+    if (this.snapshotWarmer === undefined) {
+      return;
+    }
+    try {
+      await this.snapshotWarmer.warmSnapshot(
+        pools,
+        globalSet,
+        chainId,
+        protocol,
+        ctx
+      );
+    } catch (error) {
+      ctx.logger.warn(
+        `[${this.discovererName}] Pool snapshot warm failed; selection state will build on first use`,
+        {chainId, protocol, error}
+      );
+      void ctx.metrics
+        .count(buildMetricKey('PoolDiscoverer.SnapshotWarm'), 1, {
+          tags: [
+            `chain:${ChainId[chainId]}`,
+            `protocol:${protocol}`,
+            'status:failure',
+            'reason:warm_error',
+          ],
+        })
+        .catch(() => {});
+    }
   }
 
   private getPoolsCacheTtlSeconds(chainId: ChainId): number {
@@ -805,6 +865,11 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     }
 
     let retrievedPools: TPool[] | undefined;
+    // An entry stored empty is a short-lived negative entry and is served
+    // as-is. A non-empty entry that the filters below empty out is
+    // re-derived instead, since those filters reflect state newer than the
+    // entry.
+    let cachedEntryUsable = false;
     try {
       // Cache READ also honors the directive — CallerOptOut means bypass
       // both the read and the write.
@@ -812,9 +877,9 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         const retrievedPoolsStr =
           await this.getPoolsForTokensCache.get(cacheKey);
         if (retrievedPoolsStr !== undefined) {
-          retrievedPools = JSON.parse(retrievedPoolsStr);
+          const cachedPools: TPool[] = JSON.parse(retrievedPoolsStr);
           retrievedPools = await this.filterUnsupportedTokenPools(
-            retrievedPools!,
+            cachedPools,
             ctx
           );
           // The cached list is the selector's output from an earlier
@@ -825,6 +890,8 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
             retrievedPools,
             chainId
           );
+          cachedEntryUsable =
+            cachedPools.length === 0 || retrievedPools.length > 0;
           ctx.logger.debug(
             `[${this.discovererName}] Retrieved ${protocol} pools for tokens from cache`,
             {
@@ -839,7 +906,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       }
     }
 
-    if (retrievedPools === undefined || retrievedPools.length === 0) {
+    if (retrievedPools === undefined || !cachedEntryUsable) {
       status = 'miss';
       retrievedPools = await this._getPoolsForTokens(
         chainId,
@@ -921,12 +988,16 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       });
 
       if (cacheDirective.shouldUseCache) {
+        const ttl =
+          this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
+            chainId
+          ] ??
+          this.serviceConfig.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds;
         await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
           ttl:
-            this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
-              chainId
-            ] ??
-            this.serviceConfig.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds,
+            retrievedPools.length === 0
+              ? Math.min(ttl, EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS)
+              : ttl,
         });
       }
     }
