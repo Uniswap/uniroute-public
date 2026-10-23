@@ -5849,16 +5849,14 @@ describe('AuroraV2PoolsProvider stale-price side', () => {
 });
 
 describe('AURORA_SUPPORTED_TARGETS', () => {
-  it('covers exactly the V2/V3/V4 cron matrix minus Monad testnet', () => {
+  it('covers exactly the V2/V3/V4 cron matrix', () => {
     // Derived from the live cron matrix so adding or removing a cron target
     // fails this test until the Aurora allowlist decision is revisited.
-    const CHAIN_ID_MONAD_TESTNET = 10143;
     const expected = new Set(
       createChainProtocols(noopLogger, new FakeMetric())
         .filter(cp =>
           [Protocol.V2, Protocol.V3, Protocol.V4].includes(cp.protocol)
         )
-        .filter(cp => cp.chainId !== CHAIN_ID_MONAD_TESTNET)
         .map(cp => targetKey(cp.chainId, cp.protocol))
     );
     expect(new Set(AURORA_SUPPORTED_TARGETS)).toEqual(expected);

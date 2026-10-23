@@ -4,9 +4,8 @@
  * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
  * format, serving path) is unchanged.
  *
- * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix (except
- * Monad testnet;
- * AURORA_SUPPORTED_TARGETS). Env
+ * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix
+ * (AURORA_SUPPORTED_TARGETS). Env
  * targets outside the allowlist are ignored with a metric, so even a `*`
  * flag cannot enable other chains/protocols without a code change.
  *
@@ -192,8 +191,8 @@ export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
 // pools in TopPools selection (council review finding on #11463).
 const IMPLIED_TVL_TOPUP_CAP_ETH = 1;
 
-// This mirrors createChainProtocols' V2/V3/V4 matrix. Monad testnet has no
-// Aurora pool rows yet. Unichain V2, Base V2, Base V3 (1.9M rows), and Base
+// This mirrors createChainProtocols' V2/V3/V4 matrix. Unichain V2, Base V2,
+// Base V3 (1.9M rows), and Base
 // V4 (15.4M rows) need their per-combo pre-filter because their full reads
 // exceed the cron's 30s statement timeout.
 const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<

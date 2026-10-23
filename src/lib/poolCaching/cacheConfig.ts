@@ -167,8 +167,6 @@ export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_WORLDCHAIN_V2_ID}`;
     case ChainId.UNICHAIN_SEPOLIA:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_ASTROCHAIN_SEPOLIA_V2_ID}`;
-    case ChainId.MONAD_TESTNET:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_MONAD_TESTNET_V2_ID}`;
     case ChainId.UNICHAIN:
       return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_UNICHAIN_V2_ID}`;
     case ChainId.SONEIUM:
@@ -850,25 +848,6 @@ export function createChainProtocols(
         v2TrackedEthThreshold,
         v2UntrackedUsdThreshold,
         v2SubgraphUrlOverride(ChainId.WORLDCHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.MONAD_TESTNET,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.MONAD_TESTNET,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.MONAD_TESTNET),
         undefined,
         logger,
         metric,

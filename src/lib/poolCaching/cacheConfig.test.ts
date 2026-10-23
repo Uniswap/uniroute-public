@@ -232,7 +232,6 @@ describe('cacheConfig', () => {
         ChainId.BLAST,
         ChainId.BASE,
         ChainId.WORLDCHAIN,
-        ChainId.MONAD_TESTNET,
         ChainId.UNICHAIN,
         ChainId.SONEIUM,
         ChainId.MONAD,
@@ -243,6 +242,15 @@ describe('cacheConfig', () => {
         const url = v2SubgraphUrlOverride(chainId);
         expect(typeof url).toBe('string');
       }
+    });
+
+    it('has no subgraph for Monad testnet, which the cron no longer caches', () => {
+      expect(v2SubgraphUrlOverride(ChainId.MONAD_TESTNET)).toBeUndefined();
+      expect(
+        createChainProtocols(mockLogger, mockMetric).some(
+          p => p.chainId === ChainId.MONAD_TESTNET
+        )
+      ).toBe(false);
     });
 
     it('returns undefined for unknown chain', () => {
