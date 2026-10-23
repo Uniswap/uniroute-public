@@ -3,9 +3,11 @@ import * as zlib from 'zlib';
 import {
   cacheAllPools,
   CachePoolsConfig,
+  ExtraPoolSourceUnavailableError,
   withExtraPoolSource,
 } from './cachePools';
 import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
+import {AuroraSourcedProvider} from './auroraPoolsSource';
 import {
   ExtraPoolSourceName,
   type ExtraPoolsSource,
@@ -691,6 +693,45 @@ describe('cacheAllPools', () => {
         expect.anything()
       );
     });
+
+    it('keeps the previous snapshot when an Aurora-primary read is rejected', async () => {
+      let subgraphCalls = 0;
+      const subgraph = {
+        getPools: async (): Promise<V3SubgraphPool[]> => {
+          subgraphCalls++;
+          return [];
+        },
+      };
+      const aurora = {
+        getPools: async (): Promise<V3SubgraphPool[]> => {
+          throw new Error('statement timeout');
+        },
+      };
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V3,
+          chainId: ChainId.POLYGON,
+          timeout: 90000,
+          provider: new AuroraSourcedProvider(
+            'primary',
+            aurora,
+            subgraph,
+            ChainId.POLYGON,
+            Protocol.V3,
+            0.5,
+            0,
+            mockLogger,
+            mockMetric
+          ),
+        },
+      ];
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
+      expect(subgraphCalls).toBe(0);
+      expect(putObjectCalls()).toEqual([]);
+    });
   });
 
   // --- S3 upload path ---
@@ -1266,7 +1307,8 @@ describe('cacheAllPools', () => {
     function run(
       memory: ExtraPoolSourceMemory<V4SubgraphPool>,
       fn: () => Promise<V4SubgraphPool[]>,
-      timeoutMs?: number
+      timeoutMs?: number,
+      failClosedWithoutLastGood?: boolean
     ) {
       return withExtraPoolSource(
         ExtraPoolSourceName.AGG_HOOKS,
@@ -1277,9 +1319,69 @@ describe('cacheAllPools', () => {
         memory,
         fn,
         () => NOW_MS,
-        timeoutMs
+        timeoutMs,
+        failClosedWithoutLastGood
       );
     }
+
+    it('fails closed for an Aurora-primary source with no last good result', async () => {
+      await expect(
+        run(
+          new ExtraPoolSourceMemory<V4SubgraphPool>(),
+          async () => {
+            throw new Error('statement timeout');
+          },
+          undefined,
+          true
+        )
+      ).rejects.toBeInstanceOf(ExtraPoolSourceUnavailableError);
+      expect(statusOf()).toEqual([
+        {
+          ...tags,
+          source: 'agg_hooks',
+          status: 'failure',
+          reason: 'fetch_error',
+        },
+      ]);
+    });
+
+    it('fails closed on a timed-out Aurora-primary read with no last good result', async () => {
+      await expect(
+        run(
+          new ExtraPoolSourceMemory<V4SubgraphPool>(),
+          () => new Promise(() => {}),
+          10,
+          true
+        )
+      ).rejects.toBeInstanceOf(ExtraPoolSourceUnavailableError);
+    });
+
+    it('still carries forward for an Aurora-primary source with a last good result', async () => {
+      const memory = new ExtraPoolSourceMemory<V4SubgraphPool>();
+      memory.recordGood(key, [pool], NOW_MS - 20 * 60_000);
+
+      const result = await run(
+        memory,
+        async () => {
+          throw new Error('statement timeout');
+        },
+        undefined,
+        true
+      );
+
+      expect(result).toEqual([pool]);
+    });
+
+    it('serves an empty Aurora-primary read with no last good result as success', async () => {
+      const result = await run(
+        new ExtraPoolSourceMemory<V4SubgraphPool>(),
+        async () => [],
+        undefined,
+        true
+      );
+
+      expect(result).toEqual([]);
+    });
     const statusOf = () =>
       mockMetric.calls
         .filter(call => call.key === 'CachePools.extraPoolSource')
@@ -1593,7 +1695,7 @@ describe('cacheAllPools', () => {
       });
     });
 
-    it('serves the mainnet manual V3 pool through an installed Aurora override, carries it forward when both reads fail, and drops it after a restart', async () => {
+    it('serves the mainnet manual V3 pool through an installed Aurora override, carries it forward when both reads fail, and keeps the previous snapshot after a restart', async () => {
       const mainV3Pool = makeV3Pool('0xmainv3pool', '0x1111', '0x2222');
       const manualPool = makeV3Pool(
         MAINNET_V3_MANUAL_POOL_IDS[0] ?? '',
@@ -1642,13 +1744,26 @@ describe('cacheAllPools', () => {
         manualPool.id,
       ]);
 
-      // A restart empties the process-local memory: nothing to carry.
+      // A restart empties the process-local memory: nothing to carry, so the
+      // Aurora-primary source fails closed and the combo writes nothing,
+      // leaving the previous snapshot (with the manual pool) in S3.
       resetExtraPoolSourceMemoryForTesting();
       sendMock.mockClear();
-      await cacheAllPools(mockLogger, mockMetric, config);
-      expect(writtenPoolIds(putObjectCalls()[0].input.Body)).toEqual([
-        mainV3Pool.id,
-      ]);
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
+      expect(putObjectCalls()).toEqual([]);
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource.carryForward',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V3),
+          source: 'v3_mainnet_manual',
+          outcome: 'write_skipped',
+        },
+      });
       expect(mockMetric.calls).toContainEqual({
         key: 'CachePools.extraPoolSource',
         value: 1,

@@ -8,8 +8,8 @@
  *
  * Rollout mirrors the main sources: per `<source>:<chainId>` key, shadow
  * serves the subgraph and compares pool-id sets in the background; primary
- * serves Aurora and falls back to the subgraph read on error or an empty
- * result. Targets come from POOL_CACHING_AURORA_EXTRA_SOURCE_SHADOW_TARGETS
+ * serves Aurora only, and on an error or an empty result the sweep carries
+ * forward the source's last good pools. Targets come from POOL_CACHING_AURORA_EXTRA_SOURCE_SHADOW_TARGETS
  * (`*` allowed) and POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS (`*`
  * rejected: every primary key is listed explicitly). They take effect only
  * where the main POOL_CACHING_AURORA_{SHADOW,PRIMARY}_TARGETS are set, since
@@ -585,28 +585,35 @@ export class AuroraSourcedExtraPoolsProvider<
     );
   }
 
+  /** True when this source serves Aurora with no subgraph read behind it. */
+  get isAuroraPrimary(): boolean {
+    return this.mode === 'primary';
+  }
+
   getPools(): Promise<TPool[]> {
     return this.mode === 'primary' ? this.getPoolsPrimary() : this.getShadow();
   }
 
+  // Primary has no second source. withExtraPoolSource turns a throw or an
+  // empty result into a carry-forward of the source's last good pools.
   private async getPoolsPrimary(): Promise<TPool[]> {
-    let reason: ExtraSourceFailureReason;
+    let pools: TPool[];
     try {
-      const pools = await this.aurora.getPools();
-      if (pools.length > 0) {
-        this.emit('success');
-        this.reportCoverage(pools);
-        return pools;
-      }
-      reason = 'empty';
+      pools = await this.aurora.getPools();
     } catch (err) {
-      reason = 'error';
+      this.emit('failure', 'error');
       this.logger.warn(
-        `Aurora extra pool source ${extraSourceKey(this.source, this.chainId)} failed, falling back to subgraph: ${err instanceof Error ? err.name : typeof err}`
+        `Aurora extra pool source ${extraSourceKey(this.source, this.chainId)} failed: ${err instanceof Error ? err.name : typeof err}`
       );
+      throw err;
     }
-    this.emit('failure', reason);
-    return this.subgraph.getPools();
+    if (pools.length === 0) {
+      this.emit('failure', 'empty');
+      return pools;
+    }
+    this.emit('success');
+    this.reportCoverage(pools);
+    return pools;
   }
 
   // Primary only: a partial Aurora result is served, so this is the only

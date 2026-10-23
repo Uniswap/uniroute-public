@@ -4,6 +4,7 @@ import {ADDRESS_ZERO, Protocol} from '@uniswap/router-sdk';
 import {
   AURORA_SUPPORTED_TARGETS,
   AsyncSemaphore,
+  AuroraPoolsRejectedError,
   AuroraSourcedProvider,
   AuroraV2PoolsProvider,
   AuroraV3PoolsProvider,
@@ -1893,31 +1894,38 @@ describe('AuroraSourcedProvider primary mode', () => {
     expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
   });
 
-  it('falls back to the subgraph on Aurora error', async () => {
-    const aurora = fakeProvider<V3SubgraphPool>([new Error('boom')]);
+  it('rejects an Aurora error without calling the subgraph', async () => {
+    const boom = new Error('boom');
+    const aurora = fakeProvider<V3SubgraphPool>([boom]);
     const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
 
-    const pools = await mk(aurora, subgraph, metric).getPools();
-    expect(pools.map(p => p.id)).toEqual(['0x9']);
-    expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
+    const rejection = await mk(aurora, subgraph, metric)
+      .getPools()
+      .catch((err: unknown) => err);
+    expect(rejection).toBeInstanceOf(AuroraPoolsRejectedError);
+    expect(rejection).toMatchObject({reason: 'error', cause: boom});
+    expect(subgraph.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'error'
     );
   });
 
-  it('falls back on empty Aurora result', async () => {
+  it('rejects an empty Aurora result without calling the subgraph', async () => {
     const aurora = fakeProvider<V3SubgraphPool>([[]]);
     const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
 
-    const pools = await mk(aurora, subgraph, metric).getPools();
-    expect(pools.map(p => p.id)).toEqual(['0x9']);
-    expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
+    await expect(mk(aurora, subgraph, metric).getPools()).rejects.toMatchObject(
+      {name: 'AuroraPoolsRejectedError', reason: 'empty'}
+    );
+    expect(subgraph.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'empty'
     );
   });
 
-  it('falls back when the pool count collapses below the ratio', async () => {
+  it('rejects a pool count that collapses below the ratio', async () => {
     const tenPools = Array.from({length: 10}, (_, i) => v3Pool(`0x${i}`, 10));
     const aurora = fakeProvider([tenPools, [v3Pool('0x1', 10)]]);
     const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
@@ -1925,27 +1933,93 @@ describe('AuroraSourcedProvider primary mode', () => {
     const provider = mk(aurora, subgraph, metric);
 
     expect(await provider.getPools()).toHaveLength(10); // baseline
-    const second = await provider.getPools(); // 1 < 0.5 * 10 → fallback
-    expect(second.map(p => p.id)).toEqual(['0x9']);
-    expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
+    // 1 < 0.5 * 10 → rejected
+    await expect(provider.getPools()).rejects.toMatchObject({
+      name: 'AuroraPoolsRejectedError',
+      reason: 'low_count',
+    });
+    expect(subgraph.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'low_count'
     );
   });
 
-  it('falls back below the absolute floor on the FIRST tick and never poisons the baseline', async () => {
+  it('serves a settled lower count after three agreeing low_count reads', async () => {
+    const pools = (n: number) =>
+      Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
+    // Baseline 20, then three reads near 8 (a real lasting drop), then 8.
+    const aurora = fakeProvider([
+      pools(20),
+      pools(8),
+      pools(8),
+      pools(8),
+      pools(8),
+    ]);
+    const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
+    const metric = new FakeMetric();
+    const provider = mk(aurora, subgraph, metric);
+
+    expect(await provider.getPools()).toHaveLength(20);
+    await expect(provider.getPools()).rejects.toMatchObject({
+      reason: 'low_count',
+    });
+    await expect(provider.getPools()).rejects.toMatchObject({
+      reason: 'low_count',
+    });
+    expect(await provider.getPools()).toHaveLength(8);
+    expect(metric.byKey('CachePools.aurora.baseline_reset')).toHaveLength(1);
+    // 8 is the new baseline, so the next 8 is served without a reset.
+    expect(await provider.getPools()).toHaveLength(8);
+    expect(metric.byKey('CachePools.aurora.baseline_reset')).toHaveLength(1);
+    expect(subgraph.calls).toBe(0);
+  });
+
+  it('keeps rejecting low_count reads that do not agree with each other', async () => {
+    const pools = (n: number) =>
+      Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
+    const aurora = fakeProvider([pools(20), pools(8), pools(4), pools(8)]);
+    const metric = new FakeMetric();
+    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric);
+
+    expect(await provider.getPools()).toHaveLength(20);
+    for (let tick = 0; tick < 3; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'low_count',
+      });
+    }
+    expect(metric.byKey('CachePools.aurora.baseline_reset')).toEqual([]);
+  });
+
+  it('never settles a low count under the absolute floor', async () => {
+    const pools = (n: number) =>
+      Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
+    const aurora = fakeProvider([pools(20), pools(5), pools(5), pools(5)]);
+    const metric = new FakeMetric();
+    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric, 8);
+
+    expect(await provider.getPools()).toHaveLength(20);
+    for (let tick = 0; tick < 3; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'below_floor',
+      });
+    }
+    expect(metric.byKey('CachePools.aurora.baseline_reset')).toEqual([]);
+  });
+
+  it('rejects below the absolute floor on the FIRST tick and never poisons the baseline', async () => {
     const metric = new FakeMetric();
     const fivePools = Array.from({length: 5}, (_, i) => v3Pool(`0x${i}`, 10));
     const tenPools = Array.from({length: 10}, (_, i) => v3Pool(`0x${i}`, 10));
 
-    // Tick 1 (fresh process, no ratio baseline): 5 < floor 8 → fallback.
-    const first = mk(
-      fakeProvider([fivePools]),
-      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
-      metric,
-      8
-    );
-    expect((await first.getPools()).map(p => p.id)).toEqual(['0x9']);
-    expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
+    // Tick 1 (fresh process, no ratio baseline): 5 < floor 8 → rejected.
+    const firstSubgraph = fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]);
+    const first = mk(fakeProvider([fivePools]), firstSubgraph, metric, 8);
+    await expect(first.getPools()).rejects.toMatchObject({
+      name: 'AuroraPoolsRejectedError',
+      reason: 'below_floor',
+    });
+    expect(firstSubgraph.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'below_floor'
     );
 
@@ -1993,9 +2067,11 @@ describe('AuroraSourcedProvider primary mode', () => {
       fakeProvider([[v3Pool('0x9', 1)]]),
       metric
     );
-    const pools = await second.getPools();
-    expect(pools.map(p => p.id)).toEqual(['0x9']);
-    expect(metric.byKey('CachePools.aurora.fallback')[0]!.tags?.reason).toBe(
+    await expect(second.getPools()).rejects.toMatchObject({
+      name: 'AuroraPoolsRejectedError',
+      reason: 'low_count',
+    });
+    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'low_count'
     );
   });
@@ -6323,14 +6399,14 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
     const metric = new FakeMetric();
     const routablePools = new FakeRoutablePools();
 
-    expect(await runBaseV3Primary(routablePools, metric, noopLogger)).toEqual(
-      subgraphPools
-    );
+    // The empty Aurora read is under the floor of 1, so primary rejects it.
+    await expect(
+      runBaseV3Primary(routablePools, metric, noopLogger)
+    ).rejects.toMatchObject({reason: 'empty'});
 
     expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([]);
-    // Primary ran: the empty Aurora read is under the floor of 1, so the
-    // tick falls back to the subgraph, which only a primary combo does.
-    expect(metric.byKey('CachePools.aurora.fallback')).toHaveLength(1);
+    // Only a primary combo rejects a read; shadow would serve the subgraph.
+    expect(metric.byKey('CachePools.aurora.rejected')).toHaveLength(1);
     expect(routablePools.v3Options).toEqual([
       {
         chainId: 8453,
@@ -6343,7 +6419,7 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
     ]);
   });
 
-  it('serves the subgraph and reports index_missing while the lib refuses the unpriced read', async () => {
+  it('rejects the read and reports index_missing while the lib refuses the unpriced read', async () => {
     const metric = new FakeMetric();
     const warnings: Array<[string, unknown]> = [];
     const logger: Logger = {
@@ -6354,9 +6430,9 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
       new PoolStatsIndexMissingError(POOL_STATS_V3_UNPRICED_INDEX)
     );
 
-    expect(await runBaseV3Primary(routablePools, metric, logger)).toEqual(
-      subgraphPools
-    );
+    await expect(
+      runBaseV3Primary(routablePools, metric, logger)
+    ).rejects.toMatchObject({reason: 'error'});
 
     expect(
       metric.byKey('CachePools.aurora.prefilter_unpriced_rejected')
@@ -6372,7 +6448,7 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
       {target: '8453:V3', index: POOL_STATS_V3_UNPRICED_INDEX},
     ]);
     expect(metric.byKey('CachePools.aurora.served')).toEqual([]);
-    expect(metric.byKey('CachePools.aurora.fallback')).toEqual([
+    expect(metric.byKey('CachePools.aurora.rejected')).toEqual([
       expect.objectContaining({
         tags: expect.objectContaining({reason: 'error'}),
       }),

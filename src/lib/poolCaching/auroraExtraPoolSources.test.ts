@@ -619,31 +619,47 @@ describe('AuroraSourcedExtraPoolsProvider', () => {
     ]);
   });
 
-  it.each([
-    ['error', new Error('statement timeout')],
-    ['empty', []],
-  ] as const)(
-    'falls back to the subgraph in primary mode on %s',
-    async (reason, auroraResult) => {
-      const metric = new FakeMetric();
-      const pools = await wrapper(
+  const primaryFailureTags = (reason: string) => ({
+    source: 'euler_hooks',
+    chainId: '130',
+    mode: 'primary',
+    status: 'failure',
+    reason,
+  });
+
+  it('rethrows an Aurora error in primary mode without calling the subgraph', async () => {
+    const metric = new FakeMetric();
+    const timeout = new Error('statement timeout');
+    const subgraph = new FakeSource([subgraphPool]);
+    await expect(
+      wrapper(
         'primary',
-        new FakeSource<TestPool>(
-          auroraResult instanceof Error ? auroraResult : [...auroraResult]
-        ),
-        new FakeSource([subgraphPool]),
+        new FakeSource<TestPool>(timeout),
+        subgraph,
         metric
-      ).getPools();
-      expect(pools).toEqual([subgraphPool]);
-      expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual({
-        source: 'euler_hooks',
-        chainId: '130',
-        mode: 'primary',
-        status: 'failure',
-        reason,
-      });
-    }
-  );
+      ).getPools()
+    ).rejects.toBe(timeout);
+    expect(subgraph.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual(
+      primaryFailureTags('error')
+    );
+  });
+
+  it('returns an empty Aurora result in primary mode without calling the subgraph', async () => {
+    const metric = new FakeMetric();
+    const subgraph = new FakeSource([subgraphPool]);
+    const pools = await wrapper(
+      'primary',
+      new FakeSource<TestPool>([]),
+      subgraph,
+      metric
+    ).getPools();
+    expect(pools).toEqual([]);
+    expect(subgraph.calls).toBe(0);
+    expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual(
+      primaryFailureTags('empty')
+    );
+  });
 
   it('serves the subgraph in shadow mode and reports the pool-id gap', async () => {
     const metric = new FakeMetric();

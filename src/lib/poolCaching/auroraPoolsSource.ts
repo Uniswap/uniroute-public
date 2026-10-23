@@ -303,8 +303,9 @@ export interface AuroraPoolsSourceConfig {
   tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
   minPoolCountRatio: number;
   // Absolute per-target pool-count floor for PRIMARY mode, keyed by
-  // targetKey(). A primary result below its floor falls back to the subgraph
-  // for that tick and never becomes the ratio guard's baseline. Targets
+  // targetKey(). A primary result below its floor is rejected for that tick
+  // (the previous snapshot keeps serving) and never becomes the ratio guard's
+  // baseline. Targets
   // without an entry are never served in primary mode. An entry (or the whole
   // env) that failed to parse also downgrades to shadow — same fail-closed
   // outcome as an absent entry — but under a distinct misconfiguration metric
@@ -2391,8 +2392,18 @@ function upperMedianBps(sortedDrifts: ReadonlyArray<{bps: number}>): number {
 // fallback would never fire. The map survives as long as the cron process.
 const lastAuroraPoolCountByTarget = new Map<string, number>();
 
+// Consecutive low_count rejections per targetKey, module level for the same
+// reason as the baselines.
+const lowCountStreakByTarget = new Map<
+  string,
+  {count: number; streak: number}
+>();
+const LOW_COUNT_SETTLE_TICKS = 3;
+const LOW_COUNT_SETTLE_TOLERANCE = 0.1;
+
 export function resetAuroraPoolCountBaselinesForTesting(): void {
   lastAuroraPoolCountByTarget.clear();
+  lowCountStreakByTarget.clear();
 }
 
 // In-flight shadow comparisons, keyed by targetKey. Module level for the same
@@ -2403,6 +2414,23 @@ const pendingAuroraShadowByTarget = new Map<string, Promise<void>>();
 
 export async function settlePendingAuroraShadowsForTesting(): Promise<void> {
   await Promise.all(pendingAuroraShadowByTarget.values());
+}
+
+export type AuroraRejectionReason =
+  | 'empty'
+  | 'below_floor'
+  | 'low_count'
+  | 'error';
+
+export class AuroraPoolsRejectedError extends Error {
+  constructor(
+    target: string,
+    readonly reason: AuroraRejectionReason,
+    cause?: unknown
+  ) {
+    super(`Aurora pool read rejected for ${target}: ${reason}`, {cause});
+    this.name = 'AuroraPoolsRejectedError';
+  }
 }
 
 export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
@@ -2440,56 +2468,107 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
       : this.getPoolsShadow(...args);
   }
 
+  // Primary has no second source: a rejected read throws, cacheAllPools skips
+  // the S3 write, and routing keeps serving the previous snapshot.
   private async getPoolsPrimary(
     ...args: Parameters<ISubgraphProvider<TPool>['getPools']>
   ): Promise<TPool[]> {
-    let fallbackReason: string | undefined;
     const baselineKey = targetKey(this.chainId, this.protocol);
+    let pools: TPool[];
     try {
-      const pools = await this.aurora.getPools(...args);
-      const baseline = lastAuroraPoolCountByTarget.get(baselineKey);
-      if (pools.length === 0) {
-        fallbackReason = 'empty';
-      } else if (this.minPoolCount > 0 && pools.length < this.minPoolCount) {
-        // Absolute floor: unlike the ratio guard it holds on the FIRST tick
-        // after a process start (in-memory baseline is empty then), so a
-        // mass-inadmission result can't be served or become the baseline.
-        fallbackReason = 'below_floor';
-        this.logger.warn(
-          `Aurora pool count ${pools.length} below absolute floor ${this.minPoolCount}`
-        );
-      } else if (
-        baseline !== undefined &&
-        pools.length < baseline * this.minPoolCountRatio
-      ) {
-        fallbackReason = 'low_count';
+      pools = await this.aurora.getPools(...args);
+    } catch (err) {
+      this.logger.error(
+        'Aurora pool fetch failed, keeping the previous snapshot',
+        {
+          error: err instanceof Error ? err.message : String(err),
+        }
+      );
+      throw this.reject('error', err);
+    }
+    const baseline = lastAuroraPoolCountByTarget.get(baselineKey);
+    if (pools.length === 0) {
+      throw this.reject('empty');
+    }
+    if (this.minPoolCount > 0 && pools.length < this.minPoolCount) {
+      // Absolute floor: unlike the ratio guard it holds on the FIRST tick
+      // after a process start (in-memory baseline is empty then), so a
+      // mass-inadmission result can't be served or become the baseline.
+      this.logger.warn(
+        `Aurora pool count ${pools.length} below absolute floor ${this.minPoolCount}`
+      );
+      throw this.reject('below_floor');
+    }
+    if (
+      baseline !== undefined &&
+      pools.length < baseline * this.minPoolCountRatio
+    ) {
+      if (!this.acceptsSettledLowCount(baselineKey, pools.length, baseline)) {
         this.logger.warn(
           `Aurora pool count collapsed: ${pools.length} < ${this.minPoolCountRatio} x ${baseline}`
         );
-      } else {
-        lastAuroraPoolCountByTarget.set(baselineKey, pools.length);
-        this.metric.putMetric(
-          'CachePools.aurora.served',
-          1,
-          MetricLoggerUnit.Count,
-          this.tags
-        );
-        if (this.primaryParity) this.startPrimaryParity(pools, args);
-        return pools;
+        throw this.reject('low_count');
       }
-    } catch (err) {
-      fallbackReason = 'error';
-      this.logger.error('Aurora pool fetch failed, falling back to subgraph', {
-        error: err instanceof Error ? err.message : String(err),
-      });
     }
+    lowCountStreakByTarget.delete(baselineKey);
+    lastAuroraPoolCountByTarget.set(baselineKey, pools.length);
     this.metric.putMetric(
-      'CachePools.aurora.fallback',
+      'CachePools.aurora.served',
       1,
       MetricLoggerUnit.Count,
-      {...this.tags, reason: fallbackReason ?? 'unknown'}
+      this.tags
     );
-    return this.subgraph.getPools(...args);
+    if (this.primaryParity) this.startPrimaryParity(pools, args);
+    return pools;
+  }
+
+  // The baseline only moves on a served read, so a real, lasting drop of more
+  // than half would be rejected on every tick until the cron restarts. After
+  // LOW_COUNT_SETTLE_TICKS consecutive low_count reads that agree within
+  // LOW_COUNT_SETTLE_TOLERANCE, the new count is served and becomes the
+  // baseline. The absolute floor still rejects a drop below it.
+  private acceptsSettledLowCount(
+    key: string,
+    count: number,
+    baseline: number
+  ): boolean {
+    const previous = lowCountStreakByTarget.get(key);
+    const agrees =
+      previous !== undefined &&
+      Math.abs(count - previous.count) <=
+        previous.count * LOW_COUNT_SETTLE_TOLERANCE;
+    const streak = agrees ? previous.streak + 1 : 1;
+    if (streak < LOW_COUNT_SETTLE_TICKS) {
+      lowCountStreakByTarget.set(key, {count, streak});
+      return false;
+    }
+    this.metric.putMetric(
+      'CachePools.aurora.baseline_reset',
+      1,
+      MetricLoggerUnit.Count,
+      this.tags
+    );
+    this.logger.warn(
+      `Aurora pool count settled at ${count} after ${streak} low_count reads; replacing baseline ${baseline}`
+    );
+    return true;
+  }
+
+  private reject(
+    reason: AuroraRejectionReason,
+    cause?: unknown
+  ): AuroraPoolsRejectedError {
+    this.metric.putMetric(
+      'CachePools.aurora.rejected',
+      1,
+      MetricLoggerUnit.Count,
+      {...this.tags, reason}
+    );
+    return new AuroraPoolsRejectedError(
+      targetKey(this.chainId, this.protocol),
+      reason,
+      cause
+    );
   }
 
   // Resolves with the subgraph result without waiting for Aurora: the shadow

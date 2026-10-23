@@ -29,6 +29,7 @@ import {
   ChainProtocol,
 } from './cacheConfig';
 import {applyAuroraPoolSources} from './auroraPoolsSource';
+import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
 import {
   ExtraPoolSourceName,
   ExtraPoolsSource,
@@ -106,6 +107,13 @@ class ExtraPoolSourceTimeoutError extends Error {
   override readonly name = 'ExtraPoolSourceTimeoutError';
 }
 
+export class ExtraPoolSourceUnavailableError extends Error {
+  override readonly name = 'ExtraPoolSourceUnavailableError';
+}
+
+const isAuroraPrimarySource = (source: unknown): boolean =>
+  source instanceof AuroraSourcedExtraPoolsProvider && source.isAuroraPrimary;
+
 function withExtraPoolSourceTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number
@@ -136,6 +144,12 @@ function withExtraPoolSourceTimeout<T>(
 // empty read with no recent good result is a legitimate empty source and
 // still counts as success. A partial read is served as is; the Aurora
 // wrapper's coverage check reports it.
+//
+// Last-good lives in process memory, so after a cron restart there is none.
+// For an Aurora-primary source (failClosedWithoutLastGood), a failed or
+// timed-out read with no last-good throws ExtraPoolSourceUnavailableError:
+// the combo skips its S3 write and routing keeps the previous snapshot,
+// which still holds the source's pools.
 export async function withExtraPoolSource<T extends {id: string}>(
   source: ExtraPoolSourceName,
   chainId: number,
@@ -145,7 +159,8 @@ export async function withExtraPoolSource<T extends {id: string}>(
   memory: ExtraPoolSourceMemory<T>,
   fn: () => Promise<T[]>,
   nowMs: () => number = Date.now,
-  timeoutMs: number = EXTRA_POOL_SOURCE_TIMEOUT_MS
+  timeoutMs: number = EXTRA_POOL_SOURCE_TIMEOUT_MS,
+  failClosedWithoutLastGood = false
 ): Promise<readonly T[] | undefined> {
   const key = extraSourceKey(source, chainId);
   const emit = (
@@ -183,6 +198,22 @@ export async function withExtraPoolSource<T extends {id: string}>(
     );
   }
   emit('failure', reason);
+  if (
+    failClosedWithoutLastGood &&
+    reason !== 'empty_result' &&
+    memory.lastGood(key, nowMs()) === undefined
+  ) {
+    metricInstance.putMetric(
+      'CachePools.extraPoolSource.carryForward',
+      1,
+      MetricLoggerUnit.Count,
+      {...metricTags, source, outcome: 'write_skipped'}
+    );
+    logger.warn(
+      `Extra pool source failed with no last good result; keeping the previous snapshot: source=${source} reason=${reason}`
+    );
+    throw new ExtraPoolSourceUnavailableError(`${key}: ${reason}`);
+  }
   return carryForward(
     source,
     key,
@@ -396,7 +427,10 @@ async function cachePoolsForChainProtocol(
         metricInstance,
         logger,
         V3_EXTRA_POOL_SOURCE_MEMORY,
-        () => manualSource.getPools()
+        () => manualSource.getPools(),
+        undefined,
+        undefined,
+        isAuroraPrimarySource(manualSource)
       );
       filteredPools?.forEach(pool => pools.push(pool));
 
@@ -437,7 +471,10 @@ async function cachePoolsForChainProtocol(
           metricInstance,
           logger,
           V4_EXTRA_POOL_SOURCE_MEMORY,
-          () => eulerSource.getPools()
+          () => eulerSource.getPools(),
+          undefined,
+          undefined,
+          isAuroraPrimarySource(eulerSource)
         );
         eulerPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
@@ -463,7 +500,10 @@ async function cachePoolsForChainProtocol(
               metricTags
             );
             return result;
-          }
+          },
+          undefined,
+          undefined,
+          isAuroraPrimarySource(aggHooksSource)
         );
         aggHooksPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
@@ -733,7 +773,7 @@ async function cachePoolsForChainProtocol(
       metricTags
     );
     logger.error(
-      `Failed to get pools from ${protocol} subgraph provider: ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to get pools from ${protocol} pool provider: ${err instanceof Error ? err.message : String(err)}`,
       {err}
     );
     throw err;

@@ -11,6 +11,7 @@ import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 import type {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
+import {AGG_HOOKS_ON_BASE} from './util/aggHooksAddressesAllowlist';
 
 const mockLogger: Logger = {
   info: vi.fn(),
@@ -101,13 +102,26 @@ describe('cacheConfig', () => {
         expect(urls).toEqual(
           expect.arrayContaining([
             `https://v2-internal.example/rpc/${ChainId.MAINNET}`,
-            `https://v2-internal.example/rpc/${ChainId.BASE}`,
           ])
         );
-        expect(urls).toHaveLength(3);
+        expect(urls).toHaveLength(2);
         for (const url of urls) {
           expect(url.startsWith('https://v2-internal.example/rpc/')).toBe(true);
         }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('builds no Base agg hooks provider while Base lists no agg hooks', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://uni-rpc.example');
+      try {
+        const protocols = createChainProtocols(mockLogger, mockMetric);
+        const v4Base = protocols.find(
+          p => p.protocol === Protocol.V4 && p.chainId === ChainId.BASE
+        );
+        expect(AGG_HOOKS_ON_BASE).toEqual([]);
+        expect(v4Base?.aggHooksProvider).toBeUndefined();
       } finally {
         vi.unstubAllEnvs();
       }

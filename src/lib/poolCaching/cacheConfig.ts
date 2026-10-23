@@ -1119,22 +1119,25 @@ export function createChainProtocols(
         metric,
         subgraphFetchFactory
       ),
-      aggHooksProvider: baseEthersProvider
-        ? new AggHooksSubgraphProvider(
-            ChainId.BASE,
-            AGG_HOOKS_ON_BASE,
-            baseEthersProvider,
-            3,
-            90000,
-            true,
-            v4SubgraphUrlOverride(ChainId.BASE),
-            process.env.GRAPH_BEARER_TOKEN,
-            logger,
-            metric,
-            false, // useExternalLiquidity (default) — positional, precedes the transport
-            subgraphFetchFactory
-          )
-        : undefined,
+      // Base lists no agg hooks while PancakeSwapV3's singleton is expired,
+      // so there is no source to read until a replacement is listed.
+      aggHooksProvider:
+        baseEthersProvider && AGG_HOOKS_ON_BASE.length > 0
+          ? new AggHooksSubgraphProvider(
+              ChainId.BASE,
+              AGG_HOOKS_ON_BASE,
+              baseEthersProvider,
+              3,
+              90000,
+              true,
+              v4SubgraphUrlOverride(ChainId.BASE),
+              process.env.GRAPH_BEARER_TOKEN,
+              logger,
+              metric,
+              false, // useExternalLiquidity (default) — positional, precedes the transport
+              subgraphFetchFactory
+            )
+          : undefined,
     },
     {
       protocol: Protocol.V4,
