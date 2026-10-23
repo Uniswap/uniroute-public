@@ -1578,10 +1578,37 @@ export const FAIR_HOOK_HOST_ON_ROBINHOOD =
   '0xddc9a293cfdd6a824dbd33c58a9e78fee85828c4';
 export const FAIR_HOOK_HOST_ON_ROBINHOOD_2 =
   '0xfa7feccfb9a08e69457f876c3bebccbb39bde8c4';
+// AdaptiveDynamicFeeHookV4 (ROUTE-2483): ownerless on-chain dynamic LP fee,
+// beforeSwap returns zero delta, immutable cap MAX_COMBINED_FEE=10_000 (1%).
+export const ADAPTIVE_DYNAMIC_FEE_HOOK_V4_ON_ROBINHOOD =
+  '0x6c13bb6046d162ddc0114f1fdb3612945def1fc0';
+// FrankUniv4Hook (ROUTE-2492): FRANK/ORBIO fee-on-top skim, cap MAX_FEE_BPS=500 (5%).
+export const FRANK_UNIV4_HOOK_ON_ROBINHOOD =
+  '0x6c4d9adb3c4caaeb03df683256aa77331286e0cc';
+// PonsV2MemeHook (ROUTE-2460, REA.fund): afterSwap fee-on-top, immutable caps
+// MAX_HOOK_FEE_BPS=1000, total<=MAX_TOTAL_TRADE_FEE_BPS=2000; frozen per pool.
+export const PONS_V2_MEME_HOOK_ON_ROBINHOOD_5 =
+  '0xe6da98faca06d7db50a42f93ca79fd6d1ffba044';
+// BankrIndexHook (ROUTE-2457): operator override. Index engine — beforeSwap
+// executes the basket on each component's own Uniswap v3/v4 pools (LP + protocol
+// fees paid downstream); external-liquidity / mutable-composition accepted.
+export const BANKR_INDEX_HOOK_ON_ROBINHOOD =
+  '0xba97750d0f40fedf13a98abdb131a7a598b06888';
 export const BURR_ORACLE_HOOK_ON_MAINNET =
   '0xbea2154cd15c7ac673d62c1f638a3a5a2ef1d080';
 export const SKYLINE_HOOK_ON_MAINNET =
   '0x9f6a5d8712b62ca8f1f1ce3bcd5f8e020462e8cc';
+// OLYTaxHook (ROUTE-2472): fee-on-top 5% ETH tax, immutable FEE_BPS=500
+// (same codebase as the allowlisted Robinhood OLYTaxHook).
+export const OLYTAX_HOOK_ON_MAINNET =
+  '0x6dbc016559869b6b4a85c942a4fe927ea733c0cc';
+// OGClubHook (ROUTE-2469): fee-on-top 1% ETH, immutable CLUB_FEE_BPS=100.
+export const OG_CLUB_HOOK_ON_MAINNET =
+  '0xb726548e355a7434f6d8b130e6a34e2fa55e20cc';
+// BackedFundFeeHook (ROUTE-2484): fixed 1% fee-on-top, immutable
+// MAX_TOTAL_FEE_PIPS=10_000; protocol fee left under core control.
+export const BACKED_FUND_FEE_HOOK_ON_BASE =
+  '0x9e39e2aea10df684c9bef7a6ce52c02a26bf98cc';
 export const DEVIATION_FEE_HOOK_ON_UNICHAIN =
   '0xe109c2b5fb7b1639dd7824787b6b3091e4265080';
 export const SINGLETON_FLOOR_HOOK_ON_MAINNET =
@@ -1733,6 +1760,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     HIPPOCAMPUS_HOOK_ON_MAINNET,
     BURR_ORACLE_HOOK_ON_MAINNET,
     SKYLINE_HOOK_ON_MAINNET,
+    OLYTAX_HOOK_ON_MAINNET,
+    OG_CLUB_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -1946,6 +1975,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SINGLETON_FLOOR_HOOK_ON_BASE,
     PANGEA_MULTICHAIN_HOOK_ON_BASE,
     NFTX_V4_HOOK_ON_BASE,
+    BACKED_FUND_FEE_HOOK_ON_BASE,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.BASE)?.keys() ?? []),
   ],
   [ChainId.ZORA]: [ADDRESS_ZERO, AEGIS_DFM_ON_ZORA],
@@ -2284,6 +2314,10 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     OLYTAX_HOOK_ON_ROBINHOOD,
     FAIR_HOOK_HOST_ON_ROBINHOOD,
     FAIR_HOOK_HOST_ON_ROBINHOOD_2,
+    ADAPTIVE_DYNAMIC_FEE_HOOK_V4_ON_ROBINHOOD,
+    FRANK_UNIV4_HOOK_ON_ROBINHOOD,
+    PONS_V2_MEME_HOOK_ON_ROBINHOOD_5,
+    BANKR_INDEX_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [
     ADDRESS_ZERO,
