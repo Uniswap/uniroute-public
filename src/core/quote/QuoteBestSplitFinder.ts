@@ -2648,7 +2648,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       `QuoteBestSplitFinder: after level 1 we got ${result.length} route combinations`
     );
     ctx.logger.debug('QuoteBestSplitFinder level snapshot', {
-      level: 1,
+      splitLevel: 1,
       bestAmount: currentLevelBestAmount.toString(),
       bestCombinationKey,
       bestFoundAtLevel,
@@ -2824,7 +2824,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         `QuoteBestSplitFinder: after level ${level} we got ${result.length} route combinations`
       );
       ctx.logger.debug('QuoteBestSplitFinder level snapshot', {
-        level,
+        splitLevel: level,
         bestAmount: currentLevelBestAmount.toString(),
         bestCombinationKey,
         bestFoundAtLevel,
