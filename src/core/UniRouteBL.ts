@@ -3653,7 +3653,7 @@ export class UniRouteBL implements IUniRoutedBL {
               tags: metricTags,
             }
           );
-          ctx.logger.error('Error building swap method parameters', {
+          ctx.logger.debug('Error building swap method parameters', {
             error,
             quoteSplitRoutes: quoteSplit.quotes.map(q => q.route.toString()),
             quoteSplitAmounts: quoteSplit.quotes.map(q => q.amount.toString()),
