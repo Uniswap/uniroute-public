@@ -7,6 +7,8 @@ import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {
   AGG_HOOKS_PER_CHAIN,
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST,
+  FEW_V2_SHELL_HOOK_ON_MAINNET,
+  FEW_V2_SHELL_HOOK_ON_MAINNET_2,
   getProtocolForAggHookAddress,
   getTvlBypassHookAddresses,
   HOOKS_ADDRESSES_ALLOWLIST,
@@ -221,9 +223,12 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     }
   });
 
-  it('only the Slipstream singleton on Base is priced from the quoter', () => {
-    // Its PoolManager slot0 is the 1:1 initialize placeholder; the other
-    // registered hooks either hold a real price or are 1:1 pairs.
+  it('prices the external-reserve hooks (Slipstream + FewV2 shells) from the quoter', () => {
+    // These hooks fill against reserves outside the PoolManager, so their
+    // slot0 is frozen at the 1:1 initialize placeholder — wrong for a real
+    // market pair (and off by the decimal ratio for the FewV2 shells, which
+    // sit on mismatched-decimal pairs like ETH/USDC). The other registered
+    // hooks either hold a real price or are 1:1 equal-decimal pairs.
     const quoterPriced = Object.entries(ZLCA_HOOKS_PER_CHAIN).flatMap(
       ([chainIdStr, hooks]) =>
         Object.entries(hooks)
@@ -231,6 +236,8 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
           .map(([hook]) => `${chainIdStr}:${hook}`)
     );
     expect(quoterPriced).toEqual([
+      `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET}`,
+      `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET_2}`,
       `${ChainId.BASE}:${SLIPSTREAM_AGG_HOOK_ON_BASE}`,
     ]);
   });
