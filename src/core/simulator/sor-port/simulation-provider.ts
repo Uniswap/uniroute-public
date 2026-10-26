@@ -246,7 +246,7 @@ export abstract class Simulator {
 
     if (userBalance === UserBalanceCheck.Unknown) {
       // A read error says nothing about the wallet, so nothing is seeded on it
-      ctx.logger.warn(INSUFFICIENT_BALANCE_DESCRIPTION);
+      ctx.logger.info(INSUFFICIENT_BALANCE_DESCRIPTION);
       this.countSeededSkip(ctx, SeededSkipReason.BALANCE_UNKNOWN);
       return withZeroGasSimulationResult(
         quoteSplit,
@@ -258,7 +258,7 @@ export abstract class Simulator {
     if (userBalance === UserBalanceCheck.Insufficient) {
       const skipReason = this.seededRunSkipReason();
       if (skipReason !== undefined) {
-        ctx.logger.warn(INSUFFICIENT_BALANCE_DESCRIPTION);
+        ctx.logger.info(INSUFFICIENT_BALANCE_DESCRIPTION);
         this.countSeededSkip(ctx, skipReason);
         return withZeroGasSimulationResult(
           quoteSplit,
