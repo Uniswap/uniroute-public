@@ -31,6 +31,10 @@ import {
 import {applyAuroraPoolSources} from './auroraPoolsSource';
 import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
 import {
+  FETCH_START_METADATA_KEY,
+  parseSnapshotFetchStart,
+} from './util/snapshotFetchStart';
+import {
   ExtraPoolSourceName,
   ExtraPoolsSource,
   MAINNET_V3_MANUAL_POOL_IDS,
@@ -74,16 +78,6 @@ export interface CachePoolsConfig {
    */
   v4LpFeeCorrectionMaxReadsPerTick?: number;
 }
-
-// S3 object-metadata key recording when a snapshot's subgraph fetch STARTED.
-// Freshness arbitration between concurrent writers compares these, not write
-// times. S3 lowercases metadata keys (x-amz-meta-*), so keep this lowercase.
-export const FETCH_START_METADATA_KEY = 'fetch-start-time';
-
-// A recorded fetch start meaningfully in the future is corrupt (a writer
-// with a broken clock); trusting it would freeze the key until that time.
-// Beyond this tolerance the metadata is treated as absent.
-const FETCH_START_MAX_FUTURE_SKEW_MS = 5 * 60_000;
 
 function prefixedLogger(logger: Logger, prefix: string): Logger {
   return {
@@ -837,15 +831,10 @@ async function cachePoolsForChainProtocol(
       const head = await s3.send(
         new HeadObjectCommand({Bucket: config.s3Bucket, Key: compressedKey})
       );
-      const existingRaw = head.Metadata?.[FETCH_START_METADATA_KEY];
-      const parsedFetchStart = existingRaw ? new Date(existingRaw) : undefined;
-      const existingFetchStart =
-        parsedFetchStart !== undefined &&
-        !Number.isNaN(parsedFetchStart.getTime()) &&
-        parsedFetchStart.getTime() <=
-          Date.now() + FETCH_START_MAX_FUTURE_SKEW_MS
-          ? parsedFetchStart
-          : undefined;
+      const existingFetchStart = parseSnapshotFetchStart(
+        head.Metadata?.[FETCH_START_METADATA_KEY],
+        Date.now()
+      );
       const existingIsFresher =
         existingFetchStart !== undefined
           ? existingFetchStart >= fetchStartTime

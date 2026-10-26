@@ -36,11 +36,19 @@ import {
   synthesizeErc4626WrapperPools,
 } from '../../../models/hooks/Erc4626WrapperHooks';
 import {isStaticFeeWithinSanityCeiling} from '../../../lib/poolCaching/util/feeTierSanityCeiling';
+import {
+  FETCH_START_METADATA_KEY,
+  parseSnapshotFetchStart,
+} from '../../../lib/poolCaching/util/snapshotFetchStart';
 
 // Async inflate is unconditional (not behind the snapshot SWR flag): it keeps
 // the decompressed output identical to inflateSync while moving the work off
 // the event loop, so it changes flag-off request timing but not results.
 const inflateAsync = promisify(zlib.inflate);
+
+const SNAPSHOT_AGE_METRIC = buildMetricKey(
+  'S3SubgraphPoolDiscoverer.SnapshotAgeSeconds'
+);
 
 interface BasePoolData {
   id: string;
@@ -134,6 +142,9 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
   protected readonly TrackedEthThreshold: number = 0.01;
 
+  // Fetch start of the object last loaded per S3 key so a 304 refresh can still report its age
+  private readonly snapshotFetchStartMsByKey = new Map<string, number>();
+
   protected getDiscovererName(): string {
     return 'BaseS3SubgraphPoolDiscoverer';
   }
@@ -198,6 +209,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
     const poolCallStartTime = Date.now();
     const metricTags = [`chain:${ChainId[chainId]}`, `protocol:${protocol}`];
+    // The gauge also carries the numeric chain id so the pool cache monitors key on the same lane tags as the cron metrics
+    const snapshotAgeTags = [...metricTags, `chainid:${chainId}`];
     let success = false;
     let shouldEmitDownloadMetrics = true;
 
@@ -232,6 +245,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
             {tags: metricTags}
           )
           .catch(() => undefined);
+        this.emitSnapshotAge(s3Key, snapshotAgeTags, ctx);
         return {status: SnapshotLoadStatus.UNCHANGED};
       }
       const after = Date.now();
@@ -349,6 +363,8 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         ctx
       );
 
+      this.recordSnapshotFetchStart(s3Key, response, ctx);
+      this.emitSnapshotAge(s3Key, snapshotAgeTags, ctx);
       success = true;
       return {
         status: SnapshotLoadStatus.LOADED,
@@ -384,6 +400,50 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         );
       }
     }
+  }
+
+  // Remembers when the loaded object's data was fetched, LastModified standing in for objects written without the metadata
+  private recordSnapshotFetchStart(
+    s3Key: string,
+    response: GetObjectCommandOutput,
+    ctx: Context
+  ): void {
+    const fetchStart =
+      parseSnapshotFetchStart(
+        response.Metadata?.[FETCH_START_METADATA_KEY],
+        Date.now()
+      ) ?? response.LastModified;
+    if (fetchStart === undefined) {
+      ctx.logger.warn(
+        'Pool snapshot carries neither a fetch start nor LastModified',
+        {s3Key}
+      );
+      this.snapshotFetchStartMsByKey.delete(s3Key);
+      return;
+    }
+    this.snapshotFetchStartMsByKey.set(s3Key, fetchStart.getTime());
+  }
+
+  // Gauges how old the snapshot this process serves is, which is the staleness users see when the cron stops writing
+  private emitSnapshotAge(
+    s3Key: string,
+    snapshotAgeTags: string[],
+    ctx: Context
+  ): void {
+    const fetchStartMs = this.snapshotFetchStartMsByKey.get(s3Key);
+    // Only an object with neither timestamp leaves nothing to report, and that load already warned
+    if (fetchStartMs === undefined) {
+      return;
+    }
+    const ageSeconds = Math.max(0, (Date.now() - fetchStartMs) / 1000);
+    void ctx.metrics
+      .gauge(SNAPSHOT_AGE_METRIC, ageSeconds, {tags: snapshotAgeTags})
+      .catch(error => {
+        ctx.logger.warn('Failed to emit pool snapshot age gauge', {
+          s3Key,
+          error,
+        });
+      });
   }
 
   public override async _getPoolsForTokens(

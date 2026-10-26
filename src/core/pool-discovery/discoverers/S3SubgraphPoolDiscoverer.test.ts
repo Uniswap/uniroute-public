@@ -15,7 +15,7 @@ import {Protocol} from '../../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {readFileSync} from 'fs';
 import {join} from 'path';
-import {beforeEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
   ITopPoolsSelector,
   PoolsForTokensCacheDirective,
@@ -454,6 +454,125 @@ describe('S3SubgraphPoolDiscoverer', () => {
 
         expect(ifNoneMatchSent()).toEqual([undefined, '"etag-1"', undefined]);
         expect(downloads()).toBe(2);
+      });
+    });
+
+    describe('snapshot age gauge', () => {
+      const gzippedData = readTestData('v4-pools.json.gz');
+      const ageMetric =
+        'UniRouteService.Metric.S3SubgraphPoolDiscoverer.SnapshotAgeSeconds';
+      const laneTags = ['chain:MAINNET', 'protocol:v4', 'chainid:1'];
+      const now = new Date('2026-10-23T14:00:00Z');
+      const minutesAgo = (minutes: number) =>
+        new Date(now.getTime() - minutes * 60_000);
+      const spyOnGauge = () => vi.spyOn(mockContext.metrics, 'gauge');
+      let gaugeSpy: ReturnType<typeof spyOnGauge>;
+
+      beforeEach(() => {
+        vi.useFakeTimers({toFake: ['Date']});
+        vi.setSystemTime(now);
+        gaugeSpy = spyOnGauge();
+      });
+
+      afterEach(() => {
+        gaugeSpy.mockRestore();
+        vi.useRealTimers();
+      });
+
+      // The fields S3 returns beside the body, as GetObject reports them.
+      const serveObject = (object: {
+        Metadata?: Record<string, string>;
+        LastModified?: Date;
+      }) =>
+        vi.mocked(s3Client.send).mockResolvedValue({
+          ...createMockResponse(gzippedData),
+          ETag: '"etag-1"',
+          ...object,
+        } as never);
+      const emittedAges = () =>
+        gaugeSpy.mock.calls
+          .filter(([name]) => name === ageMetric)
+          .map(([, value, opts]) => ({value, tags: opts?.tags}));
+
+      it('reports the age from the fetch start the cron recorded on the object', async () => {
+        serveObject({
+          Metadata: {'fetch-start-time': minutesAgo(10).toISOString()},
+          LastModified: minutesAgo(1),
+        });
+        await discoverer.getPools(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(emittedAges()).toEqual([{value: 600, tags: laneTags}]);
+      });
+
+      it('falls back to LastModified for an object written without the metadata', async () => {
+        serveObject({LastModified: minutesAgo(120)});
+        await discoverer.getPools(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(emittedAges()).toEqual([{value: 7200, tags: laneTags}]);
+      });
+
+      it('ignores an unparseable fetch start and uses LastModified', async () => {
+        serveObject({
+          Metadata: {'fetch-start-time': 'yesterday'},
+          LastModified: minutesAgo(30),
+        });
+        await discoverer.getPools(ChainId.MAINNET, Protocol.V4, mockContext);
+        expect(emittedAges()).toEqual([{value: 1800, tags: laneTags}]);
+      });
+
+      it('emits no age and warns when the object carries neither timestamp', async () => {
+        const warnContext = buildTestContext();
+        serveObject({});
+        await discoverer.getPools(ChainId.MAINNET, Protocol.V4, warnContext);
+        expect(warnContext.metrics.gaugeStore[ageMetric]).toBeUndefined();
+        expect(
+          warnContext.logger.outputs.filter(
+            ({prefix, msg}) =>
+              prefix === 'WARN:' &&
+              msg ===
+                'Pool snapshot carries neither a fetch start nor LastModified'
+          )
+        ).toHaveLength(1);
+      });
+
+      it('keeps reporting a growing age across 304 refreshes without downloading again', async () => {
+        const memoDiscoverer = new S3SubgraphPoolDiscovererV4(
+          {
+            ...mockConfig,
+            PoolDiscovery: {
+              ...mockConfig.PoolDiscovery,
+              SnapshotMemoEnabled: true,
+            },
+          },
+          getPoolsCache,
+          getPoolsForTokensCache,
+          FeatureGatedTokensRepository.empty(),
+          s3Client
+        );
+        let downloads = 0;
+        vi.mocked(s3Client.send).mockImplementation((async (
+          command: unknown
+        ) => {
+          if (
+            command instanceof GetObjectCommand &&
+            command.input.IfNoneMatch === '"etag-1"'
+          ) {
+            throw Object.assign(new Error('Not Modified'), {
+              $metadata: {httpStatusCode: 304},
+            });
+          }
+          downloads += 1;
+          return {
+            ...createMockResponse(gzippedData),
+            ETag: '"etag-1"',
+            Metadata: {'fetch-start-time': minutesAgo(5).toISOString()},
+          };
+        }) as never);
+
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        vi.setSystemTime(new Date(now.getTime() + 20 * 60_000));
+        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+
+        expect(downloads).toBe(1);
+        expect(emittedAges().map(({value}) => value)).toEqual([300, 1500]);
       });
     });
 
