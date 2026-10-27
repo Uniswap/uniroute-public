@@ -235,9 +235,16 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
           .filter(([, config]) => config.sqrtPriceFromQuoter === true)
           .map(([hook]) => `${chainIdStr}:${hook}`)
     );
+    // All 10 Wave-1 xStock vault wrappers on Monad are quoter-priced.
+    const monad = quoterPriced.filter(e => e.startsWith(`${ChainId.MONAD}:`));
+    expect(monad).toHaveLength(10);
+    // Numeric chain order (1 < 143 < 8453): the two mainnet FewV2 shells, then
+    // the 10 Monad xStock wrappers, then the Base Slipstream singleton — nothing
+    // else.
     expect(quoterPriced).toEqual([
       `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET}`,
       `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET_2}`,
+      ...monad,
       `${ChainId.BASE}:${SLIPSTREAM_AGG_HOOK_ON_BASE}`,
     ]);
   });

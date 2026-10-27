@@ -9,6 +9,7 @@ import {
   getDynamicZlcaHooksVersion,
 } from './dynamicZlcaHooks';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
+import {XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD} from './xStockWrapHooks';
 import {
   AGG_HOOKS_ON_TEMPO,
   FLUID_DEX_1,
@@ -183,31 +184,6 @@ export const WETH_HOOKS_ADDRESS_ON_MAINNET =
   '0x57991106cb7aa27e2771beda0d6522f68524a888';
 export const WETH_HOOKS_ADDRESS_ON_MONAD =
   '0x3fad8a7205f943528915e67cf94fc792c8fce888';
-// xStocks (Monad) Wave-1 wrap hooks — Uniswap-built per-vault wrap/unwrap hooks
-// for the rebasing xStock tokens (one per vault). Wrap 1:1-style inside the
-// hook, so the <stock>/<wrapped> pool holds no PoolManager liquidity and always
-// measures zero TVL — same treatment as the WETH wrapper hooks: admitted via
-// ZERO_MEASURED_TVL_HOOKS_PER_CHAIN so routing uses the wrap leg.
-export const XSTOCK_EWY_WRAP_HOOK_ON_MONAD =
-  '0x882acfceba2724a01da07b7c691d13fbb171a888';
-export const XSTOCK_MU_WRAP_HOOK_ON_MONAD =
-  '0xea16647fc1681a16ca38c01a48af072db6f5e888';
-export const XSTOCK_NVDA_WRAP_HOOK_ON_MONAD =
-  '0xac0ea29430f8adee4e3d654efdf1ed346270e888';
-export const XSTOCK_QQQ_WRAP_HOOK_ON_MONAD =
-  '0x288064a3b5225e37228e355d422cbaa634be2888';
-export const XSTOCK_SGOV_WRAP_HOOK_ON_MONAD =
-  '0x68196453c7e0a66cbba9b4c1490b88b6acb72888';
-export const XSTOCK_SKHY_WRAP_HOOK_ON_MONAD =
-  '0x84a87e5408e4c012e59b77e68bf8b5259f11a888';
-export const XSTOCK_SMH_WRAP_HOOK_ON_MONAD =
-  '0x2e11384ab31389c66818eb9a4a71c9bacba76888';
-export const XSTOCK_SPCX_WRAP_HOOK_ON_MONAD =
-  '0x456cc230ff01bd407cf494a55682f4cfb4ce2888';
-export const XSTOCK_SPY_WRAP_HOOK_ON_MONAD =
-  '0xcb1baa4592cb90bd2fe3ca540abe95983168a888';
-export const XSTOCK_TSLA_WRAP_HOOK_ON_MONAD =
-  '0x54de9022ffafbe2ff7074f6de4d46831bdffa888';
 export const WETH_HOOKS_ADDRESS_ON_ARBITRUM =
   '0x2a4adf825bd96598487dbb6b2d8d882a4eb86888';
 
@@ -685,6 +661,25 @@ export interface ZlcaHookConfig {
   sqrtPriceFromQuoter?: boolean;
 }
 
+// Shared ZLCA config for the xStock ERC-4626 vault wrap hooks. 250_000n is a
+// conservative per-hop estimate (the vaults have no flow yet to measure
+// directly); recalibrate once the pools see prod swaps. Kept as one const so
+// the gas figure stays a single source of truth as more Wave-N xStock vaults
+// are allowlisted.
+const XSTOCK_VAULT_WRAP_ZLCA_CONFIG: ZlcaHookConfig = {
+  gasOverheadPerHop: 250_000n,
+  sqrtPriceFromQuoter: true,
+};
+
+// Every xStock wrap hook (from xStockWrapHooks.ts) gets the same config. Built
+// here so ZLCA_HOOKS_PER_CHAIN can reference it as one entry at module load.
+const XSTOCK_WRAP_HOOKS_ZLCA_ON_MONAD: Record<string, ZlcaHookConfig> =
+  Object.fromEntries(
+    XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD.map(
+      hook => [hook, XSTOCK_VAULT_WRAP_ZLCA_CONFIG] as const
+    )
+  );
+
 // Intersected with Record<number, ...> (matching HOOKS_ADDRESSES_ALLOWLIST's
 // shape) so this can be indexed by both this file's @uniswap/sdk-core ChainId
 // and the separate, numerically-overlapping ChainId enum in lib/config.ts.
@@ -718,6 +713,16 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     },
     [ETH_FLETH_AUTO_WRAP_HOOKS_ADDRESS_ON_BASE]: {gasOverheadPerHop: 500_000n},
   },
+  // xStock ERC-4626 vault wrap hooks (one per vault): a vault deposit/redeem
+  // runs inside beforeSwap, so settlement is outside the PoolManager against a
+  // yield-bearing vault rate — real per-hop gas the heuristic path can't see,
+  // and a drifting slot0 that needs a quoter probe (see
+  // XSTOCK_VAULT_WRAP_ZLCA_CONFIG). xStock tokens are compliance-sensitive,
+  // which the doc above says not to put behind a TVL bypass — but each hook's
+  // beforeInitialize only accepts its own {vault, vault.asset()} pair at fee 0,
+  // so the hook itself bounds the pool set (the "pool admission bounds its
+  // pools" exception the doc allows).
+  [ChainId.MONAD]: XSTOCK_WRAP_HOOKS_ZLCA_ON_MONAD,
   [ChainId.UNICHAIN]: {
     [FLETH_HOOK_ON_UNICHAIN]: {gasOverheadPerHop: 500_000n},
   },
@@ -1302,19 +1307,7 @@ export const ZERO_MEASURED_TVL_HOOKS_PER_CHAIN: Partial<
   [ChainId.ARBITRUM_ONE]: [WETH_HOOKS_ADDRESS_ON_ARBITRUM],
   [ChainId.BASE]: [WETH_HOOKS_ADDRESS_ON_BASE, MEMESTOCK_HOOK_ON_BASE],
   [ChainId.UNICHAIN]: [WETH_HOOKS_ADDRESS_ON_UNICHAIN],
-  [ChainId.MONAD]: [
-    WETH_HOOKS_ADDRESS_ON_MONAD,
-    XSTOCK_EWY_WRAP_HOOK_ON_MONAD,
-    XSTOCK_MU_WRAP_HOOK_ON_MONAD,
-    XSTOCK_NVDA_WRAP_HOOK_ON_MONAD,
-    XSTOCK_QQQ_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SGOV_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SKHY_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SMH_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SPCX_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SPY_WRAP_HOOK_ON_MONAD,
-    XSTOCK_TSLA_WRAP_HOOK_ON_MONAD,
-  ],
+  [ChainId.MONAD]: [WETH_HOOKS_ADDRESS_ON_MONAD],
   [ChainId.ROBINHOOD]: [
     INDEX_FEE_HOOK_ON_ROBINHOOD,
     PENSION_TAX_HOOK_ON_ROBINHOOD,
@@ -2074,16 +2067,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     WETH_HOOKS_ADDRESS_ON_MONAD,
     DOPPLER_HOOKS_ADDRESS_ON_MONAD,
     AEGIS_ENGINE_ON_MONAD,
-    XSTOCK_EWY_WRAP_HOOK_ON_MONAD,
-    XSTOCK_MU_WRAP_HOOK_ON_MONAD,
-    XSTOCK_NVDA_WRAP_HOOK_ON_MONAD,
-    XSTOCK_QQQ_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SGOV_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SKHY_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SMH_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SPCX_WRAP_HOOK_ON_MONAD,
-    XSTOCK_SPY_WRAP_HOOK_ON_MONAD,
-    XSTOCK_TSLA_WRAP_HOOK_ON_MONAD,
+    ...XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD,
   ],
   [ChainId.SONEIUM]: [ADDRESS_ZERO, AEGIS_DFM_ON_SONEIUM],
   [ChainId.XLAYER]: [
