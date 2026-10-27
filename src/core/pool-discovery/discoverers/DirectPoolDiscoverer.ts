@@ -41,22 +41,16 @@ export class DirectPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
   }
 
   public override async getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
     return [];
   }
 
   protected override async _getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
     return [];
@@ -130,11 +124,8 @@ export class DirectPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
   }
 
   protected override async _getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V3PoolInfo[]> {
     return [];
@@ -213,11 +204,8 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
   }
 
   protected override async _getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V4PoolInfo[]> {
     return [];

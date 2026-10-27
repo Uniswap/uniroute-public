@@ -61,22 +61,16 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
 
   // Static pool discoverers are used when we don't have a subgraph to query for pools, so there is no use for this method.
   public override async getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
     return [];
   }
 
   protected override async _getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V2PoolInfo[]> {
     return [];
@@ -173,11 +167,8 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
 
   // Static pool discoverers are used when we don't have a subgraph to query for pools, so there is no use for this method.
   protected override async _getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V3PoolInfo[]> {
     return [];
@@ -276,11 +267,8 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
 
   // Static pool discoverers are used when we don't have a subgraph to query for pools, so there is no use for this method.
   protected override async _getPools(
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chainId: ChainId,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     protocol: Protocol,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
   ): Promise<V4PoolInfo[]> {
     return [];
