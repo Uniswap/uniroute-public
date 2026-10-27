@@ -188,8 +188,11 @@ function parseChainIds(raw: string | undefined): number[] {
   return parsed;
 }
 
-// Approximate seconds per block, only used to estimate activateAtMs; the
-// estimate self-corrects every cron run so precision doesn't matter far out.
+// Approximate seconds per block, only used to estimate activateAtMs. The
+// estimate self-corrects every cron run, so precision doesn't matter far out,
+// but the last run before migration must land inside the serve-side
+// activation slack: overstating the block time pushes that estimate past
+// migration, and the pool stays unroutable until the next run.
 const BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.MAINNET]: 12,
   [ChainId.UNICHAIN]: 1,
@@ -197,7 +200,7 @@ const BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.ARBITRUM]: 0.25,
   [ChainId.AVAX]: 2,
   [ChainId.XLAYER]: 3,
-  [ChainId.ROBINHOOD]: 2,
+  [ChainId.ROBINHOOD]: 0.1,
   [ChainId.SEPOLIA]: 12,
 };
 const DEFAULT_BLOCK_TIME_SECONDS = 2;

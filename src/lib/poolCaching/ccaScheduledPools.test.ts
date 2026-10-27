@@ -365,6 +365,17 @@ describe('buildCcaScheduledPools', () => {
     expect(deps.readLbpInitializer).toHaveBeenCalledWith(1, STRATEGY, AUCTION);
   });
 
+  it('estimates a Robinhood activation from its ~100ms blocks', async () => {
+    config = {...config, chainIds: [4663]};
+    pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    // 1000 blocks out on Robinhood: ~100 s, not the ~33 min a 2 s block
+    // time would estimate.
+    expect(writtenEntries(4663)[0].activateAtMs).toBe(NOW + 1_000 * 100);
+  });
+
   it('anchors expiry at write time when migration is permitted but overdue', async () => {
     // migrationBlock long past (migrate() not run yet): activateAtMs is in
     // the past, but the entry must stay servable for a full TTL from NOW so
