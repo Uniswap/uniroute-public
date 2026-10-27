@@ -11,14 +11,19 @@ import {
   V3PoolInfo,
   V4PoolInfo,
 } from './interface';
-import {buildMetricKey, ChainId} from '../../lib/config';
+import {
+  buildMetricKey,
+  buildStatusTags,
+  ChainId,
+  MetricFailureReason,
+} from '../../lib/config';
 import {
   BASE_TOKENS_PER_CHAIN,
   WRAPPED_NATIVE_CURRENCY,
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
-import {CanonicalPools, identifyPoolInfo} from '../../lib/CanonicalPools';
+import {CanonicalPools} from '../../lib/CanonicalPools';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {
   IV4PoolKeyRegistry,
@@ -27,6 +32,11 @@ import {
 import {Protocol} from '../../models/pool/Protocol';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {IChainRepository} from '../../stores/chain/IChainRepository';
+import {Chain} from '../../models/chain/Chain';
+import {
+  Erc4626RegistrySnapshot,
+  Erc4626WrapperRegistrySource,
+} from '../registry/Erc4626WrapperRegistry';
 import {getApplicableV3FeeAmounts, V3Pool} from '../../models/pool/V3Pool';
 import {
   getApplicableV4FeesTickspacingsHooks,
@@ -47,6 +57,11 @@ import {
   AGG_HOOKS_PER_CHAIN,
   getTvlBypassHookAddresses,
 } from '../../lib/poolCaching/util/hooksAddressesAllowlist';
+import {
+  assertValidSliceMs,
+  DEFAULT_EVENT_LOOP_SLICE_MS,
+  EventLoopSlicer,
+} from '../../lib/eventLoopSlicer';
 
 // Token-to-pool index for faster lookups
 interface TokenPoolIndex {
@@ -61,6 +76,12 @@ interface SelectionView {
   filteredPools: UniPoolInfo[];
   tokenPoolIndex: TokenPoolIndex;
   tvlSortedPools: UniPoolInfo[];
+}
+
+// `view` is set once `build` resolves; until then requests share `build`.
+interface SelectionViewEntry {
+  build: Promise<SelectionView>;
+  view?: SelectionView;
 }
 
 export const METRIC_NON_CANONICAL_POOL = buildMetricKey(
@@ -99,33 +120,86 @@ export const getOtherToken = (pool: UniPoolInfo, tokenId: string): string => {
     : pool.token0.id;
 };
 
+// Pools a selection-view build processes between slice checks.
+export const SELECTION_VIEW_BUILD_CHUNK_SIZE = 512;
+
+const isBuildChunkEnd = (index: number): boolean =>
+  (index + 1) % SELECTION_VIEW_BUILD_CHUNK_SIZE === 0;
+
 // Helper function to build token-to-pool index
 export const buildTokenPoolIndex = (pools: UniPoolInfo[]): TokenPoolIndex => {
   const tokenToPools = new Map<string, UniPoolInfo[]>();
-
   for (const pool of pools) {
-    const token0Id = pool.token0.id.toLowerCase();
-    const token1Id = pool.token1.id.toLowerCase();
-
-    // Initialize token-to-pools mapping
-    if (!tokenToPools.has(token0Id)) {
-      tokenToPools.set(token0Id, []);
-    }
-    if (!tokenToPools.has(token1Id)) {
-      tokenToPools.set(token1Id, []);
-    }
-
-    // Add pool to both tokens
-    tokenToPools.get(token0Id)!.push(pool);
-    tokenToPools.get(token1Id)!.push(pool);
+    indexPool(tokenToPools, pool.token0.id.toLowerCase(), pool);
+    indexPool(tokenToPools, pool.token1.id.toLowerCase(), pool);
   }
-
   return {tokenToPools};
 };
 
+const indexPool = (
+  tokenToPools: Map<string, UniPoolInfo[]>,
+  tokenIdLower: string,
+  pool: UniPoolInfo
+): void => {
+  let tokenPools = tokenToPools.get(tokenIdLower);
+  if (tokenPools === undefined) {
+    tokenPools = [];
+    tokenToPools.set(tokenIdLower, tokenPools);
+  }
+  tokenPools.push(pool);
+};
+
+// The per-pool rule of BasicTopPoolsSelector.filterUnsupportedPools, shared
+// with the selection-view build. countDrops emits the NonCanonicalPool count
+// accumulated by admits. Canonical-pool lifts are read once, so a lift that
+// flips while a sliced build is yielded cannot split one view across states.
+class CompliancePoolFilter {
+  private nonCanonicalDrops = 0;
+  private readonly liftedTokens: ReadonlySet<string>;
+
+  constructor(
+    private readonly chainId: ChainId,
+    private readonly unsupportedTokens: Set<string>
+  ) {
+    this.liftedTokens = CanonicalPools.liftedTokensSnapshot(chainId);
+  }
+
+  admits(pool: UniPoolInfo): boolean {
+    if (
+      this.unsupportedTokens.has(pool.token0.id.toLowerCase()) ||
+      this.unsupportedTokens.has(pool.token1.id.toLowerCase())
+    ) {
+      return false;
+    }
+    if (
+      !CanonicalPools.isPoolAdmitted(
+        this.chainId,
+        pool.id,
+        pool.token0.id,
+        pool.token1.id,
+        this.liftedTokens
+      )
+    ) {
+      this.nonCanonicalDrops++;
+      return false;
+    }
+    return true;
+  }
+
+  countDrops(ctx: Context | undefined): void {
+    CanonicalPools.countDroppedNonCanonicalPools(
+      this.chainId,
+      this.nonCanonicalDrops,
+      ctx,
+      METRIC_NON_CANONICAL_POOL
+    );
+  }
+}
+
 // Lowercased ids of a token's pool list, memoized on the list's identity.
-// Index lists are never mutated after buildTokenPoolIndex, and a selection
-// view's index lives as long as its snapshot, so a hub token's id set (WETH,
+// A selection view's index lists keep growing while the view builds, but no
+// caller sees them until the build resolves, and they never change after.
+// The view's index lives as long as its snapshot, so a hub token's id set (WETH,
 // native ETH, USDC: tens of thousands of pools on a large chain) is built
 // once per view rather than once per intersection — getTopPoolForTokens
 // alone intersects with the WETH and ETH lists for every intermediary token
@@ -234,7 +308,7 @@ export class BasicTopPoolsSelector
   // The inner key is the ≤4-valued hooksOptions variant per chain/protocol.
   private readonly selectionViewMemo = new WeakMap<
     UniPoolInfo[],
-    WeakMap<Set<string>, Map<string, SelectionView>>
+    WeakMap<Set<string>, Map<string, SelectionViewEntry>>
   >();
 
   // hooksOptions variants requests have asked a selection view for, per
@@ -243,6 +317,10 @@ export class BasicTopPoolsSelector
   // these for a new snapshot.
   private readonly requestedViewVariants = new Map<string, Set<HooksOptions>>();
 
+  // Settles when the last queued view build for `${chainId}#${protocol}` has,
+  // and is removed then, so an entry means a new build for that key waits.
+  private readonly buildQueueTails = new Map<string, Promise<void>>();
+
   constructor(
     private readonly chainRepository: IChainRepository,
     private readonly poolSelectionConfig: Record<ChainId, IPoolSelectionConfig>,
@@ -250,8 +328,13 @@ export class BasicTopPoolsSelector
     private readonly snapshotMemoEnabled: boolean = false,
     // Optional so existing construction sites keep working; without it the
     // manual direct-pair fallback stays on the canonical grid alone.
-    private readonly poolKeyRegistry?: IV4PoolKeyRegistry
-  ) {}
+    private readonly poolKeyRegistry?: IV4PoolKeyRegistry,
+    private readonly eventLoopSliceMs: number = DEFAULT_EVENT_LOOP_SLICE_MS,
+    private readonly erc4626WrapperRegistry?: Erc4626WrapperRegistrySource,
+    private readonly clock: () => number = () => performance.now()
+  ) {
+    assertValidSliceMs(eventLoopSliceMs);
+  }
 
   public async filterPools(
     pools: UniPoolInfo[],
@@ -287,18 +370,11 @@ export class BasicTopPoolsSelector
     // so they silently keep the legacy path (which is cheap on their small
     // universes).
     const arrayMemoStable = isPoolsArrayMemoStable(pools);
-
-    // The permissioned-hook drop is pair- and namespace-dependent, so the
-    // snapshot-keyed selection view cannot be reused on chains that configure
-    // permissioned hooks (only Sepolia today) — those keep the legacy path.
-    const permissionedChain =
-      chain !== undefined && (chain.permissionedHookAddresses?.length ?? 0) > 0;
-
-    const canUseSelectionView =
-      this.snapshotMemoEnabled &&
-      arrayMemoStable &&
-      !permissionedChain &&
-      (nsCtx.erc4626Snapshot?.assets.length ?? 0) === 0;
+    const canUseSelectionView = this.usesSelectionView(
+      pools,
+      chain,
+      nsCtx.erc4626Snapshot
+    );
 
     let filteredPools: UniPoolInfo[];
     let tokenPoolIndex: TokenPoolIndex;
@@ -323,8 +399,8 @@ export class BasicTopPoolsSelector
       });
     } else {
       // `bypass` marks a stable snapshot array we CHOSE not to memoize
-      // (permissioned chain). Unstable per-request arrays stay silent —
-      // emitting per direct-pool request would drown the signal.
+      // (permissioned-hook or ERC-4626 chain). Unstable per-request arrays
+      // stay silent — emitting per direct-pool request would drown the signal.
       if (this.snapshotMemoEnabled && arrayMemoStable) {
         await ctx.metrics.count(
           buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
@@ -334,6 +410,7 @@ export class BasicTopPoolsSelector
           }
         );
       }
+      const fallbackSlicer = this.newSlicer();
       const filteredUnsupportedPools =
         BasicTopPoolsSelector.filterUnsupportedPools(
           pools,
@@ -392,28 +469,22 @@ export class BasicTopPoolsSelector
           PoolsForTokensCacheSkipReason.Erc4626WrapperPool
         );
       }
-      filteredPools = erc4626DropResult.filteredPools.filter(pool => {
-        if (
-          BasicTopPoolsSelector.isExcludedAggHookPool(
-            pool,
-            protocol,
-            aggHookAddressSet
-          )
-        ) {
-          ctx.logger.debug('Excluding agg hook pool', {
-            chainId,
-            protocol,
-            poolId: pool.id,
-            poolHooks: (pool as V4PoolInfo).hooks,
-          });
-          return false;
-        }
-        return BasicTopPoolsSelector.matchesHooksOptions(
+      const logExcludedAggHookPool = (pool: UniPoolInfo) =>
+        ctx.logger.debug('Excluding agg hook pool', {
+          chainId,
+          protocol,
+          poolId: pool.id,
+          poolHooks: 'hooks' in pool ? pool.hooks : undefined,
+        });
+      filteredPools = erc4626DropResult.filteredPools.filter(pool =>
+        BasicTopPoolsSelector.isSelectablePool(
           pool,
           protocol,
-          hooksOptions
-        );
-      });
+          hooksOptions,
+          aggHookAddressSet,
+          logExcludedAggHookPool
+        )
+      );
 
       ctx.logger.debug("Filtering pools that don't match the hooks options", {
         chainId,
@@ -423,10 +494,12 @@ export class BasicTopPoolsSelector
 
       // Build token-to-pool index for faster lookups
       tokenPoolIndex = buildTokenPoolIndex(filteredPools);
+      await fallbackSlicer.yieldIfSliceElapsed();
     }
 
     // Keep track of selected pool addresses to avoid duplicates
     const selectedPoolIds = new Set<string>();
+    const slicer = this.newSlicer();
 
     // 1. Direct pairs (pools with both tokenIn and tokenOut)
     let directPairs = BasicTopPoolsSelector.getDirectPairs(
@@ -439,6 +512,7 @@ export class BasicTopPoolsSelector
       tokenPoolIndex,
       this.poolSelectionConfig
     );
+    await slicer.yieldIfSliceElapsed();
 
     // 2. Pools with only tokenIn
     const tokenInOnlyPairs = BasicTopPoolsSelector.getTokenInOnlyPairs(
@@ -449,6 +523,7 @@ export class BasicTopPoolsSelector
       chainId,
       this.poolSelectionConfig
     );
+    await slicer.yieldIfSliceElapsed();
 
     // 3. Pools with only tokenOut
     const tokenOutOnlyPairs = BasicTopPoolsSelector.getTokenOutOnlyPairs(
@@ -459,6 +534,7 @@ export class BasicTopPoolsSelector
       chainId,
       this.poolSelectionConfig
     );
+    await slicer.yieldIfSliceElapsed();
 
     // 4. Get tokens from first hop pools to use as intermediary tokens
     const intermediaryTokenIds = BasicTopPoolsSelector.getIntermediaryTokenIds(
@@ -469,14 +545,19 @@ export class BasicTopPoolsSelector
     );
 
     // 5. For each intermediary token, get top N pools
-    const secondHopPairs: UniPoolInfo[] =
-      BasicTopPoolsSelector.getTopNPoolsForIntermediaryToken(
-        intermediaryTokenIds,
-        selectedPoolIds,
-        tokenPoolIndex,
-        chainId,
-        this.poolSelectionConfig
+    const secondHopPairs: UniPoolInfo[] = [];
+    for (const intermediaryTokenId of intermediaryTokenIds) {
+      secondHopPairs.push(
+        ...BasicTopPoolsSelector.getTopNPoolsForIntermediaryToken(
+          [intermediaryTokenId],
+          selectedPoolIds,
+          tokenPoolIndex,
+          chainId,
+          this.poolSelectionConfig
+        )
       );
+      await slicer.yieldIfSliceElapsed();
+    }
 
     // 6. get top N pools with highest liquidity (excluding already selected pools)
     // The selection-view path walks the pre-sorted copy instead of
@@ -504,6 +585,7 @@ export class BasicTopPoolsSelector
       tokenPoolIndex,
       this.poolSelectionConfig
     );
+    await slicer.yieldIfSliceElapsed();
 
     const topBaseTokenPoolsTokenOut =
       BasicTopPoolsSelector.getTopBaseTokenPools(
@@ -513,6 +595,7 @@ export class BasicTopPoolsSelector
         tokenPoolIndex,
         this.poolSelectionConfig
       );
+    await slicer.yieldIfSliceElapsed();
 
     // 8. Top 1 WETH and ETH pool for tokenIn
     const topWethPoolTokenIn = BasicTopPoolsSelector.getTopPoolForTokens(
@@ -527,6 +610,7 @@ export class BasicTopPoolsSelector
       tokenIn.address,
       tokenPoolIndex
     );
+    await slicer.yieldIfSliceElapsed();
 
     // 9. Top 1 WETH and ETH pool for tokenOut
     const topWethPoolTokenOut = BasicTopPoolsSelector.getTopPoolForTokens(
@@ -672,9 +756,10 @@ export class BasicTopPoolsSelector
    * Drops pools that carry a feature-gated (unsupported) token, and pools
    * that carry a token with a canonical-pools entry without being one of
    * its canonical pools. Both selectors run every candidate universe through
-   * this before any selection stage, so a non-canonical pool can never
-   * occupy a top-N slot. Drops are counted on `TopPoolsSelector.NonCanonicalPool`
-   * when `ctx` is given. Whether the canonical pool exists at all is checked
+   * this rule before any selection stage (the selection-view build applies
+   * it pool by pool through the same CompliancePoolFilter), so a
+   * non-canonical pool can never occupy a top-N slot. Drops are counted on
+   * `TopPoolsSelector.NonCanonicalPool` when `ctx` is given. Whether the canonical pool exists at all is checked
    * once per loaded snapshot by `CanonicalPools.checkRegistryCoverage`, not
    * here: this runs per protocol and per pair, so the canonical v4 pool is
    * legitimately absent from most inputs.
@@ -685,19 +770,33 @@ export class BasicTopPoolsSelector
     unsupportedTokens: Set<string>,
     ctx?: Context
   ): UniPoolInfo[] {
-    const supportedPools = pools.filter(pool => {
-      return (
-        !unsupportedTokens.has(pool.token0.id.toLowerCase()) &&
-        !unsupportedTokens.has(pool.token1.id.toLowerCase())
-      );
-    });
-    return CanonicalPools.dropNonCanonicalPools(
-      supportedPools,
+    const complianceFilter = new CompliancePoolFilter(
       chainId,
-      identifyPoolInfo,
-      ctx,
-      METRIC_NON_CANONICAL_POOL
+      unsupportedTokens
     );
+    const admittedPools = pools.filter(pool => complianceFilter.admits(pool));
+    complianceFilter.countDrops(ctx);
+    return admittedPools;
+  }
+
+  // The permissioned-hook and ERC-4626 (xStocks) drops are pair-dependent, so
+  // chains with either keep the unsliced path. warmSnapshot must not build a
+  // view this refuses.
+  private usesSelectionView(
+    pools: UniPoolInfo[],
+    chain: Chain | undefined,
+    erc4626Snapshot: Erc4626RegistrySnapshot | undefined
+  ): boolean {
+    return (
+      this.snapshotMemoEnabled &&
+      isPoolsArrayMemoStable(pools) &&
+      (chain?.permissionedHookAddresses?.length ?? 0) === 0 &&
+      (erc4626Snapshot?.assets.length ?? 0) === 0
+    );
+  }
+
+  private newSlicer(): EventLoopSlicer {
+    return new EventLoopSlicer(this.eventLoopSliceMs, this.clock);
   }
 
   protected static getAggHookAddressSet(chainId: ChainId): Set<string> {
@@ -729,6 +828,30 @@ export class BasicTopPoolsSelector
     return matchesHooksOptions(pool, protocol, hooksOptions);
   }
 
+  private static isSelectablePool(
+    pool: UniPoolInfo,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined,
+    aggHookAddressSet: Set<string>,
+    onAggHookPoolExcluded?: (pool: UniPoolInfo) => void
+  ): boolean {
+    if (
+      BasicTopPoolsSelector.isExcludedAggHookPool(
+        pool,
+        protocol,
+        aggHookAddressSet
+      )
+    ) {
+      onAggHookPoolExcluded?.(pool);
+      return false;
+    }
+    return BasicTopPoolsSelector.matchesHooksOptions(
+      pool,
+      protocol,
+      hooksOptions
+    );
+  }
+
   // Canonicalized: hooksOptions only affects V4 filtering, and undefined is
   // filter-identical to HOOKS_INCLUSIVE — collapsing those variants avoids
   // building content-identical views per alias.
@@ -747,7 +870,7 @@ export class BasicTopPoolsSelector
     chainId: ChainId,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined
-  ): {byVariant: Map<string, SelectionView>; variantKey: string} {
+  ): {byVariant: Map<string, SelectionViewEntry>; variantKey: string} {
     let byDenySet = this.selectionViewMemo.get(pools);
     if (byDenySet === undefined) {
       byDenySet = new WeakMap();
@@ -784,16 +907,21 @@ export class BasicTopPoolsSelector
     if (!this.snapshotMemoEnabled || !isPoolsArrayMemoStable(pools)) {
       return;
     }
-    if (protocol === Protocol.V4) {
-      const chain = await this.chainRepository.getChain(chainId);
-      if ((chain.permissionedHookAddresses?.length ?? 0) > 0) {
-        return;
-      }
+    const [chain, erc4626Snapshot] = await Promise.all([
+      protocol === Protocol.V4
+        ? this.chainRepository.getChain(chainId)
+        : undefined,
+      this.erc4626WrapperRegistry?.getSnapshot(chainId, ctx),
+    ]);
+    if (!this.usesSelectionView(pools, chain, erc4626Snapshot)) {
+      return;
     }
     const variants = this.requestedViewVariants.get(
       `${chainId}#${protocol}`
     ) ?? [HooksOptions.HOOKS_INCLUSIVE];
     let built = 0;
+    let failed = false;
+    let firstError: unknown;
     for (const hooksOptions of variants) {
       const {byVariant, variantKey} = this.getSelectionViewSlot(
         pools,
@@ -805,62 +933,166 @@ export class BasicTopPoolsSelector
       if (byVariant.has(variantKey)) {
         continue;
       }
-      const buildStartTime = Date.now();
-      byVariant.set(
-        variantKey,
-        BasicTopPoolsSelector.buildSelectionView(
+      try {
+        await this.publishSelectionView(
+          byVariant,
+          variantKey,
           pools,
           unsupportedTokens,
           chainId,
           protocol,
           hooksOptions,
           ctx
-        )
-      );
-      built += 1;
-      await ctx.metrics.dist(
-        buildMetricKey('TopPoolsSelector.SelectionView.Build.Latency.dist'),
-        Date.now() - buildStartTime,
-        {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
-      );
+        );
+        built += 1;
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+      }
     }
-    await ctx.metrics.count(
-      buildMetricKey('TopPoolsSelector.SelectionView.Prebuild'),
-      built,
-      {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'status:success']}
-    );
+    // Failures are counted per variant by SelectionView.Build and by the
+    // caller's SnapshotWarm, so Prebuild only counts views built.
+    void ctx.metrics
+      .count(buildMetricKey('TopPoolsSelector.SelectionView.Prebuild'), built, {
+        tags: [`chain:${chainId}`, `protocol:${protocol}`, 'status:success'],
+      })
+      .catch(() => undefined);
+    if (failed) {
+      throw firstError;
+    }
   }
 
-  private static buildSelectionView(
+  // Published before the build starts, so concurrent misses for one view
+  // share a single build. Builds for one chain and protocol run one at a time,
+  // each holding a full-snapshot copy while it runs. A failed build is
+  // unpublished so the next request retries it.
+  private publishSelectionView(
+    byVariant: Map<string, SelectionViewEntry>,
+    variantKey: string,
     pools: UniPoolInfo[],
     unsupportedTokens: Set<string>,
     chainId: ChainId,
     protocol: Protocol,
     hooksOptions: HooksOptions | undefined,
     ctx: Context
-  ): SelectionView {
+  ): Promise<SelectionView> {
+    const queueKey = `${chainId}#${protocol}`;
+    const tags = [`chain:${chainId}`, `protocol:${protocol}`];
+    const queueTail = this.buildQueueTails.get(queueKey);
+    if (queueTail !== undefined) {
+      void ctx.metrics
+        .count(
+          buildMetricKey('TopPoolsSelector.SelectionView.Build.Queued'),
+          1,
+          {tags}
+        )
+        .catch(() => undefined);
+    }
+    const entry: SelectionViewEntry = {
+      build: (queueTail ?? Promise.resolve()).then(async () => {
+        const startedAt = this.clock();
+        const view = await BasicTopPoolsSelector.buildSelectionView(
+          pools,
+          unsupportedTokens,
+          chainId,
+          protocol,
+          hooksOptions,
+          ctx,
+          // One slicer per build: builds for different keys each hold up to
+          // a slice per turn, bounded by the few keys building at once. A
+          // shared slicer would let the first build to resume take every
+          // slice and starve the others.
+          this.newSlicer()
+        );
+        void ctx.metrics
+          .dist(
+            buildMetricKey('TopPoolsSelector.SelectionView.Build.Latency.dist'),
+            this.clock() - startedAt,
+            {tags}
+          )
+          .catch(() => undefined);
+        return view;
+      }),
+    };
+    byVariant.set(variantKey, entry);
+    const removeSettledTail = (): void => {
+      if (this.buildQueueTails.get(queueKey) === tail) {
+        this.buildQueueTails.delete(queueKey);
+      }
+    };
+    const tail = entry.build.then(removeSettledTail, removeSettledTail);
+    this.buildQueueTails.set(queueKey, tail);
+    const countBuild = (succeeded: boolean) =>
+      void ctx.metrics
+        .count(buildMetricKey('TopPoolsSelector.SelectionView.Build'), 1, {
+          tags: [
+            ...tags,
+            ...buildStatusTags(
+              succeeded,
+              MetricFailureReason.SELECTION_VIEW_BUILD_ERROR
+            ),
+          ],
+        })
+        .catch(() => undefined);
+    entry.build.then(
+      view => {
+        entry.view = view;
+        countBuild(true);
+      },
+      () => {
+        if (byVariant.get(variantKey) === entry) {
+          byVariant.delete(variantKey);
+        }
+        countBuild(false);
+      }
+    );
+    return entry.build;
+  }
+
+  private static async buildSelectionView(
+    pools: UniPoolInfo[],
+    unsupportedTokens: Set<string>,
+    chainId: ChainId,
+    protocol: Protocol,
+    hooksOptions: HooksOptions | undefined,
+    ctx: Context,
+    slicer: EventLoopSlicer
+  ): Promise<SelectionView> {
     const aggHookAddressSet =
       BasicTopPoolsSelector.getAggHookAddressSet(chainId);
-    const filteredUnsupportedPools =
-      BasicTopPoolsSelector.filterUnsupportedPools(
-        pools,
-        chainId,
-        unsupportedTokens,
-        ctx
-      );
-    const filteredPools = filteredUnsupportedPools.filter(
-      pool =>
-        !BasicTopPoolsSelector.isExcludedAggHookPool(
+    const complianceFilter = new CompliancePoolFilter(
+      chainId,
+      unsupportedTokens
+    );
+    const filteredPools: UniPoolInfo[] = [];
+    const tokenToPools = new Map<string, UniPoolInfo[]>();
+    for (let index = 0; index < pools.length; index++) {
+      const pool = pools[index];
+      if (
+        complianceFilter.admits(pool) &&
+        BasicTopPoolsSelector.isSelectablePool(
           pool,
           protocol,
+          hooksOptions,
           aggHookAddressSet
-        ) &&
-        BasicTopPoolsSelector.matchesHooksOptions(pool, protocol, hooksOptions)
+        )
+      ) {
+        filteredPools.push(pool);
+        indexPool(tokenToPools, pool.token0.id.toLowerCase(), pool);
+        indexPool(tokenToPools, pool.token1.id.toLowerCase(), pool);
+      }
+      if (isBuildChunkEnd(index)) {
+        await slicer.yieldIfSliceElapsed();
+      }
+    }
+    complianceFilter.countDrops(ctx);
+    const tvlSortedPools = await BasicTopPoolsSelector.buildTvlSortedPools(
+      filteredPools,
+      slicer
     );
-    const tokenPoolIndex = buildTokenPoolIndex(filteredPools);
-    const tvlSortedPools =
-      BasicTopPoolsSelector.buildTvlSortedPools(filteredPools);
-    return {filteredPools, tokenPoolIndex, tvlSortedPools};
+    return {filteredPools, tokenPoolIndex: {tokenToPools}, tvlSortedPools};
   }
 
   private async getOrBuildSelectionView(
@@ -889,21 +1121,18 @@ export class BasicTopPoolsSelector
     );
     const existing = byVariant.get(variantKey);
     if (existing !== undefined) {
+      const result = existing.view === undefined ? 'inflight' : 'hit';
       await ctx.metrics.count(
         buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
         1,
-        {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:hit']}
+        {tags: [`chain:${chainId}`, `protocol:${protocol}`, `result:${result}`]}
       );
-      return existing;
+      return existing.view ?? existing.build;
     }
 
-    // Build and publish before any await: the build below is fully
-    // synchronous, so with no suspension point between the memo read above
-    // and the set below, concurrent same-tick misses cannot each rebuild the
-    // view — the second caller sees the first one's entry. Metrics are
-    // emitted only after publication.
-    const buildStartTime = Date.now();
-    const view = BasicTopPoolsSelector.buildSelectionView(
+    const view = await this.publishSelectionView(
+      byVariant,
+      variantKey,
       pools,
       unsupportedTokens,
       chainId,
@@ -911,16 +1140,10 @@ export class BasicTopPoolsSelector
       hooksOptions,
       ctx
     );
-    byVariant.set(variantKey, view);
     await ctx.metrics.count(
       buildMetricKey('TopPoolsSelector.SelectionView.Cache'),
       1,
       {tags: [`chain:${chainId}`, `protocol:${protocol}`, 'result:miss']}
-    );
-    await ctx.metrics.dist(
-      buildMetricKey('TopPoolsSelector.SelectionView.Build.Latency.dist'),
-      Date.now() - buildStartTime,
-      {tags: [`chain:${chainId}`, `protocol:${protocol}`]}
     );
     return view;
   }
@@ -938,16 +1161,23 @@ export class BasicTopPoolsSelector
   // undefinable rather than broken here. Snapshot entries are JSON
   // round-tripped and TVL-filtered upstream, which excludes NaN in
   // practice.
-  public static buildTvlSortedPools(pools: UniPoolInfo[]): UniPoolInfo[] {
+  public static async buildTvlSortedPools(
+    pools: UniPoolInfo[],
+    slicer: EventLoopSlicer
+  ): Promise<UniPoolInfo[]> {
     const seenIds = new Set<string>();
-    const uniquePools = pools.filter(pool => {
+    const uniquePools: UniPoolInfo[] = [];
+    for (let index = 0; index < pools.length; index++) {
+      const pool = pools[index];
       const poolId = pool.id.toLowerCase();
-      if (seenIds.has(poolId)) {
-        return false;
+      if (!seenIds.has(poolId)) {
+        seenIds.add(poolId);
+        uniquePools.push(pool);
       }
-      seenIds.add(poolId);
-      return true;
-    });
+      if (isBuildChunkEnd(index)) {
+        await slicer.yieldIfSliceElapsed();
+      }
+    }
     return uniquePools.sort((a, b) => getPoolTVL(b) - getPoolTVL(a));
   }
 

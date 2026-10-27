@@ -574,8 +574,9 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     return retrievedPools;
   }
 
-  // The warmer only moves work earlier; on failure the first request builds
-  // the same state lazily, so this never fails the refresh.
+  // The warmer only moves work earlier, so this never fails the refresh. A
+  // request that joined the failed build fails with it; later requests build
+  // the same state lazily.
   private async warmSnapshotSafely(
     pools: TPool[],
     globalSet: Set<string>,
@@ -596,7 +597,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       );
     } catch (error) {
       ctx.logger.warn(
-        `[${this.discovererName}] Pool snapshot warm failed; selection state will build on first use`,
+        `[${this.discovererName}] Pool snapshot warm failed; requests waiting on it fail, later requests build lazily`,
         {chainId, protocol, error}
       );
       void ctx.metrics

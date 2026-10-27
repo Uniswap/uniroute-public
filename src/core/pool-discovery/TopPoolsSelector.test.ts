@@ -17,6 +17,7 @@ import {
   getMaxFilteredPoolCount,
   MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
   METRIC_NON_CANONICAL_POOL,
+  SELECTION_VIEW_BUILD_CHUNK_SIZE,
 } from './TopPoolsSelector';
 import {defaultPoolSelectionConfig} from '../../lib/config';
 import {
@@ -61,11 +62,24 @@ import {
 } from 'src/lib/config';
 import {Protocol} from 'src/models/pool/Protocol';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
-import {CanonicalPools} from '../../lib/CanonicalPools';
+import {
+  CanonicalPools,
+  CanonicalPoolsCondition,
+} from '../../lib/CanonicalPools';
 import {V4Pool} from '../../models/pool/V4Pool';
 import {FeatureGatedTokensFetcher} from '../../stores/compliance/FeatureGatedTokensFetcher';
 import {S3FeatureGatedTokensFetcher} from '../../stores/compliance/S3FeatureGatedTokensFetcher';
-import {buildTestContext, TestContext} from '@uniswap/lib-testhelpers';
+import {
+  buildTestContext,
+  TestContext,
+  TestLogger,
+  TestMetric,
+} from '@uniswap/lib-testhelpers';
+import {MetricOptions} from '@uniswap/lib-uni';
+import {Context as UniContext} from '@uniswap/lib-uni/context';
+import {EventLoopSlicer} from '../../lib/eventLoopSlicer';
+import {createErc4626RegistrySnapshot} from '../registry/Erc4626WrapperRegistry';
+import {FakeCanonicalPoolsConditionReader} from '../../../tests/test-utils/FakeCanonicalPoolsConditionReader';
 
 describe('BasicTopPoolsSelector', () => {
   let chainRepository: IChainRepository;
@@ -3480,8 +3494,926 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
     });
   });
 
+  describe('event-loop slicing', () => {
+    const CHAIN = ChainId.ARBITRUM;
+    const HUB_ADDRESSES = [
+      ADDRESS_ZERO,
+      ...BASE_TOKENS_PER_CHAIN[CHAIN].map(token => token.address),
+    ];
+    const BUILD_METRIC = buildMetricKey(
+      'TopPoolsSelector.SelectionView.Build.Latency.dist'
+    );
+    const PREBUILD_METRIC = buildMetricKey(
+      'TopPoolsSelector.SelectionView.Prebuild'
+    );
+    const builds = (metricsCtx: TestContext) =>
+      metricsCtx.metrics.distStore.filter(
+        entry => entry.metric_name === BUILD_METRIC
+      ).length;
+    const randomToken = (index: number) =>
+      `0x${index.toString(16).padStart(40, '0')}`;
+
+    class RecordingMetric extends TestMetric {
+      readonly countCalls: Array<{
+        name: string;
+        value: number;
+        tags: string[];
+      }> = [];
+      override async count(
+        name: string,
+        value: number,
+        opts?: MetricOptions
+      ): Promise<void> {
+        this.countCalls.push({name, value, tags: opts?.tags ?? []});
+        return super.count(name, value, opts);
+      }
+    }
+    const recordingContext = () => {
+      const metrics = new RecordingMetric();
+      return {
+        recordingCtx: new TestContext(metrics, new TestLogger()),
+        metrics,
+      };
+    };
+    const countTags = (metrics: RecordingMetric, metric: string) =>
+      metrics.countCalls
+        .filter(call => call.name === buildMetricKey(metric))
+        .map(call => call.tags.filter(tag => !tag.startsWith('chain:')));
+
+    // Seeded, so the universe is fixed. Hub-heavy like a production
+    // snapshot (most pools pair with WETH, ETH or a base token), with
+    // duplicate ids, TVL ties and hooked pools, and large enough that a
+    // view build spans several slices.
+    const buildHubHeavyUniverse = (): V4PoolInfo[] => {
+      let seed = 7;
+      const random = () =>
+        (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+      const pick = <T>(values: T[]) =>
+        values[Math.floor(random() * values.length)];
+      const pools: V4PoolInfo[] = [];
+      for (let index = 0; index < 3000; index++) {
+        const tvlUSD = random() < 0.1 ? 1000 : Math.floor(random() * 1e6);
+        if (index > 0 && random() < 0.01) {
+          const original = pick(pools);
+          pools.push({...original, tvlUSD, tvlETH: tvlUSD});
+          continue;
+        }
+        const token0 =
+          random() < 0.6
+            ? pick(HUB_ADDRESSES).toLowerCase()
+            : randomToken(1 + Math.floor(random() * 400));
+        const token1 = randomToken(1 + Math.floor(random() * 400));
+        pools.push(
+          makeV4Pool(
+            `0x${(index + 1).toString(16).padStart(64, '0')}`,
+            token0,
+            token0 === token1 ? randomToken(401) : token1,
+            tvlUSD,
+            random() < 0.2 ? HOOK : ADDRESS_ZERO
+          )
+        );
+      }
+      return pools;
+    };
+
+    const [WETH_ARB, , , USDC_ARB] = BASE_TOKENS_PER_CHAIN[CHAIN].map(
+      token => new Address(token.address)
+    );
+    const SLICED_PAIRS: Array<[Address, Address]> = [
+      [WETH_ARB, USDC_ARB],
+      [new Address(randomToken(5)), WETH_ARB],
+      [new Address(ADDRESS_ZERO), new Address(randomToken(99))],
+      [new Address(randomToken(17)), new Address(randomToken(42))],
+      [USDC_ARB, new Address(randomToken(3))],
+    ];
+
+    const selectorWithSliceMs = (snapshotMemo: boolean, sliceMs: number) =>
+      new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        featureGatedTokensRepository,
+        snapshotMemo,
+        undefined,
+        sliceMs
+      );
+
+    const select = (
+      selector: BasicTopPoolsSelector,
+      pools: UniPoolInfo[],
+      selectCtx: Context,
+      pair: [Address, Address] = SLICED_PAIRS[0],
+      hooksOptions?: HooksOptions
+    ) =>
+      selector.filterPools(
+        pools,
+        CHAIN,
+        pair[0],
+        pair[1],
+        Protocol.V4,
+        hooksOptions,
+        EMPTY_NAMESPACE_CONTEXT,
+        selectCtx,
+        {shouldUseCache: true}
+      );
+
+    it('selects the same pools in the same order as the unsliced legacy path', async () => {
+      const pools = stable(buildHubHeavyUniverse());
+      const slicedSelector = selectorWithSliceMs(true, 0);
+      const unslicedSelector = selectorWithSliceMs(
+        false,
+        Number.POSITIVE_INFINITY
+      );
+      for (const hooksOptions of HOOKS_VARIANTS) {
+        for (const pair of SLICED_PAIRS) {
+          const unsliced = await select(
+            unslicedSelector,
+            pools,
+            buildTestContext(),
+            pair,
+            hooksOptions
+          );
+          const sliced = await select(
+            slicedSelector,
+            pools,
+            buildTestContext(),
+            pair,
+            hooksOptions
+          );
+          expect(unsliced.length, `${pair[0]} ${hooksOptions}`).toBeGreaterThan(
+            0
+          );
+          expect(sliced, `${pair[0]} ${hooksOptions}`).toEqual(unsliced);
+        }
+      }
+    });
+
+    const immediateRunsBefore = async (work: () => Promise<unknown>) => {
+      let immediateRan = false;
+      setImmediate(() => {
+        immediateRan = true;
+      });
+      await work();
+      return immediateRan;
+    };
+
+    const yieldsWhileBuildingAndSelecting = async (sliceMs: number) => {
+      const pools = stable(buildHubHeavyUniverse());
+      const selector = selectorWithSliceMs(true, sliceMs);
+      const {globalSet} =
+        await featureGatedTokensRepository.getSnapshot(buildTestContext());
+      const yieldedWhileBuilding = await immediateRunsBefore(() =>
+        selector.warmSnapshot(
+          pools,
+          globalSet,
+          CHAIN,
+          Protocol.V4,
+          buildTestContext()
+        )
+      );
+      const yieldedWhileSelecting = await immediateRunsBefore(() =>
+        select(selector, pools, buildTestContext())
+      );
+      return {yieldedWhileBuilding, yieldedWhileSelecting};
+    };
+
+    it('yields to the event loop while building a view and while selecting from it', async () => {
+      expect(await yieldsWhileBuildingAndSelecting(0)).toEqual({
+        yieldedWhileBuilding: true,
+        yieldedWhileSelecting: true,
+      });
+    });
+
+    it('runs each step to completion in one task when slicing is off', async () => {
+      expect(
+        await yieldsWhileBuildingAndSelecting(Number.POSITIVE_INFINITY)
+      ).toEqual({yieldedWhileBuilding: false, yieldedWhileSelecting: false});
+    });
+
+    it('shares one in-flight build between concurrent requests and a prewarm', async () => {
+      const pools = stable(buildHubHeavyUniverse());
+      const slicedSelector = selectorWithSliceMs(true, 0);
+      const {recordingCtx, metrics} = recordingContext();
+      const {globalSet} =
+        await featureGatedTokensRepository.getSnapshot(buildTestContext());
+      const [first, second] = await Promise.all([
+        select(slicedSelector, pools, recordingCtx),
+        select(slicedSelector, pools, recordingCtx),
+        slicedSelector.warmSnapshot(
+          pools,
+          globalSet,
+          CHAIN,
+          Protocol.V4,
+          recordingCtx
+        ),
+      ]);
+      await select(slicedSelector, pools, recordingCtx);
+
+      expect(builds(recordingCtx)).toBe(1);
+      expect(
+        countTags(metrics, 'TopPoolsSelector.SelectionView.Build')
+      ).toEqual([[`protocol:${Protocol.V4}`, 'status:success']]);
+      const cacheResults = countTags(
+        metrics,
+        'TopPoolsSelector.SelectionView.Cache'
+      ).map(tags => tags.find(tag => tag.startsWith('result:')));
+      expect(cacheResults).toHaveLength(3);
+      const [concurrentResults, laterResult] = [
+        cacheResults.slice(0, 2),
+        cacheResults[2],
+      ];
+      for (const result of concurrentResults) {
+        expect(['result:miss', 'result:inflight']).toContain(result);
+      }
+      expect(concurrentResults).toContain('result:inflight');
+      expect(laterResult).toBe('result:hit');
+      const unsliced = await select(
+        selectorWithSliceMs(false, Number.POSITIVE_INFINITY),
+        pools,
+        buildTestContext()
+      );
+      expect(first).toEqual(unsliced);
+      expect(second).toEqual(unsliced);
+    });
+
+    it('counts a failed build, drops it, and keeps building views for the chain', async () => {
+      const pools = buildHubHeavyUniverse();
+      const [firstPool] = pools;
+      const {token0} = firstPool;
+      let failNextRead = true;
+      Object.defineProperty(firstPool, 'token0', {
+        get: () => {
+          if (failNextRead) {
+            failNextRead = false;
+            throw new Error('malformed snapshot entry');
+          }
+          return token0;
+        },
+      });
+      stable(pools);
+      const slicedSelector = selectorWithSliceMs(true, 0);
+
+      const {recordingCtx: failedCtx, metrics: failedMetrics} =
+        recordingContext();
+      await expect(select(slicedSelector, pools, failedCtx)).rejects.toThrow(
+        'malformed snapshot entry'
+      );
+      expect(builds(failedCtx)).toBe(0);
+      expect(
+        countTags(failedMetrics, 'TopPoolsSelector.SelectionView.Build')
+      ).toEqual([
+        [
+          `protocol:${Protocol.V4}`,
+          'status:failure',
+          'reason:selection_view_build_error',
+        ],
+      ]);
+
+      // The failed build must not block later builds queued for this chain.
+      const otherVariantCtx = buildTestContext();
+      await select(
+        slicedSelector,
+        pools,
+        otherVariantCtx,
+        SLICED_PAIRS[0],
+        HooksOptions.HOOKS_ONLY
+      );
+      expect(builds(otherVariantCtx)).toBe(1);
+
+      const retryCtx = buildTestContext();
+      const retried = await select(slicedSelector, pools, retryCtx);
+      expect(builds(retryCtx)).toBe(1);
+      expect(retried).toEqual(
+        await select(
+          selectorWithSliceMs(false, Number.POSITIVE_INFINITY),
+          pools,
+          buildTestContext()
+        )
+      );
+    });
+
+    it('counts non-canonical drops once per view build, with the same total as the unsliced path', async () => {
+      const pools = stable(buildHubHeavyUniverse());
+      const usdc = USDC_ARB.address.toLowerCase();
+      const canonicalUsdcPool = pools.find(
+        pool => pool.token0.id === usdc || pool.token1.id === usdc
+      );
+      if (canonicalUsdcPool === undefined) {
+        throw new Error('fixture has no USDC pool');
+      }
+      CanonicalPools.__TEST_ONLY__injectTestData({
+        [CHAIN]: {[usdc]: [canonicalUsdcPool.id]},
+      });
+      try {
+        const {recordingCtx: slicedCtx, metrics: slicedMetrics} =
+          recordingContext();
+        const sliced = await select(
+          selectorWithSliceMs(true, 0),
+          pools,
+          slicedCtx
+        );
+        const {recordingCtx: unslicedCtx, metrics: unslicedMetrics} =
+          recordingContext();
+        const unsliced = await select(
+          selectorWithSliceMs(false, Number.POSITIVE_INFINITY),
+          pools,
+          unslicedCtx
+        );
+
+        const drops = (metrics: RecordingMetric) =>
+          metrics.countCalls
+            .filter(call => call.name === METRIC_NON_CANONICAL_POOL)
+            .map(call => call.value);
+        // The hub-heavy universe spreads USDC pools over every build chunk.
+        expect(drops(unslicedMetrics)).toHaveLength(1);
+        expect(drops(unslicedMetrics)[0]).toBeGreaterThan(100);
+        expect(drops(slicedMetrics)).toEqual(drops(unslicedMetrics));
+        expect(sliced).toEqual(unsliced);
+      } finally {
+        CanonicalPools.__TEST_ONLY__injectTestData();
+      }
+    });
+
+    const emptyFetcher = {
+      fetchAll: async () => ({tokens: [], skippedUnsupportedChains: 0}),
+    };
+    const emptyBootstrapFetcher = {fetch: async () => []};
+
+    it('applies the deny list the same way on the view and the unsliced path', async () => {
+      const usdc = USDC_ARB.address.toLowerCase();
+      const gatedTokens = new Set([usdc]);
+      class GatedRepository extends FeatureGatedTokensRepository {
+        override async getSnapshot(snapshotCtx: UniContext) {
+          return {
+            ...(await super.getSnapshot(snapshotCtx)),
+            globalSet: gatedTokens,
+          };
+        }
+      }
+      const repository = new GatedRepository(
+        emptyFetcher,
+        emptyBootstrapFetcher
+      );
+      const selectorFor = (snapshotMemo: boolean, sliceMs: number) =>
+        new BasicTopPoolsSelector(
+          chainRepository,
+          poolSelectionConfig,
+          repository,
+          snapshotMemo,
+          undefined,
+          sliceMs
+        );
+      const pools = stable(buildHubHeavyUniverse());
+      const viewSelector = selectorFor(true, 0);
+      const unslicedSelector = selectorFor(false, Number.POSITIVE_INFINITY);
+      const pairsWithoutUsdc = SLICED_PAIRS.filter(
+        pair => !pair.some(token => token.address.toLowerCase() === usdc)
+      );
+      for (const pair of pairsWithoutUsdc) {
+        const fromView = await select(
+          viewSelector,
+          pools,
+          buildTestContext(),
+          pair
+        );
+        expect(
+          fromView.some(
+            pool => pool.token0.id === usdc || pool.token1.id === usdc
+          )
+        ).toBe(false);
+        expect(fromView).toEqual(
+          await select(unslicedSelector, pools, buildTestContext(), pair)
+        );
+      }
+    });
+
+    it('starts the request slice at stage 1, after the snapshot reads', async () => {
+      let fakeNow = 0;
+      const snapshotRead = {advancesClockMs: 0};
+      class ClockAdvancingRepository extends FeatureGatedTokensRepository {
+        override async getSnapshot(snapshotCtx: UniContext) {
+          const snapshot = await super.getSnapshot(snapshotCtx);
+          fakeNow += snapshotRead.advancesClockMs;
+          return snapshot;
+        }
+      }
+      const selector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        new ClockAdvancingRepository(emptyFetcher, emptyBootstrapFetcher),
+        true,
+        undefined,
+        10,
+        undefined,
+        () => fakeNow
+      );
+      const pools = stable(buildHubHeavyUniverse());
+      await select(selector, pools, buildTestContext());
+
+      snapshotRead.advancesClockMs = 1000;
+      expect(
+        await immediateRunsBefore(() =>
+          select(selector, pools, buildTestContext())
+        )
+      ).toBe(false);
+    });
+
+    it('yields after the unsliced fallback filter once its slice has elapsed', async () => {
+      let fakeNow = 0;
+      const pools = buildHubHeavyUniverse();
+      const [firstPool] = pools;
+      const {token0} = firstPool;
+      let filterStarted = false;
+      Object.defineProperty(firstPool, 'token0', {
+        get: () => {
+          if (!filterStarted) {
+            filterStarted = true;
+            fakeNow += 1000;
+          }
+          return token0;
+        },
+      });
+      const selector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        featureGatedTokensRepository,
+        true,
+        undefined,
+        10,
+        undefined,
+        () => fakeNow
+      );
+      expect(
+        await immediateRunsBefore(() =>
+          select(selector, pools, buildTestContext())
+        )
+      ).toBe(true);
+    });
+
+    it('skips the view in the prewarm and in requests whose ERC-4626 snapshot has assets', async () => {
+      const xStock = randomToken(5);
+      const wxStock = randomToken(6);
+      const hook = randomToken(7);
+      const erc4626Snapshot = createErc4626RegistrySnapshot(
+        [
+          {
+            xStock,
+            wxStock,
+            hookAddress: hook,
+            poolId: `0x${'ab'.repeat(32)}`,
+            feeTier: '0',
+            tickSpacing: '0',
+          },
+        ],
+        0
+      );
+      const selector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        featureGatedTokensRepository,
+        true,
+        undefined,
+        0,
+        {getSnapshot: async () => erc4626Snapshot}
+      );
+      const pools = stable(buildHubHeavyUniverse());
+      const {globalSet} =
+        await featureGatedTokensRepository.getSnapshot(buildTestContext());
+      const warmCtx = buildTestContext();
+      await selector.warmSnapshot(
+        pools,
+        globalSet,
+        CHAIN,
+        Protocol.V4,
+        warmCtx
+      );
+      expect(builds(warmCtx)).toBe(0);
+
+      const requestCtx = buildTestContext();
+      await selector.filterPools(
+        pools,
+        CHAIN,
+        WETH_ARB,
+        USDC_ARB,
+        Protocol.V4,
+        undefined,
+        createNamespaceContext([], erc4626Snapshot),
+        requestCtx,
+        {shouldUseCache: true}
+      );
+      expect(builds(requestCtx)).toBe(0);
+    });
+
+    it('runs one view build at a time per chain and protocol', async () => {
+      const reads: string[] = [];
+      class ObservedDenyList extends Set<string> {
+        constructor(private readonly label: string) {
+          super();
+        }
+        override has(token: string): boolean {
+          reads.push(this.label);
+          return super.has(token);
+        }
+      }
+      const denyListByCtx = new Map<UniContext, Set<string>>();
+      class PerRequestDenyListRepository extends FeatureGatedTokensRepository {
+        override async getSnapshot(snapshotCtx: UniContext) {
+          const snapshot = await super.getSnapshot(snapshotCtx);
+          return {
+            ...snapshot,
+            globalSet: denyListByCtx.get(snapshotCtx) ?? snapshot.globalSet,
+          };
+        }
+      }
+      const selector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        new PerRequestDenyListRepository(emptyFetcher, emptyBootstrapFetcher),
+        true,
+        undefined,
+        0
+      );
+      const pools = stable(buildHubHeavyUniverse());
+      const noHooksCtx = buildTestContext();
+      const hooksOnlyCtx = buildTestContext();
+      denyListByCtx.set(noHooksCtx, new ObservedDenyList('no-hooks'));
+      denyListByCtx.set(hooksOnlyCtx, new ObservedDenyList('hooks-only'));
+
+      await Promise.all([
+        select(
+          selector,
+          pools,
+          noHooksCtx,
+          SLICED_PAIRS[0],
+          HooksOptions.NO_HOOKS
+        ),
+        select(
+          selector,
+          pools,
+          hooksOnlyCtx,
+          SLICED_PAIRS[0],
+          HooksOptions.HOOKS_ONLY
+        ),
+      ]);
+
+      const switches = reads.filter(
+        (label, index) => index > 0 && label !== reads[index - 1]
+      ).length;
+      expect(new Set(reads)).toEqual(new Set(['no-hooks', 'hooks-only']));
+      expect(switches).toBe(1);
+    });
+
+    it('counts a build queued behind another and times it from its own start', async () => {
+      // Every clock read advances the clock, so a build's latency is the number
+      // of reads it makes; two identical builds read it equally often.
+      let ticks = 0;
+      const selector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        featureGatedTokensRepository,
+        true,
+        undefined,
+        0,
+        undefined,
+        () => ++ticks
+      );
+      const pools = stable(buildHubHeavyUniverse());
+      const firstCtx = buildTestContext();
+      const {recordingCtx: queuedCtx, metrics: queuedMetrics} =
+        recordingContext();
+      await Promise.all([
+        selector.warmSnapshot(pools, new Set(), CHAIN, Protocol.V4, firstCtx),
+        selector.warmSnapshot(pools, new Set(), CHAIN, Protocol.V4, queuedCtx),
+      ]);
+      const [firstLatency, queuedLatency] = [firstCtx, queuedCtx].flatMap(
+        latencyCtx =>
+          latencyCtx.metrics.distStore
+            .filter(entry => entry.metric_name === BUILD_METRIC)
+            .map(entry => entry.val)
+      );
+      expect(firstLatency).toBeGreaterThan(0);
+      expect(queuedLatency).toBe(firstLatency);
+
+      const QUEUED_METRIC = buildMetricKey(
+        'TopPoolsSelector.SelectionView.Build.Queued'
+      );
+      expect(firstCtx.metrics.countStore[QUEUED_METRIC]).toBeUndefined();
+      expect(
+        queuedMetrics.countCalls.filter(call => call.name === QUEUED_METRIC)
+      ).toEqual([
+        {
+          name: QUEUED_METRIC,
+          value: 1,
+          tags: [`chain:${CHAIN}`, `protocol:${Protocol.V4}`],
+        },
+      ]);
+      // Once the queue has drained, the next build does not wait.
+      const laterCtx = buildTestContext();
+      await selector.warmSnapshot(
+        pools,
+        new Set(),
+        CHAIN,
+        Protocol.V4,
+        laterCtx
+      );
+      expect(builds(laterCtx)).toBe(1);
+      expect(laterCtx.metrics.countStore[QUEUED_METRIC]).toBeUndefined();
+    });
+
+    it('drops a failed build from the queue, so the next build for that key neither waits nor fails', async () => {
+      const selector = selectorWithSliceMs(true, 0);
+      const pools = buildHubHeavyUniverse();
+      const [firstPool] = pools;
+      const {token0} = firstPool;
+      let failNextRead = true;
+      Object.defineProperty(firstPool, 'token0', {
+        get: () => {
+          if (failNextRead) {
+            failNextRead = false;
+            throw new Error('malformed snapshot entry');
+          }
+          return token0;
+        },
+      });
+      stable(pools);
+      await expect(
+        selector.warmSnapshot(
+          pools,
+          new Set(),
+          CHAIN,
+          Protocol.V4,
+          buildTestContext()
+        )
+      ).rejects.toThrow('malformed snapshot entry');
+
+      const {recordingCtx: nextCtx, metrics} = recordingContext();
+      await selector.warmSnapshot(
+        pools,
+        new Set(),
+        CHAIN,
+        Protocol.V4,
+        nextCtx
+      );
+      expect(builds(nextCtx)).toBe(1);
+      expect(
+        metrics.countCalls.filter(
+          call =>
+            call.name ===
+            buildMetricKey('TopPoolsSelector.SelectionView.Build.Queued')
+        )
+      ).toEqual([]);
+    });
+
+    it('interleaves concurrent view builds for different protocols, one chunk each per turn', async () => {
+      // The fake clock is the work done: every token0 read advances it. The
+      // build reads token0 three times per kept pool.
+      const TOKEN0_READS_PER_POOL = 3;
+      const CHUNK_WORK =
+        SELECTION_VIEW_BUILD_CHUNK_SIZE * TOKEN0_READS_PER_POOL;
+      let work = 0;
+      const meteredUniverse = (copies: number) => {
+        const pools = Array.from(
+          {length: copies},
+          buildHubHeavyUniverse
+        ).flat();
+        for (const pool of pools) {
+          const {token0} = pool;
+          Object.defineProperty(pool, 'token0', {
+            get: () => {
+              work += 1;
+              return token0;
+            },
+          });
+        }
+        return stable(pools);
+      };
+      const longPools = meteredUniverse(4);
+      const shortPools = meteredUniverse(1);
+      // A slice shorter than one chunk makes every build yield at each
+      // chunk end.
+      const selector = new BasicTopPoolsSelector(
+        chainRepository,
+        poolSelectionConfig,
+        featureGatedTokensRepository,
+        true,
+        undefined,
+        1,
+        undefined,
+        () => work
+      );
+
+      let workAtLastTurn = 0;
+      let mostWorkInOneTurn = 0;
+      let ticking = true;
+      const tick = () => {
+        mostWorkInOneTurn = Math.max(mostWorkInOneTurn, work - workAtLastTurn);
+        workAtLastTurn = work;
+        if (ticking) {
+          setImmediate(tick);
+        }
+      };
+      setImmediate(tick);
+      const finished: string[] = [];
+      const longBuild = selector
+        .warmSnapshot(
+          longPools,
+          new Set(),
+          CHAIN,
+          Protocol.V4,
+          buildTestContext()
+        )
+        .then(() => finished.push('long'));
+      for (let turn = 0; turn < 3; turn++) {
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      expect(work).toBeGreaterThan(0);
+      expect(finished).toEqual([]);
+      const shortBuild = selector
+        .warmSnapshot(
+          shortPools,
+          new Set(),
+          CHAIN,
+          Protocol.V3,
+          buildTestContext()
+        )
+        .then(() => finished.push('short'));
+      await Promise.all([longBuild, shortBuild]);
+      ticking = false;
+      tick();
+
+      expect(finished).toEqual(['short', 'long']);
+      expect(mostWorkInOneTurn).toBeLessThanOrEqual(2 * CHUNK_WORK);
+    });
+
+    it('keeps prewarming the other variants when one variant fails', async () => {
+      const selector = selectorWithSliceMs(true, 0);
+      const previousSnapshot = stable(buildHubHeavyUniverse());
+      for (const hooksOptions of [
+        HooksOptions.HOOKS_INCLUSIVE,
+        HooksOptions.NO_HOOKS,
+        HooksOptions.HOOKS_ONLY,
+      ]) {
+        await select(
+          selector,
+          previousSnapshot,
+          buildTestContext(),
+          SLICED_PAIRS[0],
+          hooksOptions
+        );
+      }
+
+      const pools = buildHubHeavyUniverse();
+      const [firstPool] = pools;
+      const {token0} = firstPool;
+      let failNextRead = true;
+      Object.defineProperty(firstPool, 'token0', {
+        get: () => {
+          if (failNextRead) {
+            failNextRead = false;
+            throw new Error('malformed snapshot entry');
+          }
+          return token0;
+        },
+      });
+      stable(pools);
+      const {globalSet} =
+        await featureGatedTokensRepository.getSnapshot(buildTestContext());
+      class PrebuildRejectingMetric extends RecordingMetric {
+        override async count(
+          name: string,
+          value: number,
+          opts?: MetricOptions
+        ): Promise<void> {
+          await super.count(name, value, opts);
+          if (name === PREBUILD_METRIC) {
+            throw new Error('metrics backend unavailable');
+          }
+        }
+      }
+      const metrics = new PrebuildRejectingMetric();
+      const warmCtx = new TestContext(metrics, new TestLogger());
+      await expect(
+        selector.warmSnapshot(pools, globalSet, CHAIN, Protocol.V4, warmCtx)
+      ).rejects.toThrow('malformed snapshot entry');
+      expect(builds(warmCtx)).toBe(2);
+      expect(
+        metrics.countCalls
+          .filter(call => call.name === PREBUILD_METRIC)
+          .map(({value, tags}) => ({value, tags}))
+      ).toEqual([
+        {
+          value: 2,
+          tags: [`chain:${CHAIN}`, `protocol:${Protocol.V4}`, 'status:success'],
+        },
+      ]);
+
+      for (const hooksOptions of [
+        HooksOptions.NO_HOOKS,
+        HooksOptions.HOOKS_ONLY,
+      ]) {
+        const requestCtx = buildTestContext();
+        await select(
+          selector,
+          pools,
+          requestCtx,
+          SLICED_PAIRS[0],
+          hooksOptions
+        );
+        expect(builds(requestCtx), `${hooksOptions}`).toBe(0);
+      }
+    });
+
+    it('keeps one canonical-pool lift state for a whole sliced build', async () => {
+      const liftedToken = randomToken(17);
+      const pools = stable(buildHubHeavyUniverse());
+      const canonicalPool = pools.find(
+        pool => pool.token0.id === liftedToken || pool.token1.id === liftedToken
+      );
+      if (canonicalPool === undefined) {
+        throw new Error('fixture has no pool for the lifted token');
+      }
+      CanonicalPools.__TEST_ONLY__injectTestData({
+        [CHAIN]: {
+          [liftedToken]: {
+            symbol: 'LIFTED',
+            pools: [canonicalPool.id],
+            enforcedWhile: CanonicalPoolsCondition.POOL_MANAGER_NOT_DISTRIBUTOR,
+          },
+        },
+      });
+      try {
+        const liftCtx = buildTestContext();
+        await CanonicalPools.resolveConditions(
+          CHAIN,
+          new FakeCanonicalPoolsConditionReader(() => true),
+          liftCtx
+        );
+        const pair: [Address, Address] = [new Address(liftedToken), WETH_ARB];
+        const unsliced = await select(
+          selectorWithSliceMs(false, Number.POSITIVE_INFINITY),
+          pools,
+          buildTestContext(),
+          pair
+        );
+        // Only the lift admits more than the canonical pool for this token.
+        expect(
+          unsliced.filter(
+            pool =>
+              pool.token0.id === liftedToken || pool.token1.id === liftedToken
+          ).length
+        ).toBeGreaterThan(1);
+
+        // Re-enforces the entry while the prewarm build is past its first chunk.
+        const midBuildPool = pools[1000];
+        const {token0} = midBuildPool;
+        let flipPending = true;
+        Object.defineProperty(midBuildPool, 'token0', {
+          get: () => {
+            if (flipPending) {
+              flipPending = false;
+              void CanonicalPools.resolveConditions(
+                CHAIN,
+                new FakeCanonicalPoolsConditionReader(() => false),
+                liftCtx
+              );
+            }
+            return token0;
+          },
+        });
+        const slicedSelector = selectorWithSliceMs(true, 0);
+        const {globalSet} =
+          await featureGatedTokensRepository.getSnapshot(buildTestContext());
+        await slicedSelector.warmSnapshot(
+          pools,
+          globalSet,
+          CHAIN,
+          Protocol.V4,
+          buildTestContext()
+        );
+        expect(flipPending).toBe(false);
+
+        // Lifted again, so only the prebuilt view can differ from the reference.
+        await CanonicalPools.resolveConditions(
+          CHAIN,
+          new FakeCanonicalPoolsConditionReader(() => true),
+          liftCtx
+        );
+        expect(
+          await select(slicedSelector, pools, buildTestContext(), pair)
+        ).toEqual(unsliced);
+      } finally {
+        CanonicalPools.__TEST_ONLY__injectTestData();
+      }
+    });
+
+    it('rejects an invalid slice budget at construction', () => {
+      expect(() => selectorWithSliceMs(true, -1)).toThrow(
+        'sliceMs must be >= 0'
+      );
+    });
+  });
+
   describe('getTopNPairsFromSorted', () => {
-    it('matches getTopNPairs including TVL ties and pre-selected pools', () => {
+    it('matches getTopNPairs including TVL ties and pre-selected pools', async () => {
       const pools: UniPoolInfo[] = [
         makeV4Pool('0x1', TOKEN_A, TOKEN_B, 500),
         makeV4Pool('0x2', TOKEN_A, TOKEN_C, 500), // tie with 0x1
@@ -3498,7 +4430,10 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
         ChainId.MAINNET,
         poolSelectionConfig
       );
-      const sorted = BasicTopPoolsSelector.buildTvlSortedPools(pools);
+      const sorted = await BasicTopPoolsSelector.buildTvlSortedPools(
+        pools,
+        new EventLoopSlicer(0)
+      );
       const fast = BasicTopPoolsSelector.getTopNPairsFromSorted(
         sorted,
         seenFast,
@@ -3510,7 +4445,7 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
       expect(seenFast).toEqual(seenLegacy);
     });
 
-    it('matches getTopNPairs when the universe has duplicate pool ids with different TVLs', () => {
+    it('matches getTopNPairs when the universe has duplicate pool ids with different TVLs', async () => {
       // Legacy dedupes via the seen-set BEFORE sorting, so the first
       // occurrence (in input order) wins even when a later duplicate has
       // higher TVL. buildTvlSortedPools must preserve that.
@@ -3529,7 +4464,10 @@ describe('snapshot memoization (SnapshotMemoEnabled)', () => {
         poolSelectionConfig
       );
       const fast = BasicTopPoolsSelector.getTopNPairsFromSorted(
-        BasicTopPoolsSelector.buildTvlSortedPools(pools),
+        await BasicTopPoolsSelector.buildTvlSortedPools(
+          pools,
+          new EventLoopSlicer(0)
+        ),
         seenFast,
         ChainId.MAINNET,
         poolSelectionConfig

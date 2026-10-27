@@ -737,6 +737,8 @@ export enum MetricFailureReason {
    * pool. Either leaves the token unroutable.
    */
   NO_CANONICAL_POOL_PRESENT = 'no_canonical_pool_present',
+  /** Building a TopPoolsSelector selection view from a snapshot threw. */
+  SELECTION_VIEW_BUILD_ERROR = 'selection_view_build_error',
 }
 
 /** `status:` tag, plus the hardcoded `reason:` tag on failure. */

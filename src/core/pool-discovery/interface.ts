@@ -176,7 +176,8 @@ export async function trackPoolsForTokensCacheSkip(
  * just published, so the first request against it does not build that state
  * on its own latency. Implementations must produce exactly the state the
  * request path would build lazily (selection results unchanged), and may
- * reject; the caller degrades to lazy building.
+ * reject. A request already waiting on that build fails with it; later
+ * requests build lazily.
  */
 export interface IPoolSnapshotWarmer {
   warmSnapshot(
