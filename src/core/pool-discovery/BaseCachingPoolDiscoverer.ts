@@ -21,6 +21,7 @@ import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 import {getMaxFilteredPoolCount} from './TopPoolsSelector';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../lib/CanonicalPools';
+import {shortenByRandomJitter} from '../../lib/refreshJitter';
 
 // Upper bound on serialized size of a getPoolsForTokens cache entry, derived
 // from the selector's pool-count cap and a pessimistic per-pool byte estimate.
@@ -613,11 +614,21 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     }
   }
 
+  // Source of the TTL jitter draw; a test subclass overrides it to pin the
+  // draw.
+  protected readonly snapshotTtlJitterRandom: () => number = Math.random;
+
+  // Both snapshot writes (full load and 304 re-arm) take their TTL from
+  // here, so the jitter applies to every reload this process schedules.
   private getPoolsCacheTtlSeconds(chainId: ChainId): number {
-    return (
+    const ttlSeconds =
       this.serviceConfig.RedisCache.PoolsCacheEntryTtlSecondsByChain?.[
         chainId
-      ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds
+      ] ?? this.serviceConfig.RedisCache.AllPoolsCacheEntryTtlSeconds;
+    return shortenByRandomJitter(
+      ttlSeconds,
+      this.serviceConfig.PoolDiscovery.SnapshotRefreshJitterPercent,
+      this.snapshotTtlJitterRandom
     );
   }
 

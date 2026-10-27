@@ -1,5 +1,6 @@
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../lib/config';
+import {shortenByRandomJitter} from '../../lib/refreshJitter';
 import {Protocol} from '../../models/pool/Protocol';
 import {BaseCachingPoolDiscoverer} from './BaseCachingPoolDiscoverer';
 import {UniPoolInfo} from './interface';
@@ -8,6 +9,16 @@ export interface PoolSnapshotPrewarmTarget {
   chainId: ChainId;
   protocol: Protocol;
 }
+
+export interface PoolSnapshotPrewarmerOptions {
+  // Max targets prewarmed at once within a pass.
+  concurrency?: number;
+  // Percent (0-50) by which each wait between passes is randomly shortened.
+  jitterPercent?: number;
+  random?: () => number;
+}
+
+const DEFAULT_PREWARM_CONCURRENCY = 4;
 
 export type PoolDiscovererByProtocol = Partial<
   Record<Protocol, BaseCachingPoolDiscoverer<UniPoolInfo>>
@@ -32,14 +43,21 @@ export type PoolDiscovererByProtocol = Partial<
 export class PoolSnapshotPrewarmer {
   private timer: NodeJS.Timeout | undefined;
   private inFlight = false;
+  private readonly concurrency: number;
+  private readonly jitterPercent: number;
+  private readonly random: () => number;
 
   constructor(
     private readonly targets: readonly PoolSnapshotPrewarmTarget[],
     private readonly discoverers: PoolDiscovererByProtocol,
     private readonly ctx: Context,
     private readonly intervalMs: number,
-    private readonly concurrency = 4
-  ) {}
+    options: PoolSnapshotPrewarmerOptions = {}
+  ) {
+    this.concurrency = options.concurrency ?? DEFAULT_PREWARM_CONCURRENCY;
+    this.jitterPercent = options.jitterPercent ?? 0;
+    this.random = options.random ?? Math.random;
+  }
 
   async refreshOnce(): Promise<void> {
     // In-flight guard: a slow prewarm pass (e.g. several cold multi-second
@@ -86,22 +104,45 @@ export class PoolSnapshotPrewarmer {
   }
 
   /**
-   * Starts the interval and returns the initial pass's promise so boot
-   * sequences can await first population (bounded by the caller — see
-   * init.ts) before serving quotes.
+   * Schedules the recurring passes and returns the initial pass's promise
+   * so boot sequences can await first population (bounded by the caller —
+   * see init.ts) before serving quotes.
    */
   start(): Promise<void> {
     if (this.timer) return Promise.resolve();
     const initialRefresh = this.refreshOnce();
-    this.timer = setInterval(() => void this.refreshOnce(), this.intervalMs);
-    this.timer.unref?.();
+    this.scheduleNextPass(this.firstPassDelayMs());
     return initialRefresh;
   }
 
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      clearTimeout(this.timer);
       this.timer = undefined;
     }
+  }
+
+  // Tasks that boot together on a deploy would otherwise need about a hundred
+  // jittered passes (a day at 15 min) to drift apart. A first delay drawn
+  // uniformly from (0, interval] spreads them from the first pass and never
+  // waits longer than one interval.
+  private firstPassDelayMs(): number {
+    if (this.jitterPercent === 0) {
+      return this.intervalMs;
+    }
+    return Math.max(1, Math.round(this.intervalMs * (1 - this.random())));
+  }
+
+  // A fresh jittered wait per pass: a fixed interval would keep every task
+  // that booted together on the same schedule, and each pass forces a
+  // snapshot reload on all of them at once.
+  private scheduleNextPass(delayMs: number): void {
+    this.timer = setTimeout(() => {
+      this.scheduleNextPass(
+        shortenByRandomJitter(this.intervalMs, this.jitterPercent, this.random)
+      );
+      void this.refreshOnce();
+    }, delayMs);
+    this.timer.unref?.();
   }
 }

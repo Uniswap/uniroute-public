@@ -2617,3 +2617,70 @@ describe('BaseCachingPoolDiscoverer snapshot warmer', () => {
     ).toBe(1);
   });
 });
+
+describe('BaseCachingPoolDiscoverer snapshot TTL jitter', () => {
+  const baseConfig = getUniRouteTestConfig();
+  const configuredTtlSeconds = 300;
+  const jitterPool: UniPoolInfo = {
+    id: '0x3333333333333333333333333333333333333333',
+    feeTier: '3000',
+    liquidity: '1000',
+    token0: {id: '0x1111111111111111111111111111111111111111'},
+    token1: {id: '0x2222222222222222222222222222222222222222'},
+    tvlETH: 1000,
+    tvlUSD: 1000,
+  };
+
+  class TtlRecordingCache extends InMemoryRedisCache<string, string> {
+    public readonly ttls: (number | undefined)[] = [];
+
+    override async set(
+      key: string,
+      value: string,
+      opts?: Partial<SetOpts>
+    ): Promise<void> {
+      this.ttls.push(opts?.ttl);
+      return super.set(key, value, opts);
+    }
+  }
+
+  class PinnedJitterPoolDiscoverer extends ClosurePoolDiscoverer {
+    protected override readonly snapshotTtlJitterRandom = () => 0.5;
+  }
+
+  const configWithJitter = (jitterPercent: number): IUniRouteServiceConfig => ({
+    ...baseConfig,
+    RedisCache: {
+      ...baseConfig.RedisCache,
+      PoolsCacheEntryTtlSecondsByChain: {
+        [ChainId.MAINNET]: configuredTtlSeconds,
+      },
+    },
+    PoolDiscovery: {
+      ...baseConfig.PoolDiscovery,
+      SnapshotRefreshJitterPercent: jitterPercent,
+    },
+  });
+
+  const loadSnapshotTtls = async (
+    jitterPercent: number
+  ): Promise<(number | undefined)[]> => {
+    const getPoolsCache = new TtlRecordingCache();
+    const discoverer = new PinnedJitterPoolDiscoverer(
+      configWithJitter(jitterPercent),
+      getPoolsCache,
+      new InMemoryRedisCache<string, string>(),
+      async () => [jitterPool]
+    );
+    await discoverer.getPools(ChainId.MAINNET, Protocol.V3, buildTestContext());
+    return getPoolsCache.ttls;
+  };
+
+  it('shortens the snapshot cache TTL by the drawn jitter', async () => {
+    expect(await loadSnapshotTtls(20)).toEqual([270]);
+  });
+
+  it('writes the configured snapshot cache TTL without jitter', async () => {
+    expect(await loadSnapshotTtls(0)).toEqual([configuredTtlSeconds]);
+  });
+});

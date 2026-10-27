@@ -1,10 +1,12 @@
 import {getEnv} from './otherUtils';
 import {
   parseBooleanEnvOrDefault,
+  parseBoundedIntEnvOrDefault,
   parsePositiveIntEnvOrDefault,
   parsePositiveIntRecordEnvOrEmpty,
   parseStringArrayRecordEnvOrEmpty,
 } from './envParsing';
+import {MAX_REFRESH_JITTER_PERCENT} from './refreshJitter';
 
 // Only the S3-backed protocols have a BaseCachingPoolDiscoverer instance to
 // prewarm (external-protocol agg-hook pools aren't served from this cache).
@@ -92,6 +94,16 @@ const getPoolSnapshotPrewarmChainsAndProtocols = (): Record<number, string[]> =>
 // stack also sets POOL_SNAPSHOT_PREWARM_CHAINS.
 const getPoolSnapshotPrewarmIntervalMs = () =>
   parsePositiveIntEnvOrDefault('POOL_SNAPSHOT_PREWARM_INTERVAL_MS', 900_000);
+
+// Percent (__PLACEHOLDER__-__PLACEHOLDER__) by which each pool-snapshot cache TTL and each prewarm
+// interval is randomly shortened. __PLACEHOLDER__ (default, or any out-of-range value)
+// keeps today's fixed periods.
+const getPoolDiscoverySnapshotRefreshJitterPercent = () =>
+  parseBoundedIntEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_REFRESH_JITTER_PERCENT',
+    __PLACEHOLDER__,
+    {min: __PLACEHOLDER__, max: MAX_REFRESH_JITTER_PERCENT}
+  );
 
 // __PLACEHOLDER__ (the default for unset/invalid/non-positive values) disables negative
 // token caching.
@@ -228,6 +240,10 @@ export interface IUniRouteServiceConfig {
     // Interval between proactive prewarm passes; should stay comfortably
     // under SnapshotMaxStaleSeconds.
     PrewarmIntervalMs: number;
+    // Percent (__PLACEHOLDER__-__PLACEHOLDER__) by which each pool-snapshot cache TTL and each
+    // prewarm interval is randomly shortened, so tasks that boot together
+    // do not reload snapshots in lockstep. __PLACEHOLDER__ = fixed periods.
+    SnapshotRefreshJitterPercent: number;
   };
   CachedRoutes: {
     // Whether to enable cached routes.
@@ -416,6 +432,8 @@ export const getUniRouteSyncConfig = (
       SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
       PrewarmChainsAndProtocols: getPoolSnapshotPrewarmChainsAndProtocols(),
       PrewarmIntervalMs: getPoolSnapshotPrewarmIntervalMs(),
+      SnapshotRefreshJitterPercent:
+        getPoolDiscoverySnapshotRefreshJitterPercent(),
     },
     CachedRoutes: {
       Enabled: true,
@@ -546,6 +564,8 @@ export const getQuickRouteSyncConfig = (
       SnapshotMaxStaleSeconds: getPoolDiscoverySnapshotMaxStaleSeconds(),
       PrewarmChainsAndProtocols: getPoolSnapshotPrewarmChainsAndProtocols(),
       PrewarmIntervalMs: getPoolSnapshotPrewarmIntervalMs(),
+      SnapshotRefreshJitterPercent:
+        getPoolDiscoverySnapshotRefreshJitterPercent(),
     },
     CachedRoutes: {
       Enabled: true,

@@ -1,4 +1,4 @@
-import {describe, it, expect, vi} from 'vitest';
+import {afterEach, describe, it, expect, vi} from 'vitest';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
@@ -155,7 +155,7 @@ describe('PoolSnapshotPrewarmer', () => {
       discoverers,
       buildCtx(),
       900_000,
-      3 // concurrency
+      {concurrency: 3}
     );
 
     await prewarmer.refreshOnce();
@@ -199,5 +199,109 @@ describe('PoolSnapshotPrewarmer', () => {
     await prewarmer.start();
     expect(resolved).toBe(true);
     prewarmer.stop();
+  });
+
+  describe('pass scheduling', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    const countingDiscoverers = (): {
+      discoverers: PoolDiscovererByProtocol;
+      passes: () => number;
+    } => {
+      let calls = 0;
+      return {
+        discoverers: {
+          [Protocol.V3]: fakeDiscoverer(async () => {
+            calls += 1;
+          }),
+        },
+        passes: () => calls,
+      };
+    };
+
+    it('draws the first wait from the whole interval, then shortens each later wait by the jitter', async () => {
+      vi.useFakeTimers();
+      const {discoverers, passes} = countingDiscoverers();
+      const draws = [0.75, 0.5, 0.5];
+      const prewarmer = new PoolSnapshotPrewarmer(
+        [{chainId: ChainId.BASE, protocol: Protocol.V3}],
+        discoverers,
+        buildCtx(),
+        1_000,
+        {jitterPercent: 20, random: () => draws.shift() ?? 0.5}
+      );
+
+      await prewarmer.start();
+      expect(passes()).toBe(1);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(passes()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(passes()).toBe(2);
+      await vi.advanceTimersByTimeAsync(899);
+      expect(passes()).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(passes()).toBe(3);
+      await vi.advanceTimersByTimeAsync(900);
+      expect(passes()).toBe(4);
+      prewarmer.stop();
+    });
+
+    it('never waits longer than one interval for the first pass', async () => {
+      vi.useFakeTimers();
+      const {discoverers, passes} = countingDiscoverers();
+      const prewarmer = new PoolSnapshotPrewarmer(
+        [{chainId: ChainId.BASE, protocol: Protocol.V3}],
+        discoverers,
+        buildCtx(),
+        1_000,
+        {jitterPercent: 20, random: () => 0}
+      );
+
+      await prewarmer.start();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(passes()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(passes()).toBe(2);
+      prewarmer.stop();
+    });
+
+    it('keeps the configured interval without jitter', async () => {
+      vi.useFakeTimers();
+      const {discoverers, passes} = countingDiscoverers();
+      const prewarmer = new PoolSnapshotPrewarmer(
+        [{chainId: ChainId.BASE, protocol: Protocol.V3}],
+        discoverers,
+        buildCtx(),
+        1_000
+      );
+
+      await prewarmer.start();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(passes()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(passes()).toBe(2);
+      prewarmer.stop();
+    });
+
+    it('stop() cancels the rescheduled pass', async () => {
+      vi.useFakeTimers();
+      const {discoverers, passes} = countingDiscoverers();
+      const prewarmer = new PoolSnapshotPrewarmer(
+        [{chainId: ChainId.BASE, protocol: Protocol.V3}],
+        discoverers,
+        buildCtx(),
+        1_000,
+        {jitterPercent: 20, random: () => 0.5}
+      );
+
+      await prewarmer.start();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(passes()).toBe(2);
+      prewarmer.stop();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(passes()).toBe(2);
+    });
   });
 });
