@@ -710,15 +710,15 @@ describe('QuoteBestSplitFinder', () => {
       const bestFoundCall = metricCalls.find(call =>
         String(call[0]).includes('QuoteBestSplitFinder.BestFoundAtLevel')
       );
-      expect((bestFoundCall?.[2] as {tags: string[]}).tags).toContain(
-        'level:5'
-      );
+      expect(
+        (bestFoundCall?.[2] as {tags: string[]} | undefined)?.tags
+      ).toContain('level:5');
       const earlyExitCall = metricCalls.find(call =>
         String(call[0]).includes('QuoteBestSplitFinder.EarlyExit')
       );
-      expect((earlyExitCall?.[2] as {tags: string[]}).tags).toContain(
-        'maxLegPct:le20'
-      );
+      expect(
+        (earlyExitCall?.[2] as {tags: string[]} | undefined)?.tags
+      ).toContain('maxLegPct:le20');
     });
 
     it('tags BestFoundAtLevel with the gas-adjusted winner level, not the raw frontrunner', async () => {
@@ -762,9 +762,9 @@ describe('QuoteBestSplitFinder', () => {
         .mock.calls.find(call =>
           String(call[0]).includes('QuoteBestSplitFinder.BestFoundAtLevel')
         );
-      expect((bestFoundCall?.[2] as {tags: string[]}).tags).toContain(
-        'level:2'
-      );
+      expect(
+        (bestFoundCall?.[2] as {tags: string[]} | undefined)?.tags
+      ).toContain('level:2');
     });
 
     it('does not settle for a poor 100% route when better splits exist past an infeasible level', async () => {
@@ -878,9 +878,9 @@ describe('QuoteBestSplitFinder', () => {
         .mock.calls.find(call =>
           String(call[0]).includes('QuoteBestSplitFinder.TimedOut')
         );
-      expect((timedOutCall?.[2] as {tags: string[]}).tags).toContain(
-        'hasResult:true'
-      );
+      expect(
+        (timedOutCall?.[2] as {tags: string[]} | undefined)?.tags
+      ).toContain('hasResult:true');
 
       dateNowSpy.mockRestore();
     });

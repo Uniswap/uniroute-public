@@ -137,10 +137,10 @@ describe('cacheConfig', () => {
         );
         expect(
           (
-            mainnet?.aggHooksProvider as unknown as {
-              ethersProvider: {connection: {url: string}};
-            }
-          ).ethersProvider.connection.url
+            mainnet?.aggHooksProvider as unknown as
+              | {ethersProvider: {connection: {url: string}}}
+              | undefined
+          )?.ethersProvider.connection.url
         ).toBe(`https://uni-rpc.example/rpc/${ChainId.MAINNET}`);
       } finally {
         vi.unstubAllEnvs();
