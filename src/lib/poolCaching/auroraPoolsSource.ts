@@ -2392,10 +2392,11 @@ function upperMedianBps(sortedDrifts: ReadonlyArray<{bps: number}>): number {
 const lastAuroraPoolCountByTarget = new Map<string, number>();
 
 // Consecutive low_count rejections per targetKey, module level for the same
-// reason as the baselines.
+// reason as the baselines. `anchor` is the streak's first count, so a slow
+// drift cannot settle by agreeing with each previous read in turn.
 const lowCountStreakByTarget = new Map<
   string,
-  {count: number; streak: number}
+  {anchor: number; streak: number}
 >();
 const LOW_COUNT_SETTLE_TICKS = 3;
 const LOW_COUNT_SETTLE_TOLERANCE = 0.1;
@@ -2523,9 +2524,10 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
 
   // The baseline only moves on a served read, so a real, lasting drop of more
   // than half would be rejected on every tick until the cron restarts. After
-  // LOW_COUNT_SETTLE_TICKS consecutive low_count reads that agree within
-  // LOW_COUNT_SETTLE_TOLERANCE, the new count is served and becomes the
-  // baseline. The absolute floor still rejects a drop below it.
+  // LOW_COUNT_SETTLE_TICKS consecutive low_count reads within
+  // LOW_COUNT_SETTLE_TOLERANCE of the streak's first count, the new count is
+  // served and becomes the baseline. Any other rejection in between restarts
+  // the streak, and the absolute floor still rejects a drop below it.
   private acceptsSettledLowCount(
     key: string,
     count: number,
@@ -2534,11 +2536,12 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     const previous = lowCountStreakByTarget.get(key);
     const agrees =
       previous !== undefined &&
-      Math.abs(count - previous.count) <=
-        previous.count * LOW_COUNT_SETTLE_TOLERANCE;
+      Math.abs(count - previous.anchor) <=
+        previous.anchor * LOW_COUNT_SETTLE_TOLERANCE;
+    const anchor = agrees ? previous.anchor : count;
     const streak = agrees ? previous.streak + 1 : 1;
     if (streak < LOW_COUNT_SETTLE_TICKS) {
-      lowCountStreakByTarget.set(key, {count, streak});
+      lowCountStreakByTarget.set(key, {anchor, streak});
       return false;
     }
     this.metric.putMetric(
@@ -2557,6 +2560,9 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
     reason: AuroraRejectionReason,
     cause?: unknown
   ): AuroraPoolsRejectedError {
+    if (reason !== 'low_count') {
+      lowCountStreakByTarget.delete(targetKey(this.chainId, this.protocol));
+    }
     this.metric.putMetric(
       'CachePools.aurora.rejected',
       1,

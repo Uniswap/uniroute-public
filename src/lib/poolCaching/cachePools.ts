@@ -143,7 +143,9 @@ function withExtraPoolSourceTimeout<T>(
 // For an Aurora-primary source (failClosedWithoutLastGood), a failed or
 // timed-out read with no last-good throws ExtraPoolSourceUnavailableError:
 // the combo skips its S3 write and routing keeps the previous snapshot,
-// which still holds the source's pools.
+// which still holds the source's pools. The skip lasts at most
+// EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS from the first one; past that the
+// combo writes without the source, as an expired carry-forward does.
 export async function withExtraPoolSource<T extends {id: string}>(
   source: ExtraPoolSourceName,
   chainId: number,
@@ -195,7 +197,8 @@ export async function withExtraPoolSource<T extends {id: string}>(
   if (
     failClosedWithoutLastGood &&
     reason !== 'empty_result' &&
-    memory.lastGood(key, nowMs()) === undefined
+    memory.lastGood(key, nowMs()) === undefined &&
+    memory.skipsWriteWithoutLastGood(key, nowMs())
   ) {
     metricInstance.putMetric(
       'CachePools.extraPoolSource.carryForward',

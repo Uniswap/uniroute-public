@@ -1345,6 +1345,37 @@ describe('cacheAllPools', () => {
       ]);
     });
 
+    it('stops skipping the write once the first skip is older than the last-good window', async () => {
+      const memory = new ExtraPoolSourceMemory<V4SubgraphPool>();
+      const failingRead = async (): Promise<V4SubgraphPool[]> => {
+        throw new Error('statement timeout');
+      };
+      const at = (nowMs: number) =>
+        withExtraPoolSource(
+          ExtraPoolSourceName.AGG_HOOKS,
+          ChainId.MAINNET,
+          tags,
+          mockMetric,
+          mockLogger,
+          memory,
+          failingRead,
+          () => nowMs,
+          undefined,
+          true
+        );
+
+      await expect(at(NOW_MS)).rejects.toBeInstanceOf(
+        ExtraPoolSourceUnavailableError
+      );
+      await expect(
+        at(NOW_MS + EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS)
+      ).rejects.toBeInstanceOf(ExtraPoolSourceUnavailableError);
+      // Past the window the combo writes without the source's pools.
+      await expect(
+        at(NOW_MS + EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS + 1)
+      ).resolves.toBeUndefined();
+    });
+
     it('fails closed on a timed-out Aurora-primary read with no last good result', async () => {
       await expect(
         run(

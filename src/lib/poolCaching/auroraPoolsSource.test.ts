@@ -1990,6 +1990,45 @@ describe('AuroraSourcedProvider primary mode', () => {
     expect(metric.byKey('CachePools.aurora.baseline_reset')).toEqual([]);
   });
 
+  it('does not settle a slow drift that agrees only with each previous read', async () => {
+    const pools = (n: number) =>
+      Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
+    // Each read is within 10% of the one before, but 34 is 15% under 40.
+    const aurora = fakeProvider([pools(100), pools(40), pools(37), pools(34)]);
+    const metric = new FakeMetric();
+    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric);
+
+    expect(await provider.getPools()).toHaveLength(100);
+    for (let tick = 0; tick < 3; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'low_count',
+      });
+    }
+    expect(metric.byKey('CachePools.aurora.baseline_reset')).toEqual([]);
+  });
+
+  it('restarts the settle streak after a different rejection', async () => {
+    const pools = (n: number) =>
+      Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
+    const aurora = fakeProvider([pools(20), pools(8), [], pools(8), pools(8)]);
+    const metric = new FakeMetric();
+    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric);
+
+    expect(await provider.getPools()).toHaveLength(20);
+    await expect(provider.getPools()).rejects.toMatchObject({
+      reason: 'low_count',
+    });
+    await expect(provider.getPools()).rejects.toMatchObject({reason: 'empty'});
+    // Two agreeing low_count reads after the empty one are not three.
+    await expect(provider.getPools()).rejects.toMatchObject({
+      reason: 'low_count',
+    });
+    await expect(provider.getPools()).rejects.toMatchObject({
+      reason: 'low_count',
+    });
+    expect(metric.byKey('CachePools.aurora.baseline_reset')).toEqual([]);
+  });
+
   it('never settles a low count under the absolute floor', async () => {
     const pools = (n: number) =>
       Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));

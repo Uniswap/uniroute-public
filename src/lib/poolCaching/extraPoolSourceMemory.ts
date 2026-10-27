@@ -1,7 +1,8 @@
 // Process-local memory of each extra pool source's last good result, keyed by
 // `<source>:<chainId>`. The cron worker is a long-lived ECS task, so this
-// survives across sweeps; a restart starts empty, and the first failing sweep
-// after one writes the snapshot without that source's pools.
+// survives across sweeps; a restart starts empty. After a restart, a failing
+// Aurora-primary source skips its combo's write (keeping the previous
+// snapshot) for up to the max age, then writes without its pools.
 //
 // One sweep runs every 20 minutes, so a 6h window rides out 18 failed sweeps
 // (an Aurora incident, a stale wrapped-native price, an RPC outage) before the
@@ -24,6 +25,8 @@ export class ExtraPoolSourceMemory<TPool extends {id: string}>
 {
   private readonly lastGoodByKey = new Map<string, LastGood<TPool>>();
   private readonly idSeenAtByKey = new Map<string, Map<string, number>>();
+  // When the source first skipped a write with no last good result.
+  private readonly firstSkipAtByKey = new Map<string, number>();
 
   constructor(
     private readonly maxAgeMs: number = EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS
@@ -31,6 +34,7 @@ export class ExtraPoolSourceMemory<TPool extends {id: string}>
 
   recordGood(key: string, pools: readonly TPool[], nowMs: number): void {
     this.lastGoodByKey.set(key, {pools, atMs: nowMs});
+    this.firstSkipAtByKey.delete(key);
     let seenAt = this.idSeenAtByKey.get(key);
     if (!seenAt) {
       seenAt = new Map();
@@ -53,6 +57,17 @@ export class ExtraPoolSourceMemory<TPool extends {id: string}>
     return ageMs > this.maxAgeMs ? 'expired' : {pools: entry.pools, ageMs};
   }
 
+  // True while the source has skipped writes for no longer than the max age,
+  // counted from its first skip. Past that, the combo writes without it.
+  skipsWriteWithoutLastGood(key: string, nowMs: number): boolean {
+    const firstSkipAt = this.firstSkipAtByKey.get(key);
+    if (firstSkipAt === undefined) {
+      this.firstSkipAtByKey.set(key, nowMs);
+      return true;
+    }
+    return nowMs - firstSkipAt <= this.maxAgeMs;
+  }
+
   recentIds(key: string, nowMs: number): ReadonlySet<string> {
     const seenAt = this.idSeenAtByKey.get(key);
     const ids = new Set<string>();
@@ -66,5 +81,6 @@ export class ExtraPoolSourceMemory<TPool extends {id: string}>
   clear(): void {
     this.lastGoodByKey.clear();
     this.idSeenAtByKey.clear();
+    this.firstSkipAtByKey.clear();
   }
 }
