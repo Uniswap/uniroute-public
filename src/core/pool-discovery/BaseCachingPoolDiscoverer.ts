@@ -46,7 +46,18 @@ export const POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES =
 // can surface.
 export const EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS = 60;
 
+// On the memo + skip-reparse path the getPools cache holds this prefix plus a
+// per-load counter instead of the JSON-stringified snapshot: that string was
+// only ever compared against the parse memo's source (and parsed back on a
+// mismatch), so a unique token keeps the identity check and freshness TTL
+// without serializing the whole snapshot on every refresh. Not valid JSON, so
+// a token can never be mistaken for a snapshot body.
+const SNAPSHOT_VERSION_TOKEN_PREFIX = 'snapshot-version:';
+
 interface SnapshotMemoEntry<TPool> {
+  // The getPools cache value this entry was published with: the serialized
+  // snapshot, or a version token on the memo + skip-reparse path. Unique per
+  // load either way, so the 304 re-arm and cache reads compare it directly.
   source: string;
   parsed: TPool[];
   fetchedAtMs: number;
@@ -106,6 +117,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     // lazily by the first request against the snapshot.
     private readonly snapshotWarmer?: IPoolSnapshotWarmer
   ) {}
+
+  // Process-wide, so discoverers sharing one getPools cache never mint the
+  // same token.
+  private static snapshotVersionCounter = 0;
 
   // Memoizes the parsed full-snapshot array per getPools cache key so a
   // per-pair cache miss doesn't re-JSON.parse a multi-MB snapshot string.
@@ -272,25 +287,37 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
     return filtered;
   }
 
-  // Reuses the previously parsed snapshot when the cached string is unchanged
+  // Reuses the previously parsed snapshot when the cached value is unchanged
   // (InMemoryRedisCache returns the same string object until the entry is
   // rewritten, so the comparison is a pointer check in the steady state).
+  // Returns undefined for a version token the memo does not hold: the arrays
+  // it named are gone, so the caller treats the entry as absent.
   private async getParsedSnapshot(
     cacheKey: string,
     source: string,
     chainId: ChainId,
     protocol: Protocol,
     ctx: Context
-  ): Promise<TPool[]> {
+  ): Promise<TPool[] | undefined> {
     // Parse and publish before any await: with no suspension point between
     // the memo read and write, concurrent same-tick misses cannot each
     // re-parse the snapshot — the second caller sees the first one's entry.
     const memo = this.snapshotParseMemo.get(cacheKey);
+    const isVersionToken = source.startsWith(SNAPSHOT_VERSION_TOKEN_PREFIX);
     const result =
-      memo !== undefined && memo.source === source ? 'hit' : 'miss';
-    let parsed: TPool[];
+      memo !== undefined && memo.source === source
+        ? 'hit'
+        : isVersionToken
+          ? 'version_mismatch'
+          : 'miss';
+    let parsed: TPool[] | undefined;
     if (memo !== undefined && result === 'hit') {
       parsed = memo.parsed;
+    } else if (isVersionToken) {
+      ctx.logger.warn(
+        `[${this.discovererName}] Pool snapshot cache entry names a version the memo does not hold; treating it as absent`,
+        {cacheKey, chainId, protocol}
+      );
     } else {
       parsed = JSON.parse(source) as TPool[];
       this.snapshotParseMemo.set(cacheKey, {
@@ -417,9 +444,13 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
       }
       // Same content under a newer version (S3 rewrote identical bytes
       // under a new ETag): keep that version, so the next check asks about
-      // it instead of downloading the object again.
+      // it instead of downloading the object again. `.source` is either the
+      // serialized snapshot or its version token (see
+      // SNAPSHOT_VERSION_TOKEN_PREFIX) — the comparison and the cache write
+      // below are string-identity operations either way, so this path needs
+      // no change for the skip-reparse case.
       const confirmed = currentVersioned ?? memo;
-      // The cache keeps the string the memo already holds, so the next read
+      // The cache keeps the value the memo already holds, so the next read
       // is a pointer-equal memo hit, and the stale-serve window restarts
       // from this confirmation. Both writes are issued before any await,
       // and the full-load path publishes in the same order, so the check
@@ -463,22 +494,21 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         globalSet
       );
       if (this.snapshotSkipReparseEnabled) {
-        // Same normalization as the round-trip below, without re-parsing
-        // the just-stringified snapshot: strip undefined-valued keys in
-        // place (a no-op walk when converters already omit them — see the
-        // helper's preconditions) and memoize the filtered array directly.
-        // In-place mutation is safe — _getPools builds fresh arrays AND
-        // fresh objects per call, and deleting an undefined-valued key is
-        // invisible to `=== undefined` reads.
+        // Same normalization a JSON round trip would apply, without one:
+        // strip undefined-valued keys in place (a no-op walk when converters
+        // already omit them — see the helper's preconditions) and memoize
+        // the filtered array directly. In-place mutation is safe — _getPools
+        // builds fresh arrays AND fresh objects per call, and deleting an
+        // undefined-valued key is invisible to `=== undefined` reads. The
+        // cache gets a version token instead of the serialized snapshot (see
+        // SNAPSHOT_VERSION_TOKEN_PREFIX).
         // Kill switch: POOL_DISCOVERY_SNAPSHOT_SKIP_REPARSE_ENABLED.
         BaseCachingPoolDiscoverer.stripUndefinedValuedKeysInPlace(filtered);
-      }
-      // The cache string is identical in both flag states (the strip
-      // reproduces exactly the normalization JSON.stringify applies).
-      retrievedPoolsStr = JSON.stringify(filtered);
-      if (this.snapshotSkipReparseEnabled) {
+        BaseCachingPoolDiscoverer.snapshotVersionCounter += 1;
+        retrievedPoolsStr = `${SNAPSHOT_VERSION_TOKEN_PREFIX}${BaseCachingPoolDiscoverer.snapshotVersionCounter}`;
         retrievedPools = filtered;
       } else {
+        retrievedPoolsStr = JSON.stringify(filtered);
         // Round-trip through JSON before memoizing so flag-on serves the
         // exact objects flag-off would (a cache read always JSON.parses):
         // e.g. a property explicitly set to undefined keeps its key on the
@@ -499,15 +529,18 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         cacheKey,
       }
     );
-    // Publish the memo before awaiting the cache write, the same order as
-    // the 304 path: a 304 that resumes during the write then sees this
-    // entry and does not write the older string over it. This assumes the
-    // in-process cache (InMemoryRedisCache stores before it returns), so
-    // the memo and the cache entry change in the same tick.
     if (this.snapshotMemoEnabled) {
       if (memoGlobalSet === undefined) {
         throw new Error('Snapshot memo deny-list payload missing');
       }
+      // Publish the memo before awaiting the cache write, the same order as
+      // the 304 path: a 304 that resumes during the write then sees this
+      // entry and does not write the older value over it. This assumes the
+      // in-process cache (InMemoryRedisCache stores before it returns), so
+      // the memo and the cache entry change in the same tick. On the
+      // skip-reparse path the cache value is only ever read against this
+      // memo, and a version token the memo does not hold is treated as
+      // absent.
       this.snapshotParseMemo.set(cacheKey, {
         source: retrievedPoolsStr,
         parsed: retrievedPools,
@@ -515,7 +548,7 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
         sourceVersion: load.sourceVersion,
         globalSet: memoGlobalSet,
       });
-      // Seed both memos with the exact string written to the cache so the
+      // Seed both memos with the exact value written to the cache so the
       // first post-miss read is a memo hit. Re-filtering with the same
       // deny payload is a no-op, so the array seeds its own
       // compliance-memo entry.
@@ -751,10 +784,10 @@ export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
             protocol,
             ctx
           );
-          retrievedPools = await this.filterUnsupportedTokenPoolsMemoized(
-            parsed,
-            ctx
-          );
+          retrievedPools =
+            parsed === undefined
+              ? undefined
+              : await this.filterUnsupportedTokenPoolsMemoized(parsed, ctx);
         } else {
           retrievedPools = JSON.parse(retrievedPoolsStr);
           retrievedPools = await this.filterUnsupportedTokenPools(

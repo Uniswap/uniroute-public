@@ -5,7 +5,7 @@ import {
 } from './S3SubgraphPoolDiscoverer';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {GetObjectCommand, S3Client} from '@aws-sdk/client-s3';
-import {IRedisCache} from '@uniswap/lib-cache';
+import {InMemoryRedisCache, IRedisCache} from '@uniswap/lib-cache';
 import {
   getUniRouteTestConfig,
   IUniRouteServiceConfig,
@@ -454,6 +454,56 @@ describe('S3SubgraphPoolDiscoverer', () => {
 
         expect(ifNoneMatchSent()).toEqual([undefined, '"etag-1"', undefined]);
         expect(downloads()).toBe(2);
+      });
+
+      it('caches a version token under skip-reparse and keeps serving its snapshot across a 304', async () => {
+        const {downloads} = serveObject(
+          () => '"etag-1"',
+          () => false
+        );
+        const cache = new InMemoryRedisCache<string, string>();
+        const skipReparseDiscoverer = new S3SubgraphPoolDiscovererV4(
+          {
+            ...memoConfig,
+            PoolDiscovery: {
+              ...memoConfig.PoolDiscovery,
+              SnapshotSkipReparseEnabled: true,
+            },
+          },
+          cache,
+          getPoolsForTokensCache,
+          FeatureGatedTokensRepository.empty(),
+          s3Client
+        );
+        const cacheKey = skipReparseDiscoverer.getPoolsCacheKey(
+          ChainId.MAINNET,
+          Protocol.V4
+        );
+
+        const served = await skipReparseDiscoverer.getPools(
+          ChainId.MAINNET,
+          Protocol.V4,
+          mockContext
+        );
+        const token = await cache.get(cacheKey);
+        await skipReparseDiscoverer.prewarm(
+          ChainId.MAINNET,
+          Protocol.V4,
+          mockContext
+        );
+
+        expect(served.length).toBeGreaterThan(0);
+        expect(token).toMatch(/^snapshot-version:\d+$/);
+        expect(ifNoneMatchSent()).toEqual([undefined, '"etag-1"']);
+        expect(downloads()).toBe(1);
+        expect(await cache.get(cacheKey)).toBe(token);
+        expect(
+          await skipReparseDiscoverer.getPools(
+            ChainId.MAINNET,
+            Protocol.V4,
+            mockContext
+          )
+        ).toBe(served);
       });
     });
 

@@ -18,7 +18,7 @@ import {
   PoolsForTokensCacheSkipReason,
   UniPoolInfo,
 } from './interface';
-import {IRedisCache, InMemoryRedisCache} from '@uniswap/lib-cache';
+import {IRedisCache, InMemoryRedisCache, SetOpts} from '@uniswap/lib-cache';
 import {Address} from '../../models/address/Address';
 import {
   buildMetricKey,
@@ -259,6 +259,25 @@ const createDeferred = <T>() => {
   });
   return {promise, resolve, reject};
 };
+
+// Applies each write immediately, then holds the write's promise open while
+// `gate` is set, so a test can observe state while a cache write is in flight.
+class GatedRedisCache extends InMemoryRedisCache<string, string> {
+  public gate: Promise<void> | undefined;
+  public writeCount = 0;
+
+  override async set(
+    key: string,
+    value: string,
+    opts?: Partial<SetOpts>
+  ): Promise<void> {
+    this.writeCount += 1;
+    await super.set(key, value, opts);
+    if (this.gate !== undefined) {
+      await this.gate;
+    }
+  }
+}
 
 describe('BaseCachingPoolDiscoverer', () => {
   let getPoolsCache: IRedisCache<string, string>;
@@ -1028,6 +1047,16 @@ describe('BaseCachingPoolDiscoverer', () => {
           }) as unknown as UniPoolInfo
       );
 
+    const snapshotParseResults = () =>
+      vi
+        .mocked(ctx.metrics.count)
+        .mock.calls.filter(([key]) =>
+          String(key).includes('SnapshotParse.Cache')
+        )
+        .flatMap(([, , options]) =>
+          (options?.tags ?? []).filter(tag => tag.startsWith('result:'))
+        );
+
     let memoDiscoverer: TestPoolDiscoverer;
 
     beforeEach(() => {
@@ -1222,7 +1251,7 @@ describe('BaseCachingPoolDiscoverer', () => {
         expect(result).toStrictEqual(JSON.parse(JSON.stringify(result)));
       });
 
-      it('writes the same cache string as the flag-off memo path', async () => {
+      it('writes a version token with skip-reparse on and the serialized snapshot with it off', async () => {
         const stored: string[] = [];
         const captureCache = () =>
           ({
@@ -1245,11 +1274,144 @@ describe('BaseCachingPoolDiscoverer', () => {
           async () => makePoolsWithUndefinedValuedKeys()
         );
 
-        await flagOn.getPools(chainId, protocol, ctx);
+        const servedOn = await flagOn.getPools(chainId, protocol, ctx);
         await flagOff.getPools(chainId, protocol, ctx);
 
         expect(stored).toHaveLength(2);
-        expect(stored[0]).toBe(stored[1]);
+        expect(stored[0]).toMatch(/^snapshot-version:\d+$/);
+        // The kill switch keeps the serialized snapshot, which is exactly
+        // what the skip-reparse path serves.
+        expect(stored[1]).toBe(JSON.stringify(servedOn));
+      });
+
+      it('serves the memo for its own version token without parsing', async () => {
+        const cache = new InMemoryRedisCache<string, string>();
+        const load = vi.fn(async () => makeSnapshotPools(['0x1', '0x2']));
+        const discoverer = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          cache,
+          getPoolsForTokensCache,
+          load
+        );
+        const parseSpy = vi.spyOn(JSON, 'parse');
+
+        try {
+          const first = await discoverer.getPools(chainId, protocol, ctx);
+          const second = await discoverer.getPools(chainId, protocol, ctx);
+
+          expect(second).toBe(first);
+          expect(load).toHaveBeenCalledTimes(1);
+          expect(parseSpy).not.toHaveBeenCalled();
+          expect(snapshotParseResults()).toEqual(['result:hit']);
+        } finally {
+          parseSpy.mockRestore();
+        }
+      });
+
+      it('mints a distinct token for every load, across discoverers sharing a cache', async () => {
+        const cache = new InMemoryRedisCache<string, string>();
+        const load = async () => makeSnapshotPools(['0x1']);
+        const first = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          cache,
+          getPoolsForTokensCache,
+          load
+        );
+        const second = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          cache,
+          getPoolsForTokensCache,
+          load
+        );
+        const cacheKey = first.getPoolsCacheKey(chainId, protocol);
+
+        await first.prewarm(chainId, protocol, ctx);
+        const firstToken = await cache.get(cacheKey);
+        await second.prewarm(chainId, protocol, ctx);
+        const secondToken = await cache.get(cacheKey);
+        await first.prewarm(chainId, protocol, ctx);
+        const thirdToken = await cache.get(cacheKey);
+
+        expect(new Set([firstToken, secondToken, thirdToken]).size).toBe(3);
+      });
+
+      it('treats a version token the memo does not hold as absent instead of parsing it', async () => {
+        const cache = new InMemoryRedisCache<string, string>();
+        const discoverer = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          cache,
+          getPoolsForTokensCache,
+          async () => makeSnapshotPools(['0x1'])
+        );
+        const cacheKey = discoverer.getPoolsCacheKey(chainId, protocol);
+        await cache.set(cacheKey, 'snapshot-version:unknown');
+
+        const result = await discoverer.getPools(chainId, protocol, ctx);
+
+        // Loaded instead: a parse of the token would have thrown.
+        expect(result.map(pool => pool.id)).toEqual(['0x1']);
+        expect(await cache.get(cacheKey)).not.toBe('snapshot-version:unknown');
+        expect(snapshotParseResults()).toEqual(['result:version_mismatch']);
+        expect(ctx.logger.warn).toHaveBeenCalledWith(
+          '[ClosurePoolDiscoverer] Pool snapshot cache entry names a version the memo does not hold; treating it as absent',
+          {cacheKey, chainId, protocol}
+        );
+      });
+
+      it('serves the stale memo and refreshes when the cache names a version the memo does not hold', async () => {
+        const cache = new InMemoryRedisCache<string, string>();
+        const load = vi.fn(async () => makeSnapshotPools(['0x1']));
+        const discoverer = new ClosurePoolDiscoverer(
+          {
+            ...skipReparseConfig,
+            PoolDiscovery: {
+              ...skipReparseConfig.PoolDiscovery,
+              SnapshotSwrEnabled: true,
+              SnapshotMaxStaleSeconds: 2700,
+            },
+          },
+          cache,
+          getPoolsForTokensCache,
+          load
+        );
+        const cacheKey = discoverer.getPoolsCacheKey(chainId, protocol);
+        const served = await discoverer.getPools(chainId, protocol, ctx);
+        await cache.set(cacheKey, 'snapshot-version:unknown');
+
+        expect(await discoverer.getPools(chainId, protocol, ctx)).toBe(served);
+        await vi.waitFor(() => {
+          expect(load).toHaveBeenCalledTimes(2);
+        });
+      });
+
+      it('publishes the memo before the cache write', async () => {
+        const cache = new GatedRedisCache();
+        const writeGate = createDeferred<void>();
+        cache.gate = writeGate.promise;
+        const load = vi.fn(async () => makeSnapshotPools(['0x1']));
+        const discoverer = new ClosurePoolDiscoverer(
+          skipReparseConfig,
+          cache,
+          getPoolsForTokensCache,
+          load
+        );
+        const cacheKey = discoverer.getPoolsCacheKey(chainId, protocol);
+
+        const refresh = discoverer.prewarm(chainId, protocol, ctx);
+        await vi.waitFor(async () => {
+          expect(await cache.contains(cacheKey)).toBe(true);
+        });
+        cache.gate = undefined;
+
+        // The write is still in flight, and the token it wrote already
+        // names the memo's entry.
+        const served = await discoverer.getPools(chainId, protocol, ctx);
+        expect(served.map(pool => pool.id)).toEqual(['0x1']);
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(snapshotParseResults()).toEqual(['result:hit']);
+
+        writeGate.resolve(undefined);
+        await refresh;
       });
 
       it('flag off keeps the round-trip (fresh objects served)', async () => {
@@ -1895,6 +2057,85 @@ describe('BaseCachingPoolDiscoverer', () => {
         expect.stringContaining('a newer refresh replaced the memo'),
         expect.anything()
       );
+    });
+
+    describe('with skip-reparse (version-token cache values)', () => {
+      const skipReparseConfig: IUniRouteServiceConfig = {
+        ...memoConfig,
+        PoolDiscovery: {
+          ...memoConfig.PoolDiscovery,
+          SnapshotSkipReparseEnabled: true,
+        },
+      };
+
+      it('re-arms with the version token the memo holds', async () => {
+        const {discoverer, load} = buildDiscoverer(
+          '"etag-1"',
+          skipReparseConfig
+        );
+
+        const served = await discoverer.getPools(chainId, protocol, ctx);
+        await discoverer.prewarm(chainId, protocol, ctx);
+
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(discoverer.knownVersions).toEqual([undefined, '"etag-1"']);
+        const writes = vi.mocked(getPoolsCache.set).mock.calls;
+        expect(writes).toHaveLength(2);
+        expect(writes[0][1]).toMatch(/^snapshot-version:\d+$/);
+        expect(writes[1][1]).toBe(writes[0][1]);
+
+        vi.mocked(getPoolsCache.get).mockResolvedValue(writes[1][1]);
+        expect(await discoverer.getPools(chainId, protocol, ctx)).toBe(served);
+        expect(load).toHaveBeenCalledTimes(1);
+      });
+
+      it('leaves memo and cache on the newer version when a load lands while a 304 re-arm write is in flight', async () => {
+        const newerPools = [{...pools[0], id: 'newer-pool'}];
+        let loadedPools = pools;
+        const cache = new GatedRedisCache();
+        const load = vi.fn(async () => structuredClone(loadedPools));
+        const discoverer = new VersionedPoolDiscoverer(
+          skipReparseConfig,
+          cache,
+          getPoolsForTokensCache,
+          load,
+          '"etag-1"'
+        );
+        const cacheKey = discoverer.getPoolsCacheKey(chainId, protocol);
+        const parseResults = () =>
+          vi
+            .mocked(ctx.metrics.count)
+            .mock.calls.filter(([key]) =>
+              String(key).includes('SnapshotParse.Cache')
+            )
+            .flatMap(([, , options]) =>
+              (options?.tags ?? []).filter(tag => tag.startsWith('result:'))
+            );
+
+        await discoverer.prewarm(chainId, protocol, ctx);
+        const gate = createDeferred<void>();
+        cache.gate = gate.promise;
+        const rearm = discoverer.prewarm(chainId, protocol, ctx);
+        await vi.waitFor(() => {
+          expect(cache.writeCount).toBe(2);
+        });
+        cache.gate = undefined;
+
+        // The entry expires and the object changes while the re-arm write
+        // is in flight, so the next read loads the newer snapshot.
+        await cache.delete(cacheKey);
+        discoverer.sourceVersion = '"etag-2"';
+        loadedPools = newerPools;
+        const newer = await discoverer.getPools(chainId, protocol, ctx);
+        expect(newer.map(pool => pool.id)).toEqual(['newer-pool']);
+
+        gate.resolve(undefined);
+        await rearm;
+
+        expect(await discoverer.getPools(chainId, protocol, ctx)).toBe(newer);
+        expect(load).toHaveBeenCalledTimes(2);
+        expect(parseResults()).toEqual(['result:hit']);
+      });
     });
 
     it('reloads when the source version changes', async () => {

@@ -207,13 +207,13 @@ export interface IUniRouteServiceConfig {
     // serving when SnapshotMemoEnabled is also on.
     SnapshotSwrEnabled: boolean;
     // Skips the memo-path JSON round-trip in loadAndCachePools: instead of
-    // re-parsing the just-stringified snapshot to normalize undefined-valued
-    // keys, strip those keys in place and memoize the filtered array
-    // directly. Output is JSON-round-trip-equivalent; saves one full
-    // JSON.parse of a multi-MB snapshot per background refresh on the
-    // event loop. Only active when SnapshotMemoEnabled is also on.
-    // Kill switch: set POOL_DISCOVERY_SNAPSHOT_SKIP_REPARSE_ENABLED to
-    // 'false' and redeploy.
+    // stringifying and re-parsing the snapshot to normalize undefined-valued
+    // keys, strip those keys in place, memoize the filtered array directly
+    // and cache a version token in place of the serialized snapshot. Output
+    // is JSON-round-trip-equivalent; saves a full JSON.stringify and
+    // JSON.parse of a multi-MB snapshot per refresh on the event loop. Only
+    // active when SnapshotMemoEnabled is also on. Kill switch: set
+    // POOL_DISCOVERY_SNAPSHOT_SKIP_REPARSE_ENABLED to 'false' and redeploy.
     SnapshotSkipReparseEnabled: boolean;
     // Upper bound for serving stale parsed snapshots after the in-memory
     // snapshot cache expires, measured from when THIS process parsed the
