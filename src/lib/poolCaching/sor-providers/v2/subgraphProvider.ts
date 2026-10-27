@@ -29,6 +29,13 @@ export interface V2SubgraphPool {
   supply: number;
   reserve: number;
   reserveUSD: number;
+  /**
+   * Epoch ms of the pool's last state change (swap, liquidity change, V2
+   * Sync, or creation), from Aurora pool state. Set only on combos in
+   * POOL_CACHING_ACTIVITY_FILTER_TARGETS; the cron's activity filter reads it
+   * and strips it before the snapshot is written.
+   */
+  lastStateChangeAtMs?: number;
 }
 
 type RawV2SubgraphPool = {

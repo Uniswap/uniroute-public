@@ -2843,6 +2843,96 @@ describe('AuroraV4PoolsProvider', () => {
     }
   });
 
+  it('attaches the last state change only to pools of a recordPoolActivity target', async () => {
+    const keys = [
+      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
+      'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
+    ];
+    const saved = new Map(keys.map(key => [key, process.env[key]]));
+    const stateAsOf = new Date('2026-10-20T08:30:00.000Z');
+    const row = {
+      ...v4Row({
+        poolId: '0xv4',
+        token0Address: ROBINHOOD_WRAPPED_NATIVE,
+        tvlToken0: '10000000000000000000',
+        token0PriceUsd: 2000,
+        tvlUsd: 40000,
+      }),
+      stateAsOfTimestamp: stateAsOf,
+    };
+    class FakeRoutablePools
+      implements
+        Pick<
+          RoutablePoolsService,
+          | 'listAllV2RoutablePools'
+          | 'listAllV3RoutablePools'
+          | 'listAllV4RoutablePools'
+          | 'batchGetPoolVolumeUsd30d'
+        >
+    {
+      async batchGetPoolVolumeUsd30d() {
+        return new Map<string, number>();
+      }
+      async listAllV2RoutablePools() {
+        return [];
+      }
+      async listAllV3RoutablePools() {
+        return [{...row, poolAddress: '0xv3', feeTier: 3000}];
+      }
+      async listAllV4RoutablePools() {
+        return [row];
+      }
+    }
+    try {
+      process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V3,4663:V4';
+      process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
+        '{"4663:V3":1,"4663:V4":1}';
+      resetAuroraPoolCountBaselinesForTesting();
+      const metric = new FakeMetric();
+      const chainProtocols = [
+        {
+          chainId: ROBINHOOD,
+          protocol: Protocol.V3,
+          provider: fakeProvider<V3SubgraphPool>([[]]),
+        },
+        {
+          chainId: ROBINHOOD,
+          protocol: Protocol.V4,
+          provider: fakeProvider<V4SubgraphPool>([[]]),
+        },
+      ];
+      applyAuroraPoolSources(
+        chainProtocols,
+        {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
+        noopLogger,
+        metric,
+        {
+          scopedRun: true,
+          providerDeps: {
+            routablePools: new FakeRoutablePools(),
+            prices: freshPrices(),
+            logger: noopLogger,
+            metric,
+          },
+          recordPoolActivityTargets: new Set(['4663:V4']),
+        }
+      );
+      const v3Pools = await chainProtocols[0].provider.getPools();
+      const v4Pools = await chainProtocols[1].provider.getPools();
+      expect(v4Pools.map(pool => pool.lastStateChangeAtMs)).toEqual([
+        stateAsOf.getTime(),
+      ]);
+      expect(v3Pools.map(pool => pool.id)).toEqual(['0xv3']);
+      expect(v3Pools[0]).not.toHaveProperty('lastStateChangeAtMs');
+    } finally {
+      for (const key of keys) {
+        const value = saved.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('rejects a prod guard wildcard on every wrapped protocol and applies it in dev', async () => {
     const keys = [
       'POOL_CACHING_AURORA_PRIMARY_TARGETS',
@@ -5360,6 +5450,32 @@ describe('AuroraV2PoolsProvider', () => {
         }),
       ])
     );
+  });
+
+  it('attaches the last state change to V2 pairs only when recordPoolActivity is set', async () => {
+    const stateAsOf = new Date('2026-10-20T08:30:00.000Z');
+    const rows = [
+      {
+        ...v2Row({pairAddress: '0xTRACKED', tvlUsd: 51}),
+        stateAsOfTimestamp: stateAsOf,
+      },
+    ];
+    const read = (recordPoolActivity: boolean) =>
+      new AuroraV2PoolsProvider(CHAIN_ID_ROBINHOOD, 0.025, Number.MAX_VALUE, {
+        routablePools: {
+          batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+          listAllV2RoutablePools: async () => rows,
+        },
+        prices: freshNativePrice(CHAIN_ID_ROBINHOOD),
+        logger: noopLogger,
+        metric: new FakeMetric(),
+        recordPoolActivity,
+      }).getPools();
+
+    expect((await read(true)).map(pool => pool.lastStateChangeAtMs)).toEqual([
+      stateAsOf.getTime(),
+    ]);
+    expect((await read(false))[0]).not.toHaveProperty('lastStateChangeAtMs');
   });
 
   it('keeps virtual-token pools Base-only and wires the otherwise inert untracked threshold', async () => {

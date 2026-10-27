@@ -920,6 +920,10 @@ export interface AuroraProviderDeps<
   fetchSemaphore?: FetchSlots;
   // Test seam; production stays within the lib's one-statement 5,000-ID chunk.
   volumeLookupMaxPools?: number;
+  // Attach each pool's lastStateChangeAtMs. Set only on combos in
+  // POOL_CACHING_ACTIVITY_FILTER_TARGETS, whose cron filter strips the field
+  // before the snapshot is written.
+  recordPoolActivity?: boolean;
 }
 
 type AuroraPoolListMethod =
@@ -1096,6 +1100,17 @@ abstract class BaseAuroraPoolsProvider<
   protected withFetchSlot<T>(work: () => Promise<T>): Promise<T> {
     const semaphore = this.deps.fetchSemaphore;
     return semaphore ? semaphore.run(work) : work();
+  }
+
+  protected recordPoolActivity(
+    cachedPool: {lastStateChangeAtMs?: number},
+    stateAsOf: Date
+  ): void {
+    if (!this.deps.recordPoolActivity) return;
+    const changedAtMs = stateAsOf.getTime();
+    if (Number.isFinite(changedAtMs)) {
+      cachedPool.lastStateChangeAtMs = changedAtMs;
+    }
   }
 
   // USD price of the chain's wrapped-native token: converts the ETH-denominated
@@ -1529,7 +1544,7 @@ export class AuroraV4PoolsProvider
         droppedNullDecimals++;
         continue;
       }
-      result.push({
+      const cachedPool: V4SubgraphPool = {
         id: pool.poolId.toLowerCase(),
         feeTier: String(pool.feeBips),
         tickSpacing: String(pool.tickSpacing),
@@ -1549,7 +1564,9 @@ export class AuroraV4PoolsProvider
         },
         tvlETH: tvlEth,
         tvlUSD: tvlUsd,
-      });
+      };
+      this.recordPoolActivity(cachedPool, pool.stateAsOfTimestamp);
+      result.push(cachedPool);
       rankedPools.push({
         id: pool.poolId.toLowerCase(),
         raw: rawTvlUsd,
@@ -1727,7 +1744,7 @@ export class AuroraV3PoolsProvider
       }
       if (!family) continue;
       admittedByFamily[family]++;
-      result.push({
+      const cachedPool: V3SubgraphPool = {
         id: pool.poolAddress.toLowerCase(),
         feeTier: String(pool.feeTier),
         liquidity: pool.liquidity,
@@ -1735,7 +1752,9 @@ export class AuroraV3PoolsProvider
         token1: {id: pool.token1Address.toLowerCase()},
         tvlETH: tvlEth,
         tvlUSD: tvlUsd,
-      });
+      };
+      this.recordPoolActivity(cachedPool, pool.stateAsOfTimestamp);
+      result.push(cachedPool);
       rankedPools.push({
         id: pool.poolAddress.toLowerCase(),
         raw: pool.tvlUsd,
@@ -1913,7 +1932,7 @@ export class AuroraV2PoolsProvider
       if (!family) continue;
       admittedByFamily[family]++;
       if (staleSideImplied) impliedStaleSide++;
-      result.push({
+      const cachedPool: V2SubgraphPool = {
         id: pool.pairAddress.toLowerCase(),
         token0: {id: token0},
         token1: {id: token1},
@@ -1924,7 +1943,9 @@ export class AuroraV2PoolsProvider
         supply: Number(pool.totalSupply) / 1e18,
         reserve: tvlNative,
         reserveUSD: untrackedUsd,
-      });
+      };
+      this.recordPoolActivity(cachedPool, pool.stateAsOfTimestamp);
+      result.push(cachedPool);
       rankedPools.push({
         id: pool.pairAddress.toLowerCase(),
         raw: rawReserveUsd,
@@ -2864,6 +2885,8 @@ export function applyAuroraPoolSources<
     // The extra pool sources' targeted reads, alongside providerDeps. Without
     // it, a run given providerDeps leaves the extra sources on the subgraph.
     extraSourceRoutablePools?: AuroraExtraSourceDeps['routablePools'];
+    // targetKeys whose pools carry lastStateChangeAtMs for the activity filter.
+    recordPoolActivityTargets?: ReadonlySet<string>;
   }
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
@@ -3017,7 +3040,10 @@ export function applyAuroraPoolSources<
       continue;
     }
 
-    const providerDeps = mode === 'shadow' ? shadowDeps : deps;
+    const providerDeps = {
+      ...(mode === 'shadow' ? shadowDeps : deps),
+      recordPoolActivity: options?.recordPoolActivityTargets?.has(key) ?? false,
+    };
     const applyTvlGuard =
       config.tvlGuardTargets === 'all' ||
       config.tvlGuardTargets.has(targetKey(chainId, protocol));

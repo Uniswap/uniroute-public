@@ -1,4 +1,4 @@
-import {describe, it, expect, vi, beforeEach} from 'vitest';
+import {describe, it, expect, vi, beforeEach, afterEach} from 'vitest';
 import * as zlib from 'zlib';
 import {
   cacheAllPools,
@@ -8,6 +8,10 @@ import {
 } from './cachePools';
 import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
 import {AuroraSourcedProvider} from './auroraPoolsSource';
+import {
+  POOL_ACTIVITY_SIGNAL_MAX_STALENESS_MS,
+  POOL_ACTIVITY_WINDOW_MS,
+} from './util/poolActivityFilter';
 import {
   ExtraPoolSourceName,
   type ExtraPoolsSource,
@@ -1734,7 +1738,7 @@ describe('cacheAllPools', () => {
         '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
       );
       v3ManualFetch.error = new Error('subgraph shut off');
-      let auroraResult: Error | Array<typeof manualPool> = [manualPool];
+      let auroraResult: Error | V3SubgraphPool[] = [manualPool];
       const chainProtocol = {
         protocol: Protocol.V3,
         chainId: ChainId.MAINNET,
@@ -1808,5 +1812,139 @@ describe('cacheAllPools', () => {
         },
       });
     });
+  });
+});
+
+describe('cacheAllPools pool activity filter', () => {
+  const ROBINHOOD = 4663 as ChainId;
+  const config: CachePoolsConfig = {
+    s3Bucket: 'test-bucket',
+    s3CacheKey: 'poolCacheGzip.json',
+  };
+  const savedTargets = process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS;
+  let metric: MockMetric;
+
+  beforeEach(() => {
+    metric = new MockMetric();
+    mockChainProtocols = [];
+    resetExtraPoolSourceMemoryForTesting();
+    sendMock.mockClear();
+    sendMock.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    if (savedTargets === undefined) {
+      delete process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS;
+    } else {
+      process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = savedTargets;
+    }
+  });
+
+  function robinhoodV4Pool(id: string, lastStateChangeAtMs: number) {
+    return {
+      ...makeV4Pool(
+        id,
+        '0x0000000000000000000000000000000000000000',
+        '0xa',
+        '0xb'
+      ),
+      lastStateChangeAtMs,
+    };
+  }
+
+  function writtenPools(): Array<Record<string, unknown>> {
+    const parsed: unknown = JSON.parse(
+      zlib.inflateSync(putObjectCalls()[0].input.Body).toString('utf8')
+    );
+    if (!Array.isArray(parsed)) throw new Error('snapshot is not an array');
+    return parsed;
+  }
+
+  function cacheRobinhoodV4(pools: ReturnType<typeof robinhoodV4Pool>[]) {
+    mockChainProtocols = [
+      {
+        protocol: Protocol.V4,
+        chainId: ROBINHOOD,
+        timeout: 90000,
+        provider: {getPools: async () => pools},
+      },
+    ];
+    return cacheAllPools(createMockLogger(), metric, config);
+  }
+
+  it('writes only recently changed pools, without the timestamp, for a listed combo', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V4';
+    const nowMs = Date.now();
+    await cacheRobinhoodV4([
+      robinhoodV4Pool('0xactive', nowMs - 60_000),
+      robinhoodV4Pool('0xidle', nowMs - POOL_ACTIVITY_WINDOW_MS - 60_000),
+    ]);
+
+    const pools = writtenPools();
+    expect(pools.map(pool => pool.id)).toEqual(['0xactive']);
+    expect(pools.every(pool => !('lastStateChangeAtMs' in pool))).toBe(true);
+    const tags = {chainId: '4663', protocol: 'V4', status: 'success'};
+    expect(metric.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.kept',
+          value: 1,
+          tags,
+        }),
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.dropped',
+          value: 1,
+          tags,
+        }),
+      ])
+    );
+  });
+
+  it('writes every pool and counts a failure when the activity signal is stale', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V4';
+    const stalledMs =
+      Date.now() - POOL_ACTIVITY_SIGNAL_MAX_STALENESS_MS - 60_000;
+    await cacheRobinhoodV4([
+      robinhoodV4Pool('0xlast', stalledMs),
+      robinhoodV4Pool('0xolder', stalledMs - POOL_ACTIVITY_WINDOW_MS),
+    ]);
+
+    const pools = writtenPools();
+    expect(pools.map(pool => pool.id)).toEqual(['0xlast', '0xolder']);
+    expect(pools.every(pool => !('lastStateChangeAtMs' in pool))).toBe(true);
+    expect(metric.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.skipped',
+          tags: {
+            chainId: '4663',
+            protocol: 'V4',
+            status: 'failure',
+            reason: 'stale_activity_signal',
+          },
+        }),
+      ])
+    );
+  });
+
+  it('leaves an unlisted combo unfiltered and reports an unsupported entry', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V3,4663:V9';
+    const nowMs = Date.now();
+    await cacheRobinhoodV4([
+      robinhoodV4Pool('0xactive', nowMs),
+      robinhoodV4Pool('0xidle', nowMs - POOL_ACTIVITY_WINDOW_MS - 60_000),
+    ]);
+
+    expect(writtenPools().map(pool => pool.id)).toEqual(['0xactive', '0xidle']);
+    expect(
+      metric.calls.filter(call =>
+        call.key.startsWith('CachePools.activityFilter')
+      )
+    ).toEqual([
+      expect.objectContaining({
+        key: 'CachePools.activityFilter.misconfigured',
+        tags: {status: 'failure', reason: 'unsupported_target'},
+      }),
+    ]);
   });
 });

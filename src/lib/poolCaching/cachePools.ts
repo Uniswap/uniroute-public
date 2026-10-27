@@ -28,7 +28,7 @@ import {
   v3TrackedEthThreshold,
   ChainProtocol,
 } from './cacheConfig';
-import {applyAuroraPoolSources} from './auroraPoolsSource';
+import {applyAuroraPoolSources, targetKey} from './auroraPoolsSource';
 import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
 import {
   FETCH_START_METADATA_KEY,
@@ -66,6 +66,12 @@ import {
   createDynamicZlcaHooksRefresherFromEnv,
   DynamicZlcaHooksRefresher,
 } from './util/DynamicZlcaHooksRefresher';
+import {
+  ActivityFilterPool,
+  filterPoolsByRecentActivity,
+  poolActivityExemptions,
+  poolActivityFilterConfigFromEnv,
+} from './util/poolActivityFilter';
 
 export interface CachePoolsConfig {
   s3Bucket: string;
@@ -256,12 +262,65 @@ function carryForward<T extends {id: string}>(
   return lastGood.pools;
 }
 
+// Drops pools with no recent state change so serving tasks parse a smaller
+// snapshot. Runs before the V4 filter, so an inactive pool cannot hold one of
+// its top-N TVL slots.
+function applyPoolActivityFilter<T extends ActivityFilterPool>(
+  chainId: number,
+  pools: T[],
+  logger: Logger,
+  metricInstance: IMetric,
+  metricTags: Record<string, string>
+): T[] {
+  const {pools: keptPools, outcome} = filterPoolsByRecentActivity(
+    pools,
+    poolActivityExemptions(chainId),
+    Date.now()
+  );
+  if (outcome.status === 'skipped') {
+    metricInstance.putMetric(
+      'CachePools.activityFilter.skipped',
+      1,
+      MetricLoggerUnit.Count,
+      {...metricTags, status: 'failure', reason: outcome.reason}
+    );
+    logger.warn(
+      `Pool activity filter skipped, caching all ${pools.length} pools: ${outcome.reason}`
+    );
+    return keptPools;
+  }
+  const successTags = {...metricTags, status: 'success'};
+  metricInstance.putMetric(
+    'CachePools.activityFilter.kept',
+    outcome.kept,
+    MetricLoggerUnit.Count,
+    successTags
+  );
+  metricInstance.putMetric(
+    'CachePools.activityFilter.dropped',
+    outcome.dropped,
+    MetricLoggerUnit.Count,
+    successTags
+  );
+  metricInstance.putMetric(
+    'CachePools.activityFilter.exempt',
+    outcome.exempt,
+    MetricLoggerUnit.Count,
+    successTags
+  );
+  logger.info(
+    `Pool activity filter kept ${outcome.kept} of ${pools.length} pools (dropped=${outcome.dropped} exempt=${outcome.exempt})`
+  );
+  return keptPools;
+}
+
 async function cachePoolsForChainProtocol(
   chainProtocol: ChainProtocol,
   s3: S3Client,
   config: CachePoolsConfig,
   logger: Logger,
   metricInstance: IMetric,
+  activityFilterTargets: ReadonlySet<string>,
   subgraphFetchFactory?: SubgraphFetchFactory
 ): Promise<void> {
   const {
@@ -291,6 +350,15 @@ async function cachePoolsForChainProtocol(
     pools = (await provider.getPools()) as Array<
       V2SubgraphPool | V3SubgraphPool | V4SubgraphPool
     >;
+    if (activityFilterTargets.has(targetKey(chainId, protocol))) {
+      pools = applyPoolActivityFilter(
+        chainId,
+        pools,
+        logger,
+        metricInstance,
+        metricTags
+      );
+    }
 
     if (protocol === Protocol.V2 && chainId === ChainId.MAINNET) {
       const manuallyIncludedPools: V2SubgraphPool[] = [
@@ -1038,6 +1106,19 @@ export async function cacheAllPools(
     }
   }
 
+  const activityFilter = poolActivityFilterConfigFromEnv();
+  if (activityFilter.ignoredEntries.length > 0) {
+    metricInstance.putMetric(
+      'CachePools.activityFilter.misconfigured',
+      1,
+      MetricLoggerUnit.Count,
+      {status: 'failure', reason: 'unsupported_target'}
+    );
+    cronLogger.warn(
+      `POOL_CACHING_ACTIVITY_FILTER_TARGETS entries ignored, not code-supported Aurora combos: ${activityFilter.ignoredEntries.join(',')}`
+    );
+  }
+
   // Swap targeted combos onto the Aurora pool source (shadow or primary,
   // POOL_CACHING_AURORA_*_TARGETS). No-op when the flags are unset.
   applyAuroraPoolSources(
@@ -1045,9 +1126,12 @@ export async function cacheAllPools(
     {trackedEthThresholdFor, untrackedUsdThresholdFor},
     cronLogger,
     metricInstance,
-    // Scoped runs (the 2-minute Robinhood job) bypass the sweep's Aurora
-    // fetch semaphore so they never queue behind the all-chains batch.
-    {scopedRun: only !== undefined && only.length > 0}
+    {
+      // Scoped runs (the 2-minute Robinhood job) bypass the sweep's Aurora
+      // fetch semaphore so they never queue behind the all-chains batch.
+      scopedRun: only !== undefined && only.length > 0,
+      recordPoolActivityTargets: activityFilter.targets,
+    }
   );
 
   cronLogger.info(
@@ -1076,6 +1160,7 @@ export async function cacheAllPools(
         config,
         cronLogger,
         metricInstance,
+        activityFilter.targets,
         subgraphFetchFactory
       )
     );
