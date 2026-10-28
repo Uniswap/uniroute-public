@@ -36,6 +36,7 @@ import {
   needsGasPriceFetching,
   getUniRouteSyncCacheMissRouteFinderOverrides,
   MIN_REQUEST_ROUTING_TIME_BUDGET_MS,
+  TAG_STATUS_FAILURE,
 } from '../lib/config';
 import {Address} from '../models/address/Address';
 import {BlockNumberCache} from '../lib/blockNumberCache';
@@ -810,26 +811,30 @@ export class UniRouteBL implements IUniRoutedBL {
           .map(r => r.toString()),
       });
 
-      const {bestQuoteCandidates, bestQuote, unviableRouteStrings} =
-        await this.runQuotePipeline(
-          ctx,
-          chain,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          amountIn,
-          tradeType,
-          protocols,
-          effectiveConfig,
-          routes,
-          tokensInfo,
-          request,
-          options,
-          metricTags,
-          requestBlockNumber,
-          gasPrice,
-          resolvedStateOverrides,
-          erc4626Snapshot?.hookCodeOverrides
-        );
+      const {
+        bestQuoteCandidates,
+        bestQuote,
+        unviableRouteStrings,
+        incompleteSearch,
+      } = await this.runQuotePipeline(
+        ctx,
+        chain,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        amountIn,
+        tradeType,
+        protocols,
+        effectiveConfig,
+        routes,
+        tokensInfo,
+        request,
+        options,
+        metricTags,
+        requestBlockNumber,
+        gasPrice,
+        resolvedStateOverrides,
+        erc4626Snapshot?.hookCodeOverrides
+      );
 
       let status = QuoteStatus.Pending;
       if (bestQuote) {
@@ -894,6 +899,7 @@ export class UniRouteBL implements IUniRoutedBL {
         namespaceLogFields,
         usedCachedRoutes,
         shouldCheckCache,
+        incompleteSearch,
         options,
         metricTags
       );
@@ -1956,9 +1962,12 @@ export class UniRouteBL implements IUniRoutedBL {
     bestQuoteCandidates: QuoteSplit[];
     bestQuote: QuoteSplit | undefined;
     unviableRouteStrings: string[];
+    incompleteSearch: boolean;
   }> {
-    const bestQuoteCandidates =
-      await this.quoteStrategy.findBestQuoteCandidates(
+    let bestQuoteCandidates: QuoteSplit[];
+    let incompleteSearch = false;
+    try {
+      bestQuoteCandidates = await this.quoteStrategy.findBestQuoteCandidates(
         ctx,
         chain,
         tokenInCurrencyInfo,
@@ -1974,6 +1983,31 @@ export class UniRouteBL implements IUniRoutedBL {
         options?.testAggHooks,
         supplementalHookCodeOverrides
       );
+    } catch (error) {
+      if (
+        !(error instanceof OnChainQuoteFetchError) ||
+        error.kind !== 'incomplete'
+      ) {
+        throw error;
+      }
+      // The quote fetch dropped routes and no split came out of the rest.
+      // Served as no route, since the caller's contract is a 200 no-route
+      // and the dropped routes are gone for this request, but not cached as
+      // one: the next request searches them again.
+      incompleteSearch = true;
+      bestQuoteCandidates = [];
+      await ctx.metrics.count(buildMetricKey('IncompleteSearch'), 1, {
+        tags: [...metricTags, TAG_STATUS_FAILURE, 'reason:dropped_routes'],
+      });
+      ctx.logger.warn(
+        'Quote search was incomplete, serving no route without caching it',
+        {
+          chainId: chain.chainId,
+          routes: routes.length,
+          ...error.toLogFields(),
+        }
+      );
+    }
 
     ctx.logger.debug(`Best Quote Candidates (${bestQuoteCandidates.length}):`, {
       candidates: bestQuoteCandidates.map(candidate => ({
@@ -2061,7 +2095,12 @@ export class UniRouteBL implements IUniRoutedBL {
         resolvedStateOverrides
       );
 
-    return {bestQuoteCandidates, bestQuote, unviableRouteStrings};
+    return {
+      bestQuoteCandidates,
+      bestQuote,
+      unviableRouteStrings,
+      incompleteSearch,
+    };
   }
 
   /**
@@ -2225,6 +2264,7 @@ export class UniRouteBL implements IUniRoutedBL {
     namespaceLogFields: ReturnType<typeof namespaceFieldsForLogging>,
     usedCachedRoutes: boolean,
     shouldCheckCache: boolean,
+    incompleteSearch: boolean,
     options: QuoteOptions | undefined,
     metricTags: string[]
   ): Promise<void> {
@@ -2244,6 +2284,7 @@ export class UniRouteBL implements IUniRoutedBL {
         nsCtx,
         usedCachedRoutes,
         shouldCheckCache,
+        incompleteSearch,
         metricTags
       );
     } else {
@@ -2275,7 +2316,9 @@ export class UniRouteBL implements IUniRoutedBL {
    * so future sync requests at this amount or higher can short-circuit
    * without re-running the search. Also clears the pending refresh marker
    * so the next sync request at a *lower* amount can trigger a fresh
-   * refresh and ratchet the cliff down.
+   * refresh and ratchet the cliff down. An incomplete search (the quote
+   * fetch dropped routes) says nothing about whether a route exists, so it
+   * writes nothing and leaves the pending refresh marker to expire.
    */
   private async maybeWriteNoRouteCache(
     ctx: Context,
@@ -2289,9 +2332,16 @@ export class UniRouteBL implements IUniRoutedBL {
     nsCtx: RouteNamespaceContext,
     usedCachedRoutes: boolean,
     shouldCheckCache: boolean,
+    incompleteSearch: boolean,
     metricTags: string[]
   ): Promise<void> {
     if (usedCachedRoutes || !shouldCheckCache) {
+      return;
+    }
+    if (incompleteSearch) {
+      await ctx.metrics.count(buildMetricKey('NoRouteCache.WriteSkipped'), 1, {
+        tags: [...metricTags, 'reason:incomplete_search'],
+      });
       return;
     }
     const wrote = await this.noRouteCacheRepository.setAmountCliff(

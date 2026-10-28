@@ -1,6 +1,21 @@
 import {FakeTokenHandler} from '../../tests/test-utils/FakeTokenHandler';
 import {getGasToken} from '../lib/tokenUtils';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
+import {OnChainQuoteFetchError} from '../stores/quote/OnChainQuoteFetchError';
+import {OnChainQuoteFetcher} from '../stores/quote/OnChainQuoteFetcher';
+import {IPermissionedQuoteOverrideSource} from '../stores/quote/permissionedQuoteOverrides';
+import {DeepQuoteStrategy} from './strategy/DeepQuoteStrategy';
+import {
+  captureEthersRpcError,
+  ethersCallTimeoutError,
+  MALFORMED_RESULT,
+  MULTICALL_TRANSACTION,
+  NODE_HEADER_NOT_FOUND,
+  serveRpcReply,
+} from '../../tests/test-utils/ethersRpcErrors';
+import {IChainRepository} from '../stores/chain/IChainRepository';
+import {MAINNET} from '../stores/chain/hardcoded/chains/Mainnet';
+import {constants} from 'ethers';
 import {IQuoteSelector} from './quote/selector/IQuoteSelector';
 import {describe, expect, it, beforeEach, vi} from 'vitest';
 import {UniRouteBL} from './UniRouteBL';
@@ -500,6 +515,77 @@ class MockedQuoteStrategy extends BaseQuoteStrategy {
   }
 }
 
+class NoPermissionedQuoteOverrides implements IPermissionedQuoteOverrideSource {
+  routeTouchesPermissionedPool(): boolean {
+    return false;
+  }
+
+  async build(): Promise<undefined> {
+    return undefined;
+  }
+}
+
+// A mainnet RPC that answers the block number and gas price itself, so only
+// the quote calls reach its endpoint. Built with its network so ethers never
+// probes the endpoint.
+class PinnedBlockRpcProvider extends JsonRpcProvider {
+  constructor(url = 'http://127.0.0.1:1') {
+    super(url, {name: 'mainnet', chainId: ChainId.MAINNET});
+  }
+
+  override getBlockNumber(): Promise<number> {
+    return Promise.resolve(12345678);
+  }
+
+  override getGasPrice(): Promise<BigNumber> {
+    return Promise.resolve(BigNumber.from(0));
+  }
+}
+
+// An RPC whose every eth_call fails the same way.
+class FailingRpcProvider extends PinnedBlockRpcProvider {
+  constructor(private readonly failure: Error) {
+    super();
+  }
+
+  override call(): Promise<string> {
+    return Promise.reject(this.failure);
+  }
+}
+
+class FixedRoutesRepository extends TestRoutesRepository {
+  constructor(private readonly routes: readonly RouteBasic[]) {
+    super();
+  }
+
+  override async getRoutes(): Promise<RouteBasic[]> {
+    return [...this.routes];
+  }
+}
+
+class FixedChainRepository implements IChainRepository {
+  constructor(private readonly chain: Chain) {}
+
+  async getChain(): Promise<Chain> {
+    return this.chain;
+  }
+}
+
+// A deep search whose quote fetch dropped routes and built no split.
+class IncompleteQuoteStrategy extends MockedQuoteStrategy {
+  constructor(private readonly batchError: Error) {
+    super(null);
+  }
+
+  override async findBestQuoteCandidates(): Promise<QuoteSplit[]> {
+    throw new OnChainQuoteFetchError('incomplete', [this.batchError]);
+  }
+
+  override name(): string {
+    return 'IncompleteQuoteStrategy';
+  }
+}
+
 describe('UniRouteBL', () => {
   let redisCache: InMemoryRedisCache<string, string>;
   let cachedRoutesRepository: ICachedRoutesRepository;
@@ -911,10 +997,11 @@ describe('UniRouteBL', () => {
     const amount = BigInt(baseRequest.amount);
 
     const buildBL = (
-      strategy: MockedQuoteStrategy = new MockedQuoteStrategy()
+      strategy: MockedQuoteStrategy = new MockedQuoteStrategy(),
+      config: IUniRouteServiceConfig = serviceConfig
     ) =>
       new UniRouteBL(
-        serviceConfig,
+        config,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -1041,6 +1128,402 @@ describe('UniRouteBL', () => {
       expect(response.error?.code).not.toBe(404);
       expect(response.hitsCachedRoutes).toBe(true);
       expect(headers.get('x-no-route-cache-hit')).toBeUndefined();
+    });
+
+    describe('incomplete search', () => {
+      const readCliff = (ctx: UniContext) =>
+        noRouteCacheRepository.getAmountCliff(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          ChainId.MAINNET,
+          wrappedEth,
+          usdc,
+          TradeType.ExactIn,
+          ctx
+        );
+      const batchError = new Error('missing revert data in call exception');
+
+      it('async: a complete search with no route writes the no-route cliff', async () => {
+        const testCtx = buildTestContext();
+
+        const response = await buildBL(
+          new MockedQuoteStrategy(null),
+          serviceConfigAsync
+        ).quote(
+          testCtx,
+          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        );
+
+        expect(response.error?.code).toBe(404);
+        expect(await readCliff(testCtx)).toBe(amount);
+      });
+
+      it('async: an incomplete search is served as no route but never cached as one', async () => {
+        const testCtx = buildTestContext();
+
+        const response = await buildBL(
+          new IncompleteQuoteStrategy(batchError),
+          serviceConfigAsync
+        ).quote(
+          testCtx,
+          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        );
+
+        expect(response.error?.code).toBe(404);
+        expect(await readCliff(testCtx)).toBeUndefined();
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('IncompleteSearch')]
+        ).toBe(1);
+        expect(
+          testCtx.metrics.countStore[
+            buildMetricKey('NoRouteCache.WriteSkipped')
+          ]
+        ).toBe(1);
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+        ).toBeUndefined();
+      });
+
+      it('sync: an incomplete search keeps the 200 no-route contract', async () => {
+        const testCtx = buildTestContext();
+
+        const response = await buildBL(
+          new IncompleteQuoteStrategy(batchError)
+        ).quote(
+          testCtx,
+          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        );
+
+        expect(response.error?.code).toBe(404);
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('IncompleteSearch')]
+        ).toBe(1);
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+        ).toBeUndefined();
+      });
+
+      it('rethrows a quote fetch failure that is not an incomplete search', async () => {
+        class FailingQuoteStrategy extends MockedQuoteStrategy {
+          override async findBestQuoteCandidates(): Promise<QuoteSplit[]> {
+            throw new OnChainQuoteFetchError('generic', [batchError]);
+          }
+        }
+        const testCtx = buildTestContext();
+
+        await expect(
+          buildBL(new FailingQuoteStrategy()).quote(
+            testCtx,
+            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          )
+        ).rejects.toBeInstanceOf(OnChainQuoteFetchError);
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+        ).toBe(1);
+      });
+
+      // The deep search over the real quote fetcher, so the request sees
+      // what its batches threw rather than a strategy's verdict on them.
+      describe('over the on-chain quote fetcher', () => {
+        const UNIRPC_TIMEOUT_MS = 6000;
+        const v4Route = new RouteBasic(Protocol.V4, [
+          new V4Pool(
+            wrappedEth,
+            usdc,
+            500,
+            10,
+            '0x0000000000000000000000000000000000000000',
+            BigInt('1000000000000'),
+            '0x11b815efB8f581194ae79006d24E0d814B7697F6',
+            BigInt('79228162514264337593543950336'),
+            BigInt('0')
+          ),
+        ]);
+
+        const v2Route = new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            wrappedEth,
+            usdc,
+            new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+        ]);
+        // A V4 pool whose hook the chain replaces with its own bytecode, so
+        // the multicall takes the state-override path: a raw eth_call whose
+        // result the fetcher decodes itself.
+        const overriddenHook = '0x1111111111111111111111111111111111110080';
+        const hookedV4Route = new RouteBasic(Protocol.V4, [
+          new V4Pool(
+            wrappedEth,
+            usdc,
+            500,
+            10,
+            overriddenHook,
+            BigInt('1000000000000'),
+            '0x22b815efb8f581194ae79006d24e0d814b7697f6',
+            BigInt('79228162514264337593543950336'),
+            BigInt('0')
+          ),
+        ]);
+        const hookOverrideChainRepository = new FixedChainRepository(
+          Chain.create({
+            ...MAINNET,
+            hookCodeOverrides: {[overriddenHook]: '0x600160005260206000f3'},
+          })
+        );
+
+        const buildOnChainBL = (
+          config: IUniRouteServiceConfig,
+          rpcProvider: JsonRpcProvider,
+          routes: readonly RouteBasic[] = [v4Route],
+          chains: IChainRepository = chainRepository
+        ) => {
+          const rpcProviderMap = new Map([[ChainId.MAINNET, rpcProvider]]);
+          const onChainQuoteFetcher = new OnChainQuoteFetcher(
+            rpcProviderMap,
+            config,
+            new NoPermissionedQuoteOverrides()
+          );
+          return new UniRouteBL(
+            config,
+            redisCache,
+            chains,
+            poolDiscoverer,
+            freshPoolDetailsWrapper,
+            tokenHandler,
+            onChainQuoteFetcher,
+            quoteSelector,
+            routeQuoteAllocator,
+            gasEstimateProvider,
+            noGasConverter,
+            new FixedRoutesRepository(routes),
+            cachedRoutesRepository,
+            noRouteCacheRepository,
+            new DeepQuoteStrategy(
+              onChainQuoteFetcher,
+              gasEstimateProvider,
+              noGasConverter,
+              routeQuoteAllocator,
+              quoteSelector,
+              tokenHandler,
+              new Map(),
+              freshPoolDetailsWrapper,
+              rpcProviderMap
+            ),
+            dummySimulator,
+            quoteRequestValidator,
+            tokenProvider,
+            rpcProviderMap,
+            stateOverrideResolver
+          );
+        };
+
+        it('async: a V4 route the ABI coder rejects fails the batch it shares with a V2 route rather than caching no route', async () => {
+          // The V4 quoter's exactAmount is a uint128, so this amount never
+          // leaves the encoder, and the V2 route in the same batch (a
+          // uint256 amount) is never evaluated. Were a batch to reach the
+          // RPC, it would time out.
+          const amountAboveUint128 = constants.MaxUint256.toBigInt();
+          const testCtx = buildTestContext();
+          const batchLogSpy = vi.spyOn(testCtx.logger, 'error');
+
+          const thrown = await buildOnChainBL(
+            serviceConfigAsync,
+            new FailingRpcProvider(ethersCallTimeoutError(UNIRPC_TIMEOUT_MS)),
+            [v2Route, v4Route]
+          )
+            .quote(
+              testCtx,
+              new QuoteRequest({
+                ...baseRequest,
+                amount: amountAboveUint128.toString(),
+                tradeType: 'EXACT_IN',
+              })
+            )
+            .then(
+              () => undefined,
+              (error: unknown) => error
+            );
+
+          expect(thrown).toBeInstanceOf(OnChainQuoteFetchError);
+          if (!(thrown instanceof OnChainQuoteFetchError)) return;
+          expect(thrown.kind).toBe('generic');
+          expect(thrown.cause).toMatchObject({
+            code: 'INVALID_ARGUMENT',
+            argument: 'exactAmount',
+          });
+          expect(await readCliff(testCtx)).toBeUndefined();
+          const batchFailure = batchLogSpy.mock.calls.find(
+            ([message]) => message === 'Batch failed with non-out-of-gas error'
+          );
+          // Both routes at every split percentage, in the one batch.
+          const splitsPerRoute =
+            100 / serviceConfigAsync.RouteFinder.RouteSplitPercentage;
+          expect(batchFailure?.[1]).toMatchObject({
+            batchSize: 2 * splitsPerRoute,
+            error: {code: 'INVALID_ARGUMENT', argument: 'exactAmount'},
+          });
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.GenericError')
+            ]
+          ).toBe(1);
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.TransientRetry')
+            ]
+          ).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[buildMetricKey('IncompleteSearch')]
+          ).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+          ).toBe(1);
+        });
+
+        it('async: a malformed result on the state-override path in every batch fails the search rather than caching no route', async () => {
+          const testCtx = buildTestContext();
+
+          const thrown = await serveRpcReply(MALFORMED_RESULT, url =>
+            buildOnChainBL(
+              serviceConfigAsync,
+              new PinnedBlockRpcProvider(url),
+              [hookedV4Route],
+              hookOverrideChainRepository
+            )
+              .quote(
+                testCtx,
+                new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+              )
+              .then(
+                () => undefined,
+                (error: unknown) => error
+              )
+          );
+
+          expect(thrown).toBeInstanceOf(OnChainQuoteFetchError);
+          if (!(thrown instanceof OnChainQuoteFetchError)) return;
+          expect(thrown.kind).toBe('generic');
+          expect(thrown.cause).toMatchObject({
+            code: 'INVALID_ARGUMENT',
+            reason: 'invalid arrayify value',
+            value: MALFORMED_RESULT.result,
+          });
+          expect(await readCliff(testCtx)).toBeUndefined();
+          expect(
+            testCtx.metrics.distStore
+              .filter(
+                ({metric_name}) =>
+                  metric_name === buildMetricKey('OnChainQuoteFetch.BatchSize')
+              )
+              .map(({opts}) => opts?.tags)
+          ).toEqual([['chain:MAINNET', 'with_state_overrides:true']]);
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.GenericError')
+            ]
+          ).toBe(1);
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.TransientRetry')
+            ]
+          ).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+          ).toBe(1);
+        });
+
+        it('async: a search whose every batch timed out is resent once, then fails rather than caching no route', async () => {
+          const testCtx = buildTestContext();
+
+          await expect(
+            buildOnChainBL(
+              serviceConfigAsync,
+              new FailingRpcProvider(ethersCallTimeoutError(UNIRPC_TIMEOUT_MS))
+            ).quote(
+              testCtx,
+              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            )
+          ).rejects.toBeInstanceOf(OnChainQuoteFetchError);
+
+          expect(await readCliff(testCtx)).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.TransientRetry')
+            ]
+          ).toBe(1);
+          expect(
+            testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+          ).toBe(1);
+        });
+
+        it('async: a search whose every batch the node answered with header not found fails rather than caching no route', async () => {
+          const testCtx = buildTestContext();
+          const headerNotFound = await captureEthersRpcError(
+            NODE_HEADER_NOT_FOUND,
+            provider => provider.call(MULTICALL_TRANSACTION)
+          );
+          if (!(headerNotFound instanceof Error)) {
+            throw new Error('expected ethers to throw an Error');
+          }
+
+          const thrown = await buildOnChainBL(
+            serviceConfigAsync,
+            new FailingRpcProvider(headerNotFound)
+          )
+            .quote(
+              testCtx,
+              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            )
+            .then(
+              () => undefined,
+              (error: unknown) => error
+            );
+
+          expect(thrown).toBeInstanceOf(OnChainQuoteFetchError);
+          if (!(thrown instanceof OnChainQuoteFetchError)) return;
+          expect(thrown.kind).toBe('generic');
+          expect(thrown.cause).toBe(headerNotFound);
+          expect(await readCliff(testCtx)).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.TransientRetry')
+            ]
+          ).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.GenericError')
+            ]
+          ).toBe(1);
+          expect(
+            testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+          ).toBe(1);
+        });
+
+        it('sync: a search whose every batch timed out fails without a resend', async () => {
+          const testCtx = buildTestContext();
+
+          await expect(
+            buildOnChainBL(
+              serviceConfig,
+              new FailingRpcProvider(ethersCallTimeoutError(UNIRPC_TIMEOUT_MS))
+            ).quote(
+              testCtx,
+              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            )
+          ).rejects.toBeInstanceOf(OnChainQuoteFetchError);
+
+          expect(
+            testCtx.metrics.countStore[
+              buildMetricKey('OnChainQuoteFetch.TransientRetry')
+            ]
+          ).toBeUndefined();
+          expect(
+            testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+          ).toBe(1);
+        });
+      });
     });
   });
 

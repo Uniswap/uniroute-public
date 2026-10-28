@@ -24,6 +24,8 @@ import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {buildMetricKey, ChainId} from '../../lib/config';
 import {isTempoAggHook} from '../../lib/helpers';
 import {AGG_HOOK_QUOTE_ABI} from '../../../abis/AggHookQuoteABI';
+import {QuoteFetchReport} from '../../stores/quote/IQuoteFetcher';
+import {classifyBatchFailure} from '../../stores/quote/batchFailureClassification';
 
 /**
  * Returns true if the route is a single-hop through a Tempo aggregator hook pool.
@@ -75,6 +77,10 @@ export function partitionAggHookRoutes(routes: RouteBasic<Pool>[]): {
  * @param rpcProviderMap - Map of chainId to ethers providers
  * @param ctx            - Logging/metrics context
  * @param metricTags     - Tags for metrics emission
+ * @param options        - `contractFactory` builds the hook contract (tests
+ *                         inject a fake); `report` is filled in, when handed
+ *                         in, with the routes whose quote call never reached
+ *                         a node
  * @returns QuoteBasic[] with amounts from hook.quote()
  */
 export type HookContractFactory = (
@@ -94,8 +100,10 @@ export async function fetchAggHookQuotes(
   rpcProviderMap: Map<ChainId, JsonRpcProvider>,
   ctx: Context,
   metricTags: string[],
-  contractFactory: HookContractFactory = defaultContractFactory
+  options?: {contractFactory?: HookContractFactory; report?: QuoteFetchReport}
 ): Promise<QuoteBasic[]> {
+  const contractFactory = options?.contractFactory ?? defaultContractFactory;
+  const report = options?.report;
   const provider = rpcProviderMap.get(chain.chainId as ChainId);
   if (!provider) {
     ctx.logger.warn(
@@ -169,6 +177,10 @@ export async function fetchAggHookQuotes(
 
   const quotes: QuoteBasic[] = [];
   let failures = 0;
+  // Each route is its own eth_call, so a revert with data is the hook's
+  // answer for that route (quoted, no quote). Any other failure leaves the
+  // route unquoted: a dropped route, as a failed multicall batch is.
+  const droppedRouteErrors: unknown[] = [];
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i]!;
@@ -176,12 +188,20 @@ export async function fetchAggHookQuotes(
       quotes.push(result.value);
     } else {
       failures++;
+      if (classifyBatchFailure(result.reason) !== 'deterministic') {
+        droppedRouteErrors.push(result.reason);
+      }
       const pool = routes[i]!.path[0] as V4Pool;
       ctx.logger.warn(
         `AggHookQuoter: hook.quote() failed for pool ${pool.poolId} hook ${pool.hooks}`,
         {error: result.reason}
       );
     }
+  }
+
+  if (report) {
+    report.droppedRoutes = droppedRouteErrors.length;
+    report.batchErrors = droppedRouteErrors;
   }
 
   const latencyMs = Date.now() - startTime;

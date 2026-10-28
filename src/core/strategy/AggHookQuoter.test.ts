@@ -15,6 +15,13 @@ import {NativeCurrency} from '../../models/chain/NativeCurrency';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
 import {ChainId} from '../../lib/config';
 import {UNISWAP_AGG_HOOK_ON_TEMPO} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
+import {QuoteFetchReport} from '../../stores/quote/IQuoteFetcher';
+import {
+  captureEthersRpcError,
+  MULTICALL_TRANSACTION,
+  NODE_HEADER_NOT_FOUND,
+} from '../../../tests/test-utils/ethersRpcErrors';
+import {captureAggHookQuoteDecoderError} from '../../../tests/test-utils/ethersCoderErrors';
 
 import {isTempoAggHook} from '../../lib/helpers';
 import {
@@ -261,7 +268,7 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       ctx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     expect(quotes).toHaveLength(1);
@@ -293,7 +300,7 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       rejectingCtx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     expect(quotes).toHaveLength(1);
@@ -313,7 +320,7 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       ctx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     // amountSpecified should be -(1000000 * 50 / 100) = -500000
@@ -337,7 +344,7 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       ctx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     // exact-out: amountSpecified is positive
@@ -365,7 +372,7 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       ctx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     // First succeeds, second fails — only 1 quote returned
@@ -387,7 +394,7 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       ctx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     expect(quoteFn).toHaveBeenCalledWith(
@@ -410,10 +417,118 @@ describe('fetchAggHookQuotes', () => {
       makeProviderMap(),
       ctx,
       ['chain:TEMPO'],
-      makeMockContractFactory(quoteFn)
+      {contractFactory: makeMockContractFactory(quoteFn)}
     );
 
     expect(quotes).toHaveLength(0);
+  });
+
+  it('reports a quote call that never reached a node as a dropped route', async () => {
+    const timeout = Object.assign(new Error('timeout'), {code: 'TIMEOUT'});
+    const quoteFn = vi
+      .fn()
+      .mockResolvedValueOnce(ethers.BigNumber.from('999900'))
+      .mockRejectedValueOnce(timeout);
+    const report: QuoteFetchReport = {droppedRoutes: 0, batchErrors: []};
+
+    const quotes = await fetchAggHookQuotes(
+      chain,
+      [
+        new RouteBasic(Protocol.V4, [makeTempoAggPool()], 50),
+        new RouteBasic(Protocol.V4, [makeTempoAggPool()], 50),
+      ],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(false, PATH_USD),
+      makeProviderMap(),
+      ctx,
+      ['chain:TEMPO'],
+      {contractFactory: makeMockContractFactory(quoteFn), report}
+    );
+
+    expect(quotes).toHaveLength(1);
+    expect(report).toEqual({droppedRoutes: 1, batchErrors: [timeout]});
+  });
+
+  it('reports a quote call the node answered with header not found as a dropped route', async () => {
+    const headerNotFound = await captureEthersRpcError(
+      NODE_HEADER_NOT_FOUND,
+      provider => provider.call(MULTICALL_TRANSACTION)
+    );
+    const quoteFn = vi.fn().mockRejectedValue(headerNotFound);
+    const report: QuoteFetchReport = {droppedRoutes: 0, batchErrors: []};
+
+    const quotes = await fetchAggHookQuotes(
+      chain,
+      [new RouteBasic(Protocol.V4, [makeTempoAggPool()], 100)],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(false, PATH_USD),
+      makeProviderMap(),
+      ctx,
+      ['chain:TEMPO'],
+      {contractFactory: makeMockContractFactory(quoteFn), report}
+    );
+
+    expect(quotes).toHaveLength(0);
+    expect(report).toEqual({droppedRoutes: 1, batchErrors: [headerNotFound]});
+  });
+
+  it('reports a quote call the ABI coder rejected as a dropped route, leaving its siblings quoted', async () => {
+    // An INVALID_ARGUMENT also comes from decoding a malformed eth_call
+    // result, so it is not the hook's answer for the route: the route is
+    // dropped (the search ends incomplete, no no-route cliff), not quoted.
+    const coderRejection = captureAggHookQuoteDecoderError('0xzz');
+    const quoteFn = vi
+      .fn()
+      .mockRejectedValueOnce(coderRejection)
+      .mockResolvedValueOnce(ethers.BigNumber.from('499950'));
+    const report: QuoteFetchReport = {droppedRoutes: 0, batchErrors: []};
+
+    const quotes = await fetchAggHookQuotes(
+      chain,
+      [
+        new RouteBasic(Protocol.V4, [makeTempoAggPool()], 50),
+        new RouteBasic(Protocol.V4, [makeTempoAggPool()], 50),
+      ],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(false, PATH_USD),
+      makeProviderMap(),
+      ctx,
+      ['chain:TEMPO'],
+      {contractFactory: makeMockContractFactory(quoteFn), report}
+    );
+
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0].amount).toBe(499950n);
+    expect(report).toEqual({droppedRoutes: 1, batchErrors: [coderRejection]});
+  });
+
+  it('does not report a reverted quote call as a dropped route', async () => {
+    const quoteFn = vi.fn().mockRejectedValue(
+      Object.assign(new Error('call revert exception'), {
+        code: 'CALL_EXCEPTION',
+        reason: 'InsufficientLiquidity',
+        data: '0x08c379a0',
+      })
+    );
+    const report: QuoteFetchReport = {droppedRoutes: 0, batchErrors: []};
+
+    const quotes = await fetchAggHookQuotes(
+      chain,
+      [new RouteBasic(Protocol.V4, [makeTempoAggPool()], 100)],
+      1000000n,
+      TradeType.ExactIn,
+      new CurrencyInfo(false, PATH_USD),
+      makeProviderMap(),
+      ctx,
+      ['chain:TEMPO'],
+      {contractFactory: makeMockContractFactory(quoteFn), report}
+    );
+
+    expect(quotes).toHaveLength(0);
+    expect(report).toEqual({droppedRoutes: 0, batchErrors: []});
   });
 
   it('returns empty array when no provider available for chain', async () => {

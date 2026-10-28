@@ -6,7 +6,9 @@ import {
   getRouteSplitTimeoutMs,
   IUniRouteServiceConfig,
   OPTIMISM_STACK_CHAINS,
+  TAG_STATUS_FAILURE,
 } from '../../lib/config';
+import {OnChainQuoteFetchError} from '../../stores/quote/OnChainQuoteFetchError';
 import {QuoteSplit} from '../../models/quote/QuoteSplit';
 import {Context} from '@uniswap/lib-uni/context';
 import {Chain} from '../../models/chain/Chain';
@@ -23,7 +25,10 @@ import {QuoteBasic} from '../../models/quote/QuoteBasic';
 import {Erc20Token} from '../../models/token/Erc20Token';
 import {QuoteBestSplitFinder} from '../quote/QuoteBestSplitFinder';
 import {DEFAULT_EVENT_LOOP_SLICE_MS} from '../../lib/eventLoopSlicer';
-import {IQuoteFetcher} from '../../stores/quote/IQuoteFetcher';
+import {
+  IQuoteFetcher,
+  QuoteFetchReport,
+} from '../../stores/quote/IQuoteFetcher';
 import {IGasEstimateProvider} from '../gas/estimator/GasEstimateProvider';
 import {IGasConverter} from '../gas/converter/IGasConverter';
 import {IRouteQuoteAllocator} from '../route/RouteQuoteAllocator';
@@ -207,6 +212,10 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
 
     // Fetch quotes in parallel: hook.quote() for agg hooks, standard quoter for the rest
     const aggHookQuotesStartTime = Date.now();
+    const aggHookFetchReport: QuoteFetchReport = {
+      droppedRoutes: 0,
+      batchErrors: [],
+    };
     const aggHookQuotesPromise =
       aggHookRoutes.length > 0
         ? fetchAggHookQuotes(
@@ -217,10 +226,15 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
             tokenInCurrencyInfo,
             this.rpcProviderMap,
             ctx,
-            metricTags
+            metricTags,
+            {report: aggHookFetchReport}
           )
         : Promise.resolve([] as QuoteBasic[]);
     const standardQuotesStartTime = Date.now();
+    const standardFetchReport: QuoteFetchReport = {
+      droppedRoutes: 0,
+      batchErrors: [],
+    };
     const standardQuotesPromise =
       otherRoutes.length > 0
         ? this.quoteFetcher.fetchQuotes(
@@ -234,7 +248,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
             metricTags,
             blockNumber,
             tokensInfo,
-            supplementalHookCodeOverrides
+            supplementalHookCodeOverrides,
+            standardFetchReport
           )
         : Promise.resolve([] as QuoteBasic[]);
     const [aggHookQuotes, standardQuotes] = await Promise.all([
@@ -253,6 +268,16 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     ]);
 
     const quotes = [...aggHookQuotes, ...standardQuotes];
+    // A pair routed only through an agg hook has no standard arm, so the
+    // search is judged on what both arms dropped.
+    const fetchReport: QuoteFetchReport = {
+      droppedRoutes:
+        standardFetchReport.droppedRoutes + aggHookFetchReport.droppedRoutes,
+      batchErrors: [
+        ...standardFetchReport.batchErrors,
+        ...aggHookFetchReport.batchErrors,
+      ],
+    };
     await logElapsedTime('FetchQuotes', fetchQuotesStartTime, ctx, metricTags);
 
     // Update quotes with gas estimation details
@@ -572,6 +597,30 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       splitRoutes,
       ctx
     );
+
+    // The dropped routes may hold the only viable split, so an empty result
+    // here is not evidence that no route exists. The search ends with an
+    // `incomplete` error instead of an empty candidate list, which
+    // UniRouteBL serves as no route without writing the no-route cache.
+    if (stitchedQuotesWithGas.length === 0 && fetchReport.droppedRoutes > 0) {
+      await ctx.metrics.count(
+        buildMetricKey('DeepQuoteStrategy.IncompleteFetch'),
+        1,
+        {
+          tags: [...metricTags, TAG_STATUS_FAILURE, 'reason:dropped_routes'],
+        }
+      );
+      ctx.logger.debug(
+        'Quote fetch dropped routes and no split could be built, ending the search as incomplete',
+        {
+          chainId: chain.chainId,
+          droppedRoutes: fetchReport.droppedRoutes,
+          quotedRoutes: quotes.length,
+          pctRoutes: pctRoutes.length,
+        }
+      );
+      throw new OnChainQuoteFetchError('incomplete', fetchReport.batchErrors);
+    }
 
     return stitchedQuotesWithGas;
   }

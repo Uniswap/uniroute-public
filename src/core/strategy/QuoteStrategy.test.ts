@@ -1,7 +1,11 @@
 import {describe, expect, it, vi} from 'vitest';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {DeepQuoteStrategy} from './DeepQuoteStrategy';
-import {IQuoteFetcher} from '../../stores/quote/IQuoteFetcher';
+import {
+  IQuoteFetcher,
+  QuoteFetchReport,
+} from '../../stores/quote/IQuoteFetcher';
+import {OnChainQuoteFetchError} from '../../stores/quote/OnChainQuoteFetchError';
 import {Chain} from '../../models/chain/Chain';
 import {Address} from '../../models/address/Address';
 import {QuoteBasic} from '../../models/quote/QuoteBasic';
@@ -13,7 +17,11 @@ import {Pool} from '../../models/pool/Pool';
 import {V2Pool} from '../../models/pool/V2Pool';
 import {GasEstimateProvider} from '../gas/estimator/GasEstimateProvider';
 import {NoGasEstimator} from '../gas/estimator/IGasEstimator';
-import {ChainId, IUniRouteServiceConfig} from '../../lib/config';
+import {
+  buildMetricKey,
+  ChainId,
+  IUniRouteServiceConfig,
+} from '../../lib/config';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import {RouteQuoteAllocator} from '../route/RouteQuoteAllocator';
 import {IGasConverter} from '../gas/converter/IGasConverter';
@@ -212,7 +220,8 @@ function runStrategyTests(
     quoteSelector: SimpleQuoteSelector,
     tokenHandler: ITokenHandler,
     arbitrumGasDataProviders: Map<ChainId, ArbitrumGasDataProvider>,
-    freshPoolDetailsWrapper: IFreshPoolDetailsWrapper
+    freshPoolDetailsWrapper: IFreshPoolDetailsWrapper,
+    rpcProviderMap?: Map<ChainId, JsonRpcProvider>
   ) => BaseQuoteStrategy
 ) {
   const ctx = buildTestContext();
@@ -554,6 +563,194 @@ function runStrategyTests(
         );
 
         expect(bestQuoteCandidates.length).toBeGreaterThan(0);
+      });
+    });
+
+    describe('incomplete quote fetch', () => {
+      const metricTags = ['chain:MAINNET', 'tradeType:EXACT_IN'];
+      const batchError = new Error('missing revert data in call exception');
+      const route = () =>
+        new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            tokenInAddress,
+            tokenOutAddress,
+            new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+        ]);
+
+      // A fetcher that returns the given quotes and reports the given
+      // number of routes as dropped after its retries.
+      class ReportingQuoteFetcher implements IQuoteFetcher {
+        constructor(
+          private readonly quotes: QuoteBasic[],
+          private readonly droppedRoutes: number
+        ) {}
+
+        async fetchQuotes(
+          _chain: Chain,
+          _tokenInCurrencyInfo: CurrencyInfo,
+          _tokenOutCurrencyInfo: CurrencyInfo,
+          _amount: bigint,
+          _routes: RouteBasic[],
+          _tradeType: TradeType,
+          _ctx: Context,
+          _metricTags?: string[],
+          _blockNumber?: number,
+          _tokensInfo?: Map<string, Erc20Token | null>,
+          _supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
+          report?: QuoteFetchReport
+        ): Promise<QuoteBasic[]> {
+          if (report) {
+            report.droppedRoutes = this.droppedRoutes;
+            report.batchErrors = this.droppedRoutes > 0 ? [batchError] : [];
+          }
+          return this.quotes;
+        }
+      }
+
+      const findCandidates = (
+        quotes: QuoteBasic[],
+        droppedRoutes: number,
+        testCtx = buildTestContext()
+      ) =>
+        new strategyClass(
+          new ReportingQuoteFetcher(quotes, droppedRoutes),
+          new TestGasEstimateProvider(),
+          new TestGasConverter(),
+          new RouteQuoteAllocator(),
+          new SimpleQuoteSelector(),
+          new TokenHandlerMock(),
+          new Map(),
+          {} as IFreshPoolDetailsWrapper
+        ).findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          serviceConfig,
+          [route()],
+          new Map(),
+          metricTags
+        );
+
+      it('fails the search instead of reporting no route when dropped routes left no split', async () => {
+        const testCtx = buildTestContext();
+
+        const thrown = await findCandidates([], 3, testCtx).catch(
+          (error: unknown) => error
+        );
+
+        expect(thrown).toBeInstanceOf(OnChainQuoteFetchError);
+        if (!(thrown instanceof OnChainQuoteFetchError)) return;
+        expect(thrown.kind).toBe('incomplete');
+        expect(thrown.cause).toBe(batchError);
+        expect(
+          testCtx.metrics.countStore[
+            buildMetricKey('DeepQuoteStrategy.IncompleteFetch')
+          ]
+        ).toBe(1);
+      });
+
+      it('returns the splits it could build when routes were dropped', async () => {
+        const candidates = await findCandidates(
+          [
+            new QuoteBasic(
+              new RouteBasic(Protocol.V2, [route().path[0]], 100),
+              BigInt('1234567890'),
+              undefined
+            ),
+          ],
+          3
+        );
+
+        expect(candidates.length).toBeGreaterThan(0);
+      });
+
+      it('reports no route when a complete fetch produced no quotes', async () => {
+        const candidates = await findCandidates([], 0);
+
+        expect(candidates).toEqual([]);
+      });
+
+      // An RPC whose every eth_call fails the same way. Built with its
+      // network so ethers never probes the endpoint.
+      class FailingRpcProvider extends JsonRpcProvider {
+        constructor(private readonly failure: Error) {
+          super('http://127.0.0.1:1', {
+            name: 'mainnet',
+            chainId: ChainId.MAINNET,
+          });
+        }
+
+        call(): Promise<string> {
+          return Promise.reject(this.failure);
+        }
+      }
+
+      // A pair routed only through a single-hop agg hook: the standard arm
+      // never runs, so only the hook quote calls can drop routes.
+      const findAggHookOnlyCandidates = (
+        rpcFailure: Error,
+        testCtx = buildTestContext()
+      ) =>
+        new strategyClass(
+          new ReportingQuoteFetcher([], 0),
+          new TestGasEstimateProvider(),
+          new TestGasConverter(),
+          new RouteQuoteAllocator(),
+          new SimpleQuoteSelector(),
+          new TokenHandlerMock(),
+          new Map(),
+          {} as IFreshPoolDetailsWrapper,
+          new Map([[ChainId.MAINNET, new FailingRpcProvider(rpcFailure)]])
+        ).findBestQuoteCandidates(
+          testCtx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V4],
+          serviceConfig,
+          [new RouteBasic(Protocol.V4, [makeTempoAggPool()])],
+          new Map(),
+          metricTags
+        );
+
+      it('fails the search when the only routes were agg hook calls that never reached a node', async () => {
+        const testCtx = buildTestContext();
+        const timeout = Object.assign(new Error('timeout'), {code: 'TIMEOUT'});
+
+        const thrown = await findAggHookOnlyCandidates(timeout, testCtx).catch(
+          (error: unknown) => error
+        );
+
+        expect(thrown).toBeInstanceOf(OnChainQuoteFetchError);
+        if (!(thrown instanceof OnChainQuoteFetchError)) return;
+        expect(thrown.kind).toBe('incomplete');
+        expect(thrown.cause).toBe(timeout);
+        expect(
+          testCtx.metrics.countStore[
+            buildMetricKey('DeepQuoteStrategy.IncompleteFetch')
+          ]
+        ).toBe(1);
+      });
+
+      it('reports no route when every agg hook quote call reverted', async () => {
+        const candidates = await findAggHookOnlyCandidates(
+          Object.assign(new Error('call revert exception'), {
+            code: 'CALL_EXCEPTION',
+            reason: 'InsufficientLiquidity',
+            data: '0x08c379a0',
+          })
+        );
+
+        expect(candidates).toEqual([]);
       });
     });
 

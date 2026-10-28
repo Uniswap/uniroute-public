@@ -331,6 +331,12 @@ export interface IUniRouteServiceConfig {
     maxRetries: number;
     // Minimum batch size to use when retrying (never go below this value)
     minBatchSize: number;
+    // How many times the routes of a batch that failed before a node
+    // evaluated it (an RPC timeout surfaces as a CALL_EXCEPTION with no
+    // revert data) are sent again, at half the batch size, before they are
+    // dropped. Each retry is one more quote round trip, up to the full RPC
+    // timeout, with no overall deadline on the fetch. __PLACEHOLDER__ drops them at once.
+    transientRetries: number;
     // Per-chain multicall batch-size override (JSON record env
     // MULTICALL_BATCH_SIZE_BY_CHAIN, e.g. '{"__PLACEHOLDER__":__PLACEHOLDER__}'). Overlays the
     // in-code override map in dependencies.ts; unset chains keep their
@@ -484,6 +490,7 @@ export const getUniRouteSyncConfig = (
     OnChainQuoteFetcher: {
       maxRetries: __PLACEHOLDER__,
       minBatchSize: __PLACEHOLDER__,
+      transientRetries: __PLACEHOLDER__,
       multicallBatchSizeByChain: parsePositiveIntRecordEnvOrEmpty(
         'MULTICALL_BATCH_SIZE_BY_CHAIN'
       ),
@@ -612,6 +619,7 @@ export const getQuickRouteSyncConfig = (
     OnChainQuoteFetcher: {
       maxRetries: __PLACEHOLDER__,
       minBatchSize: __PLACEHOLDER__,
+      transientRetries: __PLACEHOLDER__,
       multicallBatchSizeByChain: parsePositiveIntRecordEnvOrEmpty(
         'MULTICALL_BATCH_SIZE_BY_CHAIN'
       ),
@@ -681,6 +689,12 @@ export const getUniRouteAsyncConfig = (
       // Keep the full deep-search budget on every chain.
       RouteSplitTimeoutMsCapByChain: undefined,
     },
+    OnChainQuoteFetcher: {
+      ...syncConfig.OnChainQuoteFetcher,
+      // One more quote round trip fits the async budget, and only async
+      // writes the no-route cache a dropped route would block.
+      transientRetries: __PLACEHOLDER__,
+    },
   };
 };
 
@@ -693,6 +707,10 @@ export const getQuickRouteAsyncConfig = (
     Lambda: {
       ...syncConfig.Lambda,
       Type: LambdaType.Async,
+    },
+    OnChainQuoteFetcher: {
+      ...syncConfig.OnChainQuoteFetcher,
+      transientRetries: __PLACEHOLDER__,
     },
   };
 };
@@ -746,6 +764,10 @@ export const TAG_STATUS_FAILURE = 'status:failure';
 
 export enum MetricFailureReason {
   RPC_ERROR = 'rpc_error',
+  /** A resent transient quote batch still left routes unquoted. */
+  TRANSIENT_RETRY_EXHAUSTED = 'exhausted',
+  /** The attempt resending transient quote batches threw before it settled. */
+  TRANSIENT_RETRY_FAILED = 'resend_failed',
   /** A periodic pass was skipped because the previous one is still running. */
   IN_FLIGHT = 'in_flight',
   REDIS_READ_ERROR = 'redis_read_error',
