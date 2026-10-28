@@ -19,7 +19,6 @@ import {
 } from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 import {promisify} from 'node:util';
-import _ from 'lodash';
 import {getTvlBypassHookAddresses} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {
   isDenylistedCcaHook,
@@ -40,6 +39,17 @@ import {
   FETCH_START_METADATA_KEY,
   parseSnapshotFetchStart,
 } from '../../../lib/poolCaching/util/snapshotFetchStart';
+import {
+  SnapshotRecordSkipCounts,
+  SnapshotTransformParams,
+  SnapshotTransformResult,
+  transformSnapshotPoolBytes,
+} from './s3SnapshotTransform';
+import {
+  ISnapshotParseOffloader,
+  SnapshotParseOffloadError,
+  SnapshotParseOffloadFailureReason,
+} from './SnapshotParseOffloader';
 
 // Async inflate is unconditional (not behind the snapshot SWR flag): it keeps
 // the decompressed output identical to inflateSync while moving the work off
@@ -50,30 +60,18 @@ const SNAPSHOT_AGE_METRIC = buildMetricKey(
   'S3SubgraphPoolDiscoverer.SnapshotAgeSeconds'
 );
 
-interface BasePoolData {
-  id: string;
-  token0: {id: string};
-  token1: {id: string};
-}
+const SNAPSHOT_PARSE_FALLBACK_METRIC = buildMetricKey(
+  'S3SubgraphPoolDiscoverer.SnapshotParseFallback'
+);
 
-interface V2PoolData extends BasePoolData {
-  liquidity?: string;
-  supply?: number;
-  reserve?: number;
-  reserveUSD?: number;
-}
+const SKIPPED_SNAPSHOT_RECORD_METRIC = buildMetricKey(
+  'S3SubgraphPoolDiscoverer.SkippedSnapshotRecord'
+);
 
-interface V3PoolData extends BasePoolData {
-  liquidity: string;
-  tvlETH: number;
-  tvlUSD: number;
-  feeTier: number;
-}
-
-interface V4PoolData extends V3PoolData {
-  tickSpacing: string;
-  hooks: string;
-  isExternalLiquidity?: boolean;
+// What a refresh served after the snapshot parse offload failed.
+enum SnapshotParseFallback {
+  KEPT_HELD_SNAPSHOT = 'kept_held_snapshot',
+  MAIN_THREAD_PARSE = 'main_thread_parse',
 }
 
 // GetObject with IfNoneMatch answers 304 for an unchanged object, which the
@@ -111,6 +109,27 @@ function decodeSnapshotVersion(
   };
 }
 
+// Runtime check standing in for what the TPoolInfo generic can't prove at
+// compile time: that a UniPoolInfo[] produced for a given `protocol` is
+// actually shaped like that protocol's pool type (V2PoolInfo has no feeTier;
+// V3/V4PoolInfo always do). Throws rather than silently mis-shaping data —
+// matches transformSnapshotPoolBytes's own "throws on malformed input"
+// contract.
+function assertPoolShapeMatchesProtocol(
+  pools: UniPoolInfo[],
+  protocol: Protocol
+): void {
+  for (const pool of pools) {
+    const hasFeeTier = 'feeTier' in pool;
+    const expectsFeeTier = protocol === Protocol.V3 || protocol === Protocol.V4;
+    if (hasFeeTier !== expectsFeeTier) {
+      throw new Error(
+        `Snapshot parse offloader returned a pool shape inconsistent with protocol ${protocol}: ${pool.id}`
+      );
+    }
+  }
+}
+
 export const S3_POOL_CACHE_KEY = (
   baseKey: string,
   chain: ChainId,
@@ -119,7 +138,6 @@ export const S3_POOL_CACHE_KEY = (
 
 abstract class BaseS3SubgraphPoolDiscoverer<
   TPoolInfo extends UniPoolInfo,
-  TPoolData extends BasePoolData,
 > extends BaseCachingPoolDiscoverer<TPoolInfo> {
   constructor(
     protected serviceConfig: IUniRouteServiceConfig,
@@ -127,6 +145,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protected getPoolsForTokensCache: IRedisCache<string, string>,
     protected featureGatedTokensRepository: FeatureGatedTokensRepository,
     protected readonly s3: S3Client,
+    protected readonly snapshotParseOffloader: ISnapshotParseOffloader,
     snapshotWarmer?: IPoolSnapshotWarmer
   ) {
     super(
@@ -140,8 +159,6 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     );
   }
 
-  protected readonly TrackedEthThreshold: number = 0.01;
-
   // Fetch start of the object last loaded per S3 key so a 304 refresh can still report its age
   private readonly snapshotFetchStartMsByKey = new Map<string, number>();
 
@@ -149,14 +166,21 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     return 'BaseS3SubgraphPoolDiscoverer';
   }
 
-  protected abstract convertToPoolInfo(
-    rawPool: TPoolData
-  ): TPoolInfo | undefined;
-
-  // Inputs of forceSelectSpecialPools that can change at runtime, as a
-  // comparable string; the base filter has none.
+  // Inputs of the snapshot's force-select filter (forceSelectV2Pool /
+  // forceSelectV4Pool in s3SnapshotTransform.ts) that can change at runtime,
+  // as a comparable string; the base filter has none.
   protected snapshotFilterVersion(_chainId: ChainId): string {
     return '';
+  }
+
+  // Runtime inputs the snapshot transform needs beyond (poolString, protocol,
+  // chainId) — e.g. V4's TVL-bypass hook set, which lives in a module-level
+  // store a worker thread cannot see (see SnapshotTransformParams). The base
+  // filter has none.
+  protected buildSnapshotTransformExtras(
+    _chainId: ChainId
+  ): Partial<SnapshotTransformParams> {
+    return {};
   }
 
   // A conditional GET on the known ETag, but only while the filter inputs
@@ -175,14 +199,20 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         : decodeSnapshotVersion(knownVersion);
     const ifNoneMatch =
       known?.filterVersion === filterVersion ? known.etag : undefined;
-    const load = await this.fetchSnapshot(chainId, protocol, ifNoneMatch, ctx);
+    const load = await this.fetchSnapshot(chainId, protocol, ifNoneMatch, {
+      allowDeferral: true,
+      ctx,
+    });
     // The hook set moved while the request was in flight, so the unchanged
     // object still has to be filtered again.
     if (
       load.status === SnapshotLoadStatus.UNCHANGED &&
       this.snapshotFilterVersion(chainId) !== filterVersion
     ) {
-      return this.fetchSnapshot(chainId, protocol, undefined, ctx);
+      return this.fetchSnapshot(chainId, protocol, undefined, {
+        allowDeferral: true,
+        ctx,
+      });
     }
     return load;
   }
@@ -192,7 +222,12 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     protocol: Protocol,
     ctx: Context
   ): Promise<TPoolInfo[]> {
-    const load = await this.fetchSnapshot(chainId, protocol, undefined, ctx);
+    // A caller of _getPools has no held snapshot to keep, so the load never
+    // defers.
+    const load = await this.fetchSnapshot(chainId, protocol, undefined, {
+      allowDeferral: false,
+      ctx,
+    });
     return load.status === SnapshotLoadStatus.LOADED ? load.pools : [];
   }
 
@@ -200,7 +235,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     chainId: ChainId,
     protocol: Protocol,
     ifNoneMatch: string | undefined,
-    ctx: Context
+    {allowDeferral, ctx}: {allowDeferral: boolean; ctx: Context}
   ): Promise<SnapshotLoad<TPoolInfo>> {
     // Guard before try/catch so programming errors propagate instead of being swallowed
     if (!this.supportedProtocols.includes(protocol)) {
@@ -271,10 +306,78 @@ abstract class BaseS3SubgraphPoolDiscoverer<
 
       const poolsBytes = await bodyStream.transformToByteArray();
 
-      // Decompress and parse the data
+      // Decompression stays here (already off the event loop via inflateAsync
+      // — see the module comment). The utf-8 decode of these bytes happens
+      // wherever the offloader actually runs the parse (main thread or a
+      // worker — see snapshotParseWorker.ts), not here, so a large snapshot's
+      // decode cost moves with the rest of the CPU-bound work. Read
+      // filterVersion/extras synchronously, no await between them and the
+      // transform call below, so the version stored with this snapshot is
+      // exactly what the filter used — a background DynamicZlcaHooksRefresher
+      // update landing mid-call must not desync the two.
+      const inflatedBytes = await inflateAsync(poolsBytes);
+      const filterVersion = this.snapshotFilterVersion(chainId);
+      const transformExtras = this.buildSnapshotTransformExtras(chainId);
+
+      // The CPU-bound utf-8 decode + JSON.parse + per-pool conversion +
+      // TVL/liquidity filter (the actual event-loop stall on a large
+      // snapshot — ~300k V4 pools on Robinhood) is delegated to
+      // snapshotParseOffloader, which may run it on a worker thread instead
+      // of this one (see WorkerThreadSnapshotParseOffloader). Behavior is
+      // identical either way: both implementations call the same pure
+      // transformSnapshotPoolBytes.
       const before2 = Date.now();
-      const poolString = (await inflateAsync(poolsBytes)).toString('utf-8');
-      const poolsData = JSON.parse(poolString) as TPoolData[];
+      const transformParams = {chainId, protocol, ...transformExtras};
+      let transformResult: SnapshotTransformResult;
+      try {
+        transformResult =
+          await this.snapshotParseOffloader.parseAndFilterSnapshot(
+            inflatedBytes,
+            transformParams,
+            ctx
+          );
+      } catch (error) {
+        if (!(error instanceof SnapshotParseOffloadError)) {
+          throw error;
+        }
+        // The worker could not parse this snapshot. Keep serving the held
+        // one while it is inside the stale-serve bound, so the stall the
+        // worker exists to remove is not put back on the event loop; with
+        // nothing servable, parse here, since an empty snapshot is worse
+        // than a slow one.
+        const keepHeld =
+          allowDeferral && this.hasServableStaleSnapshot(chainId, protocol);
+        this.recordSnapshotParseFallback(
+          metricTags,
+          error.reason,
+          keepHeld
+            ? SnapshotParseFallback.KEPT_HELD_SNAPSHOT
+            : SnapshotParseFallback.MAIN_THREAD_PARSE,
+          ctx
+        );
+        if (keepHeld) {
+          return {status: SnapshotLoadStatus.DEFERRED};
+        }
+        transformResult = transformSnapshotPoolBytes(
+          inflatedBytes,
+          transformParams
+        );
+      }
+      this.recordSkippedSnapshotRecords(
+        metricTags,
+        transformResult.skippedRecords,
+        ctx
+      );
+      const parsedPools = transformResult.pools;
+      // transformSnapshotPoolBytes returns UniPoolInfo[] regardless of
+      // protocol (it is shared across every BaseS3SubgraphPoolDiscoverer<T>
+      // subclass); `protocol` here always matches the generic TPoolInfo this
+      // particular subclass was instantiated with (S3SubgraphPoolDiscovererV2
+      // only ever calls this with Protocol.V2, etc.), but TypeScript can't
+      // see that invariant through the generic boundary. Verify it at
+      // runtime instead of asserting it away with a bare cast.
+      assertPoolShapeMatchesProtocol(parsedPools, protocol);
+      const filteredPools = parsedPools as TPoolInfo[];
       const after2 = Date.now();
 
       ctx.logger.debug(
@@ -288,64 +391,6 @@ abstract class BaseS3SubgraphPoolDiscoverer<
           tags: metricTags,
         }
       );
-
-      // Process pools using the subclass-specific conversion
-      const poolAddressSet = new Set<string>();
-      const poolInfos: TPoolInfo[] = _(poolsData)
-        .map(pool => {
-          const {id} = pool;
-          if (poolAddressSet.has(id)) {
-            return undefined;
-          }
-          poolAddressSet.add(id);
-
-          return this.convertToPoolInfo(pool);
-        })
-        .compact()
-        .value();
-
-      ctx.logger.debug(
-        `Got subgraph pools from S3 for protocol ${protocol} on ${chainId}. Num: ${poolInfos.length}`,
-        {bucket: this.serviceConfig.S3.poolBucketName, key: s3Key}
-      );
-
-      // Read with no await between here and the filter below, so the
-      // version stored with this snapshot is exactly what the filter used.
-      const filterVersion = this.snapshotFilterVersion(chainId);
-      // Keep only pools with > `TrackedEthThreshold` TVL
-      // TODO: In the future we might consider removing all filtering from here (and just trust whatever is in the S3)
-      // as we already do similar filtering there
-      let filteredPools: TPoolInfo[] = [];
-      switch (protocol) {
-        case Protocol.V2:
-          filteredPools = (poolInfos as V2PoolInfo[]).filter(
-            pool =>
-              pool.reserve > this.TrackedEthThreshold ||
-              this.forceSelectSpecialPools(pool as TPoolInfo, chainId)
-          ) as TPoolInfo[];
-          break;
-        case Protocol.V3:
-          // Special treatment for all V3 pools in order to reduce latency due to thousands of pools with very low TVL locked
-          // - Include "parseFloat(pool.totalValueLockedETH) === 0" as in certain occasions we have no way of calculating derivedETH so this is 0
-          filteredPools = (poolInfos as V3PoolInfo[]).filter(
-            pool =>
-              (parseInt(pool.liquidity) > 0 && pool.tvlETH === 0) ||
-              pool.tvlETH > this.TrackedEthThreshold ||
-              this.forceSelectSpecialPools(pool as TPoolInfo, chainId)
-          ) as TPoolInfo[];
-          break;
-        case Protocol.V4:
-          filteredPools = (poolInfos as V4PoolInfo[]).filter(
-            pool =>
-              pool.isExternalLiquidity ||
-              parseInt(pool.liquidity) > 0 ||
-              pool.tvlETH > this.TrackedEthThreshold ||
-              this.forceSelectSpecialPools(pool as TPoolInfo, chainId)
-          ) as TPoolInfo[];
-          break;
-        default:
-          throw new Error('Unsupported protocol: ' + protocol);
-      }
 
       ctx.logger.debug(`Kept ${filteredPools.length} pools`, {
         chainId,
@@ -399,6 +444,54 @@ abstract class BaseS3SubgraphPoolDiscoverer<
           }
         );
       }
+    }
+  }
+
+  private recordSnapshotParseFallback(
+    metricTags: readonly string[],
+    reason: SnapshotParseOffloadFailureReason,
+    fallback: SnapshotParseFallback,
+    ctx: Context
+  ): void {
+    ctx.logger.warn(
+      `[${this.getDiscovererName()}] Snapshot parse offload failed; ${fallback === SnapshotParseFallback.KEPT_HELD_SNAPSHOT ? 'keeping the held snapshot' : 'parsing on the main thread'}`,
+      {metricTags, reason, fallback}
+    );
+    void ctx.metrics
+      .count(SNAPSHOT_PARSE_FALLBACK_METRIC, 1, {
+        tags: [
+          ...metricTags,
+          'status:failure',
+          `reason:${reason}`,
+          `fallback:${fallback}`,
+        ],
+      })
+      .catch(() => undefined);
+  }
+
+  // One count per skip reason per load, and one warn line naming the counts
+  // (never the records themselves).
+  private recordSkippedSnapshotRecords(
+    metricTags: readonly string[],
+    skippedRecords: SnapshotRecordSkipCounts,
+    ctx: Context
+  ): void {
+    const entries = Object.entries(skippedRecords).filter(
+      ([, count]) => count !== undefined && count > 0
+    );
+    if (entries.length === 0) {
+      return;
+    }
+    ctx.logger.warn(
+      `[${this.getDiscovererName()}] Skipped malformed pool snapshot records`,
+      {metricTags, skippedRecords}
+    );
+    for (const [reason, count] of entries) {
+      void ctx.metrics
+        .count(SKIPPED_SNAPSHOT_RECORD_METRIC, count ?? 0, {
+          tags: [...metricTags, 'status:failure', `reason:${reason}`],
+        })
+        .catch(() => undefined);
     }
   }
 
@@ -457,120 +550,28 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     // Filtering takes place in BaseCachingPoolDiscoverer.getPoolsForTokens, then cached.
     return await this.getPools(chainId, protocol, ctx);
   }
-
-  /**
-   * To be implemented by the sub-classes.
-   * @param _pool - The pool to check.
-   * @param _chainId - The chain ID of the pool.
-   * @returns - Whether to force select the pool.
-   */
-  protected forceSelectSpecialPools(
-    _pool: TPoolInfo,
-
-    _chainId: ChainId
-  ): boolean {
-    return false;
-  }
 }
 
-export class S3SubgraphPoolDiscovererV2 extends BaseS3SubgraphPoolDiscoverer<
-  V2PoolInfo,
-  V2PoolData
-> {
+export class S3SubgraphPoolDiscovererV2 extends BaseS3SubgraphPoolDiscoverer<V2PoolInfo> {
   protected override getDiscovererName(): string {
     return 'S3SubgraphPoolDiscovererV2';
   }
-
-  protected override convertToPoolInfo(
-    pool: V2PoolData
-  ): V2PoolInfo | undefined {
-    const {token0, token1, id} = pool;
-    return {
-      id: id.toLowerCase(),
-      token0: {
-        id: token0.id.toLowerCase(),
-      },
-      token1: {
-        id: token1.id.toLowerCase(),
-      },
-      supply: pool.supply || 100,
-      reserve: pool.reserve || 100,
-      reserveUSD: pool.reserveUSD || 100,
-    };
-  }
-
-  /**
-   * Force select pools that contain the certain token.
-   * @param pool - The pool to check.
-   * @param chainId - The chain ID of the pool.
-   * @returns - Whether to force select the pool.
-   */
-  protected override forceSelectSpecialPools(
-    pool: V2PoolInfo,
-    chainId: ChainId
-  ): boolean {
-    // TODO: Remove. Temporary fix to ensure tokens without trackedReserveETH are in the list.
-    const FEI = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
-
-    return (
-      pool.token0.id === FEI ||
-      pool.token1.id === FEI ||
-      this.isVirtualPairBaseV2Pool(pool, chainId)
-    );
-  }
-
-  // This method checks if a given pool contains the VIRTUAL token.
-  private isVirtualPairBaseV2Pool(pool: V2PoolInfo, chainId: ChainId): boolean {
-    const virtualTokenAddress =
-      '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b'.toLowerCase();
-
-    return (
-      chainId === ChainId.BASE &&
-      (pool.token0.id.toLowerCase() === virtualTokenAddress ||
-        pool.token1.id.toLowerCase() === virtualTokenAddress)
-    );
-  }
 }
 
-export class S3SubgraphPoolDiscovererV3 extends BaseS3SubgraphPoolDiscoverer<
-  V3PoolInfo,
-  V3PoolData
-> {
+export class S3SubgraphPoolDiscovererV3 extends BaseS3SubgraphPoolDiscoverer<V3PoolInfo> {
   protected override getDiscovererName(): string {
     return 'S3SubgraphPoolDiscovererV3';
   }
-
-  protected override convertToPoolInfo(
-    pool: V3PoolData
-  ): V3PoolInfo | undefined {
-    const {token0, token1, id, liquidity, feeTier, tvlETH, tvlUSD} = pool;
-
-    return {
-      id: id.toLowerCase(),
-      feeTier: feeTier.toString(),
-      liquidity: liquidity.toString(),
-      token0: {
-        id: token0.id.toLowerCase(),
-      },
-      token1: {
-        id: token1.id.toLowerCase(),
-      },
-      tvlETH: tvlETH,
-      tvlUSD: tvlUSD,
-    };
-  }
 }
 
-export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
-  V4PoolInfo,
-  V4PoolData
-> {
+export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<V4PoolInfo> {
   constructor(
     serviceConfig: IUniRouteServiceConfig,
     getPoolsCache: IRedisCache<string, string>,
     getPoolsForTokensCache: IRedisCache<string, string>,
     featureGatedTokensRepository: FeatureGatedTokensRepository,
     s3: S3Client,
+    snapshotParseOffloader: ISnapshotParseOffloader,
     // Optional: CCA launch pools pre-registered at a known migrationBlock
     // (ROUTE-1134). Merged AFTER the caching layers so activation isn't
     // delayed by the pool-cache TTLs.
@@ -583,6 +584,7 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       getPoolsForTokensCache,
       featureGatedTokensRepository,
       s3,
+      snapshotParseOffloader,
       snapshotWarmer
     );
   }
@@ -595,6 +597,19 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
   // independently of the S3 object.
   protected override snapshotFilterVersion(chainId: ChainId): string {
     return [...(getTvlBypassHookAddresses(chainId) ?? [])].sort().join(',');
+  }
+
+  // Captured synchronously alongside snapshotFilterVersion (same
+  // getTvlBypassHookAddresses read) so the two can never observe different
+  // states of the bypass set — see fetchSnapshot's call site. Passed as a
+  // plain array: a worker thread has its own module registry and would
+  // otherwise never see DynamicZlcaHooksRefresher's in-process updates.
+  protected override buildSnapshotTransformExtras(
+    chainId: ChainId
+  ): Partial<SnapshotTransformParams> {
+    return {
+      v4BypassHookAddresses: [...(getTvlBypassHookAddresses(chainId) ?? [])],
+    };
   }
 
   public override async getPoolsForTokens(
@@ -848,65 +863,5 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<
       );
       return pools;
     }
-  }
-
-  /**
-   * Force select TVL-bypass hook pools (ZLCA hooks + zero-measured-TVL
-   * hooks — see the ZLCA_HOOKS_PER_CHAIN and
-   * ZERO_MEASURED_TVL_HOOKS_PER_CHAIN doc comments in
-   * hooksAddressesAllowlist.ts). Their `liquidity` is structurally 0 and
-   * `tvlETH` doesn't reflect their real economic backing, so the liquidity/TVL
-   * filter above would otherwise silently drop them here — even though they
-   * already cleared the pool-caching pipeline's own exemptions for the same
-   * reason.
-   */
-  protected override forceSelectSpecialPools(
-    pool: V4PoolInfo,
-    chainId: ChainId
-  ): boolean {
-    const bypassHooks = getTvlBypassHookAddresses(chainId);
-    if (!bypassHooks) return false;
-    return bypassHooks.has(pool.hooks.toLowerCase());
-  }
-
-  protected override convertToPoolInfo(
-    pool: V4PoolData
-  ): V4PoolInfo | undefined {
-    const {
-      token0,
-      token1,
-      id,
-      liquidity,
-      feeTier,
-      tvlETH,
-      tvlUSD,
-      tickSpacing,
-      hooks,
-      isExternalLiquidity,
-    } = pool;
-    // TODO: We need to know if a pool is DYNAMIC_FEE_FLAG with a subgraph field.
-    // https://linear.app/uniswap/issue/ROUTE-607/
-    // Currently dynamic fee hooked pools don't return the dynamic fee flag as feeTier but whatever feeTier is current.
-    return {
-      id: id.toLowerCase(),
-      feeTier: feeTier.toString(),
-      liquidity: liquidity.toString(),
-      tickSpacing: tickSpacing.toString(),
-      hooks: hooks.toString(),
-      token0: {
-        id: token0.id.toLowerCase(),
-      },
-      token1: {
-        id: token1.id.toLowerCase(),
-      },
-      tvlETH: tvlETH,
-      tvlUSD: tvlUSD,
-      // Conditional spread: don't materialize an undefined-valued key. Most
-      // pools lack this S3 field, and an always-present undefined key would
-      // force the memo-path normalization in BaseCachingPoolDiscoverer to
-      // mass-delete it across the snapshot (delete also degrades V8 object
-      // shapes on the served, memoized pools).
-      ...(isExternalLiquidity !== undefined && {isExternalLiquidity}),
-    };
   }
 }

@@ -19,7 +19,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
   ITopPoolsSelector,
   PoolsForTokensCacheDirective,
-  V2PoolInfo,
+  UniPoolInfo,
   V4PoolInfo,
 } from '../interface';
 import {sdkStreamMixin} from '@smithy/util-stream';
@@ -42,8 +42,28 @@ import {
 } from '../../../models/hooks/namespaces';
 import {AggHooksTopPoolsSelector} from '../TopPoolsSelector';
 import {aggHooksPoolSelectionPerChainConfig} from '../../../lib/config';
+import {
+  ISnapshotParseOffloader,
+  MainThreadSnapshotParseOffloader,
+  SnapshotParseOffloadError,
+  SnapshotParseOffloadFailureReason,
+} from './SnapshotParseOffloader';
+import {
+  SnapshotTransformParams,
+  SnapshotTransformResult,
+  transformSnapshotPoolBytes,
+} from './s3SnapshotTransform';
+import {WorkerThreadSnapshotParseOffloader} from './WorkerThreadSnapshotParseOffloader';
+import {FakeSnapshotParseWorkerHandle} from '../../../../tests/test-utils/FakeSnapshotParseWorkerHandle';
+import {TestMetric} from '@uniswap/lib-testhelpers/testMetrics';
+import {MetricOptions} from '@uniswap/lib-uni';
+import {deflateSync, inflateSync} from 'zlib';
 
 const mockConfig: IUniRouteServiceConfig = getUniRouteTestConfig();
+// Real pure-transform implementation (no I/O, no mocking) — exactly what
+// production uses when the worker-thread offload is disabled, and what every
+// test in this file exercised implicitly before the offloader existed.
+const snapshotParseOffloader = new MainThreadSnapshotParseOffloader();
 const mockContext: Context = buildTestContext();
 
 class PassthroughTopPoolsSelector implements ITopPoolsSelector<V4PoolInfo> {
@@ -116,7 +136,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
         getPoolsCache,
         getPoolsForTokensCache,
         FeatureGatedTokensRepository.empty(),
-        s3Client
+        s3Client,
+        snapshotParseOffloader
       );
     });
 
@@ -141,35 +162,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
       expect(pools[0]).toHaveProperty('reserve');
       expect(pools[0]).toHaveProperty('reserveUSD');
     });
-
-    it('should force select special pools', () => {
-      const poolVirtual = {
-        id: '1',
-        token0: {id: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b'},
-        token1: {id: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b'},
-      };
-      const poolFEI = {
-        id: '2',
-        token0: {id: '0x956f47f50a910163d8bf957cf5846d573e7f87ca'},
-        token1: {id: '0x0000000000000000000000000000000000000000'},
-      };
-
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore - protected method access for testing
-      const forceSelectSpecialPoolsVirtual = discoverer.forceSelectSpecialPools(
-        poolVirtual as V2PoolInfo,
-        ChainId.BASE
-      );
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore - protected method access for testing
-      const forceSelectSpecialPoolsFEI = discoverer.forceSelectSpecialPools(
-        poolFEI as V2PoolInfo,
-        ChainId.MAINNET
-      );
-
-      expect(forceSelectSpecialPoolsVirtual).toEqual(true);
-      expect(forceSelectSpecialPoolsFEI).toEqual(true);
-    });
   });
 
   describe('V3 Pool Discovery', () => {
@@ -193,7 +185,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
         getPoolsCache,
         getPoolsForTokensCache,
         FeatureGatedTokensRepository.empty(),
-        s3Client
+        s3Client,
+        snapshotParseOffloader
       );
     });
 
@@ -242,7 +235,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
         getPoolsCache,
         getPoolsForTokensCache,
         FeatureGatedTokensRepository.empty(),
-        s3Client
+        s3Client,
+        snapshotParseOffloader
       );
     });
 
@@ -303,7 +297,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           getPoolsCache,
           getPoolsForTokensCache,
           FeatureGatedTokensRepository.empty(),
-          s3Client
+          s3Client,
+          snapshotParseOffloader
         );
 
         await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
@@ -330,7 +325,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           getPoolsCache,
           getPoolsForTokensCache,
           FeatureGatedTokensRepository.empty(),
-          s3Client
+          s3Client,
+          snapshotParseOffloader
         );
         const countSpy = vi.spyOn(mockContext.metrics, 'count');
         const distSpy = vi.spyOn(mockContext.metrics, 'dist');
@@ -411,7 +407,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           getPoolsCache,
           getPoolsForTokensCache,
           FeatureGatedTokensRepository.empty(),
-          s3Client
+          s3Client,
+          snapshotParseOffloader
         );
 
         await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
@@ -444,7 +441,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           getPoolsCache,
           getPoolsForTokensCache,
           FeatureGatedTokensRepository.empty(),
-          s3Client
+          s3Client,
+          snapshotParseOffloader
         );
 
         await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
@@ -473,7 +471,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           cache,
           getPoolsForTokensCache,
           FeatureGatedTokensRepository.empty(),
-          s3Client
+          s3Client,
+          snapshotParseOffloader
         );
         const cacheKey = skipReparseDiscoverer.getPoolsCacheKey(
           ChainId.MAINNET,
@@ -595,7 +594,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           getPoolsCache,
           getPoolsForTokensCache,
           FeatureGatedTokensRepository.empty(),
-          s3Client
+          s3Client,
+          snapshotParseOffloader
         );
         let downloads = 0;
         vi.mocked(s3Client.send).mockImplementation((async (
@@ -717,52 +717,6 @@ describe('S3SubgraphPoolDiscoverer', () => {
         }
       }
     });
-
-    it('should force select ZLCA Hook pools despite zero liquidity and zero TVL', () => {
-      const zlcaPool = {
-        id: '1',
-        feeTier: '3000',
-        liquidity: '0',
-        tickSpacing: '60',
-        hooks: '0x958A0904940f744f8c6b72c043CeeE3EA34AE888', // LitePSM USDS (mixed case)
-        token0: {id: '0x6b175474e89094c44da98b954eedeac495271d0f'},
-        token1: {id: '0xdc035d45d973e3ec169d2276ddab16f1e407384f'},
-        tvlETH: 0,
-        tvlUSD: 0,
-      };
-      const nonZlcaPool = {
-        ...zlcaPool,
-        id: '2',
-        hooks: '0x0000000000000000000000000000000000000001',
-      };
-      const dualpoolPool = {
-        ...zlcaPool,
-        id: '3',
-        hooks: '0x00000078BD49D5279a99b5F4011a5C61eE8caaC0', // dualpool (mixed case)
-      };
-
-      const forceSelectZlca = discoverer['forceSelectSpecialPools'](
-        zlcaPool as V4PoolInfo,
-        ChainId.MAINNET
-      );
-      const forceSelectNonZlca = discoverer['forceSelectSpecialPools'](
-        nonZlcaPool as V4PoolInfo,
-        ChainId.MAINNET
-      );
-      const forceSelectDualpool = discoverer['forceSelectSpecialPools'](
-        dualpoolPool as V4PoolInfo,
-        ChainId.MAINNET
-      );
-      const forceSelectWrongChain = discoverer['forceSelectSpecialPools'](
-        zlcaPool as V4PoolInfo,
-        ChainId.ARBITRUM
-      );
-
-      expect(forceSelectZlca).toEqual(true);
-      expect(forceSelectNonZlca).toEqual(false);
-      expect(forceSelectDualpool).toEqual(true);
-      expect(forceSelectWrongChain).toEqual(false);
-    });
   });
 
   describe('Error Handling', () => {
@@ -786,7 +740,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
         getPoolsCache,
         getPoolsForTokensCache,
         FeatureGatedTokensRepository.empty(),
-        s3Client
+        s3Client,
+        snapshotParseOffloader
       );
     });
 
@@ -841,7 +796,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
         getPoolsCache,
         getPoolsForTokensCache,
         FeatureGatedTokensRepository.empty(),
-        s3Client
+        s3Client,
+        snapshotParseOffloader
       );
     });
 
@@ -957,6 +913,7 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
       pairCache,
       FeatureGatedTokensRepository.empty(),
       s3Client,
+      snapshotParseOffloader,
       repository
     );
   });
@@ -1120,6 +1077,7 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
       pairCache,
       restrictedRepo,
       s3Client,
+      snapshotParseOffloader,
       repository
     );
 
@@ -1229,4 +1187,388 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
     expect(pools.map(pool => pool.id)).not.toContain('0xccapool');
     expect(repository.getActivePools).not.toHaveBeenCalled();
   });
+});
+
+describe('S3SubgraphPoolDiscoverer snapshot-parse offload wiring', () => {
+  // Records every call it receives and returns a fixed, distinguishable
+  // result, so these tests prove fetchSnapshot actually routes through the
+  // injected offloader (and with what inputs) rather than parsing inline.
+  class RecordingSnapshotParseOffloader implements ISnapshotParseOffloader {
+    public calls: Array<{
+      poolBytes: Uint8Array;
+      params: SnapshotTransformParams;
+    }> = [];
+    constructor(
+      private readonly result: {pools: UniPoolInfo[]} | {error: Error}
+    ) {}
+
+    async parseAndFilterSnapshot(
+      poolBytes: Uint8Array,
+      params: SnapshotTransformParams
+    ) {
+      this.calls.push({poolBytes, params});
+      if ('error' in this.result) {
+        throw this.result.error;
+      }
+      return {pools: this.result.pools, skippedRecords: {}};
+    }
+
+    async close(): Promise<void> {}
+  }
+
+  const gzippedData = readTestData('v4-pools.json.gz');
+  let s3Client: S3Client;
+
+  beforeEach(() => {
+    s3Client = {
+      send: vi.fn().mockResolvedValue(createMockResponse(gzippedData) as never),
+    } as unknown as S3Client;
+  });
+
+  it('delegates the parse+filter to the injected offloader and serves exactly its result', async () => {
+    const recordedPool = {
+      id: '0xrecorded',
+      feeTier: '3000',
+      tickSpacing: '60',
+      hooks: '0x0000000000000000000000000000000000000000',
+      liquidity: '1',
+      token0: {id: '0xaaa'},
+      token1: {id: '0xbbb'},
+      tvlETH: 1,
+      tvlUSD: 1,
+    };
+    const offloader = new RecordingSnapshotParseOffloader({
+      pools: [recordedPool],
+    });
+    const discoverer = new S3SubgraphPoolDiscovererV4(
+      mockConfig,
+      {
+        get: vi.fn().mockResolvedValue(undefined),
+        set: vi.fn().mockResolvedValue(undefined),
+      } as unknown as IRedisCache<string, string>,
+      {
+        get: vi.fn().mockResolvedValue(undefined),
+        set: vi.fn().mockResolvedValue(undefined),
+      } as unknown as IRedisCache<string, string>,
+      FeatureGatedTokensRepository.empty(),
+      s3Client,
+      offloader
+    );
+
+    const pools = await discoverer['_getPools'](
+      ChainId.MAINNET,
+      Protocol.V4,
+      mockContext
+    );
+
+    expect(pools).toEqual([recordedPool]);
+    expect(offloader.calls).toHaveLength(1);
+    expect(offloader.calls[0].params.chainId).toBe(ChainId.MAINNET);
+    expect(offloader.calls[0].params.protocol).toBe(Protocol.V4);
+    expect(offloader.calls[0].poolBytes).toBeInstanceOf(Uint8Array);
+    const decoded = Buffer.from(offloader.calls[0].poolBytes).toString('utf-8');
+    expect(JSON.parse(decoded).length).toBeGreaterThan(0);
+  });
+
+  it('degrades to an empty pool list (and logs) when the offloader throws, matching the pre-existing inline-parse failure behavior (failure path)', async () => {
+    const offloader = new RecordingSnapshotParseOffloader({
+      error: new Error('boom'),
+    });
+    const discoverer = new S3SubgraphPoolDiscovererV4(
+      mockConfig,
+      {
+        get: vi.fn().mockResolvedValue(undefined),
+        set: vi.fn().mockResolvedValue(undefined),
+      } as unknown as IRedisCache<string, string>,
+      {
+        get: vi.fn().mockResolvedValue(undefined),
+        set: vi.fn().mockResolvedValue(undefined),
+      } as unknown as IRedisCache<string, string>,
+      FeatureGatedTokensRepository.empty(),
+      s3Client,
+      offloader
+    );
+    const testCtx = buildTestContext();
+
+    const pools = await discoverer['_getPools'](
+      ChainId.MAINNET,
+      Protocol.V4,
+      testCtx
+    );
+
+    expect(pools).toEqual([]);
+    expect(
+      testCtx.logger.outputs.some(
+        entry =>
+          entry.prefix === 'ERROR:' &&
+          entry.msg === 'Error fetching pools from S3'
+      )
+    ).toBe(true);
+  });
+});
+
+describe('S3SubgraphPoolDiscoverer when the snapshot parse offload fails', () => {
+  const gzippedData = readTestData('v4-pools.json.gz');
+  const params = {chainId: ChainId.MAINNET, protocol: Protocol.V4};
+  const expectedPools = () =>
+    transformSnapshotPoolBytes(inflateSync(gzippedData), params).pools;
+  const swrConfig = (maxStaleSeconds = 2700): IUniRouteServiceConfig => ({
+    ...mockConfig,
+    PoolDiscovery: {
+      ...mockConfig.PoolDiscovery,
+      SnapshotMemoEnabled: true,
+      SnapshotSwrEnabled: true,
+      SnapshotMaxStaleSeconds: maxStaleSeconds,
+    },
+  });
+
+  // Parses with the real transform until `fail` is set, then rejects the way
+  // the worker pool does.
+  class SwitchableOffloader implements ISnapshotParseOffloader {
+    public fail = false;
+    async parseAndFilterSnapshot(
+      poolBytes: Uint8Array,
+      transformParams: SnapshotTransformParams
+    ): Promise<SnapshotTransformResult> {
+      if (this.fail) {
+        throw new SnapshotParseOffloadError(
+          SnapshotParseOffloadFailureReason.TIMEOUT,
+          'Snapshot parse worker job timed out'
+        );
+      }
+      return transformSnapshotPoolBytes(poolBytes, transformParams);
+    }
+    async close(): Promise<void> {}
+  }
+
+  /** TestMetric, but keeping each count's tags. */
+  class FakeRecordingMetrics extends TestMetric {
+    public readonly counts: {name: string; val: number; tags: string[]}[] = [];
+    override async count(
+      metric_name: string,
+      val: number,
+      opts?: MetricOptions
+    ): Promise<void> {
+      this.counts.push({name: metric_name, val, tags: [...(opts?.tags ?? [])]});
+      await super.count(metric_name, val, opts);
+    }
+  }
+  const recordingContext = () => {
+    const ctx = buildTestContext();
+    const metrics = new FakeRecordingMetrics();
+    ctx.metrics = metrics;
+    return {ctx, metrics};
+  };
+  const fallbackTags = (metrics: FakeRecordingMetrics) =>
+    metrics.counts
+      .filter(
+        count =>
+          count.name ===
+          'UniRouteService.Metric.S3SubgraphPoolDiscoverer.SnapshotParseFallback'
+      )
+      .map(count => count.tags);
+
+  const s3Serving = (gzipped: Buffer): S3Client =>
+    ({
+      send: vi.fn().mockImplementation(async () => createMockResponse(gzipped)),
+    }) as unknown as S3Client;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('keeps serving the held snapshot when a refresh cannot be parsed off the event loop (failure path)', async () => {
+    const offloader = new SwitchableOffloader();
+    const cache = new InMemoryRedisCache<string, string>();
+    const discoverer = new S3SubgraphPoolDiscovererV4(
+      swrConfig(),
+      cache,
+      new InMemoryRedisCache<string, string>(),
+      FeatureGatedTokensRepository.empty(),
+      s3Serving(gzippedData),
+      offloader
+    );
+    await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+    const held = await discoverer.getPools(
+      ChainId.MAINNET,
+      Protocol.V4,
+      mockContext
+    );
+    expect(held).toEqual(expectedPools());
+
+    offloader.fail = true;
+    const {ctx, metrics} = recordingContext();
+    await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, ctx);
+    const served = await discoverer.getPools(ChainId.MAINNET, Protocol.V4, ctx);
+
+    expect(served).toBe(held);
+    expect(fallbackTags(metrics)).toEqual([
+      [
+        'chain:MAINNET',
+        'protocol:v4',
+        'status:failure',
+        'reason:timeout',
+        'fallback:kept_held_snapshot',
+      ],
+    ]);
+  });
+
+  it('parses on the main thread when there is no held snapshot to keep (failure path)', async () => {
+    const offloader = new SwitchableOffloader();
+    offloader.fail = true;
+    const discoverer = new S3SubgraphPoolDiscovererV4(
+      swrConfig(),
+      new InMemoryRedisCache<string, string>(),
+      new InMemoryRedisCache<string, string>(),
+      FeatureGatedTokensRepository.empty(),
+      s3Serving(gzippedData),
+      offloader
+    );
+    const {ctx, metrics} = recordingContext();
+
+    const served = await discoverer.getPools(ChainId.MAINNET, Protocol.V4, ctx);
+
+    expect(served).toEqual(expectedPools());
+    expect(fallbackTags(metrics)).toEqual([
+      [
+        'chain:MAINNET',
+        'protocol:v4',
+        'status:failure',
+        'reason:timeout',
+        'fallback:main_thread_parse',
+      ],
+    ]);
+  });
+
+  it('parses on the main thread once the held snapshot is past the stale-serve bound (failure path)', async () => {
+    vi.useFakeTimers({toFake: ['Date']});
+    const offloader = new SwitchableOffloader();
+    const discoverer = new S3SubgraphPoolDiscovererV4(
+      swrConfig(60),
+      new InMemoryRedisCache<string, string>(),
+      new InMemoryRedisCache<string, string>(),
+      FeatureGatedTokensRepository.empty(),
+      s3Serving(gzippedData),
+      offloader
+    );
+    await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+
+    vi.setSystemTime(Date.now() + 61_000);
+    offloader.fail = true;
+    const {ctx, metrics} = recordingContext();
+    await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, ctx);
+
+    expect(fallbackTags(metrics)).toEqual([
+      [
+        'chain:MAINNET',
+        'protocol:v4',
+        'status:failure',
+        'reason:timeout',
+        'fallback:main_thread_parse',
+      ],
+    ]);
+  });
+
+  it('never defers a direct _getPools load (failure path)', async () => {
+    const offloader = new SwitchableOffloader();
+    const discoverer = new S3SubgraphPoolDiscovererV4(
+      swrConfig(),
+      new InMemoryRedisCache<string, string>(),
+      new InMemoryRedisCache<string, string>(),
+      FeatureGatedTokensRepository.empty(),
+      s3Serving(gzippedData),
+      offloader
+    );
+    await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+    offloader.fail = true;
+
+    const pools = await discoverer['_getPools'](
+      ChainId.MAINNET,
+      Protocol.V4,
+      mockContext
+    );
+
+    expect(pools).toEqual(expectedPools());
+  });
+});
+
+describe('S3SubgraphPoolDiscoverer with a malformed snapshot record', () => {
+  const params = {chainId: ChainId.MAINNET, protocol: Protocol.V4};
+  const fixtureRecords = (): unknown[] => {
+    const records: unknown = JSON.parse(
+      inflateSync(readTestData('v4-pools.json.gz')).toString('utf-8')
+    );
+    if (!Array.isArray(records)) {
+      throw new Error('fixture is not an array');
+    }
+    return records;
+  };
+
+  it.each([
+    {
+      name: 'flag off (main-thread parse)',
+      offloader: () => new MainThreadSnapshotParseOffloader(),
+    },
+    {
+      name: 'flag on (worker pool)',
+      offloader: () =>
+        new WorkerThreadSnapshotParseOffloader(
+          () => new FakeSnapshotParseWorkerHandle(),
+          1,
+          10_000,
+          10_000
+        ),
+    },
+  ])(
+    '$name: skips only that record and serves the rest of the snapshot (failure path)',
+    async ({offloader}) => {
+      const records = fixtureRecords();
+      const intact = transformSnapshotPoolBytes(
+        new TextEncoder().encode(JSON.stringify(records)),
+        params
+      ).pools;
+      const [first, ...rest] = records;
+      if (
+        typeof first !== 'object' ||
+        first === null ||
+        !('id' in first) ||
+        typeof first.id !== 'string'
+      ) {
+        throw new Error('fixture record has no string id');
+      }
+      const corruptedId = first.id.toLowerCase();
+      const corrupted = deflateSync(
+        Buffer.from(
+          JSON.stringify([{...first, liquidity: {unexpected: true}}, ...rest])
+        )
+      );
+      const discoverer = new S3SubgraphPoolDiscovererV4(
+        mockConfig,
+        new InMemoryRedisCache<string, string>(),
+        new InMemoryRedisCache<string, string>(),
+        FeatureGatedTokensRepository.empty(),
+        {
+          send: vi
+            .fn()
+            .mockImplementation(async () => createMockResponse(corrupted)),
+        } as unknown as S3Client,
+        offloader()
+      );
+      const ctx = buildTestContext();
+
+      const pools = await discoverer.getPools(
+        ChainId.MAINNET,
+        Protocol.V4,
+        ctx
+      );
+
+      expect(pools.length).toBeGreaterThan(0);
+      expect(pools).toEqual(intact.filter(pool => pool.id !== corruptedId));
+      expect(
+        ctx.metrics.countStore[
+          'UniRouteService.Metric.S3SubgraphPoolDiscoverer.SkippedSnapshotRecord'
+        ]
+      ).toBe(1);
+    }
+  );
 });

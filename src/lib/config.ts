@@ -2,6 +2,7 @@ import {getEnv} from './otherUtils';
 import {
   parseBooleanEnvOrDefault,
   parseBoundedIntEnvOrDefault,
+  parseBoundedIntEnvOrThrow,
   parsePositiveIntEnvOrDefault,
   parsePositiveIntRecordEnvOrEmpty,
   parseStringArrayRecordEnvOrEmpty,
@@ -76,6 +77,79 @@ const getPoolDiscoverySnapshotMaxStaleSeconds = () =>
   parsePositiveIntEnvOrDefault(
     'POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS',
     DEFAULT_POOL_DISCOVERY_SNAPSHOT_MAX_STALE_SECONDS
+  );
+
+// Offloads the snapshot JSON.parse + pool conversion + TVL filter onto a
+// worker_threads pool instead of running it on the request-serving event
+// loop. Only the real re-parse path pays this cost — an ETag-unchanged
+// reload (SnapshotLoadStatus.UNCHANGED) never reaches it.
+const getPoolDiscoverySnapshotParseOffloadEnabled = () =>
+  parseBooleanEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_PARSE_OFFLOAD_ENABLED',
+    false
+  );
+
+// One pool per process (see dependencies.ts's
+// getOrCreateSnapshotParseOffloaderOnce), shared across every chain/protocol
+// that refreshes a snapshot in it. Defaults to __PLACEHOLDER__: both processes that build
+// this pool run with sub-__PLACEHOLDER__-vCPU reservations (fresh-requests-worker's
+// sqsWorkerCpu is __PLACEHOLDER__/__PLACEHOLDER__ units — infra/index.ts documents "single-threaded
+// Node.js ... __PLACEHOLDER__ vCPU is sufficient"; the serving container is __PLACEHOLDER__ units), so
+// main thread + N worker threads already contend for roughly one core's
+
+// throughput, until that's measured. NEEDS MEASUREMENT: raise this only
+// after confirming (in dev, under real load) that worker job latency stays
+// well under SnapshotParseWorkerJobTimeoutMs with the extra worker.
+const DEFAULT_SNAPSHOT_PARSE_WORKER_POOL_SIZE = __PLACEHOLDER__;
+const getPoolDiscoverySnapshotParseWorkerPoolSize = () =>
+  parsePositiveIntEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_PARSE_WORKER_POOL_SIZE',
+    DEFAULT_SNAPSHOT_PARSE_WORKER_POOL_SIZE
+  );
+
+// Milliseconds a single parse+filter job may run on a worker before it is
+// abandoned and the worker is recycled. The refresh then keeps the held
+// snapshot (or, with none inside the stale-serve bound, parses on the main
+// thread), so a timeout delays that refresh by its full duration. NEEDS
+// MEASUREMENT: before enabling the offload in any stack, measure actual
+// worker job duration in dev under load and set this comfortably above the
+// observed p99, not this default.
+const DEFAULT_SNAPSHOT_PARSE_WORKER_JOB_TIMEOUT_MS = 10_000;
+const getPoolDiscoverySnapshotParseWorkerJobTimeoutMs = () =>
+  parsePositiveIntEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_PARSE_WORKER_JOB_TIMEOUT_MS',
+    DEFAULT_SNAPSHOT_PARSE_WORKER_JOB_TIMEOUT_MS
+  );
+
+// Milliseconds a parse job may wait for a free worker. Prewarm and request
+// refreshes of several chains can queue behind one worker; past this the job
+// fails with reason:queue_timeout and the refresh keeps the held snapshot.
+const DEFAULT_SNAPSHOT_PARSE_WORKER_QUEUE_TIMEOUT_MS = 10_000;
+const SNAPSHOT_PARSE_WORKER_QUEUE_TIMEOUT_MS_BOUNDS = {min: __PLACEHOLDER__, max: 60_000};
+const getPoolDiscoverySnapshotParseWorkerQueueTimeoutMs = () =>
+  parseBoundedIntEnvOrThrow(
+    'POOL_DISCOVERY_SNAPSHOT_PARSE_WORKER_QUEUE_TIMEOUT_MS',
+    DEFAULT_SNAPSHOT_PARSE_WORKER_QUEUE_TIMEOUT_MS,
+    SNAPSHOT_PARSE_WORKER_QUEUE_TIMEOUT_MS_BOUNDS
+  );
+
+// Caps each worker's V8 old-generation heap so main + N workers can't
+// together exceed the container's memory budget the way an un-capped worker
+// (which otherwise inherits main's own --max-old-space-size ceiling) can.
+// A worker's working set is one decoded snapshot string plus its parsed and
+// filtered pool array. Measured on a synthetic 300k-pool V4 snapshot (__PLACEHOLDER__ MB
+// of JSON, Robinhood's size): a 256MB cap runs out of heap, 512MB completes,
+// so the default leaves headroom above that. Still, this has NOT been
+// reconciled against every stack's actual headroom (see
+// infra/index.ts's NODE_NON_HEAP_OVERHEAD_MB / nodeHeapSizeMB /
+// sqsWorkerMemoryMB) — dev's sqsWorkerMemoryMB in particular leaves ~__PLACEHOLDER__
+// slack above the main heap already, so this must be re-checked against
+// that budget (and the pool size above) before enabling the offload there.
+const DEFAULT_SNAPSHOT_PARSE_WORKER_MAX_OLD_GENERATION_SIZE_MB = __PLACEHOLDER__;
+const getPoolDiscoverySnapshotParseWorkerMaxOldGenerationSizeMb = () =>
+  parsePositiveIntEnvOrDefault(
+    'POOL_DISCOVERY_SNAPSHOT_PARSE_WORKER_MAX_OLD_GENERATION_SIZE_MB',
+    DEFAULT_SNAPSHOT_PARSE_WORKER_MAX_OLD_GENERATION_SIZE_MB
   );
 
 // Chain ids (JSON keys) mapped to the protocols to proactively prewarm/keep
@@ -244,6 +318,26 @@ export interface IUniRouteServiceConfig {
     // prewarm interval is randomly shortened, so tasks that boot together
     // do not reload snapshots in lockstep. __PLACEHOLDER__ = fixed periods.
     SnapshotRefreshJitterPercent: number;
+    // Offloads the snapshot JSON.parse + pool conversion + TVL filter onto a
+    // bounded worker_threads pool instead of the request-serving event loop.
+    // Only the real re-parse path pays this cost — an ETag-unchanged reload
+    // never reaches it. On a worker failure or timeout the refresh keeps the
+    // held snapshot while it is inside the stale-serve bound, else parses on
+    // the main thread (see BaseS3SubgraphPoolDiscoverer.fetchSnapshot), so
+    // this never serves an empty snapshot. Kill switch: set
+    // POOL_DISCOVERY_SNAPSHOT_PARSE_OFFLOAD_ENABLED to 'false' and redeploy.
+    SnapshotParseOffloadEnabled: boolean;
+    // Number of persistent worker threads in the shared snapshot-parse pool.
+    SnapshotParseWorkerPoolSize: number;
+    // Milliseconds a single parse+filter job may run on a worker before it
+    // is abandoned and the worker is recycled.
+    SnapshotParseWorkerJobTimeoutMs: number;
+    // Milliseconds a parse job may wait for a free worker (__PLACEHOLDER__-__PLACEHOLDER__).
+    SnapshotParseWorkerQueueTimeoutMs: number;
+    // Caps each worker's V8 old-generation heap (MB) so the worker pool
+    // can't by itself exceed the container's memory budget alongside the
+    // main thread's own heap.
+    SnapshotParseWorkerMaxOldGenerationSizeMb: number;
   };
   CachedRoutes: {
     // Whether to enable cached routes.
@@ -440,6 +534,16 @@ export const getUniRouteSyncConfig = (
       PrewarmIntervalMs: getPoolSnapshotPrewarmIntervalMs(),
       SnapshotRefreshJitterPercent:
         getPoolDiscoverySnapshotRefreshJitterPercent(),
+      SnapshotParseOffloadEnabled:
+        getPoolDiscoverySnapshotParseOffloadEnabled(),
+      SnapshotParseWorkerPoolSize:
+        getPoolDiscoverySnapshotParseWorkerPoolSize(),
+      SnapshotParseWorkerJobTimeoutMs:
+        getPoolDiscoverySnapshotParseWorkerJobTimeoutMs(),
+      SnapshotParseWorkerQueueTimeoutMs:
+        getPoolDiscoverySnapshotParseWorkerQueueTimeoutMs(),
+      SnapshotParseWorkerMaxOldGenerationSizeMb:
+        getPoolDiscoverySnapshotParseWorkerMaxOldGenerationSizeMb(),
     },
     CachedRoutes: {
       Enabled: true,
@@ -573,6 +677,16 @@ export const getQuickRouteSyncConfig = (
       PrewarmIntervalMs: getPoolSnapshotPrewarmIntervalMs(),
       SnapshotRefreshJitterPercent:
         getPoolDiscoverySnapshotRefreshJitterPercent(),
+      SnapshotParseOffloadEnabled:
+        getPoolDiscoverySnapshotParseOffloadEnabled(),
+      SnapshotParseWorkerPoolSize:
+        getPoolDiscoverySnapshotParseWorkerPoolSize(),
+      SnapshotParseWorkerJobTimeoutMs:
+        getPoolDiscoverySnapshotParseWorkerJobTimeoutMs(),
+      SnapshotParseWorkerQueueTimeoutMs:
+        getPoolDiscoverySnapshotParseWorkerQueueTimeoutMs(),
+      SnapshotParseWorkerMaxOldGenerationSizeMb:
+        getPoolDiscoverySnapshotParseWorkerMaxOldGenerationSizeMb(),
     },
     CachedRoutes: {
       Enabled: true,

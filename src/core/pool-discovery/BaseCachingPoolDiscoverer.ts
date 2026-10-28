@@ -47,6 +47,11 @@ export const POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES =
 // can surface.
 export const EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS = 60;
 
+// How long a deferred refresh keeps the held snapshot in the cache before the
+// next refresh tries again. Short, because the held snapshot is already past
+// its normal TTL; the stale-serve bound still caps its total age.
+export const DEFERRED_SNAPSHOT_RETRY_TTL_SECONDS = 60;
+
 // On the memo + skip-reparse path the getPools cache holds this prefix plus a
 // per-load counter instead of the JSON-stringified snapshot: that string was
 // only ever compared against the parse memo's source (and parsed back on a
@@ -75,6 +80,9 @@ interface SnapshotMemoEntry<TPool> {
 export enum SnapshotLoadStatus {
   UNCHANGED = 'unchanged',
   LOADED = 'loaded',
+  // The source changed but could not be parsed off the event loop; keep
+  // serving the held snapshot (see hasServableStaleSnapshot).
+  DEFERRED = 'deferred',
 }
 
 enum SnapshotSourceCheckResult {
@@ -86,6 +94,7 @@ enum SnapshotSourceCheckResult {
 
 export type SnapshotLoad<TPool> =
   | {status: SnapshotLoadStatus.UNCHANGED}
+  | {status: SnapshotLoadStatus.DEFERRED}
   | {
       status: SnapshotLoadStatus.LOADED;
       pools: TPool[];
@@ -417,6 +426,23 @@ export abstract class BaseCachingPoolDiscoverer<
     }
 
     const load = await this.loadSnapshot(chainId, protocol, knownVersion, ctx);
+    if (load.status === SnapshotLoadStatus.DEFERRED) {
+      // Re-read: a concurrent refresh may have published a newer entry.
+      const held = this.snapshotParseMemo.get(cacheKey);
+      if (held === undefined) {
+        throw new Error('Snapshot load deferred without a held snapshot');
+      }
+      // fetchedAtMs is not restamped, so the stale-serve bound still counts
+      // from the last real load: past it, the next refresh parses on the
+      // main thread instead of deferring again.
+      await this.getPoolsCache.set(cacheKey, held.source, {
+        ttl: Math.min(
+          this.getPoolsCacheTtlSeconds(chainId),
+          DEFERRED_SNAPSHOT_RETRY_TTL_SECONDS
+        ),
+      });
+      return held.parsed;
+    }
     if (load.status === SnapshotLoadStatus.UNCHANGED) {
       if (memo === undefined || knownVersion === undefined) {
         throw new Error('Snapshot reported unchanged without a known version');
@@ -687,6 +713,19 @@ export abstract class BaseCachingPoolDiscoverer<
       return memo;
     }
     return undefined;
+  }
+
+  // True while getPools would serve the held snapshot on a cache miss, so a
+  // discoverer may skip a refresh instead of loading.
+  protected hasServableStaleSnapshot(
+    chainId: ChainId,
+    protocol: Protocol
+  ): boolean {
+    return (
+      this.getServableStaleSnapshot(
+        this.getPoolsCacheKey(chainId, protocol)
+      ) !== undefined
+    );
   }
 
   private getJoinableSnapshotRefresh(
