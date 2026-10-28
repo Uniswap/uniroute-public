@@ -16,6 +16,7 @@ import {
   getLowercasedPoolIdSet,
   getMaxFilteredPoolCount,
   MAX_MANUAL_DIRECT_PAIRS_FALLBACK,
+  METRIC_BLOCKED_ROUTING_TOKEN_POOL,
   METRIC_NON_CANONICAL_POOL,
   SELECTION_VIEW_BUILD_CHUNK_SIZE,
 } from './TopPoolsSelector';
@@ -589,6 +590,125 @@ describe('BasicTopPoolsSelector', () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe('0x123');
+    });
+
+    describe('routing block list on every hop', () => {
+      const hookr = '0x18e674231a58c239dc7daedcffe15ec3a24cff5c';
+      const wHookrChecksummed = '0x0cB7b36476d577C683f7Ec03994ddC0e006a97bd';
+      const weth = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+      const hookrWethPoolId = '0xd8b750f564321ce68b4b3d8498616da96fad798d';
+      const v3Pool = (
+        id: string,
+        token0: string,
+        token1: string,
+        tvlUSD: number
+      ): V3PoolInfo => ({
+        id,
+        token0: {id: token0},
+        token1: {id: token1},
+        tvlUSD,
+        feeTier: '100',
+        liquidity: '10000',
+        tvlETH: tvlUSD,
+      });
+      // The wrapper's pools outrank the direct pool on TVL, so only the
+      // block list keeps them out of the tokenIn, tokenOut and top-TVL picks.
+      // wHOOKR appears checksummed in one pool and lowercase in the other.
+      const buildUniverse = () => [
+        v3Pool(
+          '0xdd0ebece3c0cca47a21e552da73a8a0a1f14f613',
+          hookr,
+          wHookrChecksummed,
+          1_000_000
+        ),
+        v3Pool(
+          '0x7aa37359d6d6ed87f6762b91ba3d57bcac91dac3',
+          wHookrChecksummed.toLowerCase(),
+          weth,
+          1_000_000
+        ),
+        v3Pool(hookrWethPoolId, hookr, weth, 1_000),
+      ];
+      const carriesWHookr = (pool: UniPoolInfo) =>
+        [pool.token0.id, pool.token1.id].some(
+          token => token.toLowerCase() === wHookrChecksummed.toLowerCase()
+        );
+
+      it.each([
+        ['legacy path', false],
+        ['selection view', true],
+      ])(
+        'never selects a pool through wHOOKR on Robinhood (%s)',
+        async (_label, snapshotMemoEnabled) => {
+          const robinhoodSelector = new BasicTopPoolsSelector(
+            chainRepository,
+            poolSelectionConfig,
+            FeatureGatedTokensRepository.empty(),
+            snapshotMemoEnabled
+          );
+          const pools = buildUniverse();
+          markPoolsArrayMemoStable(pools);
+          const metricCtx = buildTestContext();
+
+          const result = await robinhoodSelector.filterPools(
+            pools,
+            ChainId.ROBINHOOD,
+            new Address(hookr),
+            new Address(weth),
+            Protocol.V3,
+            undefined,
+            EMPTY_NAMESPACE_CONTEXT,
+            metricCtx,
+            {shouldUseCache: true}
+          );
+
+          expect(result.filter(carriesWHookr)).toEqual([]);
+          expect(result.map(pool => pool.id)).toContain(hookrWethPoolId);
+          expect(
+            metricCtx.metrics.countStore[METRIC_BLOCKED_ROUTING_TOKEN_POOL]
+          ).toBe(2);
+        }
+      );
+
+      it('generates no direct-pair probes for a pair with a blocked token', async () => {
+        const generated = await selector['manuallyGenerateDirectPairs'](
+          Protocol.V3,
+          ChainId.ROBINHOOD,
+          wHookrChecksummed,
+          weth,
+          new Set<string>()
+        );
+        const control = await selector['manuallyGenerateDirectPairs'](
+          Protocol.V3,
+          ChainId.ROBINHOOD,
+          hookr,
+          weth,
+          new Set<string>()
+        );
+
+        expect(generated).toEqual([]);
+        expect(control.length).toBeGreaterThan(0);
+      });
+
+      it('selects the same wrapper pools on a chain where wHOOKR is not listed', async () => {
+        const metricCtx = buildTestContext();
+        const result = await selector.filterPools(
+          buildUniverse(),
+          ChainId.MAINNET,
+          new Address(hookr),
+          new Address(weth),
+          Protocol.V3,
+          undefined,
+          EMPTY_NAMESPACE_CONTEXT,
+          metricCtx,
+          {shouldUseCache: true}
+        );
+
+        expect(result.filter(carriesWHookr)).toHaveLength(2);
+        expect(
+          metricCtx.metrics.countStore[METRIC_BLOCKED_ROUTING_TOKEN_POOL]
+        ).toBeUndefined();
+      });
     });
 
     it('drops a direct pair that is non-canonical for a listed token and keeps the canonical one', async () => {

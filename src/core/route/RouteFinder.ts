@@ -8,9 +8,13 @@ import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {Pool} from '../../models/pool/Pool';
 import {Protocol} from '../../models/pool/Protocol';
 import {CanonicalPools, identifyPoolModel} from '../../lib/CanonicalPools';
+import {RoutingBlockList} from '../../lib/RoutingBlockList';
 
 const METRIC_NON_CANONICAL_POOL = buildMetricKey(
   'RouteFinder.NonCanonicalPool'
+);
+const METRIC_BLOCKED_ROUTING_TOKEN_POOL = buildMetricKey(
+  'RouteFinder.BlockedRoutingTokenPool'
 );
 
 export interface IRouteFinder<TPool extends Pool> {
@@ -41,12 +45,19 @@ export class RouteFinder<TPool extends Pool> implements IRouteFinder<TPool> {
     // Every non-cached route is built here, from whatever pool sources the
     // repositories assembled (selector output, cache hits, cross-liquidity
     // and registry appends, on-chain probes), so this is where the
-    // canonical-pools rule is enforced for correctness. Upstream filters
-    // only save slots and probes. Copied so the fake ETH/WETH push below
-    // never mutates the caller's array.
+    // canonical-pools rule and the every-hop routing block list are
+    // enforced for correctness. Upstream filters only save slots and probes.
+    // Copied so the fake ETH/WETH push below never mutates the caller's
+    // array.
     const pools = [
       ...CanonicalPools.dropNonCanonicalPools(
-        candidatePools,
+        RoutingBlockList.dropPoolsThroughBlockedRoutingTokens(
+          candidatePools,
+          chainId,
+          identifyPoolModel,
+          ctx,
+          METRIC_BLOCKED_ROUTING_TOKEN_POOL
+        ),
         chainId,
         identifyPoolModel,
         ctx,

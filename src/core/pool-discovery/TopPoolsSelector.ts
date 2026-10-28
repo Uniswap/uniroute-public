@@ -87,6 +87,9 @@ interface SelectionViewEntry {
 export const METRIC_NON_CANONICAL_POOL = buildMetricKey(
   'TopPoolsSelector.NonCanonicalPool'
 );
+export const METRIC_BLOCKED_ROUTING_TOKEN_POOL = buildMetricKey(
+  'TopPoolsSelector.BlockedRoutingTokenPool'
+);
 
 // Helper function to get pool liquidity based on pool type (using USD value for now)
 export const getPoolTVL = (pool: UniPoolInfo): number => {
@@ -150,18 +153,22 @@ const indexPool = (
 };
 
 // The per-pool rule of BasicTopPoolsSelector.filterUnsupportedPools, shared
-// with the selection-view build. countDrops emits the NonCanonicalPool count
-// accumulated by admits. Canonical-pool lifts are read once, so a lift that
+// with the selection-view build. countDrops emits the NonCanonicalPool and
+// BlockedRoutingTokenPool counts accumulated by admits. Canonical-pool lifts are read once, so a lift that
 // flips while a sliced build is yielded cannot split one view across states.
 class CompliancePoolFilter {
   private nonCanonicalDrops = 0;
+  private blockedRoutingTokenDrops = 0;
   private readonly liftedTokens: ReadonlySet<string>;
+  private readonly chainHasBlockedRoutingTokens: boolean;
 
   constructor(
     private readonly chainId: ChainId,
     private readonly unsupportedTokens: Set<string>
   ) {
     this.liftedTokens = CanonicalPools.liftedTokensSnapshot(chainId);
+    this.chainHasBlockedRoutingTokens =
+      RoutingBlockList.hasBlockedRoutingTokens(chainId);
   }
 
   admits(pool: UniPoolInfo): boolean {
@@ -169,6 +176,17 @@ class CompliancePoolFilter {
       this.unsupportedTokens.has(pool.token0.id.toLowerCase()) ||
       this.unsupportedTokens.has(pool.token1.id.toLowerCase())
     ) {
+      return false;
+    }
+    if (
+      this.chainHasBlockedRoutingTokens &&
+      RoutingBlockList.isPoolThroughBlockedRoutingToken(
+        this.chainId,
+        pool.token0.id,
+        pool.token1.id
+      )
+    ) {
+      this.blockedRoutingTokenDrops++;
       return false;
     }
     if (
@@ -192,6 +210,12 @@ class CompliancePoolFilter {
       this.nonCanonicalDrops,
       ctx,
       METRIC_NON_CANONICAL_POOL
+    );
+    RoutingBlockList.countDroppedPools(
+      this.chainId,
+      this.blockedRoutingTokenDrops,
+      ctx,
+      METRIC_BLOCKED_ROUTING_TOKEN_POOL
     );
   }
 }
@@ -753,13 +777,15 @@ export class BasicTopPoolsSelector
   }
 
   /**
-   * Drops pools that carry a feature-gated (unsupported) token, and pools
-   * that carry a token with a canonical-pools entry without being one of
-   * its canonical pools. Both selectors run every candidate universe through
-   * this rule before any selection stage (the selection-view build applies
-   * it pool by pool through the same CompliancePoolFilter), so a
-   * non-canonical pool can never occupy a top-N slot. Drops are counted on
-   * `TopPoolsSelector.NonCanonicalPool` when `ctx` is given. Whether the canonical pool exists at all is checked
+   * Drops pools that carry a feature-gated (unsupported) token or a token
+   * blocked on every hop by `RoutingBlockList`, and pools that carry a token
+   * with a canonical-pools entry without being one of its canonical pools.
+   * Both selectors run every candidate universe through this rule before any
+   * selection stage (the selection-view build applies it pool by pool through
+   * the same CompliancePoolFilter), so such a pool can never occupy a top-N
+   * slot. Drops are counted on `TopPoolsSelector.NonCanonicalPool` and
+   * `TopPoolsSelector.BlockedRoutingTokenPool` when `ctx` is given. Whether
+   * the canonical pool exists at all is checked
    * once per loaded snapshot by `CanonicalPools.checkRegistryCoverage`, not
    * here: this runs per protocol and per pair, so the canonical v4 pool is
    * legitimately absent from most inputs.
@@ -860,7 +886,7 @@ export class BasicTopPoolsSelector
     hooksOptions: HooksOptions | undefined
   ): HooksOptions {
     return protocol === Protocol.V4
-      ? hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE
+      ? (hooksOptions ?? HooksOptions.HOOKS_INCLUSIVE)
       : HooksOptions.HOOKS_INCLUSIVE;
   }
 
@@ -1531,6 +1557,17 @@ export class BasicTopPoolsSelector
     selectedPoolIds: Set<string>,
     hooksOptions?: HooksOptions
   ) => {
+    // Every generated pool carries exactly this pair, so a blocked token
+    // means none of them may be probed.
+    if (
+      RoutingBlockList.isPoolThroughBlockedRoutingToken(
+        chainId,
+        tokenInAddress,
+        tokenOutAddress
+      )
+    ) {
+      return [];
+    }
     let forceAddedDirectPools: UniPoolInfo[] = [];
     switch (protocol) {
       case Protocol.V2: {
@@ -1694,9 +1731,7 @@ export class BasicTopPoolsSelector
  * Does NOT include the manuallyGenerateDirectPairs fallback since agg hook pools
  * are discovered from subgraph data, not generated from factory addresses.
  */
-export class AggHooksTopPoolsSelector
-  implements ITopPoolsSelector<UniPoolInfo>
-{
+export class AggHooksTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   public readonly aggHooksOnly = true;
 
   // The agg-hook result is always uncacheable (see the cache-skip below), so
