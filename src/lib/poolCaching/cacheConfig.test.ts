@@ -1,261 +1,139 @@
 import {describe, it, expect, vi} from 'vitest';
 import {
+  type ChainProtocol,
   createChainProtocols,
-  v4SubgraphUrlOverride,
-  v3SubgraphUrlOverride,
-  v2SubgraphUrlOverride,
   v3TrackedEthThreshold,
   v2TrackedEthThreshold,
 } from './cacheConfig';
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
-import type {Logger} from './sor-providers/util/log';
-import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
-import {AGG_HOOKS_ON_BASE} from './util/aggHooksAddressesAllowlist';
+import {ethers} from 'ethers';
+import {
+  AGG_HOOKS_ON_BASE,
+  AGG_HOOKS_ON_MAINNET,
+  AGG_HOOKS_ON_TEMPO,
+} from './util/aggHooksAddressesAllowlist';
 
-const mockLogger: Logger = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-  debug: vi.fn(),
-  fatal: vi.fn(),
-};
+const CHAIN_ID_TEMPO = 4217;
 
-class MockMetric extends IMetric {
-  setProperty(_key: string, _value: unknown): void {}
-  putDimensions(_dimensions: Record<string, string>): void {}
-  putMetric(
-    _key: string,
-    _value: number,
-    _unit?: MetricLoggerUnit,
-    _tags?: Record<string, string>
-  ): void {}
+// The StaticJsonRpcProvider the config builds keeps its endpoint on
+// `connection.url`; a non-JSON-RPC provider has no such field.
+function aggHooksRpcUrl(chainProtocol: ChainProtocol): string | undefined {
+  const provider = chainProtocol.aggHooks?.ethersProvider;
+  return provider instanceof ethers.providers.JsonRpcProvider
+    ? provider.connection.url
+    : undefined;
 }
-
-const mockMetric = new MockMetric();
 
 describe('cacheConfig', () => {
   describe('createChainProtocols', () => {
-    it('returns expected number of chain protocol entries', () => {
-      const protocols = createChainProtocols(mockLogger, mockMetric);
-      // Verify a reasonable number of entries are returned
-      expect(protocols.length).toBeGreaterThanOrEqual(45);
-      expect(protocols.length).toBeLessThanOrEqual(66);
+    it('returns the V2/V3/V4 cron matrix', () => {
+      const protocols = createChainProtocols();
+      expect(protocols).toHaveLength(62);
+      const byProtocol = (protocol: Protocol) =>
+        protocols.filter(p => p.protocol === protocol).length;
+      expect(byProtocol(Protocol.V3)).toBe(21);
+      expect(byProtocol(Protocol.V2)).toBe(19);
+      expect(byProtocol(Protocol.V4)).toBe(22);
     });
 
-    it('each entry has required fields', () => {
-      const protocols = createChainProtocols(mockLogger, mockMetric);
-      for (const entry of protocols) {
-        expect(entry).toHaveProperty('protocol');
-        expect(entry).toHaveProperty('chainId');
-        expect(entry).toHaveProperty('timeout');
-        expect(entry).toHaveProperty('provider');
-        expect(typeof entry.timeout).toBe('number');
-        expect(entry.timeout).toBeGreaterThan(0);
-      }
-    });
-
-    it('contains V2, V3, and V4 protocols', () => {
-      const protocols = createChainProtocols(mockLogger, mockMetric);
-      const protocolTypes = new Set(protocols.map(p => p.protocol));
-      expect(protocolTypes.has(Protocol.V2)).toBe(true);
-      expect(protocolTypes.has(Protocol.V3)).toBe(true);
-      expect(protocolTypes.has(Protocol.V4)).toBe(true);
-    });
-
-    it('V4 entries on MAINNET and UNICHAIN have eulerHooksProvider', () => {
-      const protocols = createChainProtocols(mockLogger, mockMetric);
-      const v4Mainnet = protocols.find(
-        p => p.protocol === Protocol.V4 && p.chainId === ChainId.MAINNET
+    it('lists every combo once', () => {
+      const keys = createChainProtocols().map(
+        p => `${p.chainId}:${String(p.protocol)}`
       );
-      expect(v4Mainnet?.eulerHooksProvider).toBeDefined();
-
-      const v4Unichain = protocols.find(
-        p => p.protocol === Protocol.V4 && p.chainId === ChainId.UNICHAIN
-      );
-      expect(v4Unichain?.eulerHooksProvider).toBeDefined();
+      expect(new Set(keys).size).toBe(keys.length);
     });
 
-    it('V4 entries without euler hooks do not have eulerHooksProvider', () => {
-      const protocols = createChainProtocols(mockLogger, mockMetric);
-      const v4Base = protocols.find(
-        p => p.protocol === Protocol.V4 && p.chainId === ChainId.BASE
-      );
-      expect(v4Base?.eulerHooksProvider).toBeUndefined();
-    });
-
-    it('agg hooks providers read pseudoTVL through UNI_RPC_V2_INTERNAL_ENDPOINT when set', () => {
-      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://unresolvable.example');
-      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', 'https://v2-internal.example');
-      try {
-        const protocols = createChainProtocols(mockLogger, mockMetric);
-        const urls = protocols
-          .filter(p => p.aggHooksProvider !== undefined)
-          .map(
-            p =>
-              (
-                p.aggHooksProvider as unknown as {
-                  ethersProvider: {connection: {url: string}};
-                }
-              ).ethersProvider.connection.url
-          );
-        expect(urls).toEqual(
-          expect.arrayContaining([
-            `https://v2-internal.example/rpc/${ChainId.MAINNET}`,
-          ])
-        );
-        expect(urls).toHaveLength(2);
-        for (const url of urls) {
-          expect(url.startsWith('https://v2-internal.example/rpc/')).toBe(true);
-        }
-      } finally {
-        vi.unstubAllEnvs();
+    it('installs no provider itself', () => {
+      for (const entry of createChainProtocols()) {
+        expect(entry.provider).toBeUndefined();
+        expect(entry.extraPoolSources).toBeUndefined();
       }
     });
 
-    it('builds no Base agg hooks provider while Base lists no agg hooks', () => {
-      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://uni-rpc.example');
-      try {
-        const protocols = createChainProtocols(mockLogger, mockMetric);
-        const v4Base = protocols.find(
-          p => p.protocol === Protocol.V4 && p.chainId === ChainId.BASE
-        );
-        expect(AGG_HOOKS_ON_BASE).toEqual([]);
-        expect(v4Base?.aggHooksProvider).toBeUndefined();
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    });
-
-    it('agg hooks providers fall back to UNI_RPC_ENDPOINT', () => {
-      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://uni-rpc.example');
-      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', '');
-      try {
-        const protocols = createChainProtocols(mockLogger, mockMetric);
-        const mainnet = protocols.find(
-          p => p.protocol === Protocol.V4 && p.chainId === ChainId.MAINNET
-        );
-        expect(
-          (
-            mainnet?.aggHooksProvider as unknown as
-              | {ethersProvider: {connection: {url: string}}}
-              | undefined
-          )?.ethersProvider.connection.url
-        ).toBe(`https://uni-rpc.example/rpc/${ChainId.MAINNET}`);
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    });
-
-    it('all providers have a getPools method', () => {
-      const protocols = createChainProtocols(mockLogger, mockMetric);
-      for (const entry of protocols) {
-        expect(typeof entry.provider.getPools).toBe('function');
-      }
-    });
-  });
-
-  describe('v4SubgraphUrlOverride', () => {
-    it('returns a string for known chains', () => {
-      const knownChains = [
-        ChainId.SEPOLIA,
-        ChainId.ARBITRUM_ONE,
-        ChainId.BASE,
-        ChainId.POLYGON,
-        ChainId.WORLDCHAIN,
-        ChainId.ZORA,
-        ChainId.UNICHAIN,
-        ChainId.BNB,
-        ChainId.BLAST,
-        ChainId.MAINNET,
-        ChainId.SONEIUM,
-        ChainId.OPTIMISM,
-        ChainId.MONAD,
-        ChainId.XLAYER,
-        ChainId.AVALANCHE,
-        ChainId.CELO,
-        ChainId.LINEA,
-      ];
-      for (const chainId of knownChains) {
-        const url = v4SubgraphUrlOverride(chainId);
-        expect(typeof url).toBe('string');
-      }
-    });
-
-    it('returns undefined for unknown chain', () => {
-      const url = v4SubgraphUrlOverride(999999 as ChainId);
-      expect(url).toBeUndefined();
-    });
-  });
-
-  describe('v3SubgraphUrlOverride', () => {
-    it('returns a string for known chains', () => {
-      const knownChains = [
-        ChainId.MAINNET,
-        ChainId.ARBITRUM_ONE,
-        ChainId.POLYGON,
-        ChainId.OPTIMISM,
-        ChainId.AVALANCHE,
-        ChainId.BNB,
-        ChainId.BLAST,
-        ChainId.BASE,
-        ChainId.CELO,
-        ChainId.WORLDCHAIN,
-        ChainId.UNICHAIN,
-        ChainId.ZORA,
-        ChainId.SONEIUM,
-        ChainId.MONAD,
-        ChainId.XLAYER,
-        ChainId.LINEA,
-      ];
-      for (const chainId of knownChains) {
-        const url = v3SubgraphUrlOverride(chainId);
-        expect(typeof url).toBe('string');
-      }
-    });
-
-    it('returns undefined for unknown chain', () => {
-      const url = v3SubgraphUrlOverride(999999 as ChainId);
-      expect(url).toBeUndefined();
-    });
-  });
-
-  describe('v2SubgraphUrlOverride', () => {
-    it('returns a string for known chains', () => {
-      const knownChains = [
-        ChainId.MAINNET,
-        ChainId.ARBITRUM_ONE,
-        ChainId.POLYGON,
-        ChainId.OPTIMISM,
-        ChainId.AVALANCHE,
-        ChainId.BNB,
-        ChainId.BLAST,
-        ChainId.BASE,
-        ChainId.WORLDCHAIN,
-        ChainId.UNICHAIN,
-        ChainId.SONEIUM,
-        ChainId.MONAD,
-        ChainId.XLAYER,
-        ChainId.LINEA,
-      ];
-      for (const chainId of knownChains) {
-        const url = v2SubgraphUrlOverride(chainId);
-        expect(typeof url).toBe('string');
-      }
-    });
-
-    it('has no subgraph for Monad testnet, which the cron no longer caches', () => {
-      expect(v2SubgraphUrlOverride(ChainId.MONAD_TESTNET)).toBeUndefined();
+    it('has no entry for Monad testnet, which the cron no longer caches', () => {
       expect(
-        createChainProtocols(mockLogger, mockMetric).some(
-          p => p.chainId === ChainId.MONAD_TESTNET
-        )
+        createChainProtocols().some(p => p.chainId === ChainId.MONAD_TESTNET)
       ).toBe(false);
     });
 
-    it('returns undefined for unknown chain', () => {
-      const url = v2SubgraphUrlOverride(999999 as ChainId);
-      expect(url).toBeUndefined();
+    it('has no V2 entry for Celo or Zora', () => {
+      const v2Chains = createChainProtocols()
+        .filter(p => p.protocol === Protocol.V2)
+        .map(p => p.chainId);
+      expect(v2Chains).not.toContain(ChainId.CELO);
+      expect(v2Chains).not.toContain(ChainId.ZORA);
+    });
+
+    it('configures agg hooks on the V4 combos with listed hooks, read through UNI_RPC_V2_INTERNAL_ENDPOINT when set', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://unresolvable.example');
+      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', 'https://v2-internal.example');
+      try {
+        const protocols = createChainProtocols();
+        const withAggHooks = protocols.filter(p => p.aggHooks !== undefined);
+        expect(
+          withAggHooks.map(p => [p.protocol, p.chainId, aggHooksRpcUrl(p)])
+        ).toEqual([
+          [
+            Protocol.V4,
+            ChainId.MAINNET,
+            `https://v2-internal.example/rpc/${ChainId.MAINNET}`,
+          ],
+          [
+            Protocol.V4,
+            CHAIN_ID_TEMPO,
+            `https://v2-internal.example/rpc/${CHAIN_ID_TEMPO}`,
+          ],
+        ]);
+        const mainnet = withAggHooks[0]?.aggHooks;
+        expect(mainnet?.hookAddresses).toBe(AGG_HOOKS_ON_MAINNET);
+        expect(mainnet?.useExternalLiquidity).toBe(false);
+        const tempo = withAggHooks[1]?.aggHooks;
+        expect(tempo?.hookAddresses).toBe(AGG_HOOKS_ON_TEMPO);
+        expect(tempo?.useExternalLiquidity).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('configures no Base agg hooks while Base lists no agg hooks', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://uni-rpc.example');
+      try {
+        const v4Base = createChainProtocols().find(
+          p => p.protocol === Protocol.V4 && p.chainId === ChainId.BASE
+        );
+        expect(AGG_HOOKS_ON_BASE).toEqual([]);
+        expect(v4Base?.aggHooks).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('agg hooks fall back to UNI_RPC_ENDPOINT', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', 'https://uni-rpc.example');
+      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', '');
+      try {
+        const mainnet = createChainProtocols().find(
+          p => p.protocol === Protocol.V4 && p.chainId === ChainId.MAINNET
+        );
+        expect(mainnet && aggHooksRpcUrl(mainnet)).toBe(
+          `https://uni-rpc.example/rpc/${ChainId.MAINNET}`
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('configures no agg hooks without an RPC endpoint', () => {
+      vi.stubEnv('UNI_RPC_ENDPOINT', '');
+      vi.stubEnv('UNI_RPC_V2_INTERNAL_ENDPOINT', '');
+      try {
+        expect(createChainProtocols().some(p => p.aggHooks !== undefined)).toBe(
+          false
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
   });
 
@@ -266,148 +144,6 @@ describe('cacheConfig', () => {
 
     it('v2TrackedEthThreshold is 0.025', () => {
       expect(v2TrackedEthThreshold).toBe(0.025);
-    });
-  });
-
-  /**
-   * Backstop for a MISSED call site.
-   *
-   * Every provider takes the transport as a TRAILING OPTIONAL argument, so
-   * omitting it at one of the 68 construction sites is silent: it typechecks,
-   * every existing test passes, and that one chain+protocol quietly keeps the
-   * old cross-fetch transport with no metrics, no span and no deadline. This
-   * asserts at the seam instead of per site — the factory is invoked eagerly
-   * in each constructor, so it needs no network and no provider call.
-   *
-   * The expected count is COMPUTED from the returned entries rather than
-   * hardcoded: the three agg-hooks providers are conditional on an ethers
-   * provider existing (i.e. on UNI_RPC_ENDPOINT), so a literal would make this
-   * test's meaning depend on the environment it runs in.
-   */
-  describe('subgraph transport wiring', () => {
-    it('passes the transport factory to EVERY constructed provider', () => {
-      let invocations = 0;
-      const countingFactory = () => {
-        invocations += 1;
-        // eslint-disable-next-line n/no-unsupported-features/node-builtins
-        return async () => new Response('{}', {status: 200});
-      };
-
-      const protocols = createChainProtocols(
-        mockLogger,
-        mockMetric,
-        countingFactory
-      );
-
-      const providers = protocols.flatMap(p =>
-        [p.provider, p.eulerHooksProvider, p.aggHooksProvider].filter(
-          x => x !== undefined
-        )
-      );
-
-      expect(providers.length).toBeGreaterThan(60);
-      expect(invocations).toBe(providers.length);
-    });
-
-    it('constructs every provider without a factory too (kill-switch path)', () => {
-      // The kill switch withholds the factory entirely; that must still build.
-      const protocols = createChainProtocols(mockLogger, mockMetric, undefined);
-      expect(protocols.length).toBeGreaterThan(45);
-    });
-  });
-
-  /**
-   * Backstop for a MISSED bearer token.
-   *
-   * Goldsky's `/api/private/<project>/subgraphs/...` endpoints reject every
-   * request without `Authorization: Bearer`, and the token is a positional
-   * `string | undefined` constructor argument, so passing `undefined` at one
-   * call site typechecks and only shows up as a 401 on every pool-caching tick
-   * for that chain+protocol. The dedicated-instance URLs
-   * (`api.aws-us-east-1.goldsky.com/c/...`) need no header, which is why the
-   * check is keyed on the URL shape rather than applied to every provider.
-   *
-   * White-box on purpose, like the transport test above it: the header is only
-   * observable on the constructed GraphQLClient, and driving 60+ providers'
-   * `getPools` through a fake fetch would need per-query response fixtures.
-   */
-  describe('Goldsky private-path bearer wiring', () => {
-    const GOLDSKY_PRIVATE_PATH_SEGMENT = '/api/private/';
-    const TEST_BEARER_TOKEN = 'test-goldsky-bearer-token';
-
-    /** Redacts the credential/project segment so a failure never prints it. */
-    function redactPrivatePath(url: string): string {
-      return url.replace(
-        /\/api\/private\/[^/]+\//,
-        `${GOLDSKY_PRIVATE_PATH_SEGMENT}<redacted>/`
-      );
-    }
-
-    function graphqlClientOf(provider: object): {
-      url: string;
-      authorization: string | undefined;
-    } {
-      if (
-        !('client' in provider) ||
-        typeof provider.client !== 'object' ||
-        provider.client === null
-      ) {
-        throw new Error('provider has no GraphQLClient');
-      }
-      const client = provider.client;
-      if (!('url' in client) || typeof client.url !== 'string') {
-        throw new Error('GraphQLClient has no url');
-      }
-      const options =
-        'options' in client &&
-        typeof client.options === 'object' &&
-        client.options !== null
-          ? client.options
-          : {};
-      const headers =
-        'headers' in options &&
-        typeof options.headers === 'object' &&
-        options.headers !== null
-          ? options.headers
-          : {};
-      const authorization =
-        'authorization' in headers && typeof headers.authorization === 'string'
-          ? headers.authorization
-          : undefined;
-      return {url: client.url, authorization};
-    }
-
-    it('passes the bearer token to EVERY provider on a Goldsky private-path URL', () => {
-      const previousToken = process.env.GOLD_SKY_BEARER_TOKEN;
-      process.env.GOLD_SKY_BEARER_TOKEN = TEST_BEARER_TOKEN;
-      try {
-        const protocols = createChainProtocols(
-          mockLogger,
-          mockMetric,
-          undefined
-        );
-        const providers = protocols.flatMap(p =>
-          [p.provider, p.eulerHooksProvider, p.aggHooksProvider].filter(
-            x => x !== undefined
-          )
-        );
-
-        const privatePathClients = providers
-          .map(graphqlClientOf)
-          .filter(c => c.url.includes(GOLDSKY_PRIVATE_PATH_SEGMENT));
-        expect(privatePathClients.length).toBeGreaterThan(0);
-
-        const missingBearer = privatePathClients
-          .filter(c => c.authorization !== `Bearer ${TEST_BEARER_TOKEN}`)
-          .map(c => redactPrivatePath(c.url));
-        expect(missingBearer).toEqual([]);
-      } finally {
-        if (previousToken === undefined) {
-          delete process.env.GOLD_SKY_BEARER_TOKEN;
-        } else {
-          process.env.GOLD_SKY_BEARER_TOKEN = previousToken;
-        }
-      }
     });
   });
 });

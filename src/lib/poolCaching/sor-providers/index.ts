@@ -1,68 +1,14 @@
 /**
- * Barrel export for ported smart-order-router subgraph provider classes.
- *
- * These classes were ported from @uniswap/smart-order-router to avoid
- * a runtime dependency on the full SOR package. Only the essential
- * subgraph provider classes needed for pool caching are included.
+ * Barrel export for the pool-caching pool shapes and the pool-source seam,
+ * ported from @uniswap/smart-order-router so the cron has no runtime
+ * dependency on the full SOR package.
  */
 
-// V2
-export {
-  V2SubgraphProvider,
-  type V2SubgraphPool,
-  type IV2SubgraphProvider,
-} from './v2/subgraphProvider';
-
-// V3
-export {
-  V3SubgraphProvider,
-  type V3SubgraphPool,
-  type V3RawSubgraphPool,
-  type IV3SubgraphProvider,
-} from './v3/subgraphProvider';
-
-// V4
-export {
-  V4SubgraphProvider,
-  type V4SubgraphPool,
-  type V4RawSubgraphPool,
-  type IV4SubgraphProvider,
-  SUBGRAPH_URL_BY_CHAIN,
-} from './v4/subgraphProvider';
-
-// V4 Euler Hooks
-export {
-  EulerSwapHooksSubgraphProvider,
-  type EulerSwapHooks,
-  type IEulerSwapHooksSubgraphProvider,
-} from './v4/eulerSwapHooksSubgraphProvider';
-
-// V4 AGG Hooks
-export {
-  AggHooksSubgraphProvider,
-  type IAggHooksSubgraphProvider,
-} from './v4/aggHooksSubgraphProvider';
-
-// Base class and types
-export {
-  SubgraphProvider,
-  type ISubgraphProvider,
-  type V3V4SubgraphPool,
-  type V3V4RawSubgraphPool,
-  PAGE_SIZE,
-  BASE_V4_PAGE_SIZE,
-} from './subgraphProvider';
-
-// Provider config
-export {type ProviderConfig, type LocalCacheEntry} from './provider';
+export {type V2SubgraphPool} from './v2/subgraphProvider';
+export {type V3SubgraphPool} from './v3/subgraphProvider';
+export {type V4SubgraphPool} from './v4/subgraphProvider';
+export {type ISubgraphProvider, V4_MIN_TVL_ETH} from './subgraphProvider';
 
 // Logger and metrics (types only — no globals)
 export {type Logger} from './util/log';
 export {MetricLoggerUnit, IMetric} from './util/metric';
-
-// Outbound HTTP transport for the GraphQL calls (ctx.fetch-backed)
-export {
-  type SubgraphFetch,
-  type SubgraphFetchFactory,
-  subgraphFetchFactoryFromContext,
-} from './util/subgraphFetch';

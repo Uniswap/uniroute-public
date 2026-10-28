@@ -15,19 +15,17 @@ import {
   applyAuroraPoolSources,
   auroraContext,
   auroraPoolsSourceConfigFromEnv,
-  computePoolParity,
   guardPricedTvlUsd,
   impliedOneHopTvlUsd,
-  refusePrefilteredV3Primary,
+  reportPrefilteredV3WithoutUnpriced,
   resetAuroraPoolCountBaselinesForTesting,
-  resolveAuroraMode,
-  resolveAuroraModeWithPrimaryFloor,
-  settlePendingAuroraShadowsForTesting,
+  resolveMinPoolCount,
   targetKey,
   tvlGuardAnchorTokens,
   poolCachingAuroraStatementTimeoutMsFromEnv,
   createProxiedUnirouteAuroraPool,
   unirouteAuroraConnectionOptionsFromEnv,
+  type AuroraPoolsSourceConfig,
   type TvlGuardWildcardRejection,
 } from './auroraPoolsSource';
 import {Context} from '@uniswap/lib-uni/context';
@@ -96,13 +94,10 @@ class FakeMetric extends IMetric {
   }
 }
 
-class FakeV2RoutablePools
-  implements
-    Pick<
-      RoutablePoolsService,
-      'listAllV2RoutablePools' | 'batchGetPoolVolumeUsd30d'
-    >
-{
+class FakeV2RoutablePools implements Pick<
+  RoutablePoolsService,
+  'listAllV2RoutablePools' | 'batchGetPoolVolumeUsd30d'
+> {
   readonly options: Array<
     Parameters<RoutablePoolsService['listAllV2RoutablePools']>[1]
   > = [];
@@ -132,13 +127,10 @@ class FakeV2RoutablePools
   }
 }
 
-class FakeV3RoutablePools
-  implements
-    Pick<
-      RoutablePoolsService,
-      'listAllV3RoutablePools' | 'batchGetPoolVolumeUsd30d'
-    >
-{
+class FakeV3RoutablePools implements Pick<
+  RoutablePoolsService,
+  'listAllV3RoutablePools' | 'batchGetPoolVolumeUsd30d'
+> {
   constructor(
     private readonly rows: Awaited<
       ReturnType<RoutablePoolsService['listAllV3RoutablePools']>
@@ -161,13 +153,10 @@ class FakeV3RoutablePools
   }
 }
 
-class FakeV4RoutablePools
-  implements
-    Pick<
-      RoutablePoolsService,
-      'listAllV4RoutablePools' | 'batchGetPoolVolumeUsd30d'
-    >
-{
+class FakeV4RoutablePools implements Pick<
+  RoutablePoolsService,
+  'listAllV4RoutablePools' | 'batchGetPoolVolumeUsd30d'
+> {
   constructor(
     private readonly rows: Awaited<
       ReturnType<RoutablePoolsService['listAllV4RoutablePools']>
@@ -207,23 +196,60 @@ function fakeProvider<TPool>(
   };
 }
 
-// A provider whose single getPools call settles when the test says so, to
-// model an Aurora read still queued or running after the subgraph returns.
-function deferredProvider<TPool>(): ISubgraphProvider<TPool> & {
-  resolve(pools: TPool[]): void;
-  reject(err: Error): void;
-} {
-  let settle: {resolve(pools: TPool[]): void; reject(err: Error): void} = {
-    resolve: () => {},
-    reject: () => {},
-  };
-  const result = new Promise<TPool[]>((resolve, reject) => {
-    settle = {resolve, reject};
-  });
+// A cron combo as applyAuroraPoolSources receives it: no provider until the
+// apply installs one.
+interface TestCombo<TPool> {
+  chainId: number;
+  protocol: Protocol;
+  provider?: ISubgraphProvider<TPool>;
+}
+
+function combo<TPool>(chainId: number, protocol: Protocol): TestCombo<TPool> {
+  return {chainId, protocol};
+}
+
+function installedProvider<TPool>(
+  testCombo: TestCombo<TPool>
+): ISubgraphProvider<TPool> {
+  if (!testCombo.provider) {
+    throw new Error(
+      `no provider installed for ${targetKey(testCombo.chainId, testCombo.protocol)}`
+    );
+  }
+  return testCombo.provider;
+}
+
+// Drives an installed provider for the options it hands the lib. A fake read
+// that returns no rows is rejected as `empty` by the guard, which is not what
+// these tests assert; any other failure still fails the test.
+async function readForSideEffects<TPool>(
+  testCombo: TestCombo<TPool>
+): Promise<void> {
+  try {
+    await installedProvider(testCombo).getPools();
+  } catch (err) {
+    if (!(err instanceof AuroraPoolsRejectedError) || err.reason !== 'empty') {
+      throw err;
+    }
+  }
+}
+
+// The parsed config with every list empty, for the helpers that take one.
+function configWith(
+  overrides: Partial<AuroraPoolsSourceConfig> = {}
+): AuroraPoolsSourceConfig {
   return {
-    getPools: () => result,
-    resolve: pools => settle.resolve(pools),
-    reject: err => settle.reject(err),
+    tvlGuardTargets: new Set<string>(),
+    tvlGuardTargetsWildcardRejection: undefined,
+    prefilterTargets: new Set<string>(),
+    prefilterWildcardIgnored: false,
+    prefilterUnpricedTargets: new Set<string>(),
+    prefilterUnpricedRejected: new Map(),
+    minPoolCountRatio: 0.5,
+    minPoolCountByTarget: new Map<string, number>(),
+    minPoolCountFloorInvalidKeys: new Set<string>(),
+    minPoolCountFloorUnparseable: false,
+    ...overrides,
   };
 }
 
@@ -239,33 +265,11 @@ function v3Pool(id: string, tvlUSD: number): V3SubgraphPool {
   };
 }
 
-function v4Pool(
-  id: string,
-  tvlUSD: number,
-  hooks: string,
-  liquidity: string
-): V4SubgraphPool {
-  return {
-    id,
-    feeTier: '3000',
-    tickSpacing: '60',
-    hooks,
-    liquidity,
-    token0: {id: '0xa', decimals: '18'},
-    token1: {id: '0xb', decimals: '18'},
-    tvlETH: tvlUSD / 2000,
-    tvlUSD,
-  };
-}
-
 describe('auroraPoolsSourceConfigFromEnv', () => {
   const ENV_KEYS = [
-    'POOL_CACHING_AURORA_SHADOW_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
     'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
     'DD_ENV',
@@ -288,14 +292,11 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     }
   });
 
-  it('returns undefined when no targets are set', () => {
-    expect(auroraPoolsSourceConfigFromEnv()).toBeUndefined();
-    process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
-    expect(auroraPoolsSourceConfigFromEnv()).toBeUndefined();
+  it('parses to empty lists and the default ratio with no env set', () => {
+    expect(auroraPoolsSourceConfigFromEnv(['dev'])).toEqual(configWith());
   });
 
-  it('parses guard targets independently of source targets', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
+  it('parses guard targets', () => {
     process.env.DD_ENV = 'dev';
     const unset = auroraPoolsSourceConfigFromEnv();
     expect(unset?.tvlGuardTargets).toEqual(new Set());
@@ -308,14 +309,11 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
   });
 
   it('requires explicit pre-filter targets and keeps entries beside a wildcard', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
       prefilterTargets: new Set(),
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
     });
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '130:v2,1:V2';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
@@ -323,8 +321,6 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
       prefilterWildcardIgnored: false,
       prefilterUnpricedTargets: new Set<string>(),
       prefilterUnpricedRejected: new Map(),
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
     });
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '*';
     expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
@@ -338,31 +334,7 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     });
   });
 
-  it('requires explicit primary parity targets and keeps entries beside a wildcard', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
-    });
-    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '1:v3,4663:V3';
-    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
-      primaryParityTargets: new Set(['1:V3', '4663:V3']),
-      primaryParityWildcardIgnored: false,
-    });
-    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '*';
-    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
-      primaryParityTargets: new Set(),
-      primaryParityWildcardIgnored: true,
-    });
-    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '*,1:V3';
-    expect(auroraPoolsSourceConfigFromEnv()).toMatchObject({
-      primaryParityTargets: new Set(['1:V3']),
-      primaryParityWildcardIgnored: true,
-    });
-  });
-
   it('keeps an unpriced target only for a pre-filtered V3 combo, and rejects the rest by reason', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3,8453:V2';
     process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS =
       '8453:v3,8453:V2,1:V3,base:V3,*';
@@ -383,7 +355,6 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
   });
 
   it('reports every rejected unpriced target on every apply run', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS =
       '*,8453:V2,1:V3,8453:V3';
@@ -441,7 +412,6 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
   });
 
   it('reports a pre-filter wildcard on every apply run', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '1:V2';
     const metric = new FakeMetric();
     const warnings: string[] = [];
     const logger: Logger = {
@@ -494,19 +464,14 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     }
   });
 
-  it('rejects a guard wildcard in prod without changing shadow or primary targets', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
+  it('rejects a guard wildcard in prod', () => {
     process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
     const config = auroraPoolsSourceConfigFromEnv(['prod']);
     expect(config?.tvlGuardTargets).toEqual(new Set());
     expect(config?.tvlGuardTargetsWildcardRejection).toBe('wildcard_in_prod');
-    expect(config?.shadowTargets).toBe('all');
-    expect(config?.primaryTargets).toEqual(new Set(['4663:V4']));
   });
 
   it('accepts a guard wildcard outside prod and explicit prod targets', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
     process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
     expect(auroraPoolsSourceConfigFromEnv(['dev'])).toMatchObject({
       tvlGuardTargets: 'all',
@@ -519,7 +484,6 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
   });
 
   it('rejects wildcards for prod in any environment source or an unknown environment', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
     process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*';
     const rejected: Array<
       [Array<string | undefined>, TvlGuardWildcardRejection]
@@ -557,17 +521,11 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     );
   });
 
-  it('treats a wildcard anywhere in guard targets as all while preserving primary parsing', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '10:V3';
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '*,10:V3';
+  it('treats a wildcard anywhere in guard targets as all', () => {
     process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '*,10:v3';
     const prod = auroraPoolsSourceConfigFromEnv(['prod']);
-    if (!prod) throw new Error('Expected Aurora config');
     expect(prod.tvlGuardTargets).toEqual(new Set());
     expect(prod.tvlGuardTargetsWildcardRejection).toBe('wildcard_in_prod');
-    expect(prod.primaryTargets).toEqual(new Set(['*', '10:V3']));
-    expect(resolveAuroraMode(prod, 10, Protocol.V3)).toBe('primary');
-    expect(resolveAuroraMode(prod, 1, Protocol.V3)).toBeUndefined();
     expect(auroraPoolsSourceConfigFromEnv(['dev'])?.tvlGuardTargets).toBe(
       'all'
     );
@@ -577,41 +535,23 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
     );
   });
 
-  it('parses comma-separated targets case-insensitively', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '1:v3, 8453:V4';
-    const config = auroraPoolsSourceConfigFromEnv()!;
-    expect(resolveAuroraMode(config, 1, Protocol.V3)).toBe('shadow');
-    expect(resolveAuroraMode(config, 8453, Protocol.V4)).toBe('shadow');
-    expect(resolveAuroraMode(config, 1, Protocol.V2)).toBeUndefined();
-  });
-
-  it('supports the * wildcard and primary-over-shadow precedence', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
-    const config = auroraPoolsSourceConfigFromEnv()!;
-    expect(resolveAuroraMode(config, 4663, Protocol.V4)).toBe('primary');
-    expect(resolveAuroraMode(config, 1, Protocol.V3)).toBe('shadow');
-  });
-
   it('clamps a bad ratio to the 0.5 default', () => {
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '1:V3';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO = '7';
-    expect(auroraPoolsSourceConfigFromEnv()!.minPoolCountRatio).toBe(0.5);
+    expect(auroraPoolsSourceConfigFromEnv().minPoolCountRatio).toBe(0.5);
   });
 
   it('parses the per-target absolute floor map, normalizing keys', () => {
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
       '{"4663:v4": 40000.7, "1:V3": 0, "8453:V4": -5}';
-    const floors = auroraPoolsSourceConfigFromEnv()!.minPoolCountByTarget;
+    const floors = auroraPoolsSourceConfigFromEnv().minPoolCountByTarget;
     // Fractional floors truncate; non-positive entries are dropped.
     expect(floors.get('4663:V4')).toBe(40000);
     expect(floors.has('1:V3')).toBe(false);
     expect(floors.has('8453:V4')).toBe(false);
-    // Dropped entries are tracked per key so a value typo cannot silently
-    // downgrade ITS serving primary combo — while other targets keep the
-    // strict missing-floor rule.
-    const config = auroraPoolsSourceConfigFromEnv()!;
+    // Dropped entries are tracked per key so a value typo is reported for
+    // ITS combo under the typo metric, while other targets keep the
+    // absent-floor rule.
+    const config = auroraPoolsSourceConfigFromEnv();
     expect(config.minPoolCountFloorInvalidKeys).toEqual(
       new Set(['1:V3', '8453:V4'])
     );
@@ -619,21 +559,19 @@ describe('auroraPoolsSourceConfigFromEnv', () => {
   });
 
   it('treats malformed floor JSON as no floors but flags it unparseable', () => {
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = 'not json';
-    const config = auroraPoolsSourceConfigFromEnv()!;
+    const config = auroraPoolsSourceConfigFromEnv();
     expect(config.minPoolCountByTarget.size).toBe(0);
     expect(config.minPoolCountFloorUnparseable).toBe(true);
   });
 
   it('treats a JSON array as unparseable, not as index-keyed entries', () => {
     // '[40000]' parses to an object with key "0" — without the array guard a
-    // primary target would read as primary_without_floor (deliberate absence)
+    // target would read as primary_without_floor (deliberate absence)
     // instead of primary_floor_config_invalid (typo), and #12443's monitor
     // keys off that distinction.
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V4';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '[40000]';
-    const config = auroraPoolsSourceConfigFromEnv()!;
+    const config = auroraPoolsSourceConfigFromEnv();
     expect(config.minPoolCountByTarget.size).toBe(0);
     expect(config.minPoolCountFloorUnparseable).toBe(true);
   });
@@ -797,48 +735,31 @@ describe('createProxiedUnirouteAuroraPool', () => {
   );
 });
 
-describe('refusePrefilteredV3Primary', () => {
-  const configWith = (
-    prefilterTargets: ReadonlySet<string>,
-    prefilterUnpricedTargets: ReadonlySet<string> = new Set<string>()
-  ) => ({
-    shadowTargets: new Set<string>(),
-    primaryTargets: new Set<string>(),
-    tvlGuardTargets: new Set<string>(),
-    tvlGuardTargetsWildcardRejection: undefined,
-    prefilterTargets,
-    prefilterWildcardIgnored: false,
-    prefilterUnpricedTargets,
-    prefilterUnpricedRejected: new Map(),
-    primaryParityTargets: new Set<string>(),
-    primaryParityWildcardIgnored: false,
-    minPoolCountRatio: 0.5,
-    minPoolCountByTarget: new Map<string, number>(),
-    minPoolCountFloorInvalidKeys: new Set<string>(),
-    minPoolCountFloorUnparseable: false,
-  });
-
-  it('downgrades a pre-filtered V3 primary to shadow, because the pre-filter drops exact_zero', () => {
+describe('reportPrefilteredV3WithoutUnpriced', () => {
+  it('reports a pre-filtered V3 combo without the unpriced read, which drops exact_zero', () => {
     const metric = new FakeMetric();
     const warnings: string[] = [];
     const logger: Logger = {
       ...noopLogger,
       warn: message => warnings.push(message),
     };
-    const config = configWith(new Set([targetKey(8453, Protocol.V3)]));
+    const config = configWith({
+      prefilterTargets: new Set([targetKey(8453, Protocol.V3)]),
+    });
 
     expect(
-      refusePrefilteredV3Primary(
-        'primary',
+      reportPrefilteredV3WithoutUnpriced(
         config,
         8453,
         Protocol.V3,
         logger,
         metric
       )
-    ).toBe('shadow');
+    ).toBe(true);
     expect(warnings).toHaveLength(1);
-    expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([
+    expect(
+      metric.byKey('CachePools.aurora.prefilter_unpriced_missing')
+    ).toEqual([
       expect.objectContaining({
         value: 1,
         tags: {
@@ -850,205 +771,126 @@ describe('refusePrefilteredV3Primary', () => {
     ]);
   });
 
-  it('keeps a pre-filtered V3 primary that also reads its unpriced liquid pools', () => {
+  it('stays quiet for a pre-filtered V3 combo that also reads its unpriced liquid pools', () => {
     const metric = new FakeMetric();
     const key = targetKey(8453, Protocol.V3);
-    const config = configWith(new Set([key]), new Set([key]));
+    const config = configWith({
+      prefilterTargets: new Set([key]),
+      prefilterUnpricedTargets: new Set([key]),
+    });
 
     expect(
-      refusePrefilteredV3Primary(
-        'primary',
+      reportPrefilteredV3WithoutUnpriced(
         config,
         8453,
         Protocol.V3,
         noopLogger,
         metric
       )
-    ).toBe('primary');
-    expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([]);
+    ).toBe(false);
+    expect(metric.emitted).toEqual([]);
   });
 
-  const keptCases: Array<[string, 'primary' | 'shadow', number, Protocol]> = [
-    ['a V3 primary that is not pre-filtered', 'primary', 1, Protocol.V3],
-    ['a pre-filtered V3 shadow', 'shadow', 8453, Protocol.V3],
-    ['a pre-filtered V4 primary', 'primary', 8453, Protocol.V4],
-    ['a pre-filtered V2 primary', 'primary', 8453, Protocol.V2],
+  const quietCases: Array<[string, number, Protocol]> = [
+    ['a V3 combo that is not pre-filtered', 1, Protocol.V3],
+    ['a pre-filtered V4 combo', 8453, Protocol.V4],
+    ['a pre-filtered V2 combo', 8453, Protocol.V2],
   ];
-  it.each(keptCases)('keeps %s', (_label, mode, chainId, protocol) => {
+  it.each(quietCases)('stays quiet for %s', (_label, chainId, protocol) => {
     const metric = new FakeMetric();
-    const config = configWith(
-      new Set([
+    const config = configWith({
+      prefilterTargets: new Set([
         targetKey(8453, Protocol.V2),
         targetKey(8453, Protocol.V3),
         targetKey(8453, Protocol.V4),
-      ])
-    );
+      ]),
+    });
 
     expect(
-      refusePrefilteredV3Primary(
-        mode,
+      reportPrefilteredV3WithoutUnpriced(
         config,
         chainId,
         protocol,
         noopLogger,
         metric
       )
-    ).toBe(mode);
-    expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([]);
+    ).toBe(false);
+    expect(metric.emitted).toEqual([]);
   });
 });
 
-describe('resolveAuroraModeWithPrimaryFloor', () => {
-  it('downgrades a primary target without an absolute floor to shadow', () => {
+describe('resolveMinPoolCount', () => {
+  it('reports a combo without an absolute floor and leaves it floorless', () => {
     const metric = new FakeMetric();
     const warnings: string[] = [];
     const logger: Logger = {
       ...noopLogger,
       warn: message => warnings.push(message),
     };
-    const config = {
-      shadowTargets: new Set<string>(),
-      primaryTargets: new Set([targetKey(1, Protocol.V3)]),
-      tvlGuardTargets: new Set<string>(),
-      tvlGuardTargetsWildcardRejection: undefined,
-      prefilterTargets: new Set<string>(),
-      prefilterWildcardIgnored: false,
-      prefilterUnpricedTargets: new Set<string>(),
-      prefilterUnpricedRejected: new Map(),
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
-      minPoolCountRatio: 0.5,
-      minPoolCountByTarget: new Map<string, number>(),
-      minPoolCountFloorInvalidKeys: new Set<string>(),
-      minPoolCountFloorUnparseable: false,
-    };
 
     expect(
-      resolveAuroraModeWithPrimaryFloor(config, 1, Protocol.V3, logger, metric)
-    ).toBe('shadow');
+      resolveMinPoolCount(configWith(), 1, Protocol.V3, logger, metric)
+    ).toBeUndefined();
     expect(warnings[0]).toMatch(/^Aurora pool source primary_without_floor/);
     expect(
-      metric.byKey('CachePools.aurora.primary_without_floor')[0]!.tags
+      metric.byKey('CachePools.aurora.primary_without_floor')[0]?.tags
     ).toEqual({
       chainId: '1',
       protocol: String(Protocol.V3),
     });
   });
 
-  it('downgrades an invalid floor entry to shadow (fail closed), scoped to that key', () => {
+  it('reports an invalid floor entry under its own metric, scoped to that key', () => {
     const metric = new FakeMetric();
     const warnings: string[] = [];
     const logger: Logger = {
       ...noopLogger,
       warn: message => warnings.push(message),
     };
-    const config = {
-      shadowTargets: new Set<string>(),
-      primaryTargets: new Set([
-        targetKey(4663, Protocol.V4),
-        targetKey(1, Protocol.V3),
-      ]),
-      tvlGuardTargets: new Set<string>(),
-      tvlGuardTargetsWildcardRejection: undefined,
-      prefilterTargets: new Set<string>(),
-      prefilterWildcardIgnored: false,
-      prefilterUnpricedTargets: new Set<string>(),
-      prefilterUnpricedRejected: new Map(),
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
-      minPoolCountRatio: 0.5,
-      minPoolCountByTarget: new Map<string, number>(),
+    const config = configWith({
       minPoolCountFloorInvalidKeys: new Set([targetKey(4663, Protocol.V4)]),
-      minPoolCountFloorUnparseable: false,
-    };
+    });
 
-    // The typo'd entry downgrades ITS combo to shadow — a floorless primary
-    // is unprotected on the first post-deploy tick — under the typo-specific
+    // The typo'd entry leaves ITS combo floorless under the typo-specific
     // metric...
     expect(
-      resolveAuroraModeWithPrimaryFloor(
-        config,
-        4663,
-        Protocol.V4,
-        logger,
-        metric
-      )
-    ).toBe('shadow');
+      resolveMinPoolCount(config, 4663, Protocol.V4, logger, metric)
+    ).toBeUndefined();
     expect(warnings[0]).toMatch(
       /^Aurora pool source primary_floor_config_invalid/
     );
     expect(
       metric.byKey('CachePools.aurora.primary_floor_config_invalid')
     ).toHaveLength(1);
-    // ...while a target with NO entry at all downgrades under the
+    // ...while a target with NO entry at all is reported under the
     // absence-specific metric.
     expect(
-      resolveAuroraModeWithPrimaryFloor(config, 1, Protocol.V3, logger, metric)
-    ).toBe('shadow');
+      resolveMinPoolCount(config, 1, Protocol.V3, logger, metric)
+    ).toBeUndefined();
     expect(
       metric.byKey('CachePools.aurora.primary_without_floor')
     ).toHaveLength(1);
   });
 
-  it('downgrades every primary target to shadow on an unparseable floor env', () => {
+  it('reports every combo as invalid on an unparseable floor env', () => {
     const metric = new FakeMetric();
-    const config = {
-      shadowTargets: new Set<string>(),
-      primaryTargets: new Set([targetKey(4663, Protocol.V4)]),
-      tvlGuardTargets: new Set<string>(),
-      tvlGuardTargetsWildcardRejection: undefined,
-      prefilterTargets: new Set<string>(),
-      prefilterWildcardIgnored: false,
-      prefilterUnpricedTargets: new Set<string>(),
-      prefilterUnpricedRejected: new Map(),
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
-      minPoolCountRatio: 0.5,
-      minPoolCountByTarget: new Map<string, number>(),
-      minPoolCountFloorInvalidKeys: new Set<string>(),
-      minPoolCountFloorUnparseable: true,
-    };
+    const config = configWith({minPoolCountFloorUnparseable: true});
     expect(
-      resolveAuroraModeWithPrimaryFloor(
-        config,
-        4663,
-        Protocol.V4,
-        noopLogger,
-        metric
-      )
-    ).toBe('shadow');
+      resolveMinPoolCount(config, 4663, Protocol.V4, noopLogger, metric)
+    ).toBeUndefined();
     expect(
       metric.byKey('CachePools.aurora.primary_floor_config_invalid')
     ).toHaveLength(1);
   });
 
-  it('a valid floor entry keeps primary untouched', () => {
+  it('returns a valid floor entry without reporting', () => {
     const metric = new FakeMetric();
-    const config = {
-      shadowTargets: new Set<string>(),
-      primaryTargets: new Set([targetKey(4663, Protocol.V4)]),
-      tvlGuardTargets: new Set<string>(),
-      tvlGuardTargetsWildcardRejection: undefined,
-      prefilterTargets: new Set<string>(),
-      prefilterWildcardIgnored: false,
-      prefilterUnpricedTargets: new Set<string>(),
-      prefilterUnpricedRejected: new Map(),
-      primaryParityTargets: new Set<string>(),
-      primaryParityWildcardIgnored: false,
-      minPoolCountRatio: 0.5,
+    const config = configWith({
       minPoolCountByTarget: new Map([[targetKey(4663, Protocol.V4), 40000]]),
-      minPoolCountFloorInvalidKeys: new Set<string>(),
-      minPoolCountFloorUnparseable: false,
-    };
+    });
     expect(
-      resolveAuroraModeWithPrimaryFloor(
-        config,
-        4663,
-        Protocol.V4,
-        noopLogger,
-        metric
-      )
-    ).toBe('primary');
+      resolveMinPoolCount(config, 4663, Protocol.V4, noopLogger, metric)
+    ).toBe(40000);
     expect(metric.emitted).toHaveLength(0);
   });
 });
@@ -1092,260 +934,6 @@ describe('AsyncSemaphore', () => {
     // always free for the fast job) would be violated in production.
     await expect(queued).resolves.toBe('ok');
     expect(queuedRan).toBe(true);
-  });
-
-  it('grants a freed slot to a normal waiter before an earlier low-priority waiter', async () => {
-    const semaphore = new AsyncSemaphore(1);
-    const releaseHolder = await semaphore.acquire();
-    const order: string[] = [];
-    const lowPriority = semaphore.lowPriority().run(async () => {
-      order.push('shadow');
-    });
-    const normal = semaphore.run(async () => {
-      order.push('registry');
-    });
-
-    releaseHolder();
-    await Promise.all([lowPriority, normal]);
-    expect(order).toEqual(['registry', 'shadow']);
-  });
-
-  it('runs low-priority work immediately when a slot is free', async () => {
-    const semaphore = new AsyncSemaphore(1);
-    await expect(semaphore.lowPriority().run(async () => 'ran')).resolves.toBe(
-      'ran'
-    );
-    // The low-priority run released its slot: a normal acquire must not hang.
-    const release = await semaphore.acquire();
-    release();
-  });
-});
-
-describe('computePoolParity', () => {
-  it('computes counts, jaccard, top-100 missing, and tvl drift', () => {
-    const subgraph = [
-      v3Pool('0xA1', 1000),
-      v3Pool('0xa2', 500),
-      v3Pool('0xa3', 10),
-    ];
-    const aurora = [
-      v3Pool('0xa1', 1100),
-      v3Pool('0xA2', 500),
-      v3Pool('0xa4', 5),
-    ];
-
-    const parity = computePoolParity(subgraph, aurora, undefined);
-    expect(parity.subgraphCount).toBe(3);
-    expect(parity.auroraCount).toBe(3);
-    // intersection {a1, a2} = 2, union = 4
-    expect(parity.jaccardBps).toBe(5000);
-    expect(parity.missingTop100).toBe(1); // a3
-    expect(parity.missingInAurora).toBe(1); // a3
-    expect(parity.extraInAurora).toBe(1); // a4
-    // drifts: a1 = 10% = 1000bps, a2 = 0 → p50 = 1000 (upper median)
-    expect(parity.tvlDriftBpsP50).toBe(1000);
-    // Diagnostic samples: what's missing/extra by id, and the matched pools
-    // AT the median drift (sample starts at the median, ascending).
-    expect(parity.missingSample).toEqual(['0xa3']);
-    expect(parity.extraSample).toEqual(['0xa4']);
-    expect(parity.driftSample).toEqual(['0xa1:1000.00:1100.00']);
-  });
-
-  it('handles empty results', () => {
-    const parity = computePoolParity([], [], undefined);
-    expect(parity.jaccardBps).toBe(0);
-    expect(parity.missingTop100).toBe(0);
-    expect(parity.missingTop100Live).toBe(0);
-    expect(parity.missingTop100LiveIds).toEqual([]);
-  });
-
-  it('lists every live top-100 miss, more than the sample holds, and none below the cut', () => {
-    // Seven missing pools rank above 93 shared ones, and an eighth missing
-    // pool ranks 101st, outside the counted top 100.
-    const missing = Array.from({length: 7}, (_, i) =>
-      v3Pool(`0xm${i}`, 10_000 - i)
-    );
-    const shared = Array.from({length: 93}, (_, i) =>
-      v3Pool(`0xs${i}`, 1_000 - i)
-    );
-    const belowCut = v3Pool('0xlow', 1);
-
-    const parity = computePoolParity(
-      [...missing, ...shared, belowCut],
-      shared,
-      undefined
-    );
-    expect(parity.missingTop100Live).toBe(7);
-    expect(parity.missingTop100LiveIds).toEqual(missing.map(pool => pool.id));
-    expect(parity.missingLiveSample).toHaveLength(5);
-  });
-
-  it('excludes emptied pools from the live top-100 gap and its sample', () => {
-    // The subgraph keeps ranking a drained pool by stale TVL, as it does for
-    // Mainnet V3 WETH/TRUMP (0x1b942ce8…, on-chain liquidity 0).
-    const drained = {...v3Pool('0xDEAD', 50_000), liquidity: '0'};
-    const liveMissing = v3Pool('0xb2', 900);
-    const subgraph = [drained, liveMissing, v3Pool('0xb1', 1000)];
-    const aurora = [v3Pool('0xb1', 1000)];
-
-    const parity = computePoolParity(subgraph, aurora, undefined);
-    expect(parity.missingTop100).toBe(2);
-    expect(parity.missingTop100Live).toBe(1);
-    expect(parity.missingSample).toEqual(['0xdead', '0xb2']);
-    expect(parity.missingLiveSample).toEqual(['0xb2']);
-  });
-
-  it('counts a zero-liquidity TVL-bypass hook pool as live', () => {
-    // A wrapper hook keeps its liquidity outside the PoolManager, so the
-    // pool reads liquidity 0 however much the hook holds. The registry is
-    // lowercase; the pool carries the checksummed form.
-    const bypassHook = '0xB0B0000000000000000000000000000000000001';
-    const bypassPool = v4Pool('0xd1', 0, bypassHook, '0');
-    const drainedHookless = v4Pool('0xd2', 800, ADDRESS_ZERO, '0');
-    const subgraph = [
-      drainedHookless,
-      bypassPool,
-      v4Pool('0xd3', 900, ADDRESS_ZERO, '5'),
-    ];
-    const aurora = [v4Pool('0xd3', 900, ADDRESS_ZERO, '5')];
-
-    const parity = computePoolParity(
-      subgraph,
-      aurora,
-      new Set([bypassHook.toLowerCase()])
-    );
-    expect(parity.missingTop100).toBe(2);
-    expect(parity.missingTop100Live).toBe(1);
-    expect(parity.missingLiveSample).toEqual(['0xd1']);
-  });
-
-  it('treats a zero-liquidity hooked pool as not live when its hook is not a TVL-bypass hook', () => {
-    const hooked = v4Pool(
-      '0xe1',
-      50,
-      '0xB0B0000000000000000000000000000000000002',
-      '0'
-    );
-    const parity = computePoolParity(
-      [hooked],
-      [],
-      new Set(['0xb0b0000000000000000000000000000000000001'])
-    );
-    expect(parity.missingTop100).toBe(1);
-    expect(parity.missingTop100Live).toBe(0);
-  });
-
-  it('counts every V2 pool as live (V2 carries no liquidity field)', () => {
-    const v2Pool = (id: string, reserveUSD: number): V2SubgraphPool => ({
-      id,
-      token0: {id: '0xa'},
-      token1: {id: '0xb'},
-      supply: 1,
-      reserve: reserveUSD / 2000,
-      reserveUSD,
-    });
-    const parity = computePoolParity(
-      [v2Pool('0xc1', 500), v2Pool('0xc2', 400)],
-      [v2Pool('0xc1', 500)],
-      undefined
-    );
-    expect(parity.missingTop100).toBe(1);
-    expect(parity.missingTop100Live).toBe(1);
-  });
-
-  it('counts a junk-priced Aurora-only pool at the top in extraTop100 while missingTop100 stays 0', () => {
-    // The Arc V3 shape: Aurora admits a fake-USDC pool the subgraph never
-    // serves and values it at $27.6B, above every real pool.
-    const junk = v3Pool('0x70CDF71E240CC073DB471A94B9514A0AD54B0C48', 27.6e9);
-    const subgraph = [v3Pool('0xe1', 1000), v3Pool('0xe2', 900)];
-    const aurora = [junk, v3Pool('0xE1', 1000), v3Pool('0xe2', 900)];
-
-    const parity = computePoolParity(subgraph, aurora, undefined);
-    expect(parity.missingTop100).toBe(0);
-    expect(parity.extraTop100).toBe(1);
-    expect(parity.extraSample).toEqual([
-      '0x70cdf71e240cc073db471a94b9514a0ad54b0c48',
-    ]);
-  });
-
-  it('only counts Aurora extras inside its own top 100 by TVL', () => {
-    const shared = Array.from({length: 100}, (_, i) =>
-      v3Pool(`0xf${i}`, 1000 - i)
-    );
-    const extraAtRank101 = v3Pool('0xextra', 1);
-    expect(
-      computePoolParity(shared, [...shared, extraAtRank101], undefined)
-        .extraTop100
-    ).toBe(0);
-    const extraAtRank100 = v3Pool('0xextra', 850);
-    expect(
-      computePoolParity(
-        shared,
-        [...shared.slice(0, 99), extraAtRank100],
-        undefined
-      ).extraTop100
-    ).toBe(1);
-  });
-
-  it('reports the top-100 drift apart from a dust-dominated median', () => {
-    // 150 large pools that agree exactly and 150 dust pools Aurora values at
-    // half: the full median lands on dust, the top 100 are all large pools.
-    const large = Array.from({length: 150}, (_, i) =>
-      v3Pool(`0xa${i}`, 1_000_000 + i)
-    );
-    const dustSubgraph = Array.from({length: 150}, (_, i) =>
-      v3Pool(`0xd${i}`, 0.5)
-    );
-    const dustAurora = dustSubgraph.map(pool => v3Pool(pool.id, 0.25));
-
-    const parity = computePoolParity(
-      [...large, ...dustSubgraph],
-      [...large, ...dustAurora],
-      undefined
-    );
-    expect(parity.tvlDriftBpsP50).toBe(5000);
-    expect(parity.tvlDriftBpsTop100P50).toBe(0);
-  });
-
-  it('reports no top-100 drift, not 0, on empty inputs', () => {
-    const parity = computePoolParity([], [], undefined);
-    expect(parity.extraTop100).toBe(0);
-    expect(parity.tvlDriftBpsTop100P50).toBeUndefined();
-  });
-
-  it('reports no top-100 drift when no top-100 pool has a drift sample', () => {
-    // A shared pool the subgraph values at $0 has no drift sample, however
-    // far Aurora is from it. That must not read as perfect agreement.
-    const parity = computePoolParity(
-      [v3Pool('0xe1', 0)],
-      [v3Pool('0xe1', 1e9)],
-      undefined
-    );
-    expect(parity.missingTop100).toBe(0);
-    expect(parity.extraTop100).toBe(0);
-    expect(parity.tvlDriftBpsTop100P50).toBeUndefined();
-  });
-
-  it('counts equal-TVL pools at the cutoff the same way in any input order', () => {
-    // 100 shared pools and one Aurora-only pool, all at the same TVL: which
-    // one falls off at rank 101 must not depend on the source's row order.
-    const shared = Array.from({length: 100}, (_, i) =>
-      v3Pool(`0xb${String(i).padStart(3, '0')}`, 500)
-    );
-    const extra = v3Pool('0xa000', 500);
-    const extraFirst = computePoolParity(
-      shared,
-      [extra, ...shared],
-      undefined
-    ).extraTop100;
-    const extraLast = computePoolParity(
-      shared,
-      [...shared, extra],
-      undefined
-    ).extraTop100;
-    expect(extraFirst).toBe(extraLast);
-    // '0xa000' sorts before every '0xb…' id, so it keeps its top-100 place.
-    expect(extraFirst).toBe(1);
   });
 });
 
@@ -1860,21 +1448,18 @@ describe('tvlGuardAnchorTokens', () => {
   });
 });
 
-describe('AuroraSourcedProvider primary mode', () => {
+describe('AuroraSourcedProvider', () => {
   beforeEach(() => {
     resetAuroraPoolCountBaselinesForTesting();
   });
 
   const mk = (
     aurora: ISubgraphProvider<V3SubgraphPool>,
-    subgraph: ISubgraphProvider<V3SubgraphPool>,
     metric: FakeMetric,
     minPoolCount = 0
   ) =>
     new AuroraSourcedProvider(
-      'primary',
       aurora,
-      subgraph,
       1,
       Protocol.V3,
       0.5,
@@ -1883,43 +1468,46 @@ describe('AuroraSourcedProvider primary mode', () => {
       metric
     );
 
-  it('serves Aurora pools and does not call the subgraph', async () => {
+  it('serves Aurora pools and counts the served read', async () => {
     const aurora = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
-    const subgraph = fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
 
-    const pools = await mk(aurora, subgraph, metric).getPools();
+    const pools = await mk(aurora, metric).getPools();
     expect(pools.map(p => p.id)).toEqual(['0x1', '0x2']);
-    expect(subgraph.calls).toBe(0);
-    expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+    expect(metric.byKey('CachePools.aurora.served')).toEqual([
+      {
+        key: 'CachePools.aurora.served',
+        value: 1,
+        tags: {chainId: '1', protocol: String(Protocol.V3)},
+      },
+    ]);
   });
 
-  it('rejects an Aurora error without calling the subgraph', async () => {
+  it('rejects an Aurora error', async () => {
     const boom = new Error('boom');
     const aurora = fakeProvider<V3SubgraphPool>([boom]);
-    const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
 
-    const rejection = await mk(aurora, subgraph, metric)
+    const rejection = await mk(aurora, metric)
       .getPools()
       .catch((err: unknown) => err);
     expect(rejection).toBeInstanceOf(AuroraPoolsRejectedError);
     expect(rejection).toMatchObject({reason: 'error', cause: boom});
-    expect(subgraph.calls).toBe(0);
-    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
-      'error'
-    );
+    expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags).toEqual({
+      chainId: '1',
+      protocol: String(Protocol.V3),
+      reason: 'error',
+    });
   });
 
-  it('rejects an empty Aurora result without calling the subgraph', async () => {
+  it('rejects an empty Aurora result', async () => {
     const aurora = fakeProvider<V3SubgraphPool>([[]]);
-    const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
 
-    await expect(mk(aurora, subgraph, metric).getPools()).rejects.toMatchObject(
-      {name: 'AuroraPoolsRejectedError', reason: 'empty'}
-    );
-    expect(subgraph.calls).toBe(0);
+    await expect(mk(aurora, metric).getPools()).rejects.toMatchObject({
+      name: 'AuroraPoolsRejectedError',
+      reason: 'empty',
+    });
     expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'empty'
     );
@@ -1928,9 +1516,8 @@ describe('AuroraSourcedProvider primary mode', () => {
   it('rejects a pool count that collapses below the ratio', async () => {
     const tenPools = Array.from({length: 10}, (_, i) => v3Pool(`0x${i}`, 10));
     const aurora = fakeProvider([tenPools, [v3Pool('0x1', 10)]]);
-    const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
-    const provider = mk(aurora, subgraph, metric);
+    const provider = mk(aurora, metric);
 
     expect(await provider.getPools()).toHaveLength(10); // baseline
     // 1 < 0.5 * 10 → rejected
@@ -1938,7 +1525,6 @@ describe('AuroraSourcedProvider primary mode', () => {
       name: 'AuroraPoolsRejectedError',
       reason: 'low_count',
     });
-    expect(subgraph.calls).toBe(0);
     expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'low_count'
     );
@@ -1955,9 +1541,8 @@ describe('AuroraSourcedProvider primary mode', () => {
       pools(8),
       pools(8),
     ]);
-    const subgraph = fakeProvider([[v3Pool('0x9', 1)]]);
     const metric = new FakeMetric();
-    const provider = mk(aurora, subgraph, metric);
+    const provider = mk(aurora, metric);
 
     expect(await provider.getPools()).toHaveLength(20);
     await expect(provider.getPools()).rejects.toMatchObject({
@@ -1971,7 +1556,6 @@ describe('AuroraSourcedProvider primary mode', () => {
     // 8 is the new baseline, so the next 8 is served without a reset.
     expect(await provider.getPools()).toHaveLength(8);
     expect(metric.byKey('CachePools.aurora.baseline_reset')).toHaveLength(1);
-    expect(subgraph.calls).toBe(0);
   });
 
   it('keeps rejecting low_count reads that do not agree with each other', async () => {
@@ -1979,7 +1563,7 @@ describe('AuroraSourcedProvider primary mode', () => {
       Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
     const aurora = fakeProvider([pools(20), pools(8), pools(4), pools(8)]);
     const metric = new FakeMetric();
-    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric);
+    const provider = mk(aurora, metric);
 
     expect(await provider.getPools()).toHaveLength(20);
     for (let tick = 0; tick < 3; tick++) {
@@ -1996,7 +1580,7 @@ describe('AuroraSourcedProvider primary mode', () => {
     // Each read is within 10% of the one before, but 34 is 15% under 40.
     const aurora = fakeProvider([pools(100), pools(40), pools(37), pools(34)]);
     const metric = new FakeMetric();
-    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric);
+    const provider = mk(aurora, metric);
 
     expect(await provider.getPools()).toHaveLength(100);
     for (let tick = 0; tick < 3; tick++) {
@@ -2012,7 +1596,7 @@ describe('AuroraSourcedProvider primary mode', () => {
       Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
     const aurora = fakeProvider([pools(20), pools(8), [], pools(8), pools(8)]);
     const metric = new FakeMetric();
-    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric);
+    const provider = mk(aurora, metric);
 
     expect(await provider.getPools()).toHaveLength(20);
     await expect(provider.getPools()).rejects.toMatchObject({
@@ -2034,7 +1618,7 @@ describe('AuroraSourcedProvider primary mode', () => {
       Array.from({length: n}, (_, i) => v3Pool(`0x${i}`, 10));
     const aurora = fakeProvider([pools(20), pools(5), pools(5), pools(5)]);
     const metric = new FakeMetric();
-    const provider = mk(aurora, fakeProvider([[v3Pool('0x9', 1)]]), metric, 8);
+    const provider = mk(aurora, metric, 8);
 
     expect(await provider.getPools()).toHaveLength(20);
     for (let tick = 0; tick < 3; tick++) {
@@ -2051,13 +1635,11 @@ describe('AuroraSourcedProvider primary mode', () => {
     const tenPools = Array.from({length: 10}, (_, i) => v3Pool(`0x${i}`, 10));
 
     // Tick 1 (fresh process, no ratio baseline): 5 < floor 8 → rejected.
-    const firstSubgraph = fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]);
-    const first = mk(fakeProvider([fivePools]), firstSubgraph, metric, 8);
+    const first = mk(fakeProvider([fivePools]), metric, 8);
     await expect(first.getPools()).rejects.toMatchObject({
       name: 'AuroraPoolsRejectedError',
       reason: 'below_floor',
     });
-    expect(firstSubgraph.calls).toBe(0);
     expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'below_floor'
     );
@@ -2066,24 +1648,14 @@ describe('AuroraSourcedProvider primary mode', () => {
     // not have become the ratio baseline (10 vs baseline 5 would still pass,
     // but a later 4-count against a poisoned 5-baseline would NOT fire the
     // ratio guard — the floor result must leave the baseline unset).
-    const second = mk(
-      fakeProvider([tenPools]),
-      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
-      metric,
-      8
-    );
+    const second = mk(fakeProvider([tenPools]), metric, 8);
     expect(await second.getPools()).toHaveLength(10);
     expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
   });
 
   it('applies no absolute floor when the target has no entry', async () => {
     const metric = new FakeMetric();
-    const provider = mk(
-      fakeProvider([[v3Pool('0x1', 10)]]),
-      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
-      metric,
-      0
-    );
+    const provider = mk(fakeProvider([[v3Pool('0x1', 10)]]), metric, 0);
     expect((await provider.getPools()).map(p => p.id)).toEqual(['0x1']);
   });
 
@@ -2092,20 +1664,12 @@ describe('AuroraSourcedProvider primary mode', () => {
     const metric = new FakeMetric();
 
     // Run 1: fresh provider instance establishes the baseline.
-    const first = mk(
-      fakeProvider([tenPools]),
-      fakeProvider<V3SubgraphPool>([[v3Pool('0x9', 1)]]),
-      metric
-    );
+    const first = mk(fakeProvider([tenPools]), metric);
     expect(await first.getPools()).toHaveLength(10);
 
     // Run 2: a DIFFERENT instance (as cacheAllPools rebuilds providers every
     // tick) must still see run 1's baseline and reject the collapsed result.
-    const second = mk(
-      fakeProvider([[v3Pool('0x1', 10)]]),
-      fakeProvider([[v3Pool('0x9', 1)]]),
-      metric
-    );
+    const second = mk(fakeProvider([[v3Pool('0x1', 10)]]), metric);
     await expect(second.getPools()).rejects.toMatchObject({
       name: 'AuroraPoolsRejectedError',
       reason: 'low_count',
@@ -2113,399 +1677,6 @@ describe('AuroraSourcedProvider primary mode', () => {
     expect(metric.byKey('CachePools.aurora.rejected')[0]?.tags?.reason).toBe(
       'low_count'
     );
-  });
-
-  describe('with primary parity', () => {
-    afterEach(settlePendingAuroraShadowsForTesting);
-
-    const mkParity = (
-      aurora: ISubgraphProvider<V3SubgraphPool>,
-      subgraph: ISubgraphProvider<V3SubgraphPool>,
-      metric: FakeMetric
-    ) =>
-      new AuroraSourcedProvider(
-        'primary',
-        aurora,
-        subgraph,
-        1,
-        Protocol.V3,
-        0.5,
-        0,
-        noopLogger,
-        metric,
-        true
-      );
-
-    it('serves Aurora and diffs the served pools against the subgraph in the background', async () => {
-      const aurora = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
-      const subgraph = fakeProvider([[v3Pool('0x1', 90), v3Pool('0x3', 80)]]);
-      const metric = new FakeMetric();
-
-      const pools = await mkParity(aurora, subgraph, metric).getPools();
-      await settlePendingAuroraShadowsForTesting();
-
-      expect(pools.map(p => p.id)).toEqual(['0x1', '0x2']);
-      expect(subgraph.calls).toBe(1);
-      expect(metric.byKey('CachePools.parity.missing_top100')).toEqual([
-        expect.objectContaining({
-          value: 1,
-          tags: {chainId: '1', protocol: 'V3', mode: 'primary'},
-        }),
-      ]);
-      expect(metric.byKey('CachePools.aurora.primary_parity_skipped')).toEqual(
-        []
-      );
-    });
-
-    it('still serves Aurora and counts a subgraph failure', async () => {
-      const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
-      const subgraph = fakeProvider<V3SubgraphPool>([
-        new Error('subgraph down'),
-      ]);
-      const metric = new FakeMetric();
-
-      const pools = await mkParity(aurora, subgraph, metric).getPools();
-      await settlePendingAuroraShadowsForTesting();
-
-      expect(pools.map(p => p.id)).toEqual(['0x1']);
-      expect(metric.byKey('CachePools.parity.missing_top100')).toEqual([]);
-      expect(metric.byKey('CachePools.aurora.primary_parity_skipped')).toEqual([
-        expect.objectContaining({
-          tags: expect.objectContaining({reason: 'subgraph_error'}),
-        }),
-      ]);
-    });
-
-    it('skips the comparison while the previous one is still pending', async () => {
-      const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
-      const subgraph = deferredProvider<V3SubgraphPool>();
-      const metric = new FakeMetric();
-      const provider = mkParity(aurora, subgraph, metric);
-
-      await provider.getPools();
-      const second = await provider.getPools();
-      subgraph.resolve([v3Pool('0x1', 100)]);
-
-      expect(second.map(p => p.id)).toEqual(['0x1']);
-      expect(metric.byKey('CachePools.aurora.primary_parity_skipped')).toEqual([
-        expect.objectContaining({
-          tags: expect.objectContaining({reason: 'previous_pending'}),
-        }),
-      ]);
-    });
-  });
-});
-
-describe('AuroraSourcedProvider shadow mode', () => {
-  const mk = (
-    aurora: ISubgraphProvider<V3SubgraphPool>,
-    subgraph: ISubgraphProvider<V3SubgraphPool>,
-    metric: FakeMetric
-  ) =>
-    new AuroraSourcedProvider(
-      'shadow',
-      aurora,
-      subgraph,
-      1,
-      Protocol.V3,
-      0.5,
-      0,
-      noopLogger,
-      metric
-    );
-
-  afterEach(settlePendingAuroraShadowsForTesting);
-
-  it('returns the subgraph result and emits parity metrics', async () => {
-    const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
-    const subgraph = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
-    const metric = new FakeMetric();
-
-    const pools = await mk(aurora, subgraph, metric).getPools();
-    await settlePendingAuroraShadowsForTesting();
-    expect(pools).toHaveLength(2);
-    expect(metric.byKey('CachePools.parity.subgraph_count')[0]!.value).toBe(2);
-    expect(metric.byKey('CachePools.parity.aurora_count')[0]!.value).toBe(1);
-    expect(metric.byKey('CachePools.parity.jaccard_bps')[0]!.value).toBe(5000);
-  });
-
-  it('emits the live top-100 gap next to the raw one', async () => {
-    const drained = {...v3Pool('0x9', 5000), liquidity: '0'};
-    const aurora = fakeProvider([[v3Pool('0x1', 100)]]);
-    const subgraph = fakeProvider([[drained, v3Pool('0x1', 100)]]);
-    const metric = new FakeMetric();
-
-    await mk(aurora, subgraph, metric).getPools();
-    await settlePendingAuroraShadowsForTesting();
-    expect(metric.byKey('CachePools.parity.missing_top100')[0]!.value).toBe(1);
-    expect(metric.byKey('CachePools.parity.missing_top100_live')).toEqual([
-      {
-        key: 'CachePools.parity.missing_top100_live',
-        value: 0,
-        tags: {chainId: '1', protocol: String(Protocol.V3), mode: 'shadow'},
-      },
-    ]);
-  });
-
-  it('emits the reverse top-100 gap and the top-100 drift with the shadow tags', async () => {
-    const junk = v3Pool('0xjunk', 27.6e9);
-    const aurora = fakeProvider([[junk, v3Pool('0x1', 50)]]);
-    const subgraph = fakeProvider([[v3Pool('0x1', 100)]]);
-    const metric = new FakeMetric();
-
-    await mk(aurora, subgraph, metric).getPools();
-    await settlePendingAuroraShadowsForTesting();
-    const tags = {chainId: '1', protocol: String(Protocol.V3), mode: 'shadow'};
-    expect(metric.byKey('CachePools.parity.missing_top100')[0]!.value).toBe(0);
-    expect(metric.byKey('CachePools.parity.extra_top100')).toEqual([
-      {key: 'CachePools.parity.extra_top100', value: 1, tags},
-    ]);
-    expect(metric.byKey('CachePools.parity.tvl_drift_bps_top100_p50')).toEqual([
-      {key: 'CachePools.parity.tvl_drift_bps_top100_p50', value: 5000, tags},
-    ]);
-    // A gauge: a unit-less putMetric would land as an unallowlisted `.dist`.
-    expect(
-      metric.gaugeKeys.has('CachePools.parity.tvl_drift_bps_top100_p50')
-    ).toBe(true);
-    expect(
-      metric.putMetricKeys.has('CachePools.parity.tvl_drift_bps_top100_p50')
-    ).toBe(false);
-  });
-
-  it('does not emit the top-100 drift gauge without a drift sample', async () => {
-    const aurora = fakeProvider([[v3Pool('0x1', 1e9)]]);
-    const subgraph = fakeProvider([[v3Pool('0x1', 0)]]);
-    const metric = new FakeMetric();
-
-    await mk(aurora, subgraph, metric).getPools();
-    await settlePendingAuroraShadowsForTesting();
-    expect(metric.byKey('CachePools.parity.extra_top100')).toHaveLength(1);
-    expect(
-      metric.byKey('CachePools.parity.tvl_drift_bps_top100_p50')
-    ).toHaveLength(0);
-  });
-
-  it('counts a zero-liquidity pool of a registered TVL-bypass hook in the live gap', async () => {
-    const robinhood = 4663;
-    const bypassHook = [...getTvlBypassHookAddresses(robinhood)!][0]!;
-    const hookPool = v4Pool(
-      '0xf1',
-      0,
-      bypassHook.toUpperCase().replace('0X', '0x'),
-      '0'
-    );
-    const shared = v4Pool('0xf2', 100, ADDRESS_ZERO, '7');
-    const metric = new FakeMetric();
-    const provider = new AuroraSourcedProvider(
-      'shadow',
-      fakeProvider([[shared]]),
-      fakeProvider([[hookPool, shared]]),
-      robinhood,
-      Protocol.V4,
-      0.5,
-      0,
-      noopLogger,
-      metric
-    );
-
-    await provider.getPools();
-    await settlePendingAuroraShadowsForTesting();
-    expect(
-      metric.byKey('CachePools.parity.missing_top100_live')[0]!.value
-    ).toBe(1);
-  });
-
-  describe('servable live top-100 gap', () => {
-    const shadowV4 = (
-      aurora: V4SubgraphPool[],
-      subgraph: V4SubgraphPool[],
-      logger: Logger,
-      metric: FakeMetric
-    ) =>
-      new AuroraSourcedProvider(
-        'shadow',
-        fakeProvider([aurora]),
-        fakeProvider([subgraph]),
-        1,
-        Protocol.V4,
-        0.5,
-        0,
-        logger,
-        metric
-      );
-    const capture = () => {
-      const warnings: Array<{message: string; fields: unknown}> = [];
-      const logger: Logger = {
-        ...noopLogger,
-        warn: (message, fields) => warnings.push({message, fields}),
-      };
-      return {warnings, logger};
-    };
-    const shared = v4Pool('0xshared', 100, ADDRESS_ZERO, '7');
-
-    it('counts a missing live pool that serving keeps and names it in an unsampled warn', async () => {
-      const missing = v4Pool('0xmissing', 500, ADDRESS_ZERO, '9');
-      const metric = new FakeMetric();
-      const {warnings, logger} = capture();
-
-      await shadowV4([shared], [missing, shared], logger, metric).getPools();
-      await settlePendingAuroraShadowsForTesting();
-      expect(
-        metric.byKey('CachePools.parity.servable_missing_top100_live')
-      ).toEqual([
-        {
-          key: 'CachePools.parity.servable_missing_top100_live',
-          value: 1,
-          tags: {chainId: '1', protocol: String(Protocol.V4), mode: 'shadow'},
-        },
-      ]);
-      expect(warnings).toEqual([
-        {
-          message: 'Aurora servable top-100 gap 1:V4: missingTop100Live=1',
-          fields: {missingTop100LiveIds: ['0xmissing']},
-        },
-      ]);
-    });
-
-    it('does not count a missing pool that serving drops, and stays quiet', async () => {
-      // A hookless pool above the fee ceiling: the raw gap counts it, the
-      // serving filter drops it.
-      const absurdFee = {
-        ...v4Pool('0xabsurd', 500, ADDRESS_ZERO, '9'),
-        feeTier: '990000',
-      };
-      const metric = new FakeMetric();
-      const {warnings, logger} = capture();
-
-      await shadowV4([shared], [absurdFee, shared], logger, metric).getPools();
-      await settlePendingAuroraShadowsForTesting();
-      expect(
-        metric.byKey('CachePools.parity.missing_top100_live')[0]!.value
-      ).toBe(1);
-      expect(
-        metric.byKey('CachePools.parity.servable_missing_top100_live')[0]!.value
-      ).toBe(0);
-      expect(warnings).toEqual([]);
-    });
-  });
-
-  it('still returns the subgraph result when the Aurora fetch fails', async () => {
-    const aurora = fakeProvider<V3SubgraphPool>([new Error('boom')]);
-    const subgraph = fakeProvider([[v3Pool('0x2', 50)]]);
-    const metric = new FakeMetric();
-
-    const pools = await mk(aurora, subgraph, metric).getPools();
-    await settlePendingAuroraShadowsForTesting();
-    expect(pools.map(p => p.id)).toEqual(['0x2']);
-    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(1);
-    expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
-  });
-
-  it('names the failing combo in the shadow fetch failure log', async () => {
-    const warnings: Array<{message: string; fields: unknown}> = [];
-    const logger: Logger = {
-      ...noopLogger,
-      warn: (message, fields) => warnings.push({message, fields}),
-    };
-    const provider = new AuroraSourcedProvider(
-      'shadow',
-      fakeProvider<V3SubgraphPool>([
-        new Error('canceling statement due to statement timeout'),
-      ]),
-      fakeProvider([[v3Pool('0x2', 50)]]),
-      42161,
-      Protocol.V3,
-      0.5,
-      0,
-      logger,
-      new FakeMetric()
-    );
-
-    await provider.getPools();
-    await settlePendingAuroraShadowsForTesting();
-    expect(warnings).toEqual([
-      {
-        message: 'Aurora shadow fetch failed',
-        fields: {
-          target: '42161:V3',
-          error: 'canceling statement due to statement timeout',
-        },
-      },
-    ]);
-  });
-
-  it('returns the subgraph result without waiting for a slow Aurora fetch', async () => {
-    const aurora = deferredProvider<V3SubgraphPool>();
-    const subgraph = fakeProvider([[v3Pool('0x1', 100), v3Pool('0x2', 50)]]);
-    const metric = new FakeMetric();
-
-    const pools = await mk(aurora, subgraph, metric).getPools();
-    expect(pools).toHaveLength(2);
-    expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
-
-    aurora.resolve([v3Pool('0x1', 100)]);
-    await settlePendingAuroraShadowsForTesting();
-    expect(metric.byKey('CachePools.parity.subgraph_count')[0]!.value).toBe(2);
-    expect(metric.byKey('CachePools.parity.aurora_count')[0]!.value).toBe(1);
-  });
-
-  it('counts an Aurora failure that lands after the job returned', async () => {
-    const aurora = deferredProvider<V3SubgraphPool>();
-    const subgraph = fakeProvider([[v3Pool('0x2', 50)]]);
-    const metric = new FakeMetric();
-
-    await mk(aurora, subgraph, metric).getPools();
-    aurora.reject(new Error('canceling statement due to statement timeout'));
-    await settlePendingAuroraShadowsForTesting();
-    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(1);
-  });
-
-  it('skips a combo whose previous shadow comparison is still pending, across provider instances', async () => {
-    const slowAurora = deferredProvider<V3SubgraphPool>();
-    const metric = new FakeMetric();
-    await mk(slowAurora, fakeProvider([[v3Pool('0x1', 1)]]), metric).getPools();
-
-    // The next tick rebuilds the provider; the combo's earlier read is still
-    // queued, so this tick must not add a second one behind it.
-    const nextAurora = fakeProvider([[v3Pool('0x1', 1)]]);
-    const pools = await mk(
-      nextAurora,
-      fakeProvider([[v3Pool('0x9', 1)]]),
-      metric
-    ).getPools();
-    expect(pools.map(p => p.id)).toEqual(['0x9']);
-    expect(nextAurora.calls).toBe(0);
-    expect(metric.byKey('CachePools.aurora.shadow_skipped')).toEqual([
-      {
-        key: 'CachePools.aurora.shadow_skipped',
-        value: 1,
-        tags: {
-          chainId: '1',
-          protocol: String(Protocol.V3),
-          mode: 'shadow',
-          reason: 'previous_pending',
-        },
-      },
-    ]);
-
-    // Once the earlier comparison settles, the combo shadows again.
-    slowAurora.resolve([v3Pool('0x1', 1)]);
-    await settlePendingAuroraShadowsForTesting();
-    await mk(nextAurora, fakeProvider([[v3Pool('0x9', 1)]]), metric).getPools();
-    expect(nextAurora.calls).toBe(1);
-  });
-
-  it('rejects with the subgraph error and emits no shadow metrics', async () => {
-    const aurora = fakeProvider([[v3Pool('0x1', 1)]]);
-    const subgraph = fakeProvider<V3SubgraphPool>([new Error('subgraph 502')]);
-    const metric = new FakeMetric();
-
-    await expect(mk(aurora, subgraph, metric).getPools()).rejects.toThrow(
-      'subgraph 502'
-    );
-    await settlePendingAuroraShadowsForTesting();
-    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(0);
-    expect(metric.byKey('CachePools.parity.subgraph_count')).toHaveLength(0);
   });
 });
 
@@ -2740,9 +1911,8 @@ describe('AuroraV4PoolsProvider', () => {
     ]);
   });
 
-  it('wires listed V3 into apply mode and unlisted V4 into shadow from env through provider wrapping', async () => {
+  it('applies the guard to a listed V3 combo and not to an unlisted V4 combo through provider wiring', async () => {
     const keys = [
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
       'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
       'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     ];
@@ -2757,16 +1927,13 @@ describe('AuroraV4PoolsProvider', () => {
       token1PriceUsd: 1,
       tvlUsd: 40000,
     });
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       async batchGetPoolVolumeUsd30d() {
         return new Map<string, number>();
       }
@@ -2781,26 +1948,15 @@ describe('AuroraV4PoolsProvider', () => {
       }
     }
     try {
-      process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V3,4663:V4';
       process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
         '{"4663:V3":1,"4663:V4":1}';
       process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS = '4663:v3';
       resetAuroraPoolCountBaselinesForTesting();
       const metric = new FakeMetric();
-      const chainProtocols = [
-        {
-          chainId: ROBINHOOD,
-          protocol: Protocol.V3,
-          provider: fakeProvider<V3SubgraphPool>([[]]),
-        },
-        {
-          chainId: ROBINHOOD,
-          protocol: Protocol.V4,
-          provider: fakeProvider<V4SubgraphPool>([[]]),
-        },
-      ];
+      const v3 = combo<V3SubgraphPool>(ROBINHOOD, Protocol.V3);
+      const v4 = combo<V4SubgraphPool>(ROBINHOOD, Protocol.V4);
       applyAuroraPoolSources(
-        chainProtocols,
+        [v3, v4],
         {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
         noopLogger,
         metric,
@@ -2814,8 +1970,8 @@ describe('AuroraV4PoolsProvider', () => {
           },
         }
       );
-      const v3Pools = await chainProtocols[0].provider.getPools();
-      const v4Pools = await chainProtocols[1].provider.getPools();
+      const v3Pools = await installedProvider(v3).getPools();
+      const v4Pools = await installedProvider(v4).getPools();
       expect(v3Pools[0]?.tvlUSD).toBe(2500);
       expect(v4Pools[0]?.tvlUSD).toBe(40000);
       expect(metric.byKey('CachePools.aurora.tvl_guarded')).toEqual(
@@ -2844,10 +2000,7 @@ describe('AuroraV4PoolsProvider', () => {
   });
 
   it('attaches the last state change only to pools of a recordPoolActivity target', async () => {
-    const keys = [
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-      'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
-    ];
+    const keys = ['POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET'];
     const saved = new Map(keys.map(key => [key, process.env[key]]));
     const stateAsOf = new Date('2026-10-20T08:30:00.000Z');
     const row = {
@@ -2860,16 +2013,13 @@ describe('AuroraV4PoolsProvider', () => {
       }),
       stateAsOfTimestamp: stateAsOf,
     };
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       async batchGetPoolVolumeUsd30d() {
         return new Map<string, number>();
       }
@@ -2884,7 +2034,6 @@ describe('AuroraV4PoolsProvider', () => {
       }
     }
     try {
-      process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V3,4663:V4';
       process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
         '{"4663:V3":1,"4663:V4":1}';
       resetAuroraPoolCountBaselinesForTesting();
@@ -2933,9 +2082,8 @@ describe('AuroraV4PoolsProvider', () => {
     }
   });
 
-  it('rejects a prod guard wildcard on every wrapped protocol and applies it in dev', async () => {
+  it('rejects a prod guard wildcard on every protocol and applies it in dev', async () => {
     const keys = [
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
       'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
       'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
       'DD_ENV',
@@ -2955,16 +2103,13 @@ describe('AuroraV4PoolsProvider', () => {
       token1PriceUsd: 1,
       tvlUsd: 40000,
     });
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       async batchGetPoolVolumeUsd30d() {
         return new Map<string, number>();
       }
@@ -3000,8 +2145,6 @@ describe('AuroraV4PoolsProvider', () => {
       }
     }
     try {
-      process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS =
-        '4663:V2,4663:V3,4663:V4';
       process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
         '{"4663:V2":1,"4663:V3":1,"4663:V4":1}';
       const metric = new FakeMetric();
@@ -3044,21 +2187,9 @@ describe('AuroraV4PoolsProvider', () => {
         }
         process.env.DD_ENV = environment;
         resetAuroraPoolCountBaselinesForTesting();
-        const v2Target = {
-          chainId: ROBINHOOD,
-          protocol: Protocol.V2,
-          provider: fakeProvider<V2SubgraphPool>([[]]),
-        };
-        const v3Target = {
-          chainId: ROBINHOOD,
-          protocol: Protocol.V3,
-          provider: fakeProvider<V3SubgraphPool>([[]]),
-        };
-        const v4Target = {
-          chainId: ROBINHOOD,
-          protocol: Protocol.V4,
-          provider: fakeProvider<V4SubgraphPool>([[]]),
-        };
+        const v2Target = combo<V2SubgraphPool>(ROBINHOOD, Protocol.V2);
+        const v3Target = combo<V3SubgraphPool>(ROBINHOOD, Protocol.V3);
+        const v4Target = combo<V4SubgraphPool>(ROBINHOOD, Protocol.V4);
         applyAuroraPoolSources(
           [v2Target, v3Target, v4Target],
           {
@@ -3077,9 +2208,9 @@ describe('AuroraV4PoolsProvider', () => {
             },
           }
         );
-        const v2Pools = await v2Target.provider.getPools();
-        const v3Pools = await v3Target.provider.getPools();
-        const v4Pools = await v4Target.provider.getPools();
+        const v2Pools = await installedProvider(v2Target).getPools();
+        const v3Pools = await installedProvider(v3Target).getPools();
+        const v4Pools = await installedProvider(v4Target).getPools();
         expect(v2Pools[0]?.reserveUSD).toBe(expectedTvl);
         expect(v3Pools[0]?.tvlUSD).toBe(expectedTvl);
         expect(v4Pools[0]?.tvlUSD).toBe(expectedTvl);
@@ -3100,7 +2231,7 @@ describe('AuroraV4PoolsProvider', () => {
         expect(warnings).toHaveLength(rejectedRuns);
         for (const warning of warnings) {
           expect(warning).toContain(
-            'Aurora TVL guard targets "*" rejected — guard stays in shadow everywhere'
+            'Aurora TVL guard targets "*" rejected — guard stays unapplied everywhere'
           );
         }
       }
@@ -3120,13 +2251,10 @@ describe('AuroraV4PoolsProvider', () => {
       permissionedAdapterTokens: () => [],
       majorTokens: () => [],
     };
-    class FakeCapturingV4RoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          'listAllV4RoutablePools' | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeCapturingV4RoutablePools implements Pick<
+      RoutablePoolsService,
+      'listAllV4RoutablePools' | 'batchGetPoolVolumeUsd30d'
+    > {
       options:
         | Parameters<RoutablePoolsService['listAllV4RoutablePools']>[1]
         | null = null;
@@ -4171,24 +3299,20 @@ describe('AuroraV3PoolsProvider', () => {
     ]);
   });
 
-  it('serves Robinhood V3 in primary mode without the thin launchpad pool', async () => {
+  it('serves Robinhood V3 without the thin launchpad pool', async () => {
     const keys = [
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
       'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
       'POOL_CACHING_AURORA_TVL_GUARD_TARGETS',
     ];
     const saved = new Map(keys.map(key => [key, process.env[key]]));
     const real = v3Row({poolAddress: '0xREAL', tvlUsd: 4000});
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       async batchGetPoolVolumeUsd30d() {
         return new Map<string, number>();
       }
@@ -4203,18 +3327,14 @@ describe('AuroraV3PoolsProvider', () => {
       }
     }
     try {
-      process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '4663:V3';
       process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET =
         '{"4663:V3":1}';
       delete process.env.POOL_CACHING_AURORA_TVL_GUARD_TARGETS;
       resetAuroraPoolCountBaselinesForTesting();
       const metric = new FakeMetric();
-      const subgraph = fakeProvider<V3SubgraphPool>([[]]);
-      const chainProtocols = [
-        {chainId: ROBINHOOD, protocol: Protocol.V3, provider: subgraph},
-      ];
+      const robinhoodV3 = combo<V3SubgraphPool>(ROBINHOOD, Protocol.V3);
       applyAuroraPoolSources(
-        chainProtocols,
+        [robinhoodV3],
         {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
         noopLogger,
         metric,
@@ -4228,9 +3348,8 @@ describe('AuroraV3PoolsProvider', () => {
           },
         }
       );
-      const served = await chainProtocols[0].provider.getPools();
+      const served = await installedProvider(robinhoodV3).getPools();
       expect(served.map(p => p.id)).toEqual(['0xreal']);
-      expect(subgraph.calls).toBe(0);
       expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
     } finally {
       for (const key of keys) {
@@ -4850,12 +3969,8 @@ describe('AuroraV2PoolsProvider', () => {
     };
   }
 
-  it('wraps Unichain V2 only with its pre-filter and keeps other V2 full reads', async () => {
-    const keys = [
-      'POOL_CACHING_AURORA_SHADOW_TARGETS',
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-      'POOL_CACHING_AURORA_PREFILTER_TARGETS',
-    ];
+  it('reads Unichain V2 only with its pre-filter and keeps other V2 full reads', async () => {
+    const keys = ['POOL_CACHING_AURORA_PREFILTER_TARGETS'];
     const saved = new Map(keys.map(key => [key, process.env[key]]));
     class FakeRoutablePools extends FakeV2RoutablePools {
       async listAllV3RoutablePools() {
@@ -4876,23 +3991,11 @@ describe('AuroraV2PoolsProvider', () => {
       untrackedUsdThresholdFor: () => Number.MAX_VALUE,
     };
     try {
-      process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '130:V2,1:V2';
-      delete process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
       for (const prefilterTargets of ['130:V2', '']) {
         process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = prefilterTargets;
         const routablePools = new FakeRoutablePools([]);
-        const unichainSubgraph = fakeProvider<V2SubgraphPool>([[]]);
-        const mainnetSubgraph = fakeProvider<V2SubgraphPool>([[]]);
-        const unichain = {
-          chainId: 130,
-          protocol: Protocol.V2,
-          provider: unichainSubgraph,
-        };
-        const mainnet = {
-          chainId: 1,
-          protocol: Protocol.V2,
-          provider: mainnetSubgraph,
-        };
+        const unichain = combo<V2SubgraphPool>(130, Protocol.V2);
+        const mainnet = combo<V2SubgraphPool>(1, Protocol.V2);
         applyAuroraPoolSources(
           [unichain, mainnet],
           thresholds,
@@ -4922,13 +4025,10 @@ describe('AuroraV2PoolsProvider', () => {
             },
           }
         );
-        expect(unichain.provider instanceof AuroraSourcedProvider).toBe(
-          prefilterTargets !== ''
-        );
+        expect(unichain.provider !== undefined).toBe(prefilterTargets !== '');
         expect(mainnet.provider).toBeInstanceOf(AuroraSourcedProvider);
-        await unichain.provider.getPools();
-        await mainnet.provider.getPools();
-        await settlePendingAuroraShadowsForTesting();
+        if (unichain.provider) await readForSideEffects(unichain);
+        await readForSideEffects(mainnet);
         expect(routablePools.options).toEqual(
           prefilterTargets
             ? [
@@ -4957,7 +4057,7 @@ describe('AuroraV2PoolsProvider', () => {
         },
       ]);
       expect(warnings).toContain(
-        'Aurora pool source 130:V2 requires the pre-filter — staying on subgraph'
+        'Aurora pool source 130:V2 requires the pre-filter — skipping the combo'
       );
     } finally {
       for (const key of keys) {
@@ -4968,10 +4068,9 @@ describe('AuroraV2PoolsProvider', () => {
     }
   });
 
-  // Every mode that could read a combo that requires the pre-filter
-  // (wildcard shadow, primary with a valid, absent or invalid floor, scoped
-  // or unscoped run) must skip it without the pre-filter: an unfiltered read
-  // exceeds the statement timeout. TARGET stands for the combo's key.
+  // A combo that requires the pre-filter is skipped without it on every
+  // kind of run (with or without a floor, scoped or unscoped): an unfiltered
+  // read exceeds the statement timeout.
   const PREFILTER_REQUIRED_COMBOS: ReadonlyArray<{
     chainId: number;
     protocol: Protocol;
@@ -4983,36 +4082,13 @@ describe('AuroraV2PoolsProvider', () => {
   ];
 
   it.each([
-    {
-      name: 'wildcard shadow',
-      shadow: '*',
-      primary: undefined,
-      floors: undefined,
-    },
-    {
-      name: 'primary with a floor',
-      shadow: undefined,
-      primary: 'TARGET',
-      floors: '{"TARGET":5}',
-    },
-    {
-      name: 'primary without a floor',
-      shadow: undefined,
-      primary: 'TARGET',
-      floors: undefined,
-    },
-    {
-      name: 'primary with an invalid floor',
-      shadow: undefined,
-      primary: 'TARGET',
-      floors: '{"TARGET":"x"}',
-    },
+    {name: 'with a floor', floors: '{"TARGET":5}'},
+    {name: 'without a floor', floors: undefined},
+    {name: 'with an invalid floor', floors: '{"TARGET":"x"}'},
   ])(
     'never reads Unichain V2, Base V2, Base V3, or Base V4 without its pre-filter: $name',
-    async ({shadow, primary, floors}) => {
+    async ({floors}) => {
       const keys = [
-        'POOL_CACHING_AURORA_SHADOW_TARGETS',
-        'POOL_CACHING_AURORA_PRIMARY_TARGETS',
         'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
         'POOL_CACHING_AURORA_PREFILTER_TARGETS',
       ];
@@ -5032,24 +4108,19 @@ describe('AuroraV2PoolsProvider', () => {
       try {
         for (const {chainId, protocol} of PREFILTER_REQUIRED_COMBOS) {
           const target = targetKey(chainId, protocol);
-          const forTarget = (value: string | undefined) =>
-            value?.replace(/TARGET/g, target);
-          setEnv('POOL_CACHING_AURORA_SHADOW_TARGETS', forTarget(shadow));
-          setEnv('POOL_CACHING_AURORA_PRIMARY_TARGETS', forTarget(primary));
           setEnv(
             'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
-            forTarget(floors)
+            floors?.replace(/TARGET/g, target)
           );
           delete process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS;
           for (const scopedRun of [false, true]) {
             const metric = new FakeMetric();
-            const subgraph =
+            const chainProtocol =
               protocol === Protocol.V2
-                ? fakeProvider<V2SubgraphPool>([[]])
+                ? combo<V2SubgraphPool>(chainId, protocol)
                 : protocol === Protocol.V3
-                  ? fakeProvider<V3SubgraphPool>([[]])
-                  : fakeProvider<V4SubgraphPool>([[]]);
-            const chainProtocol = {chainId, protocol, provider: subgraph};
+                  ? combo<V3SubgraphPool>(chainId, protocol)
+                  : combo<V4SubgraphPool>(chainId, protocol);
             applyAuroraPoolSources(
               [chainProtocol],
               {
@@ -5068,7 +4139,7 @@ describe('AuroraV2PoolsProvider', () => {
                 },
               }
             );
-            expect(chainProtocol.provider).toBe(subgraph);
+            expect(chainProtocol.provider).toBeUndefined();
             expect(metric.byKey('CachePools.aurora.target_skipped')).toEqual([
               expect.objectContaining({
                 tags: expect.objectContaining({
@@ -5087,15 +4158,9 @@ describe('AuroraV2PoolsProvider', () => {
   );
 
   it('reads Base V2 through the pre-filter with FEI and VIRTUAL always included when it is listed', async () => {
-    const keys = [
-      'POOL_CACHING_AURORA_SHADOW_TARGETS',
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-      'POOL_CACHING_AURORA_PREFILTER_TARGETS',
-    ];
+    const keys = ['POOL_CACHING_AURORA_PREFILTER_TARGETS'];
     const saved = new Map(keys.map(key => [key, process.env[key]]));
     try {
-      process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-      delete process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
       process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '130:V2,8453:V2';
       class FakeAllRoutablePools extends FakeV2RoutablePools {
         async listAllV3RoutablePools() {
@@ -5107,11 +4172,7 @@ describe('AuroraV2PoolsProvider', () => {
       }
       const metric = new FakeMetric();
       const routablePools = new FakeAllRoutablePools([]);
-      const base = {
-        chainId: 8453,
-        protocol: Protocol.V2,
-        provider: fakeProvider<V2SubgraphPool>([[]]),
-      };
+      const base = combo<V2SubgraphPool>(8453, Protocol.V2);
       applyAuroraPoolSources(
         [base],
         {
@@ -5131,8 +4192,7 @@ describe('AuroraV2PoolsProvider', () => {
         }
       );
       expect(base.provider).toBeInstanceOf(AuroraSourcedProvider);
-      await base.provider.getPools();
-      await settlePendingAuroraShadowsForTesting();
+      await readForSideEffects(base);
       expect(routablePools.options).toEqual([
         {
           chainId: 8453,
@@ -5153,23 +4213,16 @@ describe('AuroraV2PoolsProvider', () => {
     }
   });
 
-  it('wraps Base V3 and Base V4 with the pool_stats pre-filter instead of lockedAmountPrefilter, and keeps lockedAmountPrefilter on a non-listed V4 combo', async () => {
-    const keys = [
-      'POOL_CACHING_AURORA_SHADOW_TARGETS',
-      'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-      'POOL_CACHING_AURORA_PREFILTER_TARGETS',
-    ];
+  it('reads Base V3 and Base V4 with the pool_stats pre-filter instead of lockedAmountPrefilter, and keeps lockedAmountPrefilter on a non-listed V4 combo', async () => {
+    const keys = ['POOL_CACHING_AURORA_PREFILTER_TARGETS'];
     const saved = new Map(keys.map(key => [key, process.env[key]]));
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       readonly v3Options: Array<
         Parameters<RoutablePoolsService['listAllV3RoutablePools']>[1]
       > = [];
@@ -5198,28 +4251,14 @@ describe('AuroraV2PoolsProvider', () => {
       }
     }
     try {
-      process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-      delete process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
       process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3,8453:V4';
       const metric = new FakeMetric();
       const routablePools = new FakeRoutablePools();
-      const baseV3 = {
-        chainId: 8453,
-        protocol: Protocol.V3,
-        provider: fakeProvider<V3SubgraphPool>([[]]),
-      };
-      const baseV4 = {
-        chainId: 8453,
-        protocol: Protocol.V4,
-        provider: fakeProvider<V4SubgraphPool>([[]]),
-      };
+      const baseV3 = combo<V3SubgraphPool>(8453, Protocol.V3);
+      const baseV4 = combo<V4SubgraphPool>(8453, Protocol.V4);
       // Not in POOL_CACHING_AURORA_PREFILTER_TARGETS: must keep the existing
       // lockedAmountPrefilter path untouched.
-      const unlistedV4 = {
-        chainId: CHAIN_ID_ROBINHOOD,
-        protocol: Protocol.V4,
-        provider: fakeProvider<V4SubgraphPool>([[]]),
-      };
+      const unlistedV4 = combo<V4SubgraphPool>(CHAIN_ID_ROBINHOOD, Protocol.V4);
       applyAuroraPoolSources(
         [baseV3, baseV4, unlistedV4],
         {
@@ -5252,10 +4291,9 @@ describe('AuroraV2PoolsProvider', () => {
           },
         }
       );
-      await baseV3.provider.getPools();
-      await baseV4.provider.getPools();
-      await unlistedV4.provider.getPools();
-      await settlePendingAuroraShadowsForTesting();
+      await readForSideEffects(baseV3);
+      await readForSideEffects(baseV4);
+      await readForSideEffects(unlistedV4);
 
       expect(routablePools.v3Options).toEqual([
         {
@@ -6008,11 +5046,7 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
     // Derived from the live cron matrix so adding or removing a cron target
     // fails this test until the Aurora allowlist decision is revisited.
     const expected = new Set(
-      createChainProtocols(noopLogger, new FakeMetric())
-        .filter(cp =>
-          [Protocol.V2, Protocol.V3, Protocol.V4].includes(cp.protocol)
-        )
-        .map(cp => targetKey(cp.chainId, cp.protocol))
+      createChainProtocols().map(cp => targetKey(cp.chainId, cp.protocol))
     );
     expect(new Set(AURORA_SUPPORTED_TARGETS)).toEqual(expected);
     expect(AURORA_SUPPORTED_TARGETS.has('10143:V2')).toBe(false);
@@ -6048,8 +5082,8 @@ describe('Aurora registry lookups', () => {
 
   it('has a wrapped-native entry for every Aurora-supported chain', () => {
     // A supported combo without a wrapped-native address fails only at
-    // runtime, as a per-tick shadow_error/init failure for that combo — this
-    // pins the invariant so a future matrix addition fails HERE instead.
+    // runtime, as a per-tick rejected read for that combo — this pins the
+    // invariant so a future matrix addition fails HERE instead.
     const missing = [...AURORA_SUPPORTED_TARGETS]
       .map(key => Number(key.split(':')[0]))
       .filter(chainId => !WRAPPED_NATIVE_BY_CHAIN.has(chainId));
@@ -6068,42 +5102,22 @@ describe('Aurora registry lookups', () => {
   });
 });
 
-describe('Ink Aurora shadow', () => {
+describe('applyAuroraPoolSources', () => {
   const CHAIN_ID_INK = 57073;
   const INK_WETH = '0x4200000000000000000000000000000000000006';
-  const keys = [
-    'POOL_CACHING_AURORA_SHADOW_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-  ];
-  const saved = new Map<string, string | undefined>();
-  beforeEach(() => {
-    for (const key of keys) saved.set(key, process.env[key]);
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-    delete process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
-  });
-  afterEach(() => {
-    for (const key of keys) {
-      const value = saved.get(key);
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  });
 
-  it('shadows every Ink protocol from a `*` target and keeps serving the subgraph', async () => {
+  it('installs an Aurora provider for every Ink protocol', async () => {
     const readChainIds: number[] = [];
     type ListOptions = Parameters<
       RoutablePoolsService['listAllV3RoutablePools']
     >[1];
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       async batchGetPoolVolumeUsd30d() {
         return new Map<string, number>();
       }
@@ -6136,22 +5150,11 @@ describe('Ink Aurora shadow', () => {
         ]),
     };
     const metric = new FakeMetric();
-    const subgraphV3 = fakeProvider([[v3Pool('0xink', 100)]]);
-    const chainProtocols = [
-      {
-        chainId: CHAIN_ID_INK,
-        protocol: Protocol.V2,
-        provider: fakeProvider<V2SubgraphPool>([[]]),
-      },
-      {chainId: CHAIN_ID_INK, protocol: Protocol.V3, provider: subgraphV3},
-      {
-        chainId: CHAIN_ID_INK,
-        protocol: Protocol.V4,
-        provider: fakeProvider<V4SubgraphPool>([[]]),
-      },
-    ];
+    const inkV2 = combo<V2SubgraphPool>(CHAIN_ID_INK, Protocol.V2);
+    const inkV3 = combo<V3SubgraphPool>(CHAIN_ID_INK, Protocol.V3);
+    const inkV4 = combo<V4SubgraphPool>(CHAIN_ID_INK, Protocol.V4);
     applyAuroraPoolSources(
-      chainProtocols,
+      [inkV2, inkV3, inkV4],
       {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
       noopLogger,
       metric,
@@ -6165,36 +5168,96 @@ describe('Ink Aurora shadow', () => {
       }
     );
 
-    expect(chainProtocols[1]!.provider).not.toBe(subgraphV3);
-    const served = await chainProtocols[1]!.provider.getPools();
-    expect(served.map(pool => pool.id)).toEqual(['0xink']);
-    await chainProtocols[0]!.provider.getPools();
-    await chainProtocols[2]!.provider.getPools();
-    await settlePendingAuroraShadowsForTesting();
-
+    expect(inkV2.provider).toBeInstanceOf(AuroraSourcedProvider);
+    expect(inkV3.provider).toBeInstanceOf(AuroraSourcedProvider);
+    expect(inkV4.provider).toBeInstanceOf(AuroraSourcedProvider);
+    await readForSideEffects(inkV2);
+    await readForSideEffects(inkV3);
+    await readForSideEffects(inkV4);
     expect(readChainIds).toEqual([CHAIN_ID_INK, CHAIN_ID_INK, CHAIN_ID_INK]);
-    expect(metric.byKey('CachePools.aurora.shadow_error')).toHaveLength(0);
     expect(metric.byKey('CachePools.aurora.unsupported_target')).toHaveLength(
       0
     );
-    expect(
-      metric
-        .byKey('CachePools.parity.subgraph_count')
-        .map(entry => entry.tags?.protocol)
-    ).toEqual(
-      expect.arrayContaining([
-        String(Protocol.V2),
-        String(Protocol.V3),
-        String(Protocol.V4),
-      ])
+  });
+
+  it('installs no provider for a combo outside the supported matrix and reports it', () => {
+    const metric = new FakeMetric();
+    const warnings: string[] = [];
+    const logger: Logger = {
+      ...noopLogger,
+      warn: message => warnings.push(message),
+    };
+    const monadTestnetV2 = combo<V2SubgraphPool>(10143, Protocol.V2);
+    class FakeRoutablePools extends FakeV2RoutablePools {
+      async listAllV3RoutablePools() {
+        return [];
+      }
+      async listAllV4RoutablePools() {
+        return [];
+      }
+    }
+    applyAuroraPoolSources(
+      [monadTestnetV2],
+      {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
+      logger,
+      metric,
+      {
+        providerDeps: {
+          routablePools: new FakeRoutablePools([]),
+          prices: {batchGet: async () => new Map()},
+          logger,
+          metric,
+        },
+      }
     );
+    expect(monadTestnetV2.provider).toBeUndefined();
+    expect(metric.byKey('CachePools.aurora.unsupported_target')).toEqual([
+      {
+        key: 'CachePools.aurora.unsupported_target',
+        value: 1,
+        tags: {chainId: '10143', protocol: String(Protocol.V2)},
+      },
+    ]);
+    expect(warnings[0]).toMatch(/^No Aurora pool source for 10143:V2/);
+  });
+
+  it('installs no provider and reports init_error when the Aurora connection env is missing', () => {
+    const saved = process.env.DATA_INGESTION_AURORA_HOST;
+    delete process.env.DATA_INGESTION_AURORA_HOST;
+    try {
+      const metric = new FakeMetric();
+      const errors: string[] = [];
+      const logger: Logger = {
+        ...noopLogger,
+        error: message => errors.push(message),
+      };
+      const mainnetV3 = combo<V3SubgraphPool>(1, Protocol.V3);
+      applyAuroraPoolSources(
+        [mainnetV3],
+        {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
+        logger,
+        metric
+      );
+      expect(mainnetV3.provider).toBeUndefined();
+      expect(metric.byKey('CachePools.aurora.init_error')).toEqual([
+        {
+          key: 'CachePools.aurora.init_error',
+          value: 1,
+          tags: {reason: 'env_missing'},
+        },
+      ]);
+      expect(errors).toEqual([
+        'Aurora connection env is missing — no combo is cached this run',
+      ]);
+    } finally {
+      if (saved === undefined) delete process.env.DATA_INGESTION_AURORA_HOST;
+      else process.env.DATA_INGESTION_AURORA_HOST = saved;
+    }
   });
 });
 
-describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () => {
+describe('pre-filtered V3 at the applyAuroraPoolSources boundary', () => {
   const keys = [
-    'POOL_CACHING_AURORA_SHADOW_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
   ];
@@ -6210,17 +5273,14 @@ describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () =>
     }
   });
 
-  it('keeps Base V3 in shadow when it is listed primary with a floor, and still reads it through the pre-filter', async () => {
-    class FakeRoutablePools
-      implements
-        Pick<
-          RoutablePoolsService,
-          | 'listAllV2RoutablePools'
-          | 'listAllV3RoutablePools'
-          | 'listAllV4RoutablePools'
-          | 'batchGetPoolVolumeUsd30d'
-        >
-    {
+  it('serves Base V3 through the pre-filter without the unpriced read, and reports the missing family', async () => {
+    class FakeRoutablePools implements Pick<
+      RoutablePoolsService,
+      | 'listAllV2RoutablePools'
+      | 'listAllV3RoutablePools'
+      | 'listAllV4RoutablePools'
+      | 'batchGetPoolVolumeUsd30d'
+    > {
       readonly v3Options: Array<
         Parameters<RoutablePoolsService['listAllV3RoutablePools']>[1]
       > = [];
@@ -6241,20 +5301,11 @@ describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () =>
         return [];
       }
     }
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"8453:V3":1}';
     const metric = new FakeMetric();
     const routablePools = new FakeRoutablePools();
-    const subgraphPools = [
-      v3Pool('0x0000000000000000000000000000000000000b03', 5000),
-    ];
-    const baseV3 = {
-      chainId: 8453,
-      protocol: Protocol.V3,
-      provider: fakeProvider<V3SubgraphPool>([subgraphPools]),
-    };
+    const baseV3 = combo<V3SubgraphPool>(8453, Protocol.V3);
     applyAuroraPoolSources(
       [baseV3],
       {
@@ -6288,12 +5339,12 @@ describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () =>
       }
     );
 
-    expect(await baseV3.provider.getPools()).toEqual(subgraphPools);
-    await settlePendingAuroraShadowsForTesting();
+    expect(baseV3.provider).toBeInstanceOf(AuroraSourcedProvider);
+    await readForSideEffects(baseV3);
 
-    expect(metric.byKey('CachePools.aurora.primary_refused')).toHaveLength(1);
-    expect(metric.byKey('CachePools.aurora.served')).toEqual([]);
-    expect(metric.byKey('CachePools.aurora.fallback')).toEqual([]);
+    expect(
+      metric.byKey('CachePools.aurora.prefilter_unpriced_missing')
+    ).toHaveLength(1);
     expect(routablePools.v3Options).toEqual([
       {
         chainId: 8453,
@@ -6307,20 +5358,14 @@ describe('pre-filtered V3 primary at the applyAuroraPoolSources boundary', () =>
   });
 });
 
-describe('primary parity at the applyAuroraPoolSources boundary', () => {
-  const keys = [
-    'POOL_CACHING_AURORA_SHADOW_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS',
-    'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
-  ];
+describe('the absolute floor at the applyAuroraPoolSources boundary', () => {
+  const keys = ['POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET'];
   const saved = new Map<string, string | undefined>();
   beforeEach(() => {
     for (const key of keys) saved.set(key, process.env[key]);
     resetAuroraPoolCountBaselinesForTesting();
   });
-  afterEach(async () => {
-    await settlePendingAuroraShadowsForTesting();
+  afterEach(() => {
     for (const key of keys) {
       const value = saved.get(key);
       if (value === undefined) delete process.env[key];
@@ -6361,13 +5406,7 @@ describe('primary parity at the applyAuroraPoolSources boundary', () => {
   };
 
   const wire = (metric: FakeMetric) => {
-    const mainnetV3 = {
-      chainId: 1,
-      protocol: Protocol.V3,
-      provider: fakeProvider<V3SubgraphPool>([
-        [v3Pool('0x0000000000000000000000000000000000000b01', 5000)],
-      ]),
-    };
+    const mainnetV3 = combo<V3SubgraphPool>(1, Protocol.V3);
     applyAuroraPoolSources(
       [mainnetV3],
       {
@@ -6403,46 +5442,41 @@ describe('primary parity at the applyAuroraPoolSources boundary', () => {
     return mainnetV3;
   };
 
-  it('serves Aurora for a listed primary combo and reports its parity with mode:primary', async () => {
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '1:V3';
-    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS = '1:v3';
+  it('serves a combo under its floor without reporting a floor gap', async () => {
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"1:V3":1}';
     const metric = new FakeMetric();
     const mainnetV3 = wire(metric);
 
-    const pools = await mainnetV3.provider.getPools();
-    await settlePendingAuroraShadowsForTesting();
+    const pools = await installedProvider(mainnetV3).getPools();
 
     expect(pools.map(pool => pool.id)).toEqual([
       '0x0000000000000000000000000000000000000a01',
     ]);
     expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
-    expect(metric.byKey('CachePools.parity.subgraph_count')).toEqual([
-      expect.objectContaining({
-        value: 1,
-        tags: expect.objectContaining({chainId: '1', mode: 'primary'}),
-      }),
-    ]);
+    expect(metric.byKey('CachePools.aurora.primary_without_floor')).toEqual([]);
   });
 
-  it('reports no parity for a primary combo that is not listed', async () => {
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '1:V3';
-    process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"1:V3":1}';
+  it('serves a combo without a floor on the ratio guard alone and reports the gap', async () => {
+    delete process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET;
     const metric = new FakeMetric();
     const mainnetV3 = wire(metric);
 
-    await mainnetV3.provider.getPools();
-    await settlePendingAuroraShadowsForTesting();
+    const pools = await installedProvider(mainnetV3).getPools();
 
+    expect(pools).toHaveLength(1);
     expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
-    expect(metric.byKey('CachePools.parity.subgraph_count')).toEqual([]);
+    expect(metric.byKey('CachePools.aurora.primary_without_floor')).toEqual([
+      {
+        key: 'CachePools.aurora.primary_without_floor',
+        value: 1,
+        tags: {chainId: '1', protocol: String(Protocol.V3)},
+      },
+    ]);
   });
 });
 
-describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
+describe('pre-filtered V3 that reads its unpriced liquid pools', () => {
   const keys = [
-    'POOL_CACHING_AURORA_SHADOW_TARGETS',
-    'POOL_CACHING_AURORA_PRIMARY_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_TARGETS',
     'POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS',
     'POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET',
@@ -6459,16 +5493,13 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
     }
   });
 
-  class FakeRoutablePools
-    implements
-      Pick<
-        RoutablePoolsService,
-        | 'listAllV2RoutablePools'
-        | 'listAllV3RoutablePools'
-        | 'listAllV4RoutablePools'
-        | 'batchGetPoolVolumeUsd30d'
-      >
-  {
+  class FakeRoutablePools implements Pick<
+    RoutablePoolsService,
+    | 'listAllV2RoutablePools'
+    | 'listAllV3RoutablePools'
+    | 'listAllV4RoutablePools'
+    | 'batchGetPoolVolumeUsd30d'
+  > {
     readonly v3Options: Array<
       Parameters<RoutablePoolsService['listAllV3RoutablePools']>[1]
     > = [];
@@ -6492,25 +5523,15 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
     }
   }
 
-  const subgraphPools = [
-    v3Pool('0x0000000000000000000000000000000000000b03', 5000),
-  ];
-
-  async function runBaseV3Primary(
+  async function runBaseV3(
     routablePools: FakeRoutablePools,
     metric: FakeMetric,
     logger: Logger
   ): Promise<V3SubgraphPool[]> {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '*';
-    process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_PREFILTER_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS = '8453:V3';
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET = '{"8453:V3":1}';
-    const baseV3 = {
-      chainId: 8453,
-      protocol: Protocol.V3,
-      provider: fakeProvider<V3SubgraphPool>([subgraphPools]),
-    };
+    const baseV3 = combo<V3SubgraphPool>(8453, Protocol.V3);
     applyAuroraPoolSources(
       [baseV3],
       {
@@ -6543,22 +5564,21 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
         },
       }
     );
-    const pools = await baseV3.provider.getPools();
-    await settlePendingAuroraShadowsForTesting();
-    return pools;
+    return installedProvider(baseV3).getPools();
   }
 
-  it('serves Base V3 in primary and asks the lib for the unpriced liquid pools', async () => {
+  it('reads Base V3 with the unpriced liquid pools', async () => {
     const metric = new FakeMetric();
     const routablePools = new FakeRoutablePools();
 
-    // The empty Aurora read is under the floor of 1, so primary rejects it.
+    // The empty Aurora read is rejected.
     await expect(
-      runBaseV3Primary(routablePools, metric, noopLogger)
+      runBaseV3(routablePools, metric, noopLogger)
     ).rejects.toMatchObject({reason: 'empty'});
 
-    expect(metric.byKey('CachePools.aurora.primary_refused')).toEqual([]);
-    // Only a primary combo rejects a read; shadow would serve the subgraph.
+    expect(
+      metric.byKey('CachePools.aurora.prefilter_unpriced_missing')
+    ).toEqual([]);
     expect(metric.byKey('CachePools.aurora.rejected')).toHaveLength(1);
     expect(routablePools.v3Options).toEqual([
       {
@@ -6584,7 +5604,7 @@ describe('pre-filtered V3 primary that reads its unpriced liquid pools', () => {
     );
 
     await expect(
-      runBaseV3Primary(routablePools, metric, logger)
+      runBaseV3(routablePools, metric, logger)
     ).rejects.toMatchObject({reason: 'error'});
 
     expect(

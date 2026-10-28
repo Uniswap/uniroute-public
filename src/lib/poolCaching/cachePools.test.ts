@@ -26,14 +26,7 @@ import {
 } from './extraPoolSourceMemory';
 import type {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
-import type {
-  EulerSwapHooks,
-  IAggHooksSubgraphProvider,
-  IEulerSwapHooksSubgraphProvider,
-  ProviderConfig,
-  V3SubgraphPool,
-  V4SubgraphPool,
-} from './sor-providers';
+import type {V3SubgraphPool, V4SubgraphPool} from './sor-providers';
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 
@@ -73,41 +66,17 @@ vi.mock('./cacheConfig', async importOriginal => {
   };
 });
 
+// cacheAllPools hands every combo to applyAuroraPoolSources; these tests
+// install their own providers on the mocked matrix, so the apply is a no-op.
+vi.mock('./auroraPoolsSource', async importOriginal => {
+  const original = await importOriginal<typeof import('./auroraPoolsSource')>();
+  return {...original, applyAuroraPoolSources: () => {}};
+});
+
 // Mock v4HooksPoolsFiltering to pass through pools (avoids importing full dependency chain)
 vi.mock('./util/v4HooksPoolsFiltering', () => ({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   v4HooksPoolsFiltering: (_chainId: any, pools: any[]) => pools,
-}));
-
-// Lets a test make the inline mainnet V3 extra fetch throw.
-const v3ManualFetch = vi.hoisted((): {error?: Error} => ({}));
-
-// Mock V2SubgraphProvider and V3SubgraphProvider constructors used inside cachePoolsForChainProtocol
-vi.mock('./sor-providers', () => ({
-  V2SubgraphProvider: class {
-    async getPools() {
-      return [];
-    }
-  },
-  V3SubgraphProvider: class {
-    async getPools() {
-      if (v3ManualFetch.error) throw v3ManualFetch.error;
-      return [];
-    }
-  },
-  V4SubgraphProvider: class {
-    async getPools() {
-      return [];
-    }
-  },
-  EulerSwapHooksSubgraphProvider: class {
-    async getHooks() {
-      return [];
-    }
-    async getPoolByHook() {
-      return null;
-    }
-  },
 }));
 
 function createMockLogger(): Logger {
@@ -139,43 +108,16 @@ class MockMetric extends IMetric {
   }
 }
 
-// Closure-based fakes for the extra V4 pool sources (implements their real
-// interfaces, so a signature drift fails the compile rather than staying
+// Closure-based fake for the extra pool sources (implements the real
+// interface, so a signature drift fails the compile rather than staying
 // silently stale).
-class FakeEulerSwapHooksSubgraphProvider
-  implements IEulerSwapHooksSubgraphProvider
-{
+class FakeExtraPoolsSource<TPool> implements ExtraPoolsSource<TPool> {
   constructor(
-    private readonly hooks: EulerSwapHooks[] = [],
-    private readonly poolByHook: Record<
-      string,
-      V4SubgraphPool | undefined
-    > = {},
+    private readonly pools: TPool[] = [],
     private readonly error?: Error
   ) {}
 
-  async getHooks(_providerConfig?: ProviderConfig): Promise<EulerSwapHooks[]> {
-    if (this.error) {
-      throw this.error;
-    }
-    return this.hooks;
-  }
-
-  async getPoolByHook(
-    hook: string,
-    _providerConfig?: ProviderConfig
-  ): Promise<V4SubgraphPool | undefined> {
-    return this.poolByHook[hook];
-  }
-}
-
-class FakeAggHooksSubgraphProvider implements IAggHooksSubgraphProvider {
-  constructor(
-    private readonly pools: V4SubgraphPool[] = [],
-    private readonly error?: Error
-  ) {}
-
-  async getPools(_providerConfig?: ProviderConfig): Promise<V4SubgraphPool[]> {
+  async getPools(): Promise<TPool[]> {
     if (this.error) {
       throw this.error;
     }
@@ -255,7 +197,6 @@ describe('cacheAllPools', () => {
     mockLogger = createMockLogger();
     mockMetric = new MockMetric();
     mockChainProtocols = [];
-    v3ManualFetch.error = undefined;
     resetExtraPoolSourceMemoryForTesting();
     sendMock.mockClear();
     sendMock.mockResolvedValue({});
@@ -363,7 +304,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -401,7 +341,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V3,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -435,7 +374,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.UNICHAIN,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -457,7 +395,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.OPTIMISM,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -479,7 +416,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.BASE,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -502,7 +438,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.ARBITRUM_ONE,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -524,7 +459,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -546,7 +480,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.MONAD,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -555,7 +488,8 @@ describe('cacheAllPools', () => {
       expect(sendMock).toHaveBeenCalled();
     });
 
-    it('processes V4 with eulerHooksProvider that returns hooks and pools', async () => {
+    // Polygon: a V4 chain with no hardcoded pools appended in cachePools.
+    it('processes V4 with an EulerSwap source that returns pools', async () => {
       const pools = [
         makeV4Pool(
           '0xsomeid',
@@ -573,21 +507,22 @@ describe('cacheAllPools', () => {
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
-          chainId: ChainId.MAINNET,
-          timeout: 90000,
+          chainId: ChainId.POLYGON,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
-          eulerHooksProvider: {
-            getHooks: vi.fn().mockResolvedValue([{hook: '0xeulerhook1'}]),
-            getPoolByHook: vi.fn().mockResolvedValue(eulerPool),
-          },
+          extraPoolSources: {euler: new FakeExtraPoolsSource([eulerPool])},
         },
       ];
 
       await cacheAllPools(mockLogger, mockMetric, config);
-      expect(sendMock).toHaveBeenCalled();
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toEqual([
+        '0xsomeid',
+        eulerPool.id,
+      ]);
     });
 
-    it('processes V4 with eulerHooksProvider that returns null pool for a hook', async () => {
+    it('processes V4 with an EulerSwap source that returns no pools', async () => {
       const pools = [
         makeV4Pool(
           '0xsomeid',
@@ -599,44 +534,16 @@ describe('cacheAllPools', () => {
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
-          chainId: ChainId.MAINNET,
-          timeout: 90000,
+          chainId: ChainId.POLYGON,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
-          eulerHooksProvider: {
-            getHooks: vi.fn().mockResolvedValue([{hook: '0xeulerhook1'}]),
-            getPoolByHook: vi.fn().mockResolvedValue(null),
-          },
+          extraPoolSources: {euler: new FakeExtraPoolsSource([])},
         },
       ];
 
       await cacheAllPools(mockLogger, mockMetric, config);
-      expect(sendMock).toHaveBeenCalled();
-    });
-
-    it('processes V4 with eulerHooksProvider that returns null hooks', async () => {
-      const pools = [
-        makeV4Pool(
-          '0xsomeid',
-          '0x0000000000000000000000000000000000000000',
-          '0x1111',
-          '0x2222'
-        ),
-      ];
-      mockChainProtocols = [
-        {
-          protocol: Protocol.V4,
-          chainId: ChainId.MAINNET,
-          timeout: 90000,
-          provider: {getPools: vi.fn().mockResolvedValue(pools)},
-          eulerHooksProvider: {
-            getHooks: vi.fn().mockResolvedValue(null),
-            getPoolByHook: vi.fn(),
-          },
-        },
-      ];
-
-      await cacheAllPools(mockLogger, mockMetric, config);
-      expect(sendMock).toHaveBeenCalled();
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toEqual(['0xsomeid']);
     });
   });
 
@@ -647,7 +554,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue([])},
         },
       ];
@@ -655,7 +561,7 @@ describe('cacheAllPools', () => {
       await cacheAllPools(mockLogger, mockMetric, config);
       expect(putObjectCalls()).toHaveLength(0);
       expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining('No pools found from the subgraph')
+        expect.stringContaining('No pools found from the pool source')
       );
     });
 
@@ -664,7 +570,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V3,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(null)},
         },
       ];
@@ -681,7 +586,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi.fn().mockRejectedValue(new Error('subgraph down')),
           },
@@ -698,14 +602,7 @@ describe('cacheAllPools', () => {
       );
     });
 
-    it('keeps the previous snapshot when an Aurora-primary read is rejected', async () => {
-      let subgraphCalls = 0;
-      const subgraph = {
-        getPools: async (): Promise<V3SubgraphPool[]> => {
-          subgraphCalls++;
-          return [];
-        },
-      };
+    it('keeps the previous snapshot when an Aurora read is rejected', async () => {
       const aurora = {
         getPools: async (): Promise<V3SubgraphPool[]> => {
           throw new Error('statement timeout');
@@ -715,11 +612,8 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V3,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: new AuroraSourcedProvider(
-            'primary',
             aurora,
-            subgraph,
             ChainId.POLYGON,
             Protocol.V3,
             0.5,
@@ -733,7 +627,6 @@ describe('cacheAllPools', () => {
       await expect(
         cacheAllPools(mockLogger, mockMetric, config)
       ).resolves.toMatchObject({succeeded: 0, failed: 1});
-      expect(subgraphCalls).toBe(0);
       expect(putObjectCalls()).toEqual([]);
     });
   });
@@ -746,7 +639,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue(pools)},
         },
       ];
@@ -767,7 +659,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -777,13 +668,11 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V3,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockRejectedValue(new Error('timeout'))},
         },
         {
           protocol: Protocol.V2,
           chainId: ChainId.ARBITRUM_ONE,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -822,7 +711,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -858,7 +746,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -888,7 +775,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -917,7 +803,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -947,7 +832,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -1001,7 +885,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -1049,7 +932,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -1100,7 +982,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -1132,7 +1013,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -1172,7 +1052,6 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V2,
           chainId: ChainId.POLYGON,
-          timeout: 90000,
           provider: {
             getPools: vi
               .fn()
@@ -1230,12 +1109,11 @@ describe('cacheAllPools', () => {
       '0x5555',
       '0x6666'
     );
-    const aggChainProtocol = (aggHooksProvider: IAggHooksSubgraphProvider) => ({
+    const aggChainProtocol = (aggHooks: ExtraPoolsSource<V4SubgraphPool>) => ({
       protocol: Protocol.V4,
       chainId: ChainId.MAINNET,
-      timeout: 90000,
       provider: {getPools: async () => [mainPool]},
-      aggHooksProvider,
+      extraPoolSources: {aggHooks},
     });
     const carryForwardTags = (outcome: string) => ({
       key: 'CachePools.extraPoolSource.carryForward',
@@ -1251,7 +1129,7 @@ describe('cacheAllPools', () => {
 
     it('serves the last good agg hook pools when a later sweep fails', async () => {
       mockChainProtocols = [
-        aggChainProtocol(new FakeAggHooksSubgraphProvider([aggPool])),
+        aggChainProtocol(new FakeExtraPoolsSource([aggPool])),
       ];
       await cacheAllPools(mockLogger, mockMetric, config);
 
@@ -1259,7 +1137,7 @@ describe('cacheAllPools', () => {
       mockMetric = new MockMetric();
       mockChainProtocols = [
         aggChainProtocol(
-          new FakeAggHooksSubgraphProvider([], new Error('subgraph shut off'))
+          new FakeExtraPoolsSource([], new Error('statement timeout'))
         ),
       ];
       await cacheAllPools(mockLogger, mockMetric, config);
@@ -1290,7 +1168,7 @@ describe('cacheAllPools', () => {
       );
       mockChainProtocols = [
         aggChainProtocol(
-          new FakeAggHooksSubgraphProvider([], new Error('subgraph shut off'))
+          new FakeExtraPoolsSource([], new Error('statement timeout'))
         ),
       ];
       await cacheAllPools(mockLogger, mockMetric, config);
@@ -1489,27 +1367,37 @@ describe('cacheAllPools', () => {
       '0x2222'
     );
 
-    it('writes the snapshot without euler hook pools when eulerHooksProvider fails, and tags the failure', async () => {
+    it('keeps the previous snapshot when the euler hooks source fails with no last good result, and tags the failure', async () => {
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
-          eulerHooksProvider: new FakeEulerSwapHooksSubgraphProvider(
-            [],
-            {},
-            new Error('euler subgraph unreachable')
-          ),
+          extraPoolSources: {
+            euler: new FakeExtraPoolsSource(
+              [],
+              new Error('euler read unreachable')
+            ),
+          },
         },
       ];
 
-      await cacheAllPools(mockLogger, mockMetric, config);
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
 
-      const puts = putObjectCalls();
-      expect(puts).toHaveLength(1);
-      expect(writtenPoolIds(puts[0].input.Body)).toContain(mainPool.id);
-
+      expect(putObjectCalls()).toEqual([]);
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource.carryForward',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V4),
+          source: 'euler_hooks',
+          outcome: 'write_skipped',
+        },
+      });
       expect(mockMetric.calls).toContainEqual({
         key: 'CachePools.extraPoolSource',
         value: 1,
@@ -1542,26 +1430,37 @@ describe('cacheAllPools', () => {
       ).toBe(false);
     });
 
-    it('writes the snapshot without agg hook pools when aggHooksProvider fails, and tags the failure', async () => {
+    it('keeps the previous snapshot when the agg hooks source fails with no last good result, and tags the failure', async () => {
       mockChainProtocols = [
         {
           protocol: Protocol.V4,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
-          aggHooksProvider: new FakeAggHooksSubgraphProvider(
-            [],
-            new Error('agg hooks subgraph unreachable')
-          ),
+          extraPoolSources: {
+            aggHooks: new FakeExtraPoolsSource(
+              [],
+              new Error('agg hooks read unreachable')
+            ),
+          },
         },
       ];
 
-      await cacheAllPools(mockLogger, mockMetric, config);
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
 
-      const puts = putObjectCalls();
-      expect(puts).toHaveLength(1);
-      expect(writtenPoolIds(puts[0].input.Body)).toContain(mainPool.id);
-
+      expect(putObjectCalls()).toEqual([]);
+      expect(mockMetric.calls).toContainEqual({
+        key: 'CachePools.extraPoolSource.carryForward',
+        value: 1,
+        unit: MetricLoggerUnit.Count,
+        tags: {
+          chainId: String(ChainId.MAINNET),
+          protocol: String(Protocol.V4),
+          source: 'agg_hooks',
+          outcome: 'write_skipped',
+        },
+      });
       expect(mockMetric.calls).toContainEqual({
         key: 'CachePools.extraPoolSource',
         value: 1,
@@ -1594,7 +1493,7 @@ describe('cacheAllPools', () => {
       ).toBe(false);
     });
 
-    it('emits status:success and includes the pool when aggHooksProvider succeeds', async () => {
+    it('emits status:success and includes the pool when the agg hooks source succeeds', async () => {
       const aggPool = makeV4Pool(
         '0xaggpool',
         '0x3333333333333333333333333333333333333333',
@@ -1605,9 +1504,8 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
-          aggHooksProvider: new FakeAggHooksSubgraphProvider([aggPool]),
+          extraPoolSources: {aggHooks: new FakeExtraPoolsSource([aggPool])},
         },
       ];
 
@@ -1630,23 +1528,27 @@ describe('cacheAllPools', () => {
       });
     });
 
-    it('writes the mainnet V3 snapshot without the manual pool when its fetch fails, and tags the failure', async () => {
+    it('keeps the previous mainnet V3 snapshot when the manual pool read fails with no last good result, and tags the failure', async () => {
       const mainV3Pool = makeV3Pool('0xmainv3pool', '0x1111', '0x2222');
-      v3ManualFetch.error = new Error('v3 subgraph unreachable');
       mockChainProtocols = [
         {
           protocol: Protocol.V3,
           chainId: ChainId.MAINNET,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue([mainV3Pool])},
+          extraPoolSources: {
+            v3Manual: new FakeExtraPoolsSource<V3SubgraphPool>(
+              [],
+              new Error('v3 manual read unreachable')
+            ),
+          },
         },
       ];
 
-      await cacheAllPools(mockLogger, mockMetric, config);
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, config)
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
 
-      const puts = putObjectCalls();
-      expect(puts).toHaveLength(1);
-      expect(writtenPoolIds(puts[0].input.Body)).toEqual([mainV3Pool.id]);
+      expect(putObjectCalls()).toEqual([]);
       expect(mockMetric.calls).toContainEqual({
         key: 'CachePools.extraPoolSource',
         value: 1,
@@ -1674,10 +1576,30 @@ describe('cacheAllPools', () => {
       ).toBe(false);
     });
 
-    // The Aurora wrappers applyAuroraPoolSources installs: cachePools hands
-    // each its subgraph source, so after the subgraph shutoff the snapshot
-    // still carries the extra pools from Aurora.
-    it('serves EulerSwap pools through an installed Aurora override when the subgraph source fails', async () => {
+    it('writes the mainnet V3 snapshot without a manual pool when no source is installed', async () => {
+      const mainV3Pool = makeV3Pool('0xmainv3pool', '0x1111', '0x2222');
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V3,
+          chainId: ChainId.MAINNET,
+          provider: {getPools: vi.fn().mockResolvedValue([mainV3Pool])},
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const puts = putObjectCalls();
+      expect(puts).toHaveLength(1);
+      expect(writtenPoolIds(puts[0].input.Body)).toEqual([mainV3Pool.id]);
+      expect(
+        mockMetric.calls.filter(
+          call => call.key === 'CachePools.extraPoolSource'
+        )
+      ).toEqual([]);
+    });
+
+    // The guarded sources applyAuroraPoolSources installs.
+    it('serves EulerSwap pools through an installed Aurora source', async () => {
       const auroraEulerPool = makeV4Pool(
         '0xauroraeulerpool',
         '0x0222155e00e159a6a12613ee7c7b1021f9f568a8',
@@ -1688,24 +1610,15 @@ describe('cacheAllPools', () => {
         {
           protocol: Protocol.V4,
           chainId: ChainId.UNICHAIN,
-          timeout: 90000,
           provider: {getPools: vi.fn().mockResolvedValue([mainPool])},
-          eulerHooksProvider: new FakeEulerSwapHooksSubgraphProvider(
-            [],
-            {},
-            new Error('subgraph shut off')
-          ),
-          extraPoolSourceOverrides: {
-            euler: (subgraph: ExtraPoolsSource<V4SubgraphPool>) =>
-              new AuroraSourcedExtraPoolsProvider<V4SubgraphPool>(
-                'primary',
-                ExtraPoolSourceName.EULER_HOOKS,
-                ChainId.UNICHAIN,
-                {getPools: async () => [auroraEulerPool]},
-                subgraph,
-                mockLogger,
-                mockMetric
-              ),
+          extraPoolSources: {
+            euler: new AuroraSourcedExtraPoolsProvider<V4SubgraphPool>(
+              ExtraPoolSourceName.EULER_HOOKS,
+              ChainId.UNICHAIN,
+              {getPools: async () => [auroraEulerPool]},
+              mockLogger,
+              mockMetric
+            ),
           },
         },
       ];
@@ -1730,37 +1643,32 @@ describe('cacheAllPools', () => {
       });
     });
 
-    it('serves the mainnet manual V3 pool through an installed Aurora override, carries it forward when both reads fail, and keeps the previous snapshot after a restart', async () => {
+    it('serves the mainnet manual V3 pool through an installed Aurora source, carries it forward when the read fails, and keeps the previous snapshot after a restart', async () => {
       const mainV3Pool = makeV3Pool('0xmainv3pool', '0x1111', '0x2222');
       const manualPool = makeV3Pool(
         MAINNET_V3_MANUAL_POOL_IDS[0] ?? '',
         '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0',
         '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
       );
-      v3ManualFetch.error = new Error('subgraph shut off');
       let auroraResult: Error | V3SubgraphPool[] = [manualPool];
       const chainProtocol = {
         protocol: Protocol.V3,
         chainId: ChainId.MAINNET,
-        timeout: 90000,
         // A fresh array per run: cachePools appends the extra pools to it.
         provider: {getPools: async () => [mainV3Pool]},
-        extraPoolSourceOverrides: {
-          v3Manual: (subgraph: ExtraPoolsSource<V3SubgraphPool>) =>
-            new AuroraSourcedExtraPoolsProvider(
-              'primary',
-              ExtraPoolSourceName.V3_MAINNET_MANUAL,
-              ChainId.MAINNET,
-              {
-                getPools: async () => {
-                  if (auroraResult instanceof Error) throw auroraResult;
-                  return auroraResult;
-                },
+        extraPoolSources: {
+          v3Manual: new AuroraSourcedExtraPoolsProvider(
+            ExtraPoolSourceName.V3_MAINNET_MANUAL,
+            ChainId.MAINNET,
+            {
+              getPools: async () => {
+                if (auroraResult instanceof Error) throw auroraResult;
+                return auroraResult;
               },
-              subgraph,
-              mockLogger,
-              mockMetric
-            ),
+            },
+            mockLogger,
+            mockMetric
+          ),
         },
       };
       mockChainProtocols = [chainProtocol];
@@ -1780,8 +1688,8 @@ describe('cacheAllPools', () => {
       ]);
 
       // A restart empties the process-local memory: nothing to carry, so the
-      // Aurora-primary source fails closed and the combo writes nothing,
-      // leaving the previous snapshot (with the manual pool) in S3.
+      // source fails closed and the combo writes nothing, leaving the
+      // previous snapshot (with the manual pool) in S3.
       resetExtraPoolSourceMemoryForTesting();
       sendMock.mockClear();
       await expect(

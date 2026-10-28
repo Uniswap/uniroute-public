@@ -1,5 +1,4 @@
 import {ethers} from 'ethers';
-import pLimit from 'p-limit';
 import {describe, expect, it} from 'vitest';
 
 import {EthersPseudoTvlReader} from './pseudoTvlReader';
@@ -41,25 +40,7 @@ async function settle(): Promise<void> {
 }
 
 describe('EthersPseudoTvlReader', () => {
-  it('holds a read behind its outer limit before it reaches the node', async () => {
-    const provider = new GatedProvider();
-    const outerLimit = pLimit(1);
-    const reader = new EthersPseudoTvlReader(provider, outerLimit);
-
-    const reads = [reader.read(HOOK, POOL_ID), reader.read(HOOK, POOL_ID)];
-    await settle();
-    expect(provider.callsReceived).toBe(1);
-    expect(outerLimit.pendingCount).toBe(1);
-
-    provider.release();
-    await expect(Promise.all(reads)).resolves.toEqual([
-      {amount0: 2_000_000n, amount1: 3_000_000n},
-      {amount0: 2_000_000n, amount1: 3_000_000n},
-    ]);
-    expect(provider.callsReceived).toBe(2);
-  });
-
-  it('sends reads straight to the shared limit without an outer limit', async () => {
+  it('sends reads through the shared limit', async () => {
     const provider = new GatedProvider();
     const reader = new EthersPseudoTvlReader(provider);
 

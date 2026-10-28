@@ -11,21 +11,17 @@ import {
   type V4RoutablePool,
 } from '@uniswap/lib-data-ingestion-aurora';
 import {ethers} from 'ethers';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {beforeEach, describe, expect, it} from 'vitest';
 
 import {
   applyAuroraExtraPoolSources,
-  auroraExtraSourceConfigFromEnv,
   AuroraAggHooksPoolsProvider,
   AuroraEulerSwapPoolsProvider,
-  type AuroraExtraSourceConfig,
   type AuroraExtraSourceDeps,
   type ExtraPoolsCoverage,
   type ExtraSourceChainProtocol,
   AuroraSourcedExtraPoolsProvider,
   AuroraV3PoolIdsProvider,
-  resolveExtraSourceMode,
-  settlePendingAuroraExtraShadowsForTesting,
 } from './auroraExtraPoolSources';
 import {applyAuroraPoolSources} from './auroraPoolsSource';
 import {
@@ -38,7 +34,11 @@ import {
   resetExtraPoolSourceMemoryForTesting,
 } from './extraPoolSources';
 import {ExtraPoolSourceMemory} from './extraPoolSourceMemory';
-import type {ISubgraphProvider, V4SubgraphPool} from './sor-providers';
+import type {
+  ISubgraphProvider,
+  V3SubgraphPool,
+  V4SubgraphPool,
+} from './sor-providers';
 import type {
   PseudoTvlAmounts,
   PseudoTvlReader,
@@ -82,13 +82,10 @@ class FakeMetric extends IMetric {
   }
 }
 
-class FakeRoutablePools
-  implements
-    Pick<
-      RoutablePoolsService,
-      'listV4RoutablePoolsByHooks' | 'listV3RoutablePoolsByAddresses'
-    >
-{
+class FakeRoutablePools implements Pick<
+  RoutablePoolsService,
+  'listV4RoutablePoolsByHooks' | 'listV3RoutablePoolsByAddresses'
+> {
   readonly v4Calls: ListV4RoutablePoolsByHooksOptions[] = [];
   readonly v3Calls: ListV3RoutablePoolsByAddressesOptions[] = [];
   constructor(
@@ -225,67 +222,8 @@ const MAINNET_MANUAL_V3_ROW: V3RoutablePool = {
   stateAsOfTimestamp: new Date('2026-10-09T00:00:00Z'),
 };
 
-const ENV_KEYS = [
-  'POOL_CACHING_AURORA_EXTRA_SOURCE_SHADOW_TARGETS',
-  'POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS',
-  'POOL_CACHING_AURORA_SHADOW_TARGETS',
-  'POOL_CACHING_AURORA_PRIMARY_TARGETS',
-];
-const savedEnv = new Map<string, string | undefined>();
 beforeEach(() => {
   resetExtraPoolSourceMemoryForTesting();
-  for (const key of ENV_KEYS) {
-    savedEnv.set(key, process.env[key]);
-    delete process.env[key];
-  }
-});
-afterEach(async () => {
-  await settlePendingAuroraExtraShadowsForTesting();
-  for (const key of ENV_KEYS) {
-    const value = savedEnv.get(key);
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-});
-
-describe('auroraExtraSourceConfigFromEnv', () => {
-  it('is fully off when both target vars are unset', () => {
-    const config = auroraExtraSourceConfigFromEnv();
-    expect(
-      resolveExtraSourceMode(config, ExtraPoolSourceName.EULER_HOOKS, 130)
-    ).toBeUndefined();
-    expect([...config.rejections]).toEqual([]);
-  });
-
-  it('accepts a shadow wildcard and explicit primary keys; primary wins', () => {
-    process.env.POOL_CACHING_AURORA_EXTRA_SOURCE_SHADOW_TARGETS = '*';
-    process.env.POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS =
-      ' Euler_Hooks:130 ,agg_hooks:4217';
-    const config = auroraExtraSourceConfigFromEnv();
-    expect(
-      resolveExtraSourceMode(config, ExtraPoolSourceName.EULER_HOOKS, 130)
-    ).toBe('primary');
-    expect(
-      resolveExtraSourceMode(config, ExtraPoolSourceName.AGG_HOOKS, 4217)
-    ).toBe('primary');
-    expect(
-      resolveExtraSourceMode(config, ExtraPoolSourceName.EULER_HOOKS, 1)
-    ).toBe('shadow');
-    expect([...config.rejections]).toEqual([]);
-  });
-
-  it('rejects a primary wildcard and malformed entries instead of honouring them', () => {
-    process.env.POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS =
-      '*,euler_hooks:130,euler_hooks,made_up:1,agg_hooks:0x1,agg_hooks:1:2';
-    const config = auroraExtraSourceConfigFromEnv();
-    expect([...config.primaryTargets]).toEqual(['euler_hooks:130']);
-    expect(new Set(config.rejections)).toEqual(
-      new Set(['primary_wildcard', 'invalid_entry'])
-    );
-    expect(
-      resolveExtraSourceMode(config, ExtraPoolSourceName.AGG_HOOKS, 1)
-    ).toBeUndefined();
-  });
 });
 
 describe('AuroraEulerSwapPoolsProvider', () => {
@@ -571,213 +509,86 @@ describe('AuroraV3PoolIdsProvider', () => {
 
 describe('AuroraSourcedExtraPoolsProvider', () => {
   type TestPool = {id: string; tvlUSD: number};
-  const subgraphPool: TestPool = {id: '0xaa', tvlUSD: 1000};
   const auroraPool: TestPool = {id: '0xAA', tvlUSD: 1000};
+  const tags = {source: 'euler_hooks', chainId: '130'};
 
   function wrapper(
-    mode: 'shadow' | 'primary',
     aurora: FakeSource<TestPool>,
-    subgraph: FakeSource<TestPool>,
     metric: FakeMetric,
     logger = new RecordingLogger(),
     coverage?: ExtraPoolsCoverage<TestPool>
   ) {
     return new AuroraSourcedExtraPoolsProvider(
-      mode,
       ExtraPoolSourceName.EULER_HOOKS,
       ChainId.UNICHAIN,
       aurora,
-      subgraph,
       logger,
       metric,
       coverage
     );
   }
 
-  it('serves Aurora in primary mode', async () => {
+  it('serves the Aurora read', async () => {
     const metric = new FakeMetric();
-    const subgraph = new FakeSource([subgraphPool]);
     const pools = await wrapper(
-      'primary',
       new FakeSource([auroraPool]),
-      subgraph,
       metric
     ).getPools();
     expect(pools).toEqual([auroraPool]);
-    expect(subgraph.calls).toBe(0);
     expect(metric.byKey('CachePools.aurora.extra_source')).toEqual([
       {
         key: 'CachePools.aurora.extra_source',
         value: 1,
-        tags: {
-          source: 'euler_hooks',
-          chainId: '130',
-          mode: 'primary',
-          status: 'success',
-        },
+        tags: {...tags, status: 'success'},
       },
     ]);
   });
 
-  const primaryFailureTags = (reason: string) => ({
-    source: 'euler_hooks',
-    chainId: '130',
-    mode: 'primary',
-    status: 'failure',
-    reason,
-  });
-
-  it('rethrows an Aurora error in primary mode without calling the subgraph', async () => {
-    const metric = new FakeMetric();
-    const timeout = new Error('statement timeout');
-    const subgraph = new FakeSource([subgraphPool]);
-    await expect(
-      wrapper(
-        'primary',
-        new FakeSource<TestPool>(timeout),
-        subgraph,
-        metric
-      ).getPools()
-    ).rejects.toBe(timeout);
-    expect(subgraph.calls).toBe(0);
-    expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual(
-      primaryFailureTags('error')
-    );
-  });
-
-  it('returns an empty Aurora result in primary mode without calling the subgraph', async () => {
-    const metric = new FakeMetric();
-    const subgraph = new FakeSource([subgraphPool]);
-    const pools = await wrapper(
-      'primary',
-      new FakeSource<TestPool>([]),
-      subgraph,
-      metric
-    ).getPools();
-    expect(pools).toEqual([]);
-    expect(subgraph.calls).toBe(0);
-    expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual(
-      primaryFailureTags('empty')
-    );
-  });
-
-  it('serves the subgraph in shadow mode and reports the pool-id gap', async () => {
+  it('rethrows an Aurora error and counts it', async () => {
     const metric = new FakeMetric();
     const logger = new RecordingLogger();
-    const pools = await wrapper(
-      'shadow',
-      new FakeSource([auroraPool, {id: '0xcc', tvlUSD: 5}]),
-      new FakeSource([subgraphPool, {id: '0xbb', tvlUSD: 5}]),
-      metric,
-      logger
-    ).getPools();
-    await settlePendingAuroraExtraShadowsForTesting();
-
-    expect(pools).toEqual([subgraphPool, {id: '0xbb', tvlUSD: 5}]);
-    const parity = (name: string) =>
-      metric.byKey(`CachePools.aurora.extra_source_parity.${name}`)[0]?.value;
-    expect(parity('subgraph_count')).toBe(2);
-    expect(parity('aurora_count')).toBe(2);
-    expect(parity('missing')).toBe(1);
-    expect(parity('extra')).toBe(1);
-    expect(parity('tvl_mismatch')).toBe(0);
-    expect(logger.warnings).toEqual([
-      {
-        msg: 'Aurora extra pool source gap euler_hooks:130: missing=1 extra=1',
-        extra: [{missingIds: ['0xbb']}],
-      },
-    ]);
-  });
-
-  it('counts an Aurora shadow failure and still serves the subgraph', async () => {
-    const metric = new FakeMetric();
-    const pools = await wrapper(
-      'shadow',
-      new FakeSource<TestPool>(new Error('statement timeout')),
-      new FakeSource([subgraphPool]),
-      metric
-    ).getPools();
-    await settlePendingAuroraExtraShadowsForTesting();
-    expect(pools).toEqual([subgraphPool]);
+    const timeout = new Error('statement timeout');
+    await expect(
+      wrapper(new FakeSource<TestPool>(timeout), metric, logger).getPools()
+    ).rejects.toBe(timeout);
     expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual({
-      source: 'euler_hooks',
-      chainId: '130',
-      mode: 'shadow',
+      ...tags,
       status: 'failure',
       reason: 'error',
     });
-    expect(
-      metric.byKey('CachePools.aurora.extra_source_parity.missing')
-    ).toEqual([]);
-  });
-
-  it('counts shared pools whose TVL is outside the parity band and logs the worst', async () => {
-    const metric = new FakeMetric();
-    const logger = new RecordingLogger();
-    await wrapper(
-      'shadow',
-      new FakeSource<TestPool>([
-        {id: '0xaa', tvlUSD: 1_500}, // 1.5x: inside the band
-        {id: '0xbb', tvlUSD: 10_000_000}, // 10,000x: a decimals error
-        {id: '0xcc', tvlUSD: 0}, // one side 0
-        {id: '0xdd', tvlUSD: 0}, // both 0: not a mismatch
-      ]),
-      new FakeSource<TestPool>([
-        {id: '0xaa', tvlUSD: 1_000},
-        {id: '0xbb', tvlUSD: 1_000},
-        {id: '0xcc', tvlUSD: 250},
-        {id: '0xdd', tvlUSD: 0},
-      ]),
-      metric,
-      logger
-    ).getPools();
-    await settlePendingAuroraExtraShadowsForTesting();
-
-    expect(
-      metric.byKey('CachePools.aurora.extra_source_parity.tvl_mismatch')
-    ).toEqual([
-      {
-        key: 'CachePools.aurora.extra_source_parity.tvl_mismatch',
-        value: 2,
-        tags: {source: 'euler_hooks', chainId: '130'},
-      },
-    ]);
     expect(logger.warnings).toEqual([
       {
-        msg: 'Aurora extra pool source TVL mismatch euler_hooks:130: 2 of 4 shared pools outside 0.5-2x',
-        extra: [
-          {
-            worstTvlMismatches: [
-              {id: '0xcc', subgraphTvlUsd: 250, auroraTvlUsd: 0},
-              {id: '0xbb', subgraphTvlUsd: 1_000, auroraTvlUsd: 10_000_000},
-            ],
-          },
-        ],
+        msg: 'Aurora extra pool source euler_hooks:130 failed: Error',
+        extra: [],
       },
     ]);
   });
 
-  it('reports coverage of a partial primary result and still serves it', async () => {
+  it('returns an empty Aurora result and counts it', async () => {
+    const metric = new FakeMetric();
+    const pools = await wrapper(
+      new FakeSource<TestPool>([]),
+      metric
+    ).getPools();
+    expect(pools).toEqual([]);
+    expect(metric.byKey('CachePools.aurora.extra_source')[0]?.tags).toEqual({
+      ...tags,
+      status: 'failure',
+      reason: 'empty',
+    });
+  });
+
+  it('reports coverage of a partial result and still serves it', async () => {
     const metric = new FakeMetric();
     const logger = new RecordingLogger();
-    const subgraph = new FakeSource<TestPool>([subgraphPool]);
-    const pools = await wrapper(
-      'primary',
-      new FakeSource([auroraPool]),
-      subgraph,
-      metric,
-      logger,
-      {
-        kind: 'expected_keys',
-        expectedKeys: ['0xAA', '0xdd'],
-        coverageKey: pool => pool.id,
-        warnOnMissing: true,
-      }
-    ).getPools();
+    const pools = await wrapper(new FakeSource([auroraPool]), metric, logger, {
+      kind: 'expected_keys',
+      expectedKeys: ['0xAA', '0xdd'],
+      coverageKey: pool => pool.id,
+      warnOnMissing: true,
+    }).getPools();
 
     expect(pools).toEqual([auroraPool]);
-    expect(subgraph.calls).toBe(0);
-    const tags = {source: 'euler_hooks', chainId: '130', mode: 'primary'};
     const coverage = (name: string) =>
       metric.byKey(`CachePools.aurora.extra_source_coverage.${name}`);
     expect(coverage('served')).toEqual([
@@ -802,68 +613,42 @@ describe('AuroraSourcedExtraPoolsProvider', () => {
     ]);
   });
 
-  it('reports full primary coverage as success, and counts a gap without a warn where a key may have no pool', async () => {
+  it('reports full coverage as success, and counts a gap without a warn where a key may have no pool', async () => {
     const complete = new FakeMetric();
     const completeLogger = new RecordingLogger();
-    await wrapper(
-      'primary',
-      new FakeSource([auroraPool]),
-      new FakeSource([subgraphPool]),
-      complete,
-      completeLogger,
-      {
-        kind: 'expected_keys',
-        expectedKeys: ['0xaa'],
-        coverageKey: pool => pool.id,
-        warnOnMissing: true,
-      }
-    ).getPools();
+    await wrapper(new FakeSource([auroraPool]), complete, completeLogger, {
+      kind: 'expected_keys',
+      expectedKeys: ['0xaa'],
+      coverageKey: pool => pool.id,
+      warnOnMissing: true,
+    }).getPools();
     expect(
       complete.byKey('CachePools.aurora.extra_source_coverage_check')[0]?.tags
-    ).toEqual({
-      source: 'euler_hooks',
-      chainId: '130',
-      mode: 'primary',
-      status: 'success',
-    });
+    ).toEqual({...tags, status: 'success'});
     expect(completeLogger.warnings).toEqual([]);
 
     const quiet = new FakeMetric();
     const quietLogger = new RecordingLogger();
-    await wrapper(
-      'primary',
-      new FakeSource([auroraPool]),
-      new FakeSource([subgraphPool]),
-      quiet,
-      quietLogger,
-      {
-        kind: 'expected_keys',
-        expectedKeys: ['0xaa', '0xdd'],
-        coverageKey: pool => pool.id,
-        warnOnMissing: false,
-      }
-    ).getPools();
+    await wrapper(new FakeSource([auroraPool]), quiet, quietLogger, {
+      kind: 'expected_keys',
+      expectedKeys: ['0xaa', '0xdd'],
+      coverageKey: pool => pool.id,
+      warnOnMissing: false,
+    }).getPools();
     expect(
       quiet.byKey('CachePools.aurora.extra_source_coverage.missing')[0]?.value
     ).toBe(1);
     expect(quietLogger.warnings).toEqual([]);
   });
 
-  it('reports no coverage when primary falls back to the subgraph', async () => {
+  it('reports no coverage for an empty result', async () => {
     const metric = new FakeMetric();
-    await wrapper(
-      'primary',
-      new FakeSource<TestPool>([]),
-      new FakeSource([subgraphPool]),
-      metric,
-      new RecordingLogger(),
-      {
-        kind: 'expected_keys',
-        expectedKeys: ['0xaa'],
-        coverageKey: pool => pool.id,
-        warnOnMissing: true,
-      }
-    ).getPools();
+    await wrapper(new FakeSource<TestPool>([]), metric, new RecordingLogger(), {
+      kind: 'expected_keys',
+      expectedKeys: ['0xaa'],
+      coverageKey: pool => pool.id,
+      warnOnMissing: true,
+    }).getPools();
     expect(
       metric.byKey('CachePools.aurora.extra_source_coverage_check')
     ).toEqual([]);
@@ -884,11 +669,9 @@ describe('AuroraSourcedExtraPoolsProvider', () => {
       logger: RecordingLogger
     ) {
       return new AuroraSourcedExtraPoolsProvider(
-        'primary',
         ExtraPoolSourceName.EULER_HOOKS,
         ChainId.UNICHAIN,
         aurora,
-        new FakeSource<TestPool>([]),
         logger,
         metric,
         {kind: 'recent_pool_ids', recent: memory, warnOnMissing: true},
@@ -973,134 +756,66 @@ describe('AuroraSourcedExtraPoolsProvider', () => {
       ).toBe(0);
     });
   });
-
-  it('skips a shadow comparison while the previous one is still pending', async () => {
-    const metric = new FakeMetric();
-    let release: () => void = () => {};
-    const slowAurora: ExtraPoolsSource<TestPool> = {
-      getPools: () =>
-        new Promise(resolve => {
-          release = () => resolve([auroraPool]);
-        }),
-    };
-    const provider = new AuroraSourcedExtraPoolsProvider(
-      'shadow',
-      ExtraPoolSourceName.EULER_HOOKS,
-      ChainId.UNICHAIN,
-      slowAurora,
-      new FakeSource([subgraphPool]),
-      new RecordingLogger(),
-      metric
-    );
-    await provider.getPools();
-    await provider.getPools();
-    expect(
-      metric
-        .byKey('CachePools.aurora.extra_source')
-        .map(entry => entry.tags?.reason)
-    ).toEqual(['previous_pending']);
-    release();
-  });
 });
 
 describe('applyAuroraExtraPoolSources', () => {
-  function config(
-    overrides: Partial<AuroraExtraSourceConfig> = {}
-  ): AuroraExtraSourceConfig {
-    return {
-      shadowTargets: new Set(),
-      primaryTargets: new Set(),
-      rejections: new Set(),
-      ...overrides,
-    };
-  }
   const ethersProvider = new ethers.providers.JsonRpcProvider(
     'http://127.0.0.1:1'
   );
 
-  it('installs a wrapper only for targeted sources on combos that have them', async () => {
+  it('installs a source for every combo that has one', async () => {
     const metric = new FakeMetric();
     const routablePools = new FakeRoutablePools(
       [UNICHAIN_EULER_ROW],
       [MAINNET_MANUAL_V3_ROW]
     );
-    const chainProtocols: ExtraSourceChainProtocol[] = [
-      {
-        protocol: Protocol.V4,
-        chainId: ChainId.UNICHAIN,
-        eulerHooksProvider: {},
+    const unichainV4: ExtraSourceChainProtocol = {
+      protocol: Protocol.V4,
+      chainId: ChainId.UNICHAIN,
+    };
+    const tempoV4: ExtraSourceChainProtocol = {
+      protocol: Protocol.V4,
+      chainId: CHAIN_ID_TEMPO,
+      aggHooks: {
+        hookAddresses: ['0x7169a78a59f136876e724b648fbb339a42f46888'],
+        ethersProvider,
+        useExternalLiquidity: true,
       },
-      {
-        protocol: Protocol.V4,
-        chainId: CHAIN_ID_TEMPO,
-        aggHooksProvider: {
-          hookAddresses: ['0x7169a78a59f136876e724b648fbb339a42f46888'],
-          ethersProvider,
-          useExternalLiquidity: true,
-        },
-      },
-      {protocol: Protocol.V3, chainId: ChainId.MAINNET},
-      {protocol: Protocol.V3, chainId: ChainId.BASE},
-    ];
+    };
+    const mainnetV3: ExtraSourceChainProtocol = {
+      protocol: Protocol.V3,
+      chainId: ChainId.MAINNET,
+    };
+    const baseV3: ExtraSourceChainProtocol = {
+      protocol: Protocol.V3,
+      chainId: ChainId.BASE,
+    };
+    const polygonV4: ExtraSourceChainProtocol = {
+      protocol: Protocol.V4,
+      chainId: ChainId.POLYGON,
+    };
     applyAuroraExtraPoolSources(
-      chainProtocols,
-      config({
-        primaryTargets: new Set(['euler_hooks:130', 'v3_mainnet_manual:1']),
-      }),
-      deps(routablePools, metric),
+      [unichainV4, tempoV4, mainnetV3, baseV3, polygonV4],
       deps(routablePools, metric),
       new RecordingLogger(),
-      metric,
-      true
+      metric
     );
 
-    const [unichain, tempo, mainnetV3, baseV3] = chainProtocols.map(
-      cp => cp.extraPoolSourceOverrides
-    );
-    expect(tempo).toBeUndefined();
-    expect(baseV3).toBeUndefined();
-    const euler = await unichain?.euler?.(new FakeSource([])).getPools();
+    expect(Object.keys(unichainV4.extraPoolSources ?? {})).toEqual(['euler']);
+    expect(Object.keys(tempoV4.extraPoolSources ?? {})).toEqual(['aggHooks']);
+    expect(Object.keys(mainnetV3.extraPoolSources ?? {})).toEqual(['v3Manual']);
+    expect(baseV3.extraPoolSources).toBeUndefined();
+    expect(polygonV4.extraPoolSources).toBeUndefined();
+
+    const euler = await unichainV4.extraPoolSources?.euler?.getPools();
     expect(euler?.map(pool => pool.id)).toEqual([UNICHAIN_EULER_ROW.poolId]);
-    const manual = await mainnetV3?.v3Manual?.(new FakeSource([])).getPools();
+    expect(routablePools.v4Calls[0]?.hooks).toEqual(
+      EULER_SWAP_HOOKS_BY_CHAIN.get(ChainId.UNICHAIN)
+    );
+    const manual = await mainnetV3.extraPoolSources?.v3Manual?.getPools();
     expect(manual?.map(pool => pool.id)).toEqual([
       '0x4622df6fb2d9bee0dcdacf545acdb6a2b2f4f863',
     ]);
-    expect(
-      metric.byKey('CachePools.aurora.extra_source_unsupported_target')
-    ).toEqual([]);
-  });
-
-  it('reports config rejections and listed keys with no source in the run', () => {
-    const metric = new FakeMetric();
-    const run = (reportUnmatchedKeys: boolean) =>
-      applyAuroraExtraPoolSources(
-        [{protocol: Protocol.V4, chainId: ChainId.BASE}],
-        config({
-          shadowTargets: new Set(['euler_hooks:8453']),
-          rejections: new Set(['primary_wildcard']),
-        }),
-        deps(new FakeRoutablePools(), metric),
-        deps(new FakeRoutablePools(), metric),
-        new RecordingLogger(),
-        metric,
-        reportUnmatchedKeys
-      );
-
-    run(false);
-    expect(
-      metric.byKey('CachePools.aurora.extra_source_unsupported_target')
-    ).toEqual([]);
-    run(true);
-    expect(
-      metric
-        .byKey('CachePools.aurora.extra_source_unsupported_target')
-        .map(entry => entry.tags)
-    ).toEqual([{source: 'euler_hooks'}]);
-    expect(
-      metric
-        .byKey('CachePools.aurora.extra_source_config_rejected')
-        .map(entry => entry.tags)
-    ).toEqual([{reason: 'primary_wildcard'}, {reason: 'primary_wildcard'}]);
   });
 });
 
@@ -1124,135 +839,67 @@ describe('applyAuroraPoolSources → extra pool sources', () => {
         ],
       ]),
   };
-  const noPools: ISubgraphProvider<V4SubgraphPool> = {
-    getPools: async () => [],
-  };
 
   function unichainV4(): {
     protocol: Protocol;
     chainId: number;
-    provider: ISubgraphProvider<V4SubgraphPool>;
-    eulerHooksProvider: object;
-    extraPoolSourceOverrides?: {
-      euler?: (
-        subgraph: ExtraPoolsSource<V4SubgraphPool>
-      ) => ExtraPoolsSource<V4SubgraphPool>;
+    provider?: ISubgraphProvider<V4SubgraphPool>;
+    extraPoolSources?: {
+      euler?: ExtraPoolsSource<V4SubgraphPool>;
+      v3Manual?: ExtraPoolsSource<V3SubgraphPool>;
     };
   } {
-    return {
-      protocol: Protocol.V4,
-      chainId: ChainId.UNICHAIN,
-      provider: noPools,
-      eulerHooksProvider: {},
-    };
+    return {protocol: Protocol.V4, chainId: ChainId.UNICHAIN};
   }
 
-  it('serves EulerSwap pools from Aurora for a primary key set in the env', async () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '1:V2';
-    process.env.POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS =
-      'euler_hooks:130';
+  const providerDeps = (metric: FakeMetric) => ({
+    routablePools: {
+      batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+      listAllV2RoutablePools: async () => [],
+      listAllV3RoutablePools: async () => [],
+      listAllV4RoutablePools: async () => [],
+    },
+    prices,
+    logger: new RecordingLogger(),
+    metric,
+  });
+
+  it('serves EulerSwap pools from Aurora beside the main provider', async () => {
     const metric = new FakeMetric();
     const routablePools = new FakeRoutablePools([UNICHAIN_EULER_ROW]);
-    const chainProtocols = [unichainV4()];
+    const chainProtocol = unichainV4();
     applyAuroraPoolSources(
-      chainProtocols,
+      [chainProtocol],
       {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
       new RecordingLogger(),
       metric,
       {
         scopedRun: true,
-        providerDeps: {
-          routablePools: {
-            batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
-            listAllV2RoutablePools: async () => [],
-            listAllV3RoutablePools: async () => [],
-            listAllV4RoutablePools: async () => [],
-          },
-          prices,
-          logger: new RecordingLogger(),
-          metric,
-        },
+        providerDeps: providerDeps(metric),
         extraSourceRoutablePools: routablePools,
       }
     );
 
-    const subgraphEuler = new FakeSource<V4SubgraphPool>(
-      new Error('subgraph shut off')
-    );
-    const served = await chainProtocols[0]?.extraPoolSourceOverrides
-      ?.euler?.(subgraphEuler)
-      .getPools();
+    expect(chainProtocol.provider).toBeDefined();
+    const served = await chainProtocol.extraPoolSources?.euler?.getPools();
     expect(served?.map(pool => pool.id)).toEqual([UNICHAIN_EULER_ROW.poolId]);
-    expect(subgraphEuler.calls).toBe(0);
     expect(routablePools.v4Calls[0]?.hooks).toEqual(
       EULER_SWAP_HOOKS_BY_CHAIN.get(ChainId.UNICHAIN)
     );
   });
 
-  it('leaves the extra sources on the subgraph when no extra-source reader is available', () => {
-    process.env.POOL_CACHING_AURORA_SHADOW_TARGETS = '1:V2';
-    process.env.POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS =
-      'euler_hooks:130';
+  it('installs no extra source when no extra-source reader is available', () => {
     const metric = new FakeMetric();
-    const chainProtocols = [unichainV4()];
+    const chainProtocol = unichainV4();
     applyAuroraPoolSources(
-      chainProtocols,
+      [chainProtocol],
       {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
       new RecordingLogger(),
       metric,
-      {
-        scopedRun: true,
-        providerDeps: {
-          routablePools: {
-            batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
-            listAllV2RoutablePools: async () => [],
-            listAllV3RoutablePools: async () => [],
-            listAllV4RoutablePools: async () => [],
-          },
-          prices,
-          logger: new RecordingLogger(),
-          metric,
-        },
-      }
+      {scopedRun: true, providerDeps: providerDeps(metric)}
     );
-    expect(chainProtocols[0]?.extraPoolSourceOverrides).toBeUndefined();
-  });
-
-  it('reports extra-source targets set without the main Aurora targets, which leave them inert', () => {
-    process.env.POOL_CACHING_AURORA_EXTRA_SOURCE_PRIMARY_TARGETS =
-      'euler_hooks:130';
-    const metric = new FakeMetric();
-    const logger = new RecordingLogger();
-    const chainProtocols = [unichainV4()];
-    applyAuroraPoolSources(
-      chainProtocols,
-      {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
-      logger,
-      metric
-    );
-
-    expect(chainProtocols[0]?.extraPoolSourceOverrides).toBeUndefined();
-    expect(metric.byKey('CachePools.aurora.extra_source_inert')).toEqual([
-      {
-        key: 'CachePools.aurora.extra_source_inert',
-        value: 1,
-        tags: {reason: 'main_targets_unset'},
-      },
-    ]);
-    expect(logger.warnings).toHaveLength(1);
-  });
-
-  it('reports nothing when neither the main nor the extra targets are set', () => {
-    const metric = new FakeMetric();
-    const logger = new RecordingLogger();
-    applyAuroraPoolSources(
-      [unichainV4()],
-      {trackedEthThresholdFor: () => 0.01, untrackedUsdThresholdFor: () => 0},
-      logger,
-      metric
-    );
-    expect(metric.emitted).toEqual([]);
-    expect(logger.warnings).toEqual([]);
+    expect(chainProtocol.provider).toBeDefined();
+    expect(chainProtocol.extraPoolSources).toBeUndefined();
   });
 });
 
@@ -1272,7 +919,7 @@ describe('EULER_SWAP_HOOKS_BY_CHAIN', () => {
     }
   );
 
-  it('covers exactly the chains that have a subgraph EulerSwap source', () => {
+  it('covers exactly the chains with EulerSwap pools', () => {
     expect([...EULER_SWAP_HOOKS_BY_CHAIN.keys()].sort((a, b) => a - b)).toEqual(
       [ChainId.MAINNET, ChainId.UNICHAIN]
     );

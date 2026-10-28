@@ -1,22 +1,21 @@
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 import {getMajorTokens} from './majorTokens';
-import {v4SubgraphUrlOverride} from '../cacheConfig';
+import {createChainProtocols} from '../cacheConfig';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
-const ALL_CHAIN_IDS = Object.values(ChainId).filter(
-  (value): value is ChainId => typeof value === 'number'
-);
+const V4_CRON_CHAIN_IDS = createChainProtocols()
+  .filter(cp => cp.protocol === Protocol.V4)
+  .map(cp => cp.chainId);
 
 describe('MAJOR_TOKENS_BY_CHAIN coverage', () => {
   it('has a non-empty entry for every chain in the V4 pool-caching matrix', () => {
     // A V4 chain with no majors has no major pairs at all, so every hooked
     // pool on it bypasses allowlist gating in v4HooksPoolsFiltering. Guard
     // against a new chain being wired into cacheConfig without one.
-    const v4Chains = ALL_CHAIN_IDS.filter(
-      chainId => v4SubgraphUrlOverride(chainId) !== undefined
-    );
+    const v4Chains = V4_CRON_CHAIN_IDS;
     expect(v4Chains.length).toBeGreaterThan(0);
 
     const chainsMissingMajors = v4Chains.filter(
@@ -36,11 +35,7 @@ describe('MAJOR_TOKENS_BY_CHAIN coverage', () => {
       // Celo's native asset is the CELO ERC-20, not address(0).
       ChainId.CELO,
     ]);
-    const v4Chains = ALL_CHAIN_IDS.filter(
-      chainId => v4SubgraphUrlOverride(chainId) !== undefined
-    );
-
-    for (const chainId of v4Chains) {
+    for (const chainId of V4_CRON_CHAIN_IDS) {
       const expectNative = !chainsWithoutNativeToken.has(chainId);
       expect(
         getMajorTokens(chainId).has(ZERO_ADDRESS),

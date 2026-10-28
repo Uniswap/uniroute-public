@@ -518,7 +518,7 @@ export async function applyV4LpFeeCorrection(
       tags
     );
     logger?.error(
-      `V4 lpFee correction read failed on chain ${chainId}; keeping subgraph fees`,
+      `V4 lpFee correction read failed on chain ${chainId}; keeping the fees as read`,
       {error: err instanceof Error ? err.message : String(err)}
     );
     return pools;

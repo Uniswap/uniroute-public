@@ -12,33 +12,21 @@ import {
 } from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 
-import {
-  type SubgraphFetchFactory,
-  V2SubgraphPool,
-  V3SubgraphPool,
-  V3SubgraphProvider,
-  V4SubgraphPool,
-} from './sor-providers';
+import {V2SubgraphPool, V3SubgraphPool, V4SubgraphPool} from './sor-providers';
 
 import {
   createChainProtocols,
   trackedEthThresholdFor,
   untrackedUsdThresholdFor,
-  v3SubgraphUrlOverride,
-  v3TrackedEthThreshold,
   ChainProtocol,
 } from './cacheConfig';
 import {applyAuroraPoolSources, targetKey} from './auroraPoolsSource';
-import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
 import {
   FETCH_START_METADATA_KEY,
   parseSnapshotFetchStart,
 } from './util/snapshotFetchStart';
 import {
   ExtraPoolSourceName,
-  ExtraPoolsSource,
-  MAINNET_V3_MANUAL_POOL_IDS,
-  SubgraphEulerSwapPoolsSource,
   V3_EXTRA_POOL_SOURCE_MEMORY,
   V4_EXTRA_POOL_SOURCE_MEMORY,
   extraSourceKey,
@@ -96,8 +84,8 @@ function prefixedLogger(logger: Logger, prefix: string): Logger {
 }
 
 // Bounds one extra source's read so a hung read cannot stall the combo past
-// the job timeout (900s). Generous next to a normal read: the subgraph V3
-// manual path crawls mainnet V3 with 90s pages and 3 retries. The timeout
+// the job timeout (900s). Generous next to a normal read, which is one
+// targeted Aurora statement under the statement timeout. The timeout
 // detaches rather than cancels; the late read is ignored.
 export const EXTRA_POOL_SOURCE_TIMEOUT_MS = 300_000;
 
@@ -111,8 +99,17 @@ export class ExtraPoolSourceUnavailableError extends Error {
   override readonly name = 'ExtraPoolSourceUnavailableError';
 }
 
-const isAuroraPrimarySource = (source: unknown): boolean =>
-  source instanceof AuroraSourcedExtraPoolsProvider && source.isAuroraPrimary;
+// A chain x protocol combo with its pool source installed; one without is
+// skipped by cacheAllPools.
+type SourcedChainProtocol = ChainProtocol & {
+  provider: NonNullable<ChainProtocol['provider']>;
+};
+
+function hasPoolSource(
+  chainProtocol: ChainProtocol
+): chainProtocol is SourcedChainProtocol {
+  return chainProtocol.provider !== undefined;
+}
 
 function withExtraPoolSourceTimeout<T>(
   promise: Promise<T>,
@@ -131,27 +128,25 @@ function withExtraPoolSourceTimeout<T>(
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// Euler hooks, agg hooks and the hardcoded mainnet V3 fetch add pools to the
-// main pool set from their own reads (subgraph, or Aurora where an
-// extraPoolSourceOverrides wrapper is installed), which the main set does
-// not depend on. Each runs best-effort: a failure costs only its own pools,
-// never the snapshot built from the main set.
+// Euler hooks, agg hooks and the hardcoded mainnet V3 pools add pools to the
+// main pool set from their own Aurora reads (chainProtocol.extraPoolSources),
+// which the main set does not depend on. Each runs best-effort: a failure
+// costs only its own pools, never the snapshot built from the main set.
 //
-// Carry-forward: once the subgraph is gone a failed read has no fallback,
-// so a single bad sweep would write the snapshot without these pools. A
-// failed, timed-out or empty read instead serves the source's last good
-// pools while they are within EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS. An
-// empty read with no recent good result is a legitimate empty source and
-// still counts as success. A partial read is served as is; the Aurora
-// wrapper's coverage check reports it.
+// Carry-forward: a failed read has no fallback, so a single bad sweep would
+// write the snapshot without these pools. A failed, timed-out or empty read
+// instead serves the source's last good pools while they are within
+// EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS. An empty read with no recent good
+// result is a legitimate empty source and still counts as success. A partial
+// read is served as is; the source's coverage check reports it.
 //
 // Last-good lives in process memory, so after a cron restart there is none.
-// For an Aurora-primary source (failClosedWithoutLastGood), a failed or
-// timed-out read with no last-good throws ExtraPoolSourceUnavailableError:
-// the combo skips its S3 write and routing keeps the previous snapshot,
-// which still holds the source's pools. The skip lasts at most
-// EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS from the first one; past that the
-// combo writes without the source, as an expired carry-forward does.
+// With failClosedWithoutLastGood, a failed or timed-out read with no
+// last-good throws ExtraPoolSourceUnavailableError: the combo skips its S3
+// write and routing keeps the previous snapshot, which still holds the
+// source's pools. The skip lasts at most EXTRA_POOL_SOURCE_LAST_GOOD_MAX_AGE_MS
+// from the first one; past that the combo writes without the source, as an
+// expired carry-forward does.
 export async function withExtraPoolSource<T extends {id: string}>(
   source: ExtraPoolSourceName,
   chainId: number,
@@ -315,22 +310,14 @@ function applyPoolActivityFilter<T extends ActivityFilterPool>(
 }
 
 async function cachePoolsForChainProtocol(
-  chainProtocol: ChainProtocol,
+  chainProtocol: SourcedChainProtocol,
   s3: S3Client,
   config: CachePoolsConfig,
   logger: Logger,
   metricInstance: IMetric,
-  activityFilterTargets: ReadonlySet<string>,
-  subgraphFetchFactory?: SubgraphFetchFactory
+  activityFilterTargets: ReadonlySet<string>
 ): Promise<void> {
-  const {
-    protocol,
-    chainId,
-    provider,
-    eulerHooksProvider,
-    aggHooksProvider,
-    extraPoolSourceOverrides,
-  } = chainProtocol;
+  const {protocol, chainId, provider, extraPoolSources} = chainProtocol;
   const metricTags = {chainId: String(chainId), protocol: String(protocol)};
   logger = prefixedLogger(logger, `[${chainId}_${protocol}]`);
   const fetchStartTime = new Date();
@@ -460,44 +447,22 @@ async function cachePoolsForChainProtocol(
     }
 
     if (protocol === Protocol.V3 && chainId === ChainId.MAINNET) {
-      const manualPoolIds = new Set(MAINNET_V3_MANUAL_POOL_IDS);
-      const subgraphManualSource: ExtraPoolsSource<V3SubgraphPool> = {
-        getPools: async () => {
-          const v3MainnetSubgraphProvider = new V3SubgraphProvider(
-            ChainId.MAINNET,
-            3,
-            90000,
-            true,
-            v3TrackedEthThreshold,
-            0, // wstETH/USDC totalValueLockedUSDUntracked is 0
-            v3SubgraphUrlOverride(ChainId.MAINNET),
-            undefined,
-            logger,
-            metricInstance,
-            subgraphFetchFactory
-          );
-          const additionalPools = await v3MainnetSubgraphProvider.getPools();
-          return additionalPools.filter((pool: V3SubgraphPool) =>
-            manualPoolIds.has(pool.id.toLowerCase())
-          );
-        },
-      };
-      const manualSource =
-        extraPoolSourceOverrides?.v3Manual?.(subgraphManualSource) ??
-        subgraphManualSource;
-      const filteredPools = await withExtraPoolSource(
-        ExtraPoolSourceName.V3_MAINNET_MANUAL,
-        chainId,
-        metricTags,
-        metricInstance,
-        logger,
-        V3_EXTRA_POOL_SOURCE_MEMORY,
-        () => manualSource.getPools(),
-        undefined,
-        undefined,
-        isAuroraPrimarySource(manualSource)
-      );
-      filteredPools?.forEach(pool => pools.push(pool));
+      const manualSource = extraPoolSources?.v3Manual;
+      if (manualSource) {
+        const manualPools = await withExtraPoolSource(
+          ExtraPoolSourceName.V3_MAINNET_MANUAL,
+          chainId,
+          metricTags,
+          metricInstance,
+          logger,
+          V3_EXTRA_POOL_SOURCE_MEMORY,
+          () => manualSource.getPools(),
+          undefined,
+          undefined,
+          true
+        );
+        manualPools?.forEach(pool => pools.push(pool));
+      }
 
       pools = (pools as Array<V3SubgraphPool>).filter(
         (pool: V3SubgraphPool) => {
@@ -519,16 +484,8 @@ async function cachePoolsForChainProtocol(
     if (protocol === Protocol.V4) {
       const manuallyIncludedV4Pools: V4SubgraphPool[] = [];
 
-      if (eulerHooksProvider) {
-        const subgraphEulerSource = new SubgraphEulerSwapPoolsSource(
-          eulerHooksProvider,
-          logger,
-          metricInstance,
-          metricTags
-        );
-        const eulerSource =
-          extraPoolSourceOverrides?.euler?.(subgraphEulerSource) ??
-          subgraphEulerSource;
+      const eulerSource = extraPoolSources?.euler;
+      if (eulerSource) {
         const eulerPools = await withExtraPoolSource(
           ExtraPoolSourceName.EULER_HOOKS,
           chainId,
@@ -539,15 +496,13 @@ async function cachePoolsForChainProtocol(
           () => eulerSource.getPools(),
           undefined,
           undefined,
-          isAuroraPrimarySource(eulerSource)
+          true
         );
         eulerPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
 
-      if (aggHooksProvider) {
-        const aggHooksSource =
-          extraPoolSourceOverrides?.aggHooks?.(aggHooksProvider) ??
-          aggHooksProvider;
+      const aggHooksSource = extraPoolSources?.aggHooks;
+      if (aggHooksSource) {
         const aggHooksPools = await withExtraPoolSource(
           ExtraPoolSourceName.AGG_HOOKS,
           chainId,
@@ -568,7 +523,7 @@ async function cachePoolsForChainProtocol(
           },
           undefined,
           undefined,
-          isAuroraPrimarySource(aggHooksSource)
+          true
         );
         aggHooksPools?.forEach(pool => manuallyIncludedV4Pools.push(pool));
       }
@@ -778,7 +733,7 @@ async function cachePoolsForChainProtocol(
 
       manuallyIncludedV4Pools.forEach(pool => pools.push(pool));
 
-      // The subgraph's feeTier tracks the Swap event's fee param
+      // The snapshot's feeTier tracks the Swap event's fee param
       // — the TOTAL swap fee — so it drifts off PoolKey.fee once a pool's
       // protocol fee is live. Correct it BEFORE filtering, so the real
       // pool-key fee feeds the token0+token1+feeTier grouping and the
@@ -808,7 +763,7 @@ async function cachePoolsForChainProtocol(
             {...metricTags, reason: 'no_rpc_endpoint'}
           );
           logger.warn(
-            'V4 lpFee correction enabled but no UniRPC endpoint is configured — keeping subgraph fees'
+            'V4 lpFee correction enabled but no UniRPC endpoint is configured — keeping the fees as read'
           );
         }
       }
@@ -851,13 +806,13 @@ async function cachePoolsForChainProtocol(
       MetricLoggerUnit.Count,
       metricTags
     );
-    logger.info('No pools found from the subgraph');
+    logger.info('No pools found from the pool source');
     return;
   }
 
   const beforeS3 = Date.now();
   logger.info(
-    `Got ${pools.length} pools from the subgraph. Saving to ${compressedKey}`
+    `Got ${pools.length} pools from the pool source. Saving to ${compressedKey}`
   );
 
   const serializedPools = JSON.stringify(pools);
@@ -1020,7 +975,7 @@ export interface CacheAllPoolsResult {
 
 /**
  * Runs all pool caching jobs in batches of `batchSize` to control memory usage.
- * Each job fetches pools from subgraph for a given chain+protocol, compresses, and uploads to S3.
+ * Each job fetches pools from Aurora for a given chain+protocol, compresses, and uploads to S3.
  * Per-job failures are tolerated (logged + counted); callers decide from the
  * returned counts whether the run as a whole is healthy.
  */
@@ -1074,24 +1029,14 @@ export async function cacheAllPools(
   config: CachePoolsConfig,
   batchSize = 5,
   perJobTimeoutMs = 300000,
-  only?: Array<{chainId: number; protocol: Protocol}>,
-  /**
-   * ctx.fetch-backed transport for the subgraph GraphQL calls. Omitted,
-   * graphql-request keeps its bundled cross-fetch and the calls emit no
-   * client.* metrics and no spans.
-   */
-  subgraphFetchFactory?: SubgraphFetchFactory
+  only?: Array<{chainId: number; protocol: Protocol}>
 ): Promise<CacheAllPoolsResult> {
   const s3 = new S3Client({region: process.env.AWS_REGION || 'us-east-2'});
-  const cronLogger = prefixedLogger(logger, '[SubgraphCron]');
+  const cronLogger = prefixedLogger(logger, '[PoolCachingCron]');
   // Refresh factory-discovered ZLCA hooks before fetching so this run's
-  // tvl-bypass subgraph query and V4 filtering see them (fail-open).
+  // Aurora V4 admission and V4 filtering see them (fail-open).
   await refreshDynamicZlcaHooks(cronLogger, metricInstance);
-  let chainProtocols = createChainProtocols(
-    cronLogger,
-    metricInstance,
-    subgraphFetchFactory
-  );
+  let chainProtocols = createChainProtocols();
   if (only !== undefined && only.length > 0) {
     chainProtocols = chainProtocols.filter(cp =>
       only.some(o => o.chainId === cp.chainId && o.protocol === cp.protocol)
@@ -1119,8 +1064,6 @@ export async function cacheAllPools(
     );
   }
 
-  // Swap targeted combos onto the Aurora pool source (shadow or primary,
-  // POOL_CACHING_AURORA_*_TARGETS). No-op when the flags are unset.
   applyAuroraPoolSources(
     chainProtocols,
     {trackedEthThresholdFor, untrackedUsdThresholdFor},
@@ -1133,9 +1076,12 @@ export async function cacheAllPools(
       recordPoolActivityTargets: activityFilter.targets,
     }
   );
+  // A combo applyAuroraPoolSources left without a provider was reported
+  // there; it writes no snapshot this run and keeps its previous one.
+  const sourcedChainProtocols = chainProtocols.filter(hasPoolSource);
 
   cronLogger.info(
-    `Starting pool caching for ${chainProtocols.length} chain+protocol combinations${
+    `Starting pool caching for ${sourcedChainProtocols.length} chain+protocol combinations${
       only !== undefined && only.length > 0
         ? ` (only ${only.map(o => `${o.chainId}_${o.protocol}`).join(', ')})`
         : ''
@@ -1145,9 +1091,9 @@ export async function cacheAllPools(
   let succeeded = 0;
   let failed = 0;
   const allRawTasks: Promise<void>[] = [];
-  for (let i = 0; i < chainProtocols.length; i += batchSize) {
-    const batch = chainProtocols.slice(i, i + batchSize);
-    const batchLabel = `batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chainProtocols.length / batchSize)}`;
+  for (let i = 0; i < sourcedChainProtocols.length; i += batchSize) {
+    const batch = sourcedChainProtocols.slice(i, i + batchSize);
+    const batchLabel = `batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(sourcedChainProtocols.length / batchSize)}`;
 
     cronLogger.info(
       `Processing ${batchLabel}: ${batch.map(cp => `${cp.protocol}/${cp.chainId}`).join(', ')}`
@@ -1160,8 +1106,7 @@ export async function cacheAllPools(
         config,
         cronLogger,
         metricInstance,
-        activityFilter.targets,
-        subgraphFetchFactory
+        activityFilter.targets
       )
     );
     allRawTasks.push(...rawTasks);

@@ -1,6 +1,11 @@
 /**
  * Ported from routing-api/lib/cron/cache-config.ts
- * Defines chain+protocol matrix and subgraph provider instantiation for pool caching.
+ * Defines the chain+protocol matrix the pool-caching cron writes a snapshot
+ * for. Every combo reads its pools from data-ingestion Aurora:
+ * applyAuroraPoolSources (auroraPoolsSource.ts) installs each combo's
+ * provider, and applyAuroraExtraPoolSources (auroraExtraPoolSources.ts) the
+ * extra sources (EulerSwap hooks, aggregator hooks, the mainnet V3 manual
+ * pools) layered on top of it.
  */
 
 import {Protocol} from '@uniswap/router-sdk';
@@ -16,181 +21,19 @@ export const CHAIN_ID_ROBINHOOD = 4663 as ChainId;
 // ARC is not in sdk-core — define locally until sdk-core is upgraded
 const CHAIN_ID_ARC = 5042 as ChainId;
 
-import {
-  V2SubgraphProvider,
-  V3SubgraphProvider,
-  V4SubgraphProvider,
-  EulerSwapHooksSubgraphProvider,
-  AggHooksSubgraphProvider,
-  type ISubgraphProvider,
-  type SubgraphFetchFactory,
-  type V2SubgraphPool,
-  type V3SubgraphPool,
-  type V4SubgraphPool,
+import type {
+  ISubgraphProvider,
+  V2SubgraphPool,
+  V3SubgraphPool,
+  V4SubgraphPool,
 } from './sor-providers';
-
-import {Logger} from './sor-providers/util/log';
-import type {ExtraPoolSourceOverrides} from './extraPoolSources';
-import {IMetric} from './sor-providers/util/metric';
+import type {ExtraPoolSources} from './extraPoolSources';
 
 import {
   AGG_HOOKS_ON_BASE,
   AGG_HOOKS_ON_MAINNET,
   AGG_HOOKS_ON_TEMPO,
 } from './util/aggHooksAddressesAllowlist';
-
-// --- Subgraph URL overrides (read from environment at init time) ---
-
-export const v4SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
-  switch (chainId) {
-    case ChainId.SEPOLIA:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ETHEREUM_SEPOLIA_V4_ID}`;
-    case ChainId.ARBITRUM_ONE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ARBITRUM_V4_ID}`;
-    case ChainId.BASE:
-      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BASE_V4_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BASE_V4_INDEX_ID}`;
-    case ChainId.POLYGON:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_POLYGON_V4_ID}`;
-    case ChainId.WORLDCHAIN:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_WORLDCHAIN_V4_ID}`;
-    case ChainId.ZORA:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ZORA_V4_ID}`;
-    case ChainId.UNICHAIN:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_UNICHAIN_V4_ID}`;
-    case ChainId.BNB:
-      return `https://gateway.thegraph.com/api/subgraphs/id/${process.env.GRAPH_BNB_V4_ID}`;
-    case ChainId.BLAST:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BLAST_V4_ID}`;
-    case ChainId.MAINNET:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ETHEREUM_V4_ID}`;
-    case ChainId.SONEIUM:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_SONEIUM_V4_ID}`;
-    case ChainId.OPTIMISM:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_OPTIMISM_V4_ID}`;
-    case ChainId.MONAD:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-monad/prod/gn`;
-    case CHAIN_ID_TEMPO:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-tempo/prod/gn`;
-    case ChainId.XLAYER:
-      return `https://gateway.thegraph.com/api/subgraphs/id/${process.env.GRAPH_XLAYER_V4_ID}`;
-    case ChainId.AVALANCHE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_AVALANCHE_V4_ID}`;
-    case ChainId.CELO:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_CELO_V4_ID}`;
-    case ChainId.LINEA:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-linea/prod/gn`;
-    case CHAIN_ID_MEGAETH:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-megaeth-mainnet/prod/gn`;
-    case CHAIN_ID_ROBINHOOD:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-robinhood-mainnet/prod/gn`;
-    case CHAIN_ID_ARC:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-arc-mainnet/prod/gn`;
-    case ChainId.INK:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v4-ink/prod/gn`;
-    default:
-      return undefined;
-  }
-};
-
-export const v3SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
-  switch (chainId) {
-    case ChainId.MAINNET:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ETHEREUM_V3_ID}`;
-    case ChainId.ARBITRUM_ONE:
-      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_ARBITRUM_V3_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_ARBITRUM_V3_INDEX_ID}`;
-    // TODO(ROUTE-1201): migrate POLYGON V3 to TheGraph once Ellipfra new version is synced.
-    case ChainId.POLYGON:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_POLYGON_V3_ID}`;
-    // TODO(ROUTE-1201): migrate OPTIMISM V3 to TheGraph once Ellipfra new version is synced.
-    case ChainId.OPTIMISM:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_OPTIMISM_V3_ID}`;
-    case ChainId.AVALANCHE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_AVALANCHE_V3_ID}`;
-    case ChainId.BNB:
-      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BNB_V3_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BNB_V3_INDEX_ID}`;
-    case ChainId.BLAST:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_BLAST_V3_ID}`;
-    case ChainId.BASE:
-      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BASE_V3_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BASE_V3_INDEX_ID}`;
-    case ChainId.CELO:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_CELO_V3_ID}`;
-    case ChainId.WORLDCHAIN:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_WORLDCHAIN_V3_ID}`;
-    case ChainId.UNICHAIN_SEPOLIA:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ASTROCHAIN_SEPOLIA_V3_ID}`;
-    case ChainId.UNICHAIN:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_UNICHAIN_V3_ID}`;
-    case ChainId.ZORA:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_ZORA_V3_ID}`;
-    case ChainId.SONEIUM:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap2/gn/subgraphs/id/${process.env.GOLD_SKY_SONEIUM_V3_ID}`;
-    case ChainId.MONAD:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-monad/prod/gn`;
-    case CHAIN_ID_TEMPO:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-tempo/prod/gn`;
-    case ChainId.XLAYER:
-      return `https://gateway.thegraph.com/api/subgraphs/id/${process.env.GRAPH_XLAYER_V3_ID}`;
-    case ChainId.LINEA:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-linea/prod/gn`;
-    case CHAIN_ID_MEGAETH:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-megaeth-mainnet/prod/gn`;
-    case CHAIN_ID_ROBINHOOD:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-robinhood-mainnet/prod/gn`;
-    case CHAIN_ID_ARC:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-arc-mainnet/prod/gn`;
-    case ChainId.INK:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v3-ink/prod/gn`;
-    default:
-      return undefined;
-  }
-};
-
-export const v2SubgraphUrlOverride = (chainId: ChainId): string | undefined => {
-  switch (chainId) {
-    case ChainId.MAINNET:
-      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_MAINNET_V2_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_MAINNET_V2_INDEX_ID}`;
-    case ChainId.ARBITRUM_ONE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_ARBITRUM_V2_ID}`;
-    case ChainId.POLYGON:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_POLYGON_V2_ID}`;
-    case ChainId.OPTIMISM:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_OPTIMISM_V2_ID}`;
-    case ChainId.AVALANCHE:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_AVALANCHE_V2_ID}`;
-    case ChainId.BNB:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_BNB_V2_ID}`;
-    case ChainId.BLAST:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_BLAST_V2_ID}`;
-    case ChainId.BASE:
-      return `https://gateway.thegraph.com/api/deployments/id/${process.env.GRAPH_BASE_V2_DEPLOYMENT_ID}/indexers/id/${process.env.GRAPH_BASE_V2_INDEX_ID}`;
-    case ChainId.WORLDCHAIN:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_WORLDCHAIN_V2_ID}`;
-    case ChainId.UNICHAIN_SEPOLIA:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_ASTROCHAIN_SEPOLIA_V2_ID}`;
-    case ChainId.UNICHAIN:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_UNICHAIN_V2_ID}`;
-    case ChainId.SONEIUM:
-      return `https://api.aws-us-east-1.goldsky.com/c/uniswap/gn/subgraphs/id/${process.env.GOLD_SKY_SONEIUM_V2_ID}`;
-    case ChainId.MONAD:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-monad/prod/gn`;
-    case CHAIN_ID_TEMPO:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-tempo/prod/gn`;
-    case ChainId.XLAYER:
-      return `https://gateway.thegraph.com/api/subgraphs/id/${process.env.GRAPH_XLAYER_V2_ID}`;
-    case ChainId.LINEA:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-linea/prod/gn`;
-    case CHAIN_ID_MEGAETH:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-megaeth-mainnet/prod/gn`;
-    case CHAIN_ID_ROBINHOOD:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-robinhood-mainnet/prod/gn`;
-    case CHAIN_ID_ARC:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-arc-mainnet/prod/gn`;
-    case ChainId.INK:
-      return `https://api.goldsky.com/api/private/${process.env.GOLD_SKY_API_KEY}/subgraphs/uniswap-v2-ink/prod/gn`;
-    default:
-      return undefined;
-  }
-};
 
 // --- Threshold constants ---
 
@@ -208,9 +51,8 @@ export const v2UntrackedUsdThreshold = Number.MAX_VALUE;
 
 // --- Chain protocol definitions ---
 
-// Per-(protocol, chain) TVL floor in native-token units, matching what the
-// matrix below passes into each subgraph provider. The Aurora pool source
-// (auroraPoolsSource.ts) uses this as the tracked-ETH threshold in its
+// Per-(protocol, chain) TVL floor in native-token units. The Aurora pool
+// source (auroraPoolsSource.ts) uses this as the tracked-ETH threshold in its
 // TS-replicated admission union — it deliberately fetches unfloored from SQL,
 // since a SQL floor would drop the high-liquidity band and bypass-hook pools.
 export function trackedEthThresholdFor(
@@ -228,8 +70,8 @@ export function trackedEthThresholdFor(
   }
 }
 
-// Keep Aurora's admission union tied to the same per-protocol threshold the
-// corresponding subgraph provider receives.
+// The per-protocol untracked-USD admission threshold of Aurora's admission
+// union.
 export function untrackedUsdThresholdFor(
   protocol: Protocol,
   _chainId: number
@@ -244,1273 +86,160 @@ export function untrackedUsdThresholdFor(
   }
 }
 
+// The aggregator-hook pools of a V4 combo: the hooks whose pools are read,
+// and the RPC provider that values them through each hook's
+// pseudoTotalValueLocked.
+export interface AggHooksPoolSourceConfig {
+  hookAddresses: readonly string[];
+  ethersProvider: ethers.providers.BaseProvider;
+  // Keep only the pools whose hook reports liquidity it holds outside the
+  // PoolManager.
+  useExternalLiquidity: boolean;
+}
+
 export interface ChainProtocol {
   protocol: Protocol;
   chainId: ChainId;
-  timeout: number;
-  provider:
+  // V4 combos with listed aggregator hooks; the source is built by
+  // applyAuroraExtraPoolSources.
+  aggHooks?: AggHooksPoolSourceConfig;
+  // The combo's pool source, installed by applyAuroraPoolSources. A combo
+  // left without one (no Aurora read for it, or the Aurora client failed to
+  // initialize) is skipped by cacheAllPools and keeps its previous snapshot.
+  provider?:
     | ISubgraphProvider<V2SubgraphPool>
     | ISubgraphProvider<V3SubgraphPool>
     | ISubgraphProvider<V4SubgraphPool>;
-  eulerHooksProvider?: EulerSwapHooksSubgraphProvider;
-  aggHooksProvider?: AggHooksSubgraphProvider;
-  // Set by applyAuroraPoolSources, never here: Aurora wrappers for the extra
-  // sources above (and the mainnet V3 manual read) on Aurora-targeted combos.
-  extraPoolSourceOverrides?: ExtraPoolSourceOverrides;
+  // Set by applyAuroraExtraPoolSources, never here.
+  extraPoolSources?: ExtraPoolSources;
 }
 
-export function createChainProtocols(
-  logger: Logger,
-  metric: IMetric,
-  /**
-   * ctx.fetch-backed transport for the V2/V3/V4 subgraph GraphQL calls.
-   * Omitted (tests, and any caller with no context), graphql-request keeps its
-   * bundled cross-fetch.
-   */
-  subgraphFetchFactory?: SubgraphFetchFactory
-): ChainProtocol[] {
-  // Build an ethers provider for chains that need on-chain pseudoTotalValueLocked calls.
-  // Prefers the v2-internal gateway, like cronService's CCA reads and
+// Order is the cron's batch order: the V3 sets first, then V2, then V4.
+const V3_CHAIN_IDS: readonly ChainId[] = [
+  ChainId.MAINNET,
+  ChainId.ARBITRUM_ONE,
+  ChainId.POLYGON,
+  ChainId.OPTIMISM,
+  ChainId.CELO,
+  ChainId.BNB,
+  ChainId.AVALANCHE,
+  ChainId.BASE,
+  ChainId.BLAST,
+  ChainId.UNICHAIN,
+  ChainId.WORLDCHAIN,
+  ChainId.ZORA,
+  ChainId.SONEIUM,
+  ChainId.MONAD,
+  CHAIN_ID_TEMPO,
+  ChainId.XLAYER,
+  ChainId.LINEA,
+  CHAIN_ID_MEGAETH,
+  CHAIN_ID_ROBINHOOD,
+  CHAIN_ID_ARC,
+  ChainId.INK,
+];
+
+const V2_CHAIN_IDS: readonly ChainId[] = [
+  ChainId.MAINNET,
+  ChainId.ARBITRUM_ONE,
+  ChainId.POLYGON,
+  ChainId.OPTIMISM,
+  ChainId.BNB,
+  ChainId.AVALANCHE,
+  ChainId.BASE,
+  ChainId.BLAST,
+  ChainId.WORLDCHAIN,
+  ChainId.UNICHAIN,
+  ChainId.SONEIUM,
+  ChainId.MONAD,
+  CHAIN_ID_TEMPO,
+  ChainId.XLAYER,
+  ChainId.LINEA,
+  CHAIN_ID_MEGAETH,
+  CHAIN_ID_ROBINHOOD,
+  CHAIN_ID_ARC,
+  ChainId.INK,
+];
+
+const V4_CHAIN_IDS: readonly ChainId[] = [
+  ChainId.SEPOLIA,
+  ChainId.ARBITRUM_ONE,
+  ChainId.BASE,
+  ChainId.POLYGON,
+  ChainId.WORLDCHAIN,
+  ChainId.ZORA,
+  ChainId.UNICHAIN,
+  ChainId.BLAST,
+  ChainId.MAINNET,
+  ChainId.SONEIUM,
+  ChainId.OPTIMISM,
+  ChainId.BNB,
+  ChainId.MONAD,
+  CHAIN_ID_TEMPO,
+  ChainId.XLAYER,
+  ChainId.AVALANCHE,
+  ChainId.CELO,
+  ChainId.LINEA,
+  CHAIN_ID_MEGAETH,
+  CHAIN_ID_ROBINHOOD,
+  CHAIN_ID_ARC,
+  ChainId.INK,
+];
+
+// The chains with an aggregator-hook allowlist. A chain whose list is empty
+// (Base, while PancakeSwapV3's singleton is expired) has no source to read
+// until a replacement is listed. Tempo's hook holds its liquidity outside the
+// PoolManager, so only pools with external liquidity are kept there.
+const AGG_HOOKS_BY_CHAIN: ReadonlyMap<
+  ChainId,
+  Omit<AggHooksPoolSourceConfig, 'ethersProvider'>
+> = new Map([
+  [
+    ChainId.BASE,
+    {hookAddresses: AGG_HOOKS_ON_BASE, useExternalLiquidity: false},
+  ],
+  [
+    ChainId.MAINNET,
+    {hookAddresses: AGG_HOOKS_ON_MAINNET, useExternalLiquidity: false},
+  ],
+  [
+    CHAIN_ID_TEMPO,
+    {hookAddresses: AGG_HOOKS_ON_TEMPO, useExternalLiquidity: true},
+  ],
+]);
+
+export function createChainProtocols(): ChainProtocol[] {
+  // The RPC endpoint for the chains that need on-chain pseudoTotalValueLocked
+  // calls. Prefers the v2-internal gateway, like cronService's CCA reads and
   // DynamicZlcaHooksRefresher: UNI_RPC_ENDPOINT's hostname does not resolve
   // from the cron container (getaddrinfo ENOTFOUND on every pseudoTVL read
   // since 2026-06-16, ROUTE-2067).
   const uniRpcEndpoint =
     process.env.UNI_RPC_V2_INTERNAL_ENDPOINT || process.env.UNI_RPC_ENDPOINT;
-  const mainnetEthersProvider = uniRpcEndpoint
-    ? new ethers.providers.StaticJsonRpcProvider(
-        `${uniRpcEndpoint}/rpc/${ChainId.MAINNET}`,
-        ChainId.MAINNET
-      )
-    : undefined;
-  const baseEthersProvider = uniRpcEndpoint
-    ? new ethers.providers.StaticJsonRpcProvider(
-        `${uniRpcEndpoint}/rpc/${ChainId.BASE}`,
-        ChainId.BASE
-      )
-    : undefined;
-  const tempoEthersProvider = uniRpcEndpoint
-    ? new ethers.providers.StaticJsonRpcProvider(
-        `${uniRpcEndpoint}/rpc/${CHAIN_ID_TEMPO}`,
-        CHAIN_ID_TEMPO
-      )
-    : undefined;
+  const aggHooksFor = (
+    chainId: ChainId
+  ): AggHooksPoolSourceConfig | undefined => {
+    const hooks = AGG_HOOKS_BY_CHAIN.get(chainId);
+    if (!hooks || hooks.hookAddresses.length === 0 || !uniRpcEndpoint) {
+      return undefined;
+    }
+    return {
+      ...hooks,
+      ethersProvider: new ethers.providers.StaticJsonRpcProvider(
+        `${uniRpcEndpoint}/rpc/${chainId}`,
+        chainId
+      ),
+    };
+  };
 
   return [
-    // V3
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.MAINNET,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.MAINNET,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.MAINNET),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.ARBITRUM_ONE,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.ARBITRUM_ONE,
-        5,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.POLYGON,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.POLYGON,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.POLYGON),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.OPTIMISM,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.OPTIMISM,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.OPTIMISM),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.CELO,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.CELO,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.CELO),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.BNB,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.BNB,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.BNB),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.AVALANCHE,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.AVALANCHE,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.AVALANCHE),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.BASE,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.BASE,
-        // Outer retries restart every shard from page one, and this crawl is
-        // ~6 min sharded 8 ways against a 900s per-chain-protocol ceiling
-        // (POOL_CACHING_JOB_TIMEOUT_MS, applied per task in cachePools). Only
-        // one restart can finish inside that budget, so further attempts
-        // cannot produce a snapshot — they only add load to a subgraph that
-        // just failed. Transient pages are retried on their own shard instead
-        // (PAGE_FETCH_RETRIES), which is what makes getting here rare.
-        1,
-        900000,
-        true,
-        v3BaseTrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.BASE),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.BLAST,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.BLAST,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.BLAST),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.UNICHAIN,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.UNICHAIN,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.UNICHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.WORLDCHAIN,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.WORLDCHAIN,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.WORLDCHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.ZORA,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.ZORA,
-        3,
-        360000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.ZORA),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.SONEIUM,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.SONEIUM,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.SONEIUM),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.MONAD,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.MONAD,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.MONAD),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: CHAIN_ID_TEMPO,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        CHAIN_ID_TEMPO,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(CHAIN_ID_TEMPO),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.XLAYER,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.XLAYER,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.XLAYER),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.LINEA,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.LINEA,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.LINEA),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: CHAIN_ID_MEGAETH,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        CHAIN_ID_MEGAETH,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(CHAIN_ID_MEGAETH),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: CHAIN_ID_ROBINHOOD,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        CHAIN_ID_ROBINHOOD,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: CHAIN_ID_ARC,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        CHAIN_ID_ARC,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(CHAIN_ID_ARC),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V3,
-      chainId: ChainId.INK,
-      timeout: 90000,
-      provider: new V3SubgraphProvider(
-        ChainId.INK,
-        3,
-        90000,
-        true,
-        v3TrackedEthThreshold,
-        v3UntrackedUsdThreshold,
-        v3SubgraphUrlOverride(ChainId.INK),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    // V2
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.MAINNET,
-      timeout: 1200000,
-      provider: new V2SubgraphProvider(
-        ChainId.MAINNET,
-        5,
-        1200000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.MAINNET),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.ARBITRUM_ONE,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.ARBITRUM_ONE,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.POLYGON,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.POLYGON,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.POLYGON),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.OPTIMISM,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.OPTIMISM,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.OPTIMISM),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.BNB,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.BNB,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.BNB),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.AVALANCHE,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.AVALANCHE,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.AVALANCHE),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.BASE,
-      timeout: 840000,
-      provider: new V2SubgraphProvider(
-        ChainId.BASE,
-        5,
-        900000,
-        true,
-        3000,
-        v2BaseTrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.BASE),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.BLAST,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.BLAST,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.BLAST),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.WORLDCHAIN,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.WORLDCHAIN,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.WORLDCHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.UNICHAIN,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.UNICHAIN,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.UNICHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.SONEIUM,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.SONEIUM,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.SONEIUM),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.MONAD,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.MONAD,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.MONAD),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: CHAIN_ID_TEMPO,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        CHAIN_ID_TEMPO,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(CHAIN_ID_TEMPO),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.XLAYER,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.XLAYER,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.XLAYER),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.LINEA,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.LINEA,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.LINEA),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: CHAIN_ID_MEGAETH,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        CHAIN_ID_MEGAETH,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(CHAIN_ID_MEGAETH),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: CHAIN_ID_ROBINHOOD,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        CHAIN_ID_ROBINHOOD,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: CHAIN_ID_ARC,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        CHAIN_ID_ARC,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(CHAIN_ID_ARC),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V2,
-      chainId: ChainId.INK,
-      timeout: 90000,
-      provider: new V2SubgraphProvider(
-        ChainId.INK,
-        3,
-        90000,
-        true,
-        1000,
-        v2TrackedEthThreshold,
-        v2UntrackedUsdThreshold,
-        v2SubgraphUrlOverride(ChainId.INK),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    // V4
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.SEPOLIA,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.SEPOLIA,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.SEPOLIA),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.ARBITRUM_ONE,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.ARBITRUM_ONE,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.ARBITRUM_ONE),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.BASE,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.BASE,
-        3,
-        90000,
-        true,
-        v4BaseTrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.BASE),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-      // Base lists no agg hooks while PancakeSwapV3's singleton is expired,
-      // so there is no source to read until a replacement is listed.
-      aggHooksProvider:
-        baseEthersProvider && AGG_HOOKS_ON_BASE.length > 0
-          ? new AggHooksSubgraphProvider(
-              ChainId.BASE,
-              AGG_HOOKS_ON_BASE,
-              baseEthersProvider,
-              3,
-              90000,
-              true,
-              v4SubgraphUrlOverride(ChainId.BASE),
-              process.env.GRAPH_BEARER_TOKEN,
-              logger,
-              metric,
-              false, // useExternalLiquidity (default) — positional, precedes the transport
-              subgraphFetchFactory
-            )
-          : undefined,
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.POLYGON,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.POLYGON,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.POLYGON),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.WORLDCHAIN,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.WORLDCHAIN,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.WORLDCHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.ZORA,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.ZORA,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.ZORA),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.UNICHAIN,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.UNICHAIN,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.UNICHAIN),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-      eulerHooksProvider: new EulerSwapHooksSubgraphProvider(
-        ChainId.UNICHAIN,
-        3,
-        90000,
-        true,
-        v4SubgraphUrlOverride(ChainId.UNICHAIN),
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.BLAST,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.BLAST,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.BLAST),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.MAINNET,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.MAINNET,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.MAINNET),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-      eulerHooksProvider: new EulerSwapHooksSubgraphProvider(
-        ChainId.MAINNET,
-        3,
-        90000,
-        true,
-        v4SubgraphUrlOverride(ChainId.MAINNET),
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-      aggHooksProvider: mainnetEthersProvider
-        ? new AggHooksSubgraphProvider(
-            ChainId.MAINNET,
-            AGG_HOOKS_ON_MAINNET,
-            mainnetEthersProvider,
-            3,
-            90000,
-            true,
-            v4SubgraphUrlOverride(ChainId.MAINNET),
-            undefined,
-            logger,
-            metric,
-            false, // useExternalLiquidity (default) — positional, precedes the transport
-            subgraphFetchFactory
-          )
-        : undefined,
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.SONEIUM,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.SONEIUM,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.SONEIUM),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.OPTIMISM,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.OPTIMISM,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.OPTIMISM),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.BNB,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.BNB,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.BNB),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.MONAD,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.MONAD,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.MONAD),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: CHAIN_ID_TEMPO,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        CHAIN_ID_TEMPO,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(CHAIN_ID_TEMPO),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-      aggHooksProvider: tempoEthersProvider
-        ? new AggHooksSubgraphProvider(
-            CHAIN_ID_TEMPO,
-            AGG_HOOKS_ON_TEMPO,
-            tempoEthersProvider,
-            3,
-            90000,
-            true,
-            v4SubgraphUrlOverride(CHAIN_ID_TEMPO),
-            process.env.GOLD_SKY_BEARER_TOKEN,
-            logger,
-            metric,
-            true,
-            subgraphFetchFactory
-          )
-        : undefined,
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.XLAYER,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.XLAYER,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.XLAYER),
-        process.env.GRAPH_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.AVALANCHE,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.AVALANCHE,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.AVALANCHE),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.CELO,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.CELO,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.CELO),
-        undefined,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.LINEA,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.LINEA,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.LINEA),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: CHAIN_ID_MEGAETH,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        CHAIN_ID_MEGAETH,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(CHAIN_ID_MEGAETH),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: CHAIN_ID_ROBINHOOD,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        CHAIN_ID_ROBINHOOD,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(CHAIN_ID_ROBINHOOD),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: CHAIN_ID_ARC,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        CHAIN_ID_ARC,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(CHAIN_ID_ARC),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
-    {
-      protocol: Protocol.V4,
-      chainId: ChainId.INK,
-      timeout: 90000,
-      provider: new V4SubgraphProvider(
-        ChainId.INK,
-        3,
-        90000,
-        true,
-        v4TrackedEthThreshold,
-        v4UntrackedUsdThreshold,
-        v4SubgraphUrlOverride(ChainId.INK),
-        process.env.GOLD_SKY_BEARER_TOKEN,
-        logger,
-        metric,
-        subgraphFetchFactory
-      ),
-    },
+    ...V3_CHAIN_IDS.map(chainId => ({protocol: Protocol.V3, chainId})),
+    ...V2_CHAIN_IDS.map(chainId => ({protocol: Protocol.V2, chainId})),
+    ...V4_CHAIN_IDS.map((chainId): ChainProtocol => {
+      const aggHooks = aggHooksFor(chainId);
+      return aggHooks
+        ? {protocol: Protocol.V4, chainId, aggHooks}
+        : {protocol: Protocol.V4, chainId};
+    }),
   ];
 }

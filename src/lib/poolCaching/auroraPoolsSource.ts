@@ -1,26 +1,21 @@
 /**
- * Aurora-backed pool source for the pool-caching cron (subgraph → Aurora
- * migration). Replaces SubgraphProvider.getPools() behind env-flagged
- * targets; everything downstream of getPools() (hooks filtering, S3 snapshot
- * format, serving path) is unchanged.
+ * The pool-caching cron's pool source: every chain x protocol combo reads
+ * its pools from data-ingestion Aurora through the providers here, and
+ * everything downstream of getPools() (hooks filtering, S3 snapshot format,
+ * serving path) reads the result as the subgraph-shaped pools it always did.
  *
  * SCOPE: hard-limited to the cron's V2 + V3 + V4 matrix
- * (AURORA_SUPPORTED_TARGETS). Env
- * targets outside the allowlist are ignored with a metric, so even a `*`
- * flag cannot enable other chains/protocols without a code change.
+ * (AURORA_SUPPORTED_TARGETS), which mirrors createChainProtocols; a combo
+ * outside it is skipped with a metric.
  *
- * Modes:
- *   - shadow:  subgraph result stays authoritative (written to S3); Aurora is
- *              fetched concurrently and diffed, parity metrics emitted.
- *   - primary: Aurora result is served; on Aurora error, empty result, a
- *              pool count below the per-target absolute floor
- *              (minPoolCountByTarget), or a count collapsing below
- *              minPoolCountRatio × the previous run's count, the run falls
- *              back to the subgraph provider — surviving an Aurora outage
- *              needs no deploy. The absolute floor is what protects the FIRST
- *              tick after a process start: the ratio guard's baseline is
- *              in-memory, so without a floor a mass-inadmission result (e.g.
- *              price-pipeline outage) would be accepted as the new baseline.
+ * A read has no second source. On an Aurora error, an empty result, a pool
+ * count below the per-target absolute floor (minPoolCountByTarget), or a
+ * count collapsing below minPoolCountRatio x the previous run's count, the
+ * read is rejected: the combo writes no snapshot that tick and routing keeps
+ * serving the previous one. The absolute floor is what protects the FIRST
+ * tick after a process start: the ratio guard's baseline is in-memory, so
+ * without a floor a mass-inadmission result (e.g. price-pipeline outage)
+ * would be accepted as the new baseline.
  */
 
 import * as fs from 'fs';
@@ -62,18 +57,14 @@ import {
 } from './sor-providers';
 import {V4_MIN_TVL_ETH} from './sor-providers/subgraphProvider';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
-import {getDynamicZlcaHooks} from './util/dynamicZlcaHooks';
 import {getMajorTokens} from './util/majorTokens';
-import {v4HooksPoolsFiltering} from './util/v4HooksPoolsFiltering';
 import {ChainId as SdkChainId} from '@uniswap/sdk-core';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {
   applyAuroraExtraPoolSources,
-  auroraExtraSourceConfigFromEnv,
   type AuroraExtraSourceDeps,
   type ExtraSourceChainProtocol,
-  reportInertExtraSourceTargets,
 } from './auroraExtraPoolSources';
 import {ARBITRUM} from '../../stores/chain/hardcoded/chains/Arbitrum';
 import {ARC} from '../../stores/chain/hardcoded/chains/Arc';
@@ -97,23 +88,6 @@ import {UNICHAIN} from '../../stores/chain/hardcoded/chains/Unichain';
 import {WORLDCHAIN} from '../../stores/chain/hardcoded/chains/WorldChain';
 import {XLAYER} from '../../stores/chain/hardcoded/chains/XLayer';
 import {ZORA} from '../../stores/chain/hardcoded/chains/Zora';
-
-// Observability sinks for the servable-parity re-run of the serving filter:
-// the REAL filter run (cachePools) owns the filter's metrics/logs; the parity
-// re-run must not double-emit them.
-const NOOP_LOGGER: Logger = {
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  debug: () => {},
-  fatal: () => {},
-};
-class NoopMetric extends IMetric {
-  putDimensions(): void {}
-  putMetric(): void {}
-  setProperty(): void {}
-}
-const NOOP_METRIC = new NoopMetric();
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
@@ -166,8 +140,8 @@ const USDG_ON_ROBINHOOD = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
 // yet). Restricting the propagation SOURCE to these chain quote assets
 // mirrors the subgraph's whitelist concept: a meme priced off another meme's
 // pool must not mint implied TVL. Per-chain opt-in requires verifying that
-// chain's deployed subgraph whitelist and minimumNativeLocked semantics; new
-// chains intentionally launch without it and shadow parity decides if needed.
+// chain's deployed subgraph whitelist and minimumNativeLocked semantics, so
+// new chains launch without it.
 // V4 only: the V3 provider does not apply it (see AuroraV3PoolsProvider).
 export const IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN: {
   [chainId: number]: ReadonlySet<string>;
@@ -222,7 +196,7 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
 ];
 
 // Combos whose full read exceeds the statement timeout. They are read only
-// with the pool_stats pre-filter; without it they stay on the subgraph.
+// with the pool_stats pre-filter; listed without it, they are skipped.
 const TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set([
   '130:V2',
   '8453:V2',
@@ -235,13 +209,13 @@ const TARGETS_REQUIRING_PREFILTER: ReadonlySet<string> = new Set([
 // in pool_stats). On an ETH-native chain such as these, tracked V2 admission needs
 // over 0.025 native, far above $1. On a chain whose native token is cheap,
 // that admission floor can sit below $1, and pool_stats can undervalue a
-// pair on any chain. So each combo's shadow parity must measure coverage
-// before it is listed, and before it serves from this lossy read. V3 and V4
+// pair on any chain. So a combo is listed for this lossy read only where
+// its full read cannot fit the timeout. V3 and V4
 // use the same $1 floor. V2 always includes FEI (and VIRTUAL on Base)
 // because its admission has token-based families. V3 and V4 admission has
 // no token-based family, so they include no tokens, and V4 keeps its
 // always-include hooks instead. The floor does drop V3's exact_zero family
-// (refusePrefilteredV3Primary).
+// (reportPrefilteredV3WithoutUnpriced).
 const PREFILTER_MIN_POOL_STATS_TVL_USD = 1;
 const V2_FEI_TOKEN = '0x956f47f50a910163d8bf957cf5846d573e7f87ca';
 const V2_BASE_VIRTUAL_TOKEN = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b';
@@ -260,8 +234,6 @@ export const AURORA_SUPPORTED_TARGETS: ReadonlySet<string> = new Set(
 
 // --- Config ---
 
-export type AuroraTargetMode = 'shadow' | 'primary';
-
 // Why a `*` in the guard targets was rejected: the environment says prod, or
 // no environment source is set at all.
 export type TvlGuardWildcardRejection =
@@ -278,8 +250,6 @@ export type PrefilterUnpricedRejection =
 
 export interface AuroraPoolsSourceConfig {
   // 'all' (env value "*") or a set of `${chainId}:${PROTOCOL}` keys.
-  shadowTargets: 'all' | ReadonlySet<string>;
-  primaryTargets: 'all' | ReadonlySet<string>;
   tvlGuardTargets: 'all' | ReadonlySet<string>;
   prefilterTargets: ReadonlySet<string>;
   // A lossy pre-filter requires explicit per-combo selection.
@@ -291,24 +261,17 @@ export interface AuroraPoolsSourceConfig {
   // pool_stats_v3_chain_unpriced_idx is valid.
   prefilterUnpricedTargets: ReadonlySet<string>;
   prefilterUnpricedRejected: ReadonlyMap<string, PrefilterUnpricedRejection>;
-  // Primary combos that also fetch the subgraph in the background and diff
-  // it against the served Aurora pools, so a guarded primary ranking keeps a
-  // parity signal. Explicit keys only: a wildcard would send every primary
-  // combo back to the subgraph, so `*` is ignored.
-  primaryParityTargets: ReadonlySet<string>;
-  primaryParityWildcardIgnored: boolean;
-  // Prod enables the guard per combo after its shadow soak; rejecting `*`
-  // keeps an all-combo typo in shadow everywhere and makes it observable.
+  // Prod enables the guard per combo; rejecting `*` keeps an all-combo typo
+  // from guarding every lane at once and makes it observable.
   tvlGuardTargetsWildcardRejection: TvlGuardWildcardRejection | undefined;
   minPoolCountRatio: number;
-  // Absolute per-target pool-count floor for PRIMARY mode, keyed by
-  // targetKey(). A primary result below its floor is rejected for that tick
-  // (the previous snapshot keeps serving) and never becomes the ratio guard's
-  // baseline. Targets
-  // without an entry are never served in primary mode. An entry (or the whole
-  // env) that failed to parse also downgrades to shadow — same fail-closed
-  // outcome as an absent entry — but under a distinct misconfiguration metric
-  // so a typo stays distinguishable from a deliberate absence.
+  // Absolute per-target pool-count floor, keyed by targetKey(). A result
+  // below its floor is rejected for that tick (the previous snapshot keeps
+  // serving) and never becomes the ratio guard's baseline. A target without
+  // an entry is served on the ratio guard alone and reported every tick
+  // (resolveMinPoolCount); an entry (or the whole env) that failed to parse
+  // is reported under a distinct metric so a typo stays distinguishable from
+  // a deliberate absence.
   minPoolCountByTarget: ReadonlyMap<string, number>;
   minPoolCountFloorInvalidKeys: ReadonlySet<string>;
   minPoolCountFloorUnparseable: boolean;
@@ -359,15 +322,13 @@ function parsePrefilterUnpricedTargets(
 export function parseMinPoolCountByTarget(raw: string | undefined): {
   byTarget: ReadonlyMap<string, number>;
   // Targets whose ENTRY existed but had a malformed value. Behaviorally an
-  // invalid entry downgrades the target to shadow exactly like an absent one
-  // (fail closed — a floorless primary is unprotected on the first
-  // post-deploy tick), but it is tracked separately so a typo stays
-  // distinguishable from a deliberate absence in metrics/alerting. Kept
-  // per-key so one bad entry cannot affect any OTHER target
-  // (security-gate finding on #12440).
+  // invalid entry leaves the target floorless exactly like an absent one,
+  // but it is tracked separately so a typo stays distinguishable from a
+  // deliberate absence in metrics/alerting. Kept per-key so one bad entry
+  // cannot affect any OTHER target (security-gate finding on #12440).
   invalidKeys: ReadonlySet<string>;
   // The whole env failed to parse (bad JSON / non-object): key names are
-  // unknowable, so every primary target is treated as invalid-entry.
+  // unknowable, so every target is treated as invalid-entry.
   unparseable: boolean;
 } {
   const byTarget = new Map<string, number>();
@@ -382,9 +343,9 @@ export function parseMinPoolCountByTarget(raw: string | undefined): {
     return {byTarget, invalidKeys, unparseable: true};
   }
   // Arrays pass the object check but read as {"0": value, ...} — index keys
-  // would land primary targets in primary_without_floor instead of
+  // would land targets in primary_without_floor instead of
   // primary_floor_config_invalid, and #12443's monitor keys off that
-  // distinction. Same fail-closed outcome either way; keep the metric honest.
+  // distinction. Same outcome either way; keep the metric honest.
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     return {byTarget, invalidKeys, unparseable: true};
   }
@@ -399,19 +360,13 @@ export function parseMinPoolCountByTarget(raw: string | undefined): {
   return {byTarget, invalidKeys, unparseable: false};
 }
 
-// Returns undefined when neither target env is set — the feature is fully off
-// and no Aurora client is created.
 export function auroraPoolsSourceConfigFromEnv(
   environments: readonly (string | undefined)[] = [
     process.env.DD_ENV,
     process.env.ENVIRONMENT,
     process.env.ENV,
   ]
-): AuroraPoolsSourceConfig | undefined {
-  const shadowRaw = process.env.POOL_CACHING_AURORA_SHADOW_TARGETS;
-  const primaryRaw = process.env.POOL_CACHING_AURORA_PRIMARY_TARGETS;
-  if (!shadowRaw && !primaryRaw) return undefined;
-
+): AuroraPoolsSourceConfig {
   const ratioRaw = process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_RATIO;
   const floorConfig = parseMinPoolCountByTarget(
     process.env.POOL_CACHING_AURORA_MIN_POOL_COUNT_BY_TARGET
@@ -435,20 +390,11 @@ export function auroraPoolsSourceConfigFromEnv(
     process.env.POOL_CACHING_AURORA_PREFILTER_UNPRICED_TARGETS,
     prefilterTargets
   );
-  const parsedPrimaryParityTargets = parseTargets(
-    process.env.POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS
-  );
-  const primaryParityWildcardIgnored =
-    parsedPrimaryParityTargets === 'all' || parsedPrimaryParityTargets.has('*');
-  const primaryParityTargets =
-    parsedPrimaryParityTargets === 'all'
-      ? new Set<string>()
-      : new Set([...parsedPrimaryParityTargets].filter(key => key !== '*'));
   const setEnvironments = environments
     .map(value => value?.trim().toLowerCase())
     .filter((value): value is string => Boolean(value));
-  // This safety gate keeps a wildcard in shadow when the environment is
-  // unknown or any source says prod, including conflicting env values.
+  // This safety gate ignores a wildcard when the environment is unknown or
+  // any source says prod, including conflicting env values.
   const tvlGuardTargetsWildcardRejection:
     | TvlGuardWildcardRejection
     | undefined =
@@ -460,8 +406,6 @@ export function auroraPoolsSourceConfigFromEnv(
           ? 'wildcard_unknown_environment'
           : undefined;
   return {
-    shadowTargets: parseTargets(shadowRaw),
-    primaryTargets: parseTargets(primaryRaw),
     tvlGuardTargets: tvlGuardTargetsWildcardRejection
       ? new Set()
       : parsedTvlGuardTargets,
@@ -469,8 +413,6 @@ export function auroraPoolsSourceConfigFromEnv(
     prefilterWildcardIgnored,
     prefilterUnpricedTargets: prefilterUnpriced.targets,
     prefilterUnpricedRejected: prefilterUnpriced.rejected,
-    primaryParityTargets,
-    primaryParityWildcardIgnored,
     tvlGuardTargetsWildcardRejection,
     minPoolCountRatio:
       Number.isFinite(parsedRatio) && parsedRatio > 0 && parsedRatio <= 1
@@ -482,93 +424,79 @@ export function auroraPoolsSourceConfigFromEnv(
   };
 }
 
-export function resolveAuroraMode(
-  config: AuroraPoolsSourceConfig,
-  chainId: number,
-  protocol: Protocol
-): AuroraTargetMode | undefined {
-  const key = targetKey(chainId, protocol);
-  const inTargets = (targets: 'all' | ReadonlySet<string>) =>
-    targets === 'all' || targets.has(key);
-  // primary wins when a combo is (mis)listed in both.
-  if (inTargets(config.primaryTargets)) return 'primary';
-  if (inTargets(config.shadowTargets)) return 'shadow';
-  return undefined;
-}
-
-export function resolveAuroraModeWithPrimaryFloor(
+// The absolute floor a combo is served under, or undefined when it has none.
+// The floor is what protects the first tick after a process start, when the
+// ratio guard has no baseline, so a combo without a usable entry is reported
+// on every tick (uniroute_pool_cache_aurora_floor_misconfig). It is still
+// served, on the ratio guard alone: the read has no second source, and a
+// snapshot that never refreshes is the worse outcome. A malformed entry, or
+// an unparseable env, is reported under its own metric so a typo stays
+// distinguishable from a deliberate absence.
+export function resolveMinPoolCount(
   config: AuroraPoolsSourceConfig,
   chainId: number,
   protocol: Protocol,
   logger: Logger,
   metric: IMetric
-): AuroraTargetMode | undefined {
-  const mode = resolveAuroraMode(config, chainId, protocol);
+): number | undefined {
   const key = targetKey(chainId, protocol);
-  if (mode !== 'primary' || config.minPoolCountByTarget.has(key)) return mode;
+  const floor = config.minPoolCountByTarget.get(key);
+  if (floor !== undefined) return floor;
+  const tags = {chainId: String(chainId), protocol: String(protocol)};
   if (
     config.minPoolCountFloorUnparseable ||
     config.minPoolCountFloorInvalidKeys.has(key)
   ) {
-    // FAIL CLOSED (review round on #12440): a primary target whose floor
-    // entry (or the whole env) failed to parse downgrades to shadow, same
-    // as an absent entry. Keeping primary here would drop the exact
-    // protection the floor exists for — the first tick after a deploy,
-    // where the ratio guard has no baseline. The cost of the downgrade is
-    // one deploy cycle of freshness; the distinct metric below keeps a typo
-    // distinguishable from a deliberate absence for the #12443 monitor.
     logger.warn(
-      `Aurora pool source primary_floor_config_invalid for ${key} — downgrading to shadow`
+      `Aurora pool source primary_floor_config_invalid for ${key} — serving on the ratio guard alone`
     );
     metric.putMetric(
       'CachePools.aurora.primary_floor_config_invalid',
       1,
       MetricLoggerUnit.Count,
-      {chainId: String(chainId), protocol: String(protocol)}
+      tags
     );
-    return 'shadow';
+    return undefined;
   }
   logger.warn(
-    `Aurora pool source primary_without_floor for ${key} — downgrading to shadow`
+    `Aurora pool source primary_without_floor for ${key} — serving on the ratio guard alone`
   );
   metric.putMetric(
     'CachePools.aurora.primary_without_floor',
     1,
     MetricLoggerUnit.Count,
-    {chainId: String(chainId), protocol: String(protocol)}
+    tags
   );
-  return 'shadow';
+  return undefined;
 }
 
 // A V3 combo read through the pool_stats pre-filter never sees the
 // exact_zero family (liquidity > 0 with no priced TVL): those pools have a
 // null or zero pool_stats.tvl_usd, so the candidate query drops them, and no
 // index on pool_stats reaches them without a sequential scan (Base V3 holds
-// ~299k). Top-100 parity cannot see the loss because those pools never rank,
-// so such a combo stays shadow-only unless it also reads that family
-// (prefilterUnpricedTargets).
-export function refusePrefilteredV3Primary(
-  mode: AuroraTargetMode,
+// ~299k). The combo is served from that read regardless, since there is no
+// other, and the gap is reported on every tick until the combo is listed in
+// prefilterUnpricedTargets. Returns true when it was reported.
+export function reportPrefilteredV3WithoutUnpriced(
   config: AuroraPoolsSourceConfig,
   chainId: number,
   protocol: Protocol,
   logger: Logger,
   metric: IMetric
-): AuroraTargetMode {
+): boolean {
   const key = targetKey(chainId, protocol);
   if (
-    mode !== 'primary' ||
     protocol !== Protocol.V3 ||
     !config.prefilterTargets.has(key) ||
     config.prefilterUnpricedTargets.has(key)
   ) {
-    return mode;
+    return false;
   }
   logger.warn(
-    `Aurora pool source ${key} is pre-filtered, which drops the V3 exact_zero family — downgrading to shadow`
+    `Aurora pool source ${key} is pre-filtered without its unpriced liquid pools — serving without the V3 exact_zero family`
   );
   metric.putMetric(
-    'CachePools.aurora.primary_refused',
+    'CachePools.aurora.prefilter_unpriced_missing',
     1,
     MetricLoggerUnit.Count,
     {
@@ -577,7 +505,7 @@ export function refusePrefilteredV3Primary(
       reason: 'prefilter_drops_exact_zero',
     }
   );
-  return 'shadow';
+  return true;
 }
 
 // --- Connection (mirrors liquidity's createDeployedDataIngestionDbIfConfigured) ---
@@ -938,48 +866,32 @@ export interface FetchSlots {
 // poolCachingBatchSize is 50 but Aurora's shared Kysely pool is deliberately
 // small. Limit full-set reads to three, below the pool's four connections, so
 // Robinhood's fast job keeps a checkout even during the all-chains sweep.
-// A freed slot goes to the oldest normal waiter first; low-priority waiters
-// only get a slot when no normal waiter is queued.
+// A freed slot goes to the oldest waiter.
 export class AsyncSemaphore implements FetchSlots {
   private inFlight = 0;
   private readonly waiters: Array<() => void> = [];
-  private readonly lowPriorityWaiters: Array<() => void> = [];
 
   constructor(private readonly concurrency: number) {}
 
-  async acquire(lowPriority = false): Promise<() => void> {
+  async acquire(): Promise<() => void> {
     if (this.inFlight < this.concurrency) {
       this.inFlight++;
     } else {
-      const queue = lowPriority ? this.lowPriorityWaiters : this.waiters;
-      await new Promise<void>(resolve => queue.push(resolve));
+      await new Promise<void>(resolve => this.waiters.push(resolve));
     }
 
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const next = this.waiters.shift() ?? this.lowPriorityWaiters.shift();
+      const next = this.waiters.shift();
       if (next) next();
       else this.inFlight--;
     };
   }
 
   async run<T>(work: () => Promise<T>): Promise<T> {
-    return this.runAcquired(await this.acquire(), work);
-  }
-
-  /** The same slots, queued behind every normal-priority waiter. */
-  lowPriority(): FetchSlots {
-    return {
-      run: async work => this.runAcquired(await this.acquire(true), work),
-    };
-  }
-
-  private async runAcquired<T>(
-    release: () => void,
-    work: () => Promise<T>
-  ): Promise<T> {
+    const release = await this.acquire();
     try {
       return await work();
     } finally {
@@ -994,11 +906,6 @@ export class AsyncSemaphore implements FetchSlots {
 // connection and starve the fast Robinhood job, review round on #12440).
 // Scoped fast-job runs bypass it entirely (fetchSemaphore left unset).
 export const AURORA_FETCH_SEMAPHORE = new AsyncSemaphore(3);
-
-// Shadow comparisons settle after their cron job has returned, so a sweep's
-// shadow reads can still be queued when the registry step, or the next
-// sweep's primary reads, need a slot. Low priority lets those go first.
-const AURORA_SHADOW_FETCH_SLOTS = AURORA_FETCH_SEMAPHORE.lowPriority();
 
 export interface AuroraV4AdmissionDeps {
   permissionedHookAddresses(chainId: number): Iterable<string>;
@@ -1044,8 +951,8 @@ function volumeCreditedTvlUsd(
 // wrapped native, no price row, or a row older than
 // NATIVE_PRICE_MAX_STALENESS_MS). batchGet returns whatever row exists
 // regardless of age; a frozen price would silently skew every TVL floor and
-// tvlETH, so stale is treated as missing (a throw makes primary mode fall
-// back to the subgraph).
+// tvlETH, so stale is treated as missing (a throw rejects the read and the
+// previous snapshot keeps serving).
 export async function fetchNativeUsdPrice(
   prices: CurrentTokenPricesService,
   chainId: number,
@@ -1353,8 +1260,7 @@ export class AuroraV4PoolsProvider
     // a large share of pools hold nothing, and reading them all can approach
     // the statement timeout. Where that still isn't enough (Base), the
     // pool_stats pre-filter below trades some of this family's admission
-    // coverage for a read that fits the timeout at all — shadow parity
-    // measures what it drops.
+    // coverage for a read that fits the timeout at all.
     //
     // The native-price lookup rides the SAME fetch slot: a provider must hold
     // at most one pool connection at a time, or dozens of concurrent price
@@ -1381,8 +1287,8 @@ export class AuroraV4PoolsProvider
       ),
     }));
 
-    // Subgraph V4 admission = union of four query families
-    // (sor-providers/subgraphProvider.ts getPools):
+    // Subgraph V4 admission, replicated: the union of the smart-order-router
+    // V4 subgraph provider's four query families:
     //   (a) tvlETH > trackedEthThreshold
     //   (b) liquidity > 0 AND tvlETH > V4_MIN_TVL_ETH
     //   (c) hooks ∈ TVL-bypass registries (no floor)
@@ -1522,8 +1428,7 @@ export class AuroraV4PoolsProvider
       if (!family) continue;
       admittedByFamily[family]++;
       // Count only admission FLIPS — pools rescued by the top-up, not every
-      // pool where the code path fired. This is the number the shadow
-      // readout compares against the missing-pool gap.
+      // pool where the code path fired.
       if (
         impliedUsd > 0 &&
         !admissionFamily(
@@ -1618,7 +1523,7 @@ export class AuroraV4PoolsProvider
 }
 
 // V3 analog: same fetch-full-set + TS admission replication, mirroring the
-// V3 subgraph query families (sor-providers/subgraphProvider.ts getPools):
+// smart-order-router V3 subgraph provider's query families:
 //   (a) tvlETH > trackedEthThreshold
 //   (b) liquidity > 0 AND tvlETH == 0 ("V3 zero ETH pools": live liquidity
 //       the subgraph cannot value in tracked terms — an EXACT-zero match,
@@ -1628,9 +1533,9 @@ export class AuroraV4PoolsProvider
 //
 // No implied one-hop top-up, unlike V4. On Robinhood V3 it valued the meme
 // side of hundreds of thousands of dead launchpad pools at spot, each holding
-// a few dollars of WETH, so the top-up alone lifted them past family (a): prod
-// shadow admitted ~378k pools against the subgraph's ~33.6k, ~347k of them
-// only through the top-up. The subgraph's derivedETH does not price a token
+// a few dollars of WETH, so the top-up alone lifted them past family (a): on
+// prod it admitted ~378k pools against the subgraph's ~33.6k, ~347k of them
+// only through the top-up. The subgraph's derivedETH did not price a token
 // from a pool that thin, so the priced-side TVL alone is the closer replica.
 export class AuroraV3PoolsProvider
   extends BaseAuroraPoolsProvider<'listAllV3RoutablePools'>
@@ -1650,8 +1555,9 @@ export class AuroraV3PoolsProvider
   }
 
   // The lib refuses an unpriced read whose index is missing or invalid. The
-  // error still propagates, so a primary tick serves the subgraph, which
-  // carries the exact_zero family, rather than a read that drops it.
+  // error still propagates, so the tick rejects the read and keeps the
+  // previous snapshot, which carries the exact_zero family, rather than
+  // serving a read that drops it.
   private async listPools(ctx: Context) {
     try {
       return await this.deps.routablePools.listAllV3RoutablePools(ctx, {
@@ -1781,10 +1687,9 @@ export class AuroraV3PoolsProvider
   }
 }
 
-// V2 mirrors V2SubgraphProvider's four query families in their original
-// priority order. Aurora prices both reserve sides, which is the closest
-// equivalent to the subgraph's tracked reserve; shadow parity per chain is
-// the judge of any remaining divergence.
+// V2 mirrors the subgraph V2 provider's four query families in their
+// original priority order. Aurora prices both reserve sides, which is the
+// closest equivalent to the subgraph's tracked reserve.
 export class AuroraV2PoolsProvider
   extends BaseAuroraPoolsProvider<'listAllV2RoutablePools'>
   implements ISubgraphProvider<V2SubgraphPool>
@@ -1910,7 +1815,7 @@ export class AuroraV2PoolsProvider
           pool.token0HasStalePrice &&
           parsePositiveLiquidity(pool.reserve0));
       // One rule for the served value and both guard-metric values, so the
-      // shadow metrics rank exactly what would be served.
+      // guard metrics rank exactly what is served.
       const reserveUsdOf = (pricedUsd: number) =>
         staleSideImplied ? 2 * pricedUsd : pricedUsd;
       const untrackedUsd = reserveUsdOf(pricedTvlUsd);
@@ -2054,6 +1959,10 @@ export function impliedOneHopTvlUsd(
 
 // --- Junk-price TVL guard ---
 
+// Ids per diagnostic sample in the guard's displacement log: enough to look
+// the displaced pools up by hand, small enough to keep the log line bounded.
+const SAMPLE_SIZE = 5;
+
 // A pool's priced-side TVL may be at most this many times its smaller priced
 // side, plus that side. Prod `current_token_prices` carries fresh but absurd
 // prices for junk tokens, and a pool pairing one with a near-empty real side
@@ -2141,8 +2050,8 @@ export function tvlGuardAnchorTokens(
 }
 
 /**
- * Bounds the raw SQL priced-side TVL when applied; callers also run this in
- * shadow to measure its effect while serving raw TVL.
+ * Bounds the raw SQL priced-side TVL when applied; callers also run this
+ * unapplied to measure its effect while serving raw TVL.
  *
  * A side counts as priced only when its computed value is at least $1. With
  * two priced sides, trust the raw TVL when both tokens are anchors: two
@@ -2227,184 +2136,9 @@ function parsePositiveLiquidity(liquidity: string): boolean {
   }
 }
 
-// --- Parity diff (shadow mode) ---
+// --- Guarded provider (the seam installed into ChainProtocol.provider) ---
 
 type AnySubgraphPool = V2SubgraphPool | V3SubgraphPool | V4SubgraphPool;
-
-function poolTvlUsd(pool: AnySubgraphPool): number {
-  return 'tvlUSD' in pool ? pool.tvlUSD : pool.reserveUSD;
-}
-
-export interface PoolParity {
-  subgraphCount: number;
-  auroraCount: number;
-  jaccardBps: number;
-  missingTop100: number;
-  // missingTop100 over the subgraph pools that hold liquidity. The subgraph
-  // keeps reporting TVL for pools emptied long ago and ranks them by it, so
-  // missingTop100 also counts pools with nothing to route through. V2 pools
-  // carry no liquidity field and all count as live, and so do pools of a
-  // TVL-bypass hook, whose liquidity sits outside the PoolManager and reads 0
-  // however much the hook holds.
-  // Blind spots: `liquidity` is in-range liquidity, so a pool whose positions
-  // are all out of range counts as not live even when it holds two-sided
-  // value, and a pool drained to dust stays live. missingTop100 keeps the
-  // unfiltered view next to it.
-  missingTop100Live: number;
-  // The pools behind missingTop100Live (at most 100), lowercase, in subgraph
-  // TVL order. A flip gate values every one, so unlike the samples below it
-  // is not truncated.
-  missingTop100LiveIds: string[];
-  missingInAurora: number;
-  extraInAurora: number;
-  // The reverse of missingTop100: how many of Aurora's top 100 pools by TVL
-  // the subgraph set does not contain. missingTop100 cannot see a pool that
-  // only Aurora admits, so a junk-priced Aurora-only pool at the top of the
-  // ranking leaves it at 0. Blind spot: a pool both sources hold but that
-  // Aurora ranks far higher (a mispriced shared pool) counts in neither.
-  extraTop100: number;
-  tvlDriftBpsP50: number;
-  // tvlDriftBpsP50 over the matched pools in the subgraph's top 100 by TVL.
-  // On a chain with a large long tail, dust pools set the full median, so it
-  // says little about the pools that ranking picks. Blind spots: it ranks by
-  // the subgraph's TVL, so a pool Aurora alone ranks high is not in it (see
-  // extraTop100). Undefined when no top-100 pool has a drift sample (no
-  // match, or a subgraph TVL of 0), so an empty sample never reads as parity.
-  tvlDriftBpsTop100P50: number | undefined;
-  // Diagnostic samples so a parity gap is classifiable from logs alone:
-  // top-TVL pool ids the subgraph has but Aurora lacks / vice versa, and
-  // median-drift matched pools with both TVLs (id:subgraphTvl:auroraTvl).
-  missingSample: string[];
-  missingLiveSample: string[];
-  extraSample: string[];
-  driftSample: string[];
-}
-
-function holdsLiquidity(
-  pool: AnySubgraphPool,
-  tvlBypassHooks: ReadonlySet<string> | undefined
-): boolean {
-  if ('hooks' in pool && tvlBypassHooks?.has(pool.hooks.toLowerCase())) {
-    return true;
-  }
-  return 'liquidity' in pool ? parsePositiveLiquidity(pool.liquidity) : true;
-}
-
-export function computePoolParity(
-  subgraphPools: AnySubgraphPool[],
-  auroraPools: AnySubgraphPool[],
-  tvlBypassHooks: ReadonlySet<string> | undefined
-): PoolParity {
-  const subgraphById = new Map(
-    subgraphPools.map(pool => [pool.id.toLowerCase(), pool])
-  );
-  const auroraById = new Map(
-    auroraPools.map(pool => [pool.id.toLowerCase(), pool])
-  );
-
-  let intersection = 0;
-  const driftsBps: Array<{bps: number; id: string; s: number; a: number}> = [];
-  for (const [id, subgraphPool] of subgraphById) {
-    const auroraPool = auroraById.get(id);
-    if (!auroraPool) continue;
-    intersection++;
-    const subgraphTvl = poolTvlUsd(subgraphPool);
-    const auroraTvl = poolTvlUsd(auroraPool);
-    if (subgraphTvl > 0) {
-      driftsBps.push({
-        bps: Math.abs(auroraTvl - subgraphTvl) / subgraphTvl / 0.0001,
-        id,
-        s: subgraphTvl,
-        a: auroraTvl,
-      });
-    }
-  }
-  const unionSize = subgraphById.size + auroraById.size - intersection || 1;
-
-  const subgraphByTvlDesc = [...subgraphById.values()].sort(
-    (a, b) => poolTvlUsd(b) - poolTvlUsd(a)
-  );
-  const liveSubgraphByTvlDesc = subgraphByTvlDesc.filter(pool =>
-    holdsLiquidity(pool, tvlBypassHooks)
-  );
-  const countMissing = (pools: AnySubgraphPool[]) =>
-    pools.filter(pool => !auroraById.has(pool.id.toLowerCase())).length;
-  const missingTop100 = countMissing(subgraphByTvlDesc.slice(0, 100));
-  const missingTop100LiveIds = liveSubgraphByTvlDesc
-    .slice(0, 100)
-    .map(pool => pool.id.toLowerCase())
-    .filter(id => !auroraById.has(id));
-  const missingTop100Live = missingTop100LiveIds.length;
-  // Ties break on the lowercase id, so equal-TVL pools at the cutoff give the
-  // same count on every sweep whatever order the source returned them in.
-  const auroraTop100 = [...auroraById.entries()]
-    .sort(
-      ([idA, a], [idB, b]) =>
-        poolTvlUsd(b) - poolTvlUsd(a) || (idA < idB ? -1 : idA > idB ? 1 : 0)
-    )
-    .slice(0, 100)
-    .map(([, pool]) => pool);
-  const extraTop100 = auroraTop100.filter(
-    pool => !subgraphById.has(pool.id.toLowerCase())
-  ).length;
-
-  driftsBps.sort((a, b) => a.bps - b.bps);
-  const medianIdx = Math.floor(driftsBps.length / 2);
-  const tvlDriftBpsP50 = upperMedianBps(driftsBps);
-  const subgraphTop100Ids = new Set(
-    subgraphByTvlDesc.slice(0, 100).map(pool => pool.id.toLowerCase())
-  );
-  const top100Drifts = driftsBps.filter(drift =>
-    subgraphTop100Ids.has(drift.id)
-  );
-  const tvlDriftBpsTop100P50 =
-    top100Drifts.length > 0 ? upperMedianBps(top100Drifts) : undefined;
-
-  const topTvlSample = (
-    pools: Iterable<AnySubgraphPool>,
-    excludeIds: Map<string, AnySubgraphPool>
-  ) =>
-    [...pools]
-      .filter(pool => !excludeIds.has(pool.id.toLowerCase()))
-      .sort((a, b) => poolTvlUsd(b) - poolTvlUsd(a))
-      .slice(0, SAMPLE_SIZE)
-      .map(pool => pool.id.toLowerCase());
-  const driftSample = driftsBps
-    .slice(medianIdx, medianIdx + 3)
-    .map(d => `${d.id}:${d.s.toFixed(2)}:${d.a.toFixed(2)}`);
-
-  return {
-    subgraphCount: subgraphById.size,
-    auroraCount: auroraById.size,
-    jaccardBps: Math.round((intersection / unionSize) * 10000),
-    missingTop100,
-    missingTop100Live,
-    missingTop100LiveIds,
-    missingInAurora: subgraphById.size - intersection,
-    extraInAurora: auroraById.size - intersection,
-    extraTop100,
-    tvlDriftBpsP50: Math.round(tvlDriftBpsP50),
-    tvlDriftBpsTop100P50:
-      tvlDriftBpsTop100P50 === undefined
-        ? undefined
-        : Math.round(tvlDriftBpsTop100P50),
-    missingSample: topTvlSample(subgraphById.values(), auroraById),
-    missingLiveSample: topTvlSample(liveSubgraphByTvlDesc, auroraById),
-    extraSample: topTvlSample(auroraById.values(), subgraphById),
-    driftSample,
-  };
-}
-
-// Ids per diagnostic sample in the parity result/log — enough to classify a
-// gap against the DB by hand, small enough to keep the log line bounded.
-const SAMPLE_SIZE = 5;
-
-// Upper median of drifts already sorted ascending; 0 when there are none.
-function upperMedianBps(sortedDrifts: ReadonlyArray<{bps: number}>): number {
-  return sortedDrifts[Math.floor(sortedDrifts.length / 2)]?.bps ?? 0;
-}
-
-// --- Wrapper provider (the seam installed into ChainProtocol.provider) ---
 
 // Collapse-guard baselines, keyed by targetKey. MODULE level, not an instance
 // field: cacheAllPools rebuilds the providers on every cron tick, so an
@@ -2427,16 +2161,6 @@ export function resetAuroraPoolCountBaselinesForTesting(): void {
   lowCountStreakByTarget.clear();
 }
 
-// In-flight shadow comparisons, keyed by targetKey. Module level for the same
-// reason as the baselines: providers are rebuilt every tick, and the bound
-// has to hold across ticks. One entry per combo caps the background backlog
-// at one sweep's worth of shadow reads.
-const pendingAuroraShadowByTarget = new Map<string, Promise<void>>();
-
-export async function settlePendingAuroraShadowsForTesting(): Promise<void> {
-  await Promise.all(pendingAuroraShadowByTarget.values());
-}
-
 export type AuroraRejectionReason =
   | 'empty'
   | 'below_floor'
@@ -2454,50 +2178,32 @@ export class AuroraPoolsRejectedError extends Error {
   }
 }
 
-export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
-  implements ISubgraphProvider<TPool>
-{
+// Guards an Aurora read with the collapse checks above. There is no second
+// source: a rejected read throws, cacheAllPools skips the S3 write, and
+// routing keeps serving the previous snapshot.
+export class AuroraSourcedProvider<
+  TPool extends AnySubgraphPool,
+> implements ISubgraphProvider<TPool> {
   constructor(
-    private readonly mode: AuroraTargetMode,
     private readonly aurora: ISubgraphProvider<TPool>,
-    private readonly subgraph: ISubgraphProvider<TPool>,
     private readonly chainId: number,
     private readonly protocol: Protocol,
     private readonly minPoolCountRatio: number,
     // 0 = no absolute floor for this target (ratio guard only).
     private readonly minPoolCount: number,
     private readonly logger: Logger,
-    private readonly metric: IMetric,
-    // Primary only: also diff the served pools against the subgraph in the
-    // background (POOL_CACHING_AURORA_PRIMARY_PARITY_TARGETS).
-    private readonly primaryParity = false
+    private readonly metric: IMetric
   ) {}
 
   private get tags(): Record<string, string> {
-    return {
-      chainId: String(this.chainId),
-      protocol: String(this.protocol),
-      mode: this.mode,
-    };
+    return {chainId: String(this.chainId), protocol: String(this.protocol)};
   }
 
-  async getPools(
-    ...args: Parameters<ISubgraphProvider<TPool>['getPools']>
-  ): Promise<TPool[]> {
-    return this.mode === 'primary'
-      ? this.getPoolsPrimary(...args)
-      : this.getPoolsShadow(...args);
-  }
-
-  // Primary has no second source: a rejected read throws, cacheAllPools skips
-  // the S3 write, and routing keeps serving the previous snapshot.
-  private async getPoolsPrimary(
-    ...args: Parameters<ISubgraphProvider<TPool>['getPools']>
-  ): Promise<TPool[]> {
+  async getPools(): Promise<TPool[]> {
     const baselineKey = targetKey(this.chainId, this.protocol);
     let pools: TPool[];
     try {
-      pools = await this.aurora.getPools(...args);
+      pools = await this.aurora.getPools();
     } catch (err) {
       this.logger.error(
         'Aurora pool fetch failed, keeping the previous snapshot',
@@ -2539,7 +2245,6 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
       MetricLoggerUnit.Count,
       this.tags
     );
-    if (this.primaryParity) this.startPrimaryParity(pools, args);
     return pools;
   }
 
@@ -2596,259 +2301,6 @@ export class AuroraSourcedProvider<TPool extends AnySubgraphPool>
       cause
     );
   }
-
-  // Resolves with the subgraph result without waiting for Aurora: the shadow
-  // read queues on the sweep's fetch slots and can run past the subgraph
-  // fetch, and the per-job timeout that bounds this call would otherwise
-  // drop the job's S3 write over a comparison that never affects serving.
-  // The parity comparison settles in the background.
-  private getPoolsShadow(
-    ...args: Parameters<ISubgraphProvider<TPool>['getPools']>
-  ): Promise<TPool[]> {
-    const key = targetKey(this.chainId, this.protocol);
-    if (pendingAuroraShadowByTarget.has(key)) {
-      this.metric.putMetric(
-        'CachePools.aurora.shadow_skipped',
-        1,
-        MetricLoggerUnit.Count,
-        {...this.tags, reason: 'previous_pending'}
-      );
-      return this.subgraph.getPools(...args);
-    }
-
-    const auroraPromise = this.aurora.getPools(...args);
-    const subgraphPromise = this.subgraph.getPools(...args);
-    const comparison = this.compareShadow(subgraphPromise, auroraPromise);
-    pendingAuroraShadowByTarget.set(key, comparison);
-    void comparison.finally(() => pendingAuroraShadowByTarget.delete(key));
-    return subgraphPromise;
-  }
-
-  // The served pools carry the TVL that serving ranks by, guarded where the
-  // guard applies, so this measures the served ranking against the
-  // subgraph's. It never delays or changes what is served.
-  private startPrimaryParity(
-    servedPools: TPool[],
-    args: Parameters<ISubgraphProvider<TPool>['getPools']>
-  ): void {
-    const key = targetKey(this.chainId, this.protocol);
-    if (pendingAuroraShadowByTarget.has(key)) {
-      this.metric.putMetric(
-        'CachePools.aurora.primary_parity_skipped',
-        1,
-        MetricLoggerUnit.Count,
-        {...this.tags, reason: 'previous_pending'}
-      );
-      return;
-    }
-    const subgraphPromise = Promise.resolve().then(() =>
-      this.subgraph.getPools(...args)
-    );
-    const comparison = this.compareShadow(
-      subgraphPromise,
-      Promise.resolve(servedPools)
-    );
-    pendingAuroraShadowByTarget.set(key, comparison);
-    void comparison.finally(() => pendingAuroraShadowByTarget.delete(key));
-  }
-
-  // Never rejects. In shadow mode a subgraph failure is the caller's to
-  // report; in primary mode nothing else sees it, so it is counted here. An
-  // Aurora failure is counted as shadow_error.
-  private async compareShadow(
-    subgraphPromise: Promise<TPool[]>,
-    auroraPromise: Promise<TPool[]>
-  ): Promise<void> {
-    const [subgraphResult, auroraResult] = await Promise.allSettled([
-      subgraphPromise,
-      auroraPromise,
-    ]);
-    if (subgraphResult.status === 'rejected') {
-      if (this.mode === 'primary') {
-        this.metric.putMetric(
-          'CachePools.aurora.primary_parity_skipped',
-          1,
-          MetricLoggerUnit.Count,
-          {...this.tags, reason: 'subgraph_error'}
-        );
-      }
-      return;
-    }
-    const subgraphPools = subgraphResult.value;
-
-    try {
-      if (auroraResult.status === 'rejected') throw auroraResult.reason;
-      const auroraPools = auroraResult.value;
-      const parity = computePoolParity(
-        subgraphPools,
-        auroraPools,
-        getTvlBypassHookAddresses(this.chainId)
-      );
-      this.metric.putMetric(
-        'CachePools.parity.subgraph_count',
-        parity.subgraphCount,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.aurora_count',
-        parity.auroraCount,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.jaccard_bps',
-        parity.jaccardBps,
-        MetricLoggerUnit.None,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.missing_top100',
-        parity.missingTop100,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.missing_top100_live',
-        parity.missingTop100Live,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.extra_in_aurora',
-        parity.extraInAurora,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.tvl_drift_bps_p50',
-        parity.tvlDriftBpsP50,
-        MetricLoggerUnit.None,
-        this.tags
-      );
-      this.metric.putMetric(
-        'CachePools.parity.extra_top100',
-        parity.extraTop100,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      // A gauge, not putMetric: a unit-less putMetric lands as an
-      // allowlist-gated `.dist`, and this is one level per sweep. Not emitted
-      // without a sample, so the series shows a gap rather than a false 0.
-      if (parity.tvlDriftBpsTop100P50 !== undefined) {
-        this.metric.putGauge(
-          'CachePools.parity.tvl_drift_bps_top100_p50',
-          parity.tvlDriftBpsTop100P50,
-          this.tags
-        );
-      }
-      this.logger.info(
-        `Aurora shadow parity ${targetKey(this.chainId, this.protocol)}: ` +
-          `subgraph=${parity.subgraphCount} aurora=${parity.auroraCount} ` +
-          `jaccardBps=${parity.jaccardBps} missingTop100=${parity.missingTop100} ` +
-          `tvlDriftBpsP50=${parity.tvlDriftBpsP50} missingTop100Live=${parity.missingTop100Live} ` +
-          `extraTop100=${parity.extraTop100} tvlDriftBpsTop100P50=${parity.tvlDriftBpsTop100P50 ?? 'n/a'}`,
-        {
-          missingInAurora: parity.missingInAurora,
-          extraInAurora: parity.extraInAurora,
-          missingSample: parity.missingSample,
-          missingLiveSample: parity.missingLiveSample,
-          extraSample: parity.extraSample,
-          driftSample: parity.driftSample,
-        }
-      );
-      // Raw getPools parity over-counts: the serving path drops
-      // non-servable pools (non-allowlisted custom-accounting hooks etc.)
-      // in v4HooksPoolsFiltering AFTER this seam, so a subgraph pool that
-      // would never serve inflates missingInAurora. Diff the sets the way
-      // serving would actually see them — same filter, no-op observability
-      // so the genuine cachePools run's filter metrics stay untouched.
-      if (this.protocol === Protocol.V4) {
-        const dynamicZlcaHookMap = getDynamicZlcaHooks(this.chainId);
-        const dynamicHooks = dynamicZlcaHookMap
-          ? new Set(dynamicZlcaHookMap.keys())
-          : undefined;
-        const servableSubgraph = v4HooksPoolsFiltering(
-          this.chainId as SdkChainId,
-          [...(subgraphPools as unknown as V4SubgraphPool[])],
-          NOOP_LOGGER,
-          NOOP_METRIC,
-          dynamicHooks
-        );
-        const servableAurora = v4HooksPoolsFiltering(
-          this.chainId as SdkChainId,
-          [...(auroraPools as unknown as V4SubgraphPool[])],
-          NOOP_LOGGER,
-          NOOP_METRIC,
-          dynamicHooks
-        );
-        const servable = computePoolParity(
-          servableSubgraph,
-          servableAurora,
-          getTvlBypassHookAddresses(this.chainId)
-        );
-        this.metric.putMetric(
-          'CachePools.parity.servable_missing',
-          servable.missingInAurora,
-          MetricLoggerUnit.Count,
-          this.tags
-        );
-        this.metric.putMetric(
-          'CachePools.parity.servable_extra',
-          servable.extraInAurora,
-          MetricLoggerUnit.Count,
-          this.tags
-        );
-        this.metric.putMetric(
-          'CachePools.parity.servable_jaccard_bps',
-          servable.jaccardBps,
-          MetricLoggerUnit.None,
-          this.tags
-        );
-        this.metric.putMetric(
-          'CachePools.parity.servable_missing_top100_live',
-          servable.missingTop100Live,
-          MetricLoggerUnit.Count,
-          this.tags
-        );
-        // The info line below is sampled. This warn is not, so every sweep
-        // that misses a live servable top-100 pool leaves all of the missing
-        // ids in the logs for the flip gate's value check.
-        if (servable.missingTop100Live > 0) {
-          this.logger.warn(
-            `Aurora servable top-100 gap ${targetKey(this.chainId, this.protocol)}: missingTop100Live=${servable.missingTop100Live}`,
-            {missingTop100LiveIds: servable.missingTop100LiveIds}
-          );
-        }
-        this.logger.info(
-          `Aurora servable parity ${targetKey(this.chainId, this.protocol)}: ` +
-            `subgraph=${servable.subgraphCount} aurora=${servable.auroraCount} ` +
-            `jaccardBps=${servable.jaccardBps} missingTop100=${servable.missingTop100} ` +
-            `tvlDriftBpsP50=${servable.tvlDriftBpsP50} missingTop100Live=${servable.missingTop100Live} ` +
-            `extraTop100=${servable.extraTop100} tvlDriftBpsTop100P50=${servable.tvlDriftBpsTop100P50 ?? 'n/a'}`,
-          {
-            missingInAurora: servable.missingInAurora,
-            extraInAurora: servable.extraInAurora,
-            missingSample: servable.missingSample,
-            missingLiveSample: servable.missingLiveSample,
-            extraSample: servable.extraSample,
-            driftSample: servable.driftSample,
-          }
-        );
-      }
-    } catch (err) {
-      this.metric.putMetric(
-        'CachePools.aurora.shadow_error',
-        1,
-        MetricLoggerUnit.Count,
-        this.tags
-      );
-      this.logger.warn('Aurora shadow fetch failed', {
-        target: targetKey(this.chainId, this.protocol),
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
 }
 
 // --- Wiring ---
@@ -2858,13 +2310,14 @@ export interface AuroraSourceThresholds {
   untrackedUsdThresholdFor(protocol: Protocol, chainId: number): number;
 }
 
-// Wraps the providers of targeted chain×protocol combos in place. Called by
-// cacheAllPools after createChainProtocols; a no-op unless the
-// POOL_CACHING_AURORA_*_TARGETS env flags are set AND the Aurora connection
-// env is complete. Only combos in AURORA_SUPPORTED_TARGETS are ever wrapped.
+// Installs each combo's Aurora provider in place. Called by cacheAllPools
+// after createChainProtocols. A combo outside AURORA_SUPPORTED_TARGETS, a
+// combo that needs the pool_stats pre-filter and is not listed for it, and
+// every combo when the Aurora client cannot be built, is left without a
+// provider: cacheAllPools skips it and routing keeps its previous snapshot.
 export function applyAuroraPoolSources<
   T extends ExtraSourceChainProtocol & {
-    provider:
+    provider?:
       | ISubgraphProvider<V2SubgraphPool>
       | ISubgraphProvider<V3SubgraphPool>
       | ISubgraphProvider<V4SubgraphPool>;
@@ -2883,17 +2336,13 @@ export function applyAuroraPoolSources<
     // in production; lets the env-to-provider path run without a database.
     providerDeps?: AuroraProviderDeps<AuroraPoolListMethod>;
     // The extra pool sources' targeted reads, alongside providerDeps. Without
-    // it, a run given providerDeps leaves the extra sources on the subgraph.
+    // it, a run given providerDeps installs no extra sources.
     extraSourceRoutablePools?: AuroraExtraSourceDeps['routablePools'];
     // targetKeys whose pools carry lastStateChangeAtMs for the activity filter.
     recordPoolActivityTargets?: ReadonlySet<string>;
   }
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
-  if (!config) {
-    reportInertExtraSourceTargets(logger, metric);
-    return;
-  }
   if (config.tvlGuardTargetsWildcardRejection) {
     metric.putMetric(
       'CachePools.aurora.tvl_guard_config_rejected',
@@ -2902,7 +2351,7 @@ export function applyAuroraPoolSources<
       {reason: config.tvlGuardTargetsWildcardRejection}
     );
     logger.warn(
-      'Aurora TVL guard targets "*" rejected — guard stays in shadow everywhere',
+      'Aurora TVL guard targets "*" rejected — guard stays unapplied everywhere',
       {reason: config.tvlGuardTargetsWildcardRejection}
     );
   }
@@ -2917,17 +2366,6 @@ export function applyAuroraPoolSources<
       'Aurora pre-filter targets wildcard ignored — list explicit combos'
     );
   }
-  if (config.primaryParityWildcardIgnored) {
-    metric.putMetric(
-      'CachePools.aurora.primary_parity_config_rejected',
-      1,
-      MetricLoggerUnit.Count,
-      {reason: 'wildcard'}
-    );
-    logger.warn(
-      'Aurora primary parity targets wildcard ignored — list explicit combos'
-    );
-  }
   for (const [target, reason] of config.prefilterUnpricedRejected) {
     metric.putMetric(
       'CachePools.aurora.prefilter_config_rejected',
@@ -2937,53 +2375,37 @@ export function applyAuroraPoolSources<
     );
     logger.warn('Aurora pre-filter unpriced target ignored', {target, reason});
   }
-  const skippedTargets = new Set<string>();
-  for (const {chainId, protocol} of chainProtocols) {
-    const key = targetKey(chainId, protocol);
-    if (
-      TARGETS_REQUIRING_PREFILTER.has(key) &&
-      resolveAuroraMode(config, chainId, protocol) &&
-      !config.prefilterTargets.has(key)
-    ) {
-      skippedTargets.add(key);
-      logger.warn(
-        `Aurora pool source ${key} requires the pre-filter — staying on subgraph`
-      );
-      metric.putMetric(
-        'CachePools.aurora.target_skipped',
-        1,
-        MetricLoggerUnit.Count,
-        {
-          chainId: String(chainId),
-          protocol: String(protocol),
-          reason: 'prefilter_required',
-        }
-      );
-    }
-  }
 
   let deps = options?.providerDeps;
   let extraSourceRoutablePools = options?.extraSourceRoutablePools;
   if (!deps) {
-    // A failed init (e.g. missing CA bundle file) must degrade THIS feature,
-    // never kill the whole all-chains pool-caching run. The failure is latched
-    // (env is immutable, a retry can't succeed) but re-emitted every tick so a
-    // permanently-down Aurora path stays visible.
+    // A failed init (e.g. missing CA bundle file) leaves every combo without
+    // a provider for this run; the previous snapshots keep serving. The
+    // failure is latched (env is immutable, a retry can't succeed) but
+    // re-emitted every tick so a permanently-down Aurora path stays visible.
     const init = getOrCreateUnirouteAuroraDb(logger);
     if (init.status === 'init_failed') {
       metric.putMetric(
         'CachePools.aurora.init_error',
         1,
-        MetricLoggerUnit.Count
+        MetricLoggerUnit.Count,
+        {reason: 'init_failed'}
       );
-      logger.error('Aurora pool source init failed — staying on subgraphs', {
-        error: init.error.message,
-      });
+      logger.error(
+        'Aurora pool source init failed — no combo is cached this run',
+        {error: init.error.message}
+      );
       return;
     }
     if (init.status === 'env_missing') {
-      logger.warn(
-        'POOL_CACHING_AURORA_*_TARGETS set but Aurora connection env is missing — staying on subgraphs'
+      metric.putMetric(
+        'CachePools.aurora.init_error',
+        1,
+        MetricLoggerUnit.Count,
+        {reason: 'env_missing'}
+      );
+      logger.error(
+        'Aurora connection env is missing — no combo is cached this run'
       );
       return;
     }
@@ -2999,89 +2421,85 @@ export function applyAuroraPoolSources<
       fetchSemaphore: options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE,
     };
   }
-  const shadowDeps: AuroraProviderDeps<AuroraPoolListMethod> = {
-    ...deps,
-    fetchSemaphore: options?.scopedRun ? undefined : AURORA_SHADOW_FETCH_SLOTS,
-  };
 
   for (const chainProtocol of chainProtocols) {
     const {chainId, protocol} = chainProtocol;
     const key = targetKey(chainId, protocol);
-    if (skippedTargets.has(key)) continue;
-    const resolvedMode = resolveAuroraModeWithPrimaryFloor(
-      config,
-      chainId,
-      protocol,
-      logger,
-      metric
-    );
-    if (!resolvedMode) continue;
-    const mode = refusePrefilteredV3Primary(
-      resolvedMode,
-      config,
-      chainId,
-      protocol,
-      logger,
-      metric
-    );
-    const primaryParity =
-      mode === 'primary' && config.primaryParityTargets.has(key);
-
+    const tags = {chainId: String(chainId), protocol: String(protocol)};
     if (!AURORA_SUPPORTED_TARGETS.has(key)) {
       logger.warn(
-        `Aurora pool source targeted for ${targetKey(chainId, protocol)} but only ${[...AURORA_SUPPORTED_TARGETS].join(', ')} are code-supported — staying on subgraph`
+        `No Aurora pool source for ${key}; only ${[...AURORA_SUPPORTED_TARGETS].join(', ')} are code-supported — skipping the combo`
       );
       metric.putMetric(
         'CachePools.aurora.unsupported_target',
         1,
         MetricLoggerUnit.Count,
-        {chainId: String(chainId), protocol: String(protocol)}
+        tags
       );
       continue;
     }
-
+    if (
+      TARGETS_REQUIRING_PREFILTER.has(key) &&
+      !config.prefilterTargets.has(key)
+    ) {
+      logger.warn(
+        `Aurora pool source ${key} requires the pre-filter — skipping the combo`
+      );
+      metric.putMetric(
+        'CachePools.aurora.target_skipped',
+        1,
+        MetricLoggerUnit.Count,
+        {...tags, reason: 'prefilter_required'}
+      );
+      continue;
+    }
+    const minPoolCount =
+      resolveMinPoolCount(config, chainId, protocol, logger, metric) ?? 0;
+    reportPrefilteredV3WithoutUnpriced(
+      config,
+      chainId,
+      protocol,
+      logger,
+      metric
+    );
     const providerDeps = {
-      ...(mode === 'shadow' ? shadowDeps : deps),
+      ...deps,
       recordPoolActivity: options?.recordPoolActivityTargets?.has(key) ?? false,
     };
     const applyTvlGuard =
-      config.tvlGuardTargets === 'all' ||
-      config.tvlGuardTargets.has(targetKey(chainId, protocol));
+      config.tvlGuardTargets === 'all' || config.tvlGuardTargets.has(key);
+    const prefiltered = config.prefilterTargets.has(key);
 
     // Per-protocol provider dispatch. A combo added to
     // AURORA_SUPPORTED_TARGETS must have a protocol-shaped provider branch
     // here — never map one protocol's pools through another's row shape.
     if (protocol === Protocol.V4) {
       chainProtocol.provider = new AuroraSourcedProvider(
-        mode,
         new AuroraV4PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
           providerDeps,
           DEFAULT_V4_ADMISSION_DEPS,
           applyTvlGuard,
-          config.prefilterTargets.has(key)
+          prefiltered
             ? {minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD}
             : undefined
         ),
-        chainProtocol.provider as ISubgraphProvider<V4SubgraphPool>,
         chainId,
         protocol,
         config.minPoolCountRatio,
-        config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
+        minPoolCount,
         logger,
-        metric,
-        primaryParity
+        metric
       );
     } else if (protocol === Protocol.V3) {
       chainProtocol.provider = new AuroraSourcedProvider(
-        mode,
         new AuroraV3PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
           providerDeps,
           applyTvlGuard,
-          config.prefilterTargets.has(key)
+          prefiltered
             ? {
                 minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD,
                 includeUnpricedLiquidPools:
@@ -3089,76 +2507,65 @@ export function applyAuroraPoolSources<
               }
             : undefined
         ),
-        chainProtocol.provider as ISubgraphProvider<V3SubgraphPool>,
         chainId,
         protocol,
         config.minPoolCountRatio,
-        config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
+        minPoolCount,
         logger,
-        metric,
-        primaryParity
+        metric
       );
     } else if (protocol === Protocol.V2) {
       chainProtocol.provider = new AuroraSourcedProvider(
-        mode,
         new AuroraV2PoolsProvider(
           chainId,
           thresholds.trackedEthThresholdFor(protocol, chainId),
           thresholds.untrackedUsdThresholdFor(protocol, chainId),
           providerDeps,
           applyTvlGuard,
-          config.prefilterTargets.has(key)
+          prefiltered
             ? {
                 minPoolStatsTvlUsd: PREFILTER_MIN_POOL_STATS_TVL_USD,
                 alwaysIncludeTokens: v2PrefilterAlwaysIncludeTokens(chainId),
               }
             : undefined
         ),
-        chainProtocol.provider as ISubgraphProvider<V2SubgraphPool>,
         chainId,
         protocol,
         config.minPoolCountRatio,
-        config.minPoolCountByTarget.get(targetKey(chainId, protocol)) ?? 0,
+        minPoolCount,
         logger,
-        metric,
-        primaryParity
+        metric
       );
     } else {
       logger.warn(
-        `Aurora pool source targeted for ${targetKey(chainId, protocol)} but no Aurora provider exists for ${String(protocol)} — staying on subgraph`
+        `No Aurora provider exists for ${String(protocol)} (${key}) — skipping the combo`
       );
       metric.putMetric(
         'CachePools.aurora.unsupported_target',
         1,
         MetricLoggerUnit.Count,
-        {chainId: String(chainId), protocol: String(protocol)}
+        tags
       );
       continue;
     }
-    logger.info(
-      `Aurora pool source enabled (${mode}) for ${targetKey(chainId, protocol)}`
-    );
+    logger.info(`Aurora pool source installed for ${key}`);
   }
 
   if (extraSourceRoutablePools) {
     const prices = deps.prices;
-    const extraDeps = (fetchSlots: FetchSlots | undefined) => ({
-      routablePools: extraSourceRoutablePools,
-      nativeUsdPrice: (ctx: Context, chainId: number) =>
-        fetchNativeUsdPrice(prices, chainId, ctx),
-      newContext: () => auroraContext(metric),
-      logger,
-      metric,
-      fetchSlots,
-    });
     applyAuroraExtraPoolSources(
       chainProtocols,
-      auroraExtraSourceConfigFromEnv(),
-      extraDeps(options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE),
-      extraDeps(options?.scopedRun ? undefined : AURORA_SHADOW_FETCH_SLOTS),
+      {
+        routablePools: extraSourceRoutablePools,
+        nativeUsdPrice: (ctx: Context, chainId: number) =>
+          fetchNativeUsdPrice(prices, chainId, ctx),
+        newContext: () => auroraContext(metric),
+        logger,
+        metric,
+        fetchSlots: options?.scopedRun ? undefined : AURORA_FETCH_SEMAPHORE,
+      },
       logger,
-      metric,
-      !options?.scopedRun
+      metric
     );
   }
 }
