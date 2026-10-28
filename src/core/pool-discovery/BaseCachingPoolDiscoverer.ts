@@ -98,9 +98,9 @@ export type SnapshotLoad<TPool> =
 // Local cache items will expire after a certain time controlled by config.
 // `getPoolsForTokens` is the main method that will be called externally to get all pools involving any of the given tokens.
 // This method will filter the pools based on the given tokens and return a small number of pools (TopN logic) and cached as well.
-export abstract class BaseCachingPoolDiscoverer<TPool extends UniPoolInfo>
-  implements IPoolDiscoverer<TPool>
-{
+export abstract class BaseCachingPoolDiscoverer<
+  TPool extends UniPoolInfo,
+> implements IPoolDiscoverer<TPool> {
   protected constructor(
     protected serviceConfig: IUniRouteServiceConfig,
     protected getPoolsCache: IRedisCache<string, string>,

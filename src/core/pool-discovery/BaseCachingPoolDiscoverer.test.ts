@@ -64,9 +64,7 @@ class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
  * branch where maybeDropPermissionedPools flips the directive when the
  * namespace is inactive but a permissioned-hook pool was encountered.
  */
-class CacheSuppressingTopPoolsSelector
-  implements ITopPoolsSelector<UniPoolInfo>
-{
+class CacheSuppressingTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
     pools: UniPoolInfo[],
     _chainId: ChainId,
