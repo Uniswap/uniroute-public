@@ -16,6 +16,8 @@ import {
   S3Client,
   GetObjectCommand,
   GetObjectCommandOutput,
+  HeadObjectCommand,
+  HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 import {promisify} from 'node:util';
@@ -88,6 +90,12 @@ function isS3NotModified(error: unknown): boolean {
   );
 }
 
+// The object fields the snapshot age is read from, as GetObject and HeadObject both report them
+type SnapshotObjectTimestamps = Pick<
+  GetObjectCommandOutput,
+  'Metadata' | 'LastModified'
+>;
+
 // A snapshot's source version is the object's ETag joined with the runtime
 // inputs of the load-time filter; an ETag never contains the separator.
 const SNAPSHOT_VERSION_SEPARATOR = '|';
@@ -158,9 +166,6 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       snapshotWarmer
     );
   }
-
-  // Fetch start of the object last loaded per S3 key so a 304 refresh can still report its age
-  private readonly snapshotFetchStartMsByKey = new Map<string, number>();
 
   protected getDiscovererName(): string {
     return 'BaseS3SubgraphPoolDiscoverer';
@@ -280,7 +285,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
             {tags: metricTags}
           )
           .catch(() => undefined);
-        this.emitSnapshotAge(s3Key, snapshotAgeTags, ctx);
+        await this.emitSnapshotAgeAfterNotModified(s3Key, snapshotAgeTags, ctx);
         return {status: SnapshotLoadStatus.UNCHANGED};
       }
       const after = Date.now();
@@ -408,8 +413,11 @@ abstract class BaseS3SubgraphPoolDiscoverer<
         ctx
       );
 
-      this.recordSnapshotFetchStart(s3Key, response, ctx);
-      this.emitSnapshotAge(s3Key, snapshotAgeTags, ctx);
+      this.emitSnapshotAge(
+        this.snapshotFetchStartMs(s3Key, response, ctx),
+        snapshotAgeTags,
+        ctx
+      );
       success = true;
       return {
         status: SnapshotLoadStatus.LOADED,
@@ -495,36 +503,68 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     }
   }
 
-  // Remembers when the loaded object's data was fetched, LastModified standing in for objects written without the metadata
-  private recordSnapshotFetchStart(
+  // When the object's data was fetched, LastModified standing in for objects written without the metadata
+  private snapshotFetchStartMs(
     s3Key: string,
-    response: GetObjectCommandOutput,
+    object: SnapshotObjectTimestamps,
     ctx: Context
-  ): void {
+  ): number | undefined {
     const fetchStart =
       parseSnapshotFetchStart(
-        response.Metadata?.[FETCH_START_METADATA_KEY],
+        object.Metadata?.[FETCH_START_METADATA_KEY],
         Date.now()
-      ) ?? response.LastModified;
+      ) ?? object.LastModified;
     if (fetchStart === undefined) {
       ctx.logger.warn(
         'Pool snapshot carries neither a fetch start nor LastModified',
         {s3Key}
       );
-      this.snapshotFetchStartMsByKey.delete(s3Key);
+      return undefined;
+    }
+    return fetchStart.getTime();
+  }
+
+  // A 304 only says the bytes are unchanged. The cron rewrites a quiet lane's
+  // snapshot with the same bytes every tick, so the ETag stays put while the
+  // fetch start moves, and only the object's current metadata gives the age
+  // of what this process serves.
+  private async emitSnapshotAgeAfterNotModified(
+    s3Key: string,
+    snapshotAgeTags: string[],
+    ctx: Context
+  ): Promise<void> {
+    let head: HeadObjectCommandOutput;
+    try {
+      head = await this.s3.send(
+        new HeadObjectCommand({
+          Bucket: this.serviceConfig.S3.poolBucketName,
+          Key: s3Key,
+        })
+      );
+    } catch (error) {
+      ctx.logger.warn(
+        'Pool snapshot HEAD after a 304 failed, skipping the age gauge',
+        {
+          s3Key,
+          errorName: error instanceof Error ? error.name : typeof error,
+        }
+      );
       return;
     }
-    this.snapshotFetchStartMsByKey.set(s3Key, fetchStart.getTime());
+    this.emitSnapshotAge(
+      this.snapshotFetchStartMs(s3Key, head, ctx),
+      snapshotAgeTags,
+      ctx
+    );
   }
 
   // Gauges how old the snapshot this process serves is, which is the staleness users see when the cron stops writing
   private emitSnapshotAge(
-    s3Key: string,
+    fetchStartMs: number | undefined,
     snapshotAgeTags: string[],
     ctx: Context
   ): void {
-    const fetchStartMs = this.snapshotFetchStartMsByKey.get(s3Key);
-    // Only an object with neither timestamp leaves nothing to report, and that load already warned
+    // Only an object with neither timestamp leaves nothing to report, and that read already warned
     if (fetchStartMs === undefined) {
       return;
     }
@@ -533,7 +573,7 @@ abstract class BaseS3SubgraphPoolDiscoverer<
       .gauge(SNAPSHOT_AGE_METRIC, ageSeconds, {tags: snapshotAgeTags})
       .catch(error => {
         ctx.logger.warn('Failed to emit pool snapshot age gauge', {
-          s3Key,
+          tags: snapshotAgeTags,
           error,
         });
       });

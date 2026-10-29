@@ -4,7 +4,11 @@ import {
   S3SubgraphPoolDiscovererV4,
 } from './S3SubgraphPoolDiscoverer';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
-import {GetObjectCommand, S3Client} from '@aws-sdk/client-s3';
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import {InMemoryRedisCache, IRedisCache} from '@uniswap/lib-cache';
 import {
   getUniRouteTestConfig,
@@ -255,7 +259,8 @@ describe('S3SubgraphPoolDiscoverer', () => {
           $metadata: {httpStatusCode: 304},
         });
       // Serves the object under `etag()`, answering 304 to a matching
-      // If-None-Match the way S3 does, and counts the full downloads.
+      // If-None-Match the way S3 does, and counts the full downloads. A HEAD
+      // after the 304 only reads the object's timestamps.
       const serveObject = (etag: () => string, failing: () => boolean) => {
         let downloads = 0;
         vi.mocked(s3Client.send).mockImplementation((async (
@@ -263,6 +268,9 @@ describe('S3SubgraphPoolDiscoverer', () => {
         ) => {
           if (failing()) {
             throw new Error('s3 down');
+          }
+          if (command instanceof HeadObjectCommand) {
+            return {ETag: etag(), LastModified: new Date(), $metadata: {}};
           }
           if (
             command instanceof GetObjectCommand &&
@@ -582,8 +590,10 @@ describe('S3SubgraphPoolDiscoverer', () => {
         ).toHaveLength(1);
       });
 
-      it('keeps reporting a growing age across 304 refreshes without downloading again', async () => {
-        const memoDiscoverer = new S3SubgraphPoolDiscovererV4(
+      // The memo path refreshes with a conditional GET, which is where S3
+      // answers 304 and the age has to come from a HEAD of the object.
+      const memoDiscoverer = () =>
+        new S3SubgraphPoolDiscovererV4(
           {
             ...mockConfig,
             PoolDiscovery: {
@@ -597,10 +607,27 @@ describe('S3SubgraphPoolDiscoverer', () => {
           s3Client,
           snapshotParseOffloader
         );
+      // Serves one object whose first load carries `fetchStart`, answers 304
+      // on its ETag afterwards, and answers a HEAD with `head`.
+      const serveUnchangedObject = (
+        fetchStart: Date,
+        head: () =>
+          | {Metadata?: Record<string, string>; LastModified?: Date}
+          | Error
+      ) => {
         let downloads = 0;
+        let heads = 0;
         vi.mocked(s3Client.send).mockImplementation((async (
           command: unknown
         ) => {
+          if (command instanceof HeadObjectCommand) {
+            heads += 1;
+            const answer = head();
+            if (answer instanceof Error) {
+              throw answer;
+            }
+            return {ETag: '"etag-1"', $metadata: {}, ...answer};
+          }
           if (
             command instanceof GetObjectCommand &&
             command.input.IfNoneMatch === '"etag-1"'
@@ -613,16 +640,88 @@ describe('S3SubgraphPoolDiscoverer', () => {
           return {
             ...createMockResponse(gzippedData),
             ETag: '"etag-1"',
-            Metadata: {'fetch-start-time': minutesAgo(5).toISOString()},
+            Metadata: {'fetch-start-time': fetchStart.toISOString()},
           };
         }) as never);
-
-        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        return {downloads: () => downloads, heads: () => heads};
+      };
+      const twentyMinutesLater = () =>
         vi.setSystemTime(new Date(now.getTime() + 20 * 60_000));
-        await memoDiscoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
 
-        expect(downloads).toBe(1);
+      it('keeps reporting a growing age across 304 refreshes of an object the cron did not rewrite', async () => {
+        const discoverer = memoDiscoverer();
+        const fetchStart = minutesAgo(5);
+        const {downloads, heads} = serveUnchangedObject(fetchStart, () => ({
+          Metadata: {'fetch-start-time': fetchStart.toISOString()},
+        }));
+
+        await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        twentyMinutesLater();
+        await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+
+        expect(downloads()).toBe(1);
+        expect(heads()).toBe(1);
         expect(emittedAges().map(({value}) => value)).toEqual([300, 1500]);
+      });
+
+      it('reads the fetch start again on a 304, so a lane rewritten with the same bytes reports the fresh age', async () => {
+        const discoverer = memoDiscoverer();
+        // Rewritten 17 minutes after the first load, 3 minutes before the refresh.
+        const rewrittenAt = new Date(now.getTime() + 17 * 60_000);
+        const {downloads, heads} = serveUnchangedObject(minutesAgo(5), () => ({
+          Metadata: {'fetch-start-time': rewrittenAt.toISOString()},
+          LastModified: new Date(now.getTime() + 18 * 60_000),
+        }));
+
+        await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        twentyMinutesLater();
+        await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+
+        expect(downloads()).toBe(1);
+        expect(heads()).toBe(1);
+        expect(emittedAges().map(({value}) => value)).toEqual([300, 180]);
+      });
+
+      it('falls back to the HEAD LastModified when the rewritten object carries no fetch start', async () => {
+        const discoverer = memoDiscoverer();
+        serveUnchangedObject(minutesAgo(5), () => ({
+          LastModified: new Date(now.getTime() + 18 * 60_000),
+        }));
+
+        await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+        twentyMinutesLater();
+        await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, mockContext);
+
+        expect(emittedAges().map(({value}) => value)).toEqual([300, 120]);
+      });
+
+      it('skips the age gauge and warns when the HEAD after a 304 fails', async () => {
+        const warnContext = buildTestContext();
+        const warnGaugeSpy = vi.spyOn(warnContext.metrics, 'gauge');
+        const discoverer = memoDiscoverer();
+        serveUnchangedObject(minutesAgo(5), () => new Error('head timed out'));
+
+        try {
+          await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, warnContext);
+          twentyMinutesLater();
+          await discoverer.prewarm(ChainId.MAINNET, Protocol.V4, warnContext);
+
+          expect(
+            warnGaugeSpy.mock.calls
+              .filter(([name]) => name === ageMetric)
+              .map(([, value]) => value)
+          ).toEqual([300]);
+          expect(
+            warnContext.logger.outputs.filter(
+              ({prefix, msg}) =>
+                prefix === 'WARN:' &&
+                msg ===
+                  'Pool snapshot HEAD after a 304 failed, skipping the age gauge'
+            )
+          ).toHaveLength(1);
+        } finally {
+          warnGaugeSpy.mockRestore();
+        }
       });
     });
 
