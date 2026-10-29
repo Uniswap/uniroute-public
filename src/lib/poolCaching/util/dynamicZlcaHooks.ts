@@ -9,8 +9,8 @@
  *
  * Denylisted hooks are deliberately KEPT here: the denylist gates admission
  * (`getTvlBypassHookAddresses`, `v4HooksPoolsFiltering`), never gas
- * calibration. A freshly denylisted hook's routes keep being served from the
- * route/pair caches until their TTLs expire, and dropping its gas overhead
+ * calibration. A freshly denylisted hook's pools keep being served from the
+ * pair cache until its TTL expires, and dropping its gas overhead
  * during that window would under-gas exactly the swaps we are trying to stop
  * (the estimate becomes the tx gas limit downstream — a shortfall reverts).
  *

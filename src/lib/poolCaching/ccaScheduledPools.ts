@@ -20,7 +20,7 @@ import {V4Pool} from '../../models/pool/V4Pool';
 import {Address} from '../../models/address/Address';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
-import {HOOKS_ADDRESSES_DENYLIST} from './util/hooksAddressesDenylist';
+import {isDenylistedHook} from './util/hooksAddressesDenylist';
 import {blocksUnvettedHookAdmission} from './util/v4HooksPoolsFiltering';
 import {ChainId} from '../config';
 import {unirouteFetch} from '../unirouteFetch';
@@ -361,12 +361,7 @@ export function isAutoApprovedCcaHook(
  * still routable through the scheduled-pools registry until expiry.
  */
 export function isDenylistedCcaHook(chainId: number, hook: string): boolean {
-  const denylist = HOOKS_ADDRESSES_DENYLIST[chainId];
-  if (!denylist || denylist.length === 0) {
-    return false;
-  }
-  const lowered = hook.toLowerCase();
-  return denylist.some(address => address.toLowerCase() === lowered);
+  return isDenylistedHook(chainId, hook);
 }
 
 // A zeroed initializers() read is ambiguous: the strategy consumes the struct

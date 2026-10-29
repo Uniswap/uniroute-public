@@ -66,3 +66,18 @@ export const HOOKS_ADDRESSES_DENYLIST: Partial<Record<ChainId, Array<string>>> &
   [ChainId.ROBINHOOD]: [...QUOTER_EXEMPT_HOOKS_ON_ROBINHOOD],
   [CHAIN_ID_TEMPO]: [],
 };
+
+/**
+ * Whether `hook` is in `chainId`'s HOOKS_ADDRESSES_DENYLIST, compared
+ * case-insensitively. Every path that admits or serves a hooked pool outside
+ * the pool-caching filter consults this, so denylisting a hook kills it
+ * everywhere rather than only in fresh snapshots.
+ */
+export function isDenylistedHook(chainId: number, hook: string): boolean {
+  const denylist = HOOKS_ADDRESSES_DENYLIST[chainId];
+  if (!denylist || denylist.length === 0) {
+    return false;
+  }
+  const lowered = hook.toLowerCase();
+  return denylist.some(address => address.toLowerCase() === lowered);
+}
