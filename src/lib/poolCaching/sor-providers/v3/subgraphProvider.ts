@@ -16,10 +16,10 @@ export interface V3SubgraphPool {
   tvlETH: number;
   tvlUSD: number;
   /**
-   * Epoch ms of the pool's last state change (swap, liquidity change, V2
-   * Sync, or creation), from Aurora pool state. Set only on combos in
-   * POOL_CACHING_ACTIVITY_FILTER_TARGETS; the cron's activity filter reads it
-   * and strips it before the snapshot is written.
+   * Epoch ms of the pool's Aurora pool state (`state_as_of_timestamp`),
+   * which data-ingestion moves on each swap, liquidity change and creation.
+   * Set only on combos in POOL_CACHING_ACTIVITY_FILTER_TARGETS; the cron's
+   * activity filter reads it and strips it before the snapshot is written.
    */
   lastStateChangeAtMs?: number;
 }

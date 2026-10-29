@@ -18,15 +18,24 @@ export const POOL_ACTIVITY_WINDOW_MS = 7 * DAY_MS;
  */
 export const POOL_ACTIVITY_SIGNAL_MAX_STALENESS_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * When the filter would keep less than this share of a combo's pools, the
+ * activity signal is more likely wrong than the pools idle, so the filter
+ * keeps the whole list instead. Robinhood V4 on dev keeps ~7.7% (26.4k of
+ * 341.6k), about four times this floor.
+ */
+export const POOL_ACTIVITY_MIN_KEPT_SHARE = 0.02;
+
 export type ActivityFilterPool =
   | V2SubgraphPool
   | V3SubgraphPool
   | V4SubgraphPool;
 
 export enum PoolActivitySkipReason {
-  /** No pool carries a timestamp: the combo is served from the subgraph. */
+  /** No pool carries a timestamp: the provider did not record activity. */
   NO_ACTIVITY_SIGNAL = 'no_activity_signal',
   STALE_ACTIVITY_SIGNAL = 'stale_activity_signal',
+  KEPT_SHARE_BELOW_FLOOR = 'kept_share_below_floor',
 }
 
 export type PoolActivityFilterOutcome =
@@ -81,7 +90,11 @@ export function poolActivityFilterConfigFromEnv(): PoolActivityFilterConfig {
  * Pools admitted by identity rather than by trading: TVL-bypass hooks (ZLCA
  * and zero-measured-TVL hooks, static and factory-discovered), permissioned
  * hooks, and canonical pools. A canonical pool missing from the snapshot
- * leaves its token unroutable.
+ * leaves its token unroutable. Allowlisted hooks are not exempt: Robinhood's
+ * allowlist includes the zero address, and an idle allowlisted pool off the
+ * canonical (fee, tickSpacing) grid stays reachable as a direct pair through
+ * the V4 PoolKey registry probe on stacks whose registry lists include the
+ * chain (prod for Robinhood).
  */
 export function poolActivityExemptions(
   chainId: number
@@ -162,6 +175,15 @@ export function filterPoolsByRecentActivity<T extends ActivityFilterPool>(
     } else {
       dropped++;
     }
+  }
+  if (kept.length < pools.length * POOL_ACTIVITY_MIN_KEPT_SHARE) {
+    return {
+      pools: pools.map(withoutActivityTimestamp),
+      outcome: {
+        status: 'skipped',
+        reason: PoolActivitySkipReason.KEPT_SHARE_BELOW_FLOOR,
+      },
+    };
   }
   return {
     pools: kept,

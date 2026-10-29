@@ -4,6 +4,7 @@ import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
 import {FLETH_HOOK_ON_ROBINHOOD} from './hooksAddressesAllowlist';
 import {
   filterPoolsByRecentActivity,
+  POOL_ACTIVITY_MIN_KEPT_SHARE,
   POOL_ACTIVITY_SIGNAL_MAX_STALENESS_MS,
   POOL_ACTIVITY_WINDOW_MS,
   poolActivityExemptions,
@@ -170,6 +171,47 @@ describe('filterPoolsByRecentActivity', () => {
     expect(outcome).toEqual({
       status: 'skipped',
       reason: PoolActivitySkipReason.STALE_ACTIVITY_SIGNAL,
+    });
+  });
+
+  it('keeps every pool when it would keep less than the floor share', () => {
+    const idleCount = Math.ceil(1 / POOL_ACTIVITY_MIN_KEPT_SHARE);
+    const input = [
+      v4Pool('0xactive', RECENT_MS),
+      ...Array.from({length: idleCount}, (_, index) =>
+        v4Pool(`0xidle${index}`, STALE_MS)
+      ),
+    ];
+    const {pools, outcome} = filterPoolsByRecentActivity(
+      input,
+      NO_EXEMPTIONS,
+      NOW_MS
+    );
+    expect(pools).toHaveLength(input.length);
+    expect(pools.every(pool => !('lastStateChangeAtMs' in pool))).toBe(true);
+    expect(outcome).toEqual({
+      status: 'skipped',
+      reason: PoolActivitySkipReason.KEPT_SHARE_BELOW_FLOOR,
+    });
+  });
+
+  it('prunes when the kept share is exactly at the floor', () => {
+    const idleCount = Math.round(1 / POOL_ACTIVITY_MIN_KEPT_SHARE) - 1;
+    const {outcome} = filterPoolsByRecentActivity(
+      [
+        v4Pool('0xactive', RECENT_MS),
+        ...Array.from({length: idleCount}, (_, index) =>
+          v4Pool(`0xidle${index}`, STALE_MS)
+        ),
+      ],
+      NO_EXEMPTIONS,
+      NOW_MS
+    );
+    expect(outcome).toEqual({
+      status: 'pruned',
+      kept: 1,
+      dropped: idleCount,
+      exempt: 0,
     });
   });
 

@@ -25,8 +25,10 @@ export interface V4SubgraphPool {
   tvlUSD: number;
   isExternalLiquidity?: boolean;
   /**
-   * Epoch ms of the pool's last state change (swap, liquidity change, V2
-   * Sync, or creation), from Aurora pool state. Set only on combos in
+   * Epoch ms of the pool's Aurora pool state (`state_as_of_timestamp`): the
+   * time data-ingestion read the state after a swap, liquidity change or
+   * creation, so it trails the event. A state backfill rewrites it with the
+   * pool's last transaction time, which can be earlier. Set only on combos in
    * POOL_CACHING_ACTIVITY_FILTER_TARGETS; the cron's activity filter reads it
    * and strips it before the snapshot is written.
    */
