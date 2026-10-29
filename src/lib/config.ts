@@ -887,6 +887,15 @@ export enum MetricFailureReason {
   REDIS_READ_ERROR = 'redis_read_error',
   SQS_SEND_ERROR = 'sqs_send_error',
   ZLCA_QUOTER_PRICE_UNAVAILABLE = 'zlca_quoter_price_unavailable',
+  /** The larger ZLCA price probe reverted; the first answer was kept. */
+  ZLCA_QUOTER_RETRY_REVERTED_KEPT_FIRST = 'retry_reverted_kept_first',
+  /** The larger ZLCA price probe reverted after a too-coarse first answer. */
+  ZLCA_QUOTER_RETRY_REVERTED = 'retry_reverted',
+  /**
+   * A permissioned hook's quote shims could not be built, so the ZLCA price
+   * probe was not sent.
+   */
+  PERMISSIONED_OVERRIDES_UNAVAILABLE = 'permissioned_overrides_unavailable',
   /**
    * A quote calldata template whose splice does not reproduce the direct
    * encode of its route shape, so every call of that shape encodes directly.

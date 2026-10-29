@@ -748,8 +748,12 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [NATIVE_USDC_CONVERTER_HOOK_ON_ARC]: {gasOverheadPerHop: 250_000n},
   },
   [ChainId.SEPOLIA]: {
-    // The hook's `maxGas()` reports 100000.
-    [GRO_PERMISSIONED_HOOK_ON_SEPOLIA]: {gasOverheadPerHop: 100_000n},
+    // The hook's `maxGas()` reports 100000. Its pool sits at a 1:1 raw
+    // initialize price over an 18- vs 6-decimal pair while swaps fill at NAV.
+    [GRO_PERMISSIONED_HOOK_ON_SEPOLIA]: {
+      gasOverheadPerHop: 100_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
 };
 
