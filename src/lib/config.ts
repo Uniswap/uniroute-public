@@ -888,6 +888,13 @@ export enum MetricFailureReason {
   SQS_SEND_ERROR = 'sqs_send_error',
   ZLCA_QUOTER_PRICE_UNAVAILABLE = 'zlca_quoter_price_unavailable',
   /**
+   * A quote calldata template whose splice does not reproduce the direct
+   * encode of its route shape, so every call of that shape encodes directly.
+   */
+  SPLICE_MISMATCH = 'splice_mismatch',
+  /** A quote amount wider than a calldata template's sentinel can vouch for, so it encodes directly. */
+  AMOUNT_OUT_OF_RANGE = 'amount_out_of_range',
+  /**
    * A canonical pool (`CanonicalPools`) is absent from the loaded snapshot
    * of its protocol: the registry id is wrong or the snapshot lacks the
    * pool. Either leaves the token unroutable.
