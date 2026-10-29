@@ -29,12 +29,12 @@ describe('cacheConfig', () => {
   describe('createChainProtocols', () => {
     it('returns the V2/V3/V4 cron matrix', () => {
       const protocols = createChainProtocols();
-      expect(protocols).toHaveLength(62);
+      expect(protocols).toHaveLength(59);
       const byProtocol = (protocol: Protocol) =>
         protocols.filter(p => p.protocol === protocol).length;
-      expect(byProtocol(Protocol.V3)).toBe(21);
-      expect(byProtocol(Protocol.V2)).toBe(19);
-      expect(byProtocol(Protocol.V4)).toBe(22);
+      expect(byProtocol(Protocol.V3)).toBe(20);
+      expect(byProtocol(Protocol.V2)).toBe(18);
+      expect(byProtocol(Protocol.V4)).toBe(21);
     });
 
     it('lists every combo once', () => {
@@ -54,6 +54,12 @@ describe('cacheConfig', () => {
     it('has no entry for Monad testnet, which the cron no longer caches', () => {
       expect(
         createChainProtocols().some(p => p.chainId === ChainId.MONAD_TESTNET)
+      ).toBe(false);
+    });
+
+    it('has no entry for Blast, which is shut down', () => {
+      expect(
+        createChainProtocols().some(p => p.chainId === ChainId.BLAST)
       ).toBe(false);
     });
 

@@ -125,6 +125,22 @@ describe('QuoteRequestValidator', () => {
       );
     });
 
+    it('should reject Blast (81457) as an unsupported chain', async () => {
+      const BLAST_CHAIN_ID = 81457;
+      const request = createValidRequest();
+      request.tokenInChainId = BLAST_CHAIN_ID;
+      request.tokenOutChainId = BLAST_CHAIN_ID;
+
+      const result = await validator.validateInputs(request, ctx);
+
+      expect(result?.error?.code).toBe(400);
+      expect(result?.error?.message).toBe('Unsupported chainId: 81457');
+      expect(quoteErrorReasonOf(result?.error)).toBe(
+        QuoteErrorReason.CHAIN_UNSUPPORTED
+      );
+      expect(mockChainRepository.getChain).not.toHaveBeenCalled();
+    });
+
     it('should return error when mixed protocol is specified explicitly', async () => {
       const request = createValidRequest();
       request.protocols = Protocol.MIXED;

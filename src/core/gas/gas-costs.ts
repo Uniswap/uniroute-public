@@ -75,7 +75,6 @@ const perChainBaseSwapCost = (id: ChainId): BigNumber => {
     case ChainId.AVAX:
     case ChainId.BASE:
     case ChainId.ZORA:
-    case ChainId.BLAST:
     case ChainId.ZKSYNC:
     case ChainId.UNICHAIN:
     case ChainId.WORLDCHAIN:
@@ -122,7 +121,6 @@ const osakaCostPerInitTick = (id: ChainId): BigNumber => {
     case ChainId.OPTIMISM:
     case ChainId.BASE:
     case ChainId.ZORA:
-    case ChainId.BLAST:
     case ChainId.ZKSYNC:
     case ChainId.UNICHAIN:
     case ChainId.WORLDCHAIN:
@@ -166,7 +164,6 @@ const osakaCostPerHop = (id: ChainId): BigNumber => {
     case ChainId.AVAX:
     case ChainId.BASE:
     case ChainId.ZORA:
-    case ChainId.BLAST:
     case ChainId.ZKSYNC:
     case ChainId.UNICHAIN:
     case ChainId.WORLDCHAIN:

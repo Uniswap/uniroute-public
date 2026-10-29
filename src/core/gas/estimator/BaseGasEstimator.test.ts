@@ -486,42 +486,6 @@ describe('BaseGasEstimator', () => {
       expect(result.gasUse).toBeGreaterThan(BigInt(100000)); // Should be more than just route gas
     });
 
-    it('should estimate gas correctly for Blast when OpStackEnabled is true', async () => {
-      const rpcProviderMap = new Map<ChainId, JsonRpcProvider>();
-      const estimator = new TestableGasEstimator(
-        BigInt(100000), // route gas
-        BigInt(50000), // l1l2 gas
-        rpcProviderMap,
-        {} as IFreshPoolDetailsWrapper
-      );
-
-      const testData = createTestData();
-      const chainId = ChainId.BLAST; // OP Stack chain
-      const serviceConfig = getUniRouteSyncConfig();
-      serviceConfig.L1L2GasCostFetcher.OpStackEnabled = true;
-      const gasPriceWei = 30000000000; // 30 gwei
-
-      const result = await estimator.estimateGas(
-        serviceConfig,
-        testData.tokenInCurrencyInfo,
-        testData.tokenOutCurrencyInfo,
-        testData.amountIn,
-        chainId,
-        testData.tokensInfo,
-        testData.tradeType,
-        testData.dummyQuote,
-        testData.provider,
-        gasPriceWei,
-        testData.ctx
-      );
-
-      // Should include both route gas and L1L2 gas
-      expect(result.gasPriceInWei).toBe(BigInt(gasPriceWei));
-      // With OpStackEnabled=true, L1L2 gas should be calculated and added to route gas
-      // Note: This requires RPC calls which may fail in test environment, but we verify the calculation path
-      expect(result.gasUse).toBeGreaterThan(BigInt(100000)); // Should be more than just route gas
-    });
-
     it('should use provided l2GasData when available', async () => {
       const rpcProviderMap = new Map<ChainId, JsonRpcProvider>();
       const estimator = new TestableGasEstimator(

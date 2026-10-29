@@ -6,6 +6,7 @@ import {
   chainFeaturesAt,
   getForkLineage,
 } from '@uniswap/lib-sharedconfig/chainFeatures';
+import {ChainId as UniRouteChainId} from '../../lib/config';
 import {AMSTERDAM_GAS_FEATURES, gasRegimeForChain} from './gas-costs';
 
 describe('Amsterdam gas regime', () => {
@@ -18,7 +19,7 @@ describe('Amsterdam gas regime', () => {
       const client = new ChainFeatures({
         forced: new Map([[ChainId.MAINNET, features]]),
       });
-      expect(gasRegimeForChain(ChainId.MAINNET, client)).toBe('osaka');
+      expect(gasRegimeForChain(UniRouteChainId.MAINNET, client)).toBe('osaka');
     }
   );
 
@@ -26,8 +27,8 @@ describe('Amsterdam gas regime', () => {
     const client = new ChainFeatures({
       forced: new Map([[ChainId.BASE, AMSTERDAM_GAS_FEATURES]]),
     });
-    expect(gasRegimeForChain(ChainId.BASE, client)).toBe('amsterdam');
-    expect(gasRegimeForChain(ChainId.MAINNET, client)).toBe('osaka');
+    expect(gasRegimeForChain(UniRouteChainId.BASE, client)).toBe('amsterdam');
+    expect(gasRegimeForChain(UniRouteChainId.MAINNET, client)).toBe('osaka');
   });
 
   for (const [chainId, config] of Object.entries(CHAIN_FEATURE_CONFIGS)) {

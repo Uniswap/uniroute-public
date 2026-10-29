@@ -71,7 +71,6 @@ import {ARC} from '../../stores/chain/hardcoded/chains/Arc';
 import {AVALANCHE} from '../../stores/chain/hardcoded/chains/Avalanche';
 import {BASE} from '../../stores/chain/hardcoded/chains/Base';
 import {BNB} from '../../stores/chain/hardcoded/chains/BNB';
-import {BLAST} from '../../stores/chain/hardcoded/chains/Blast';
 import {CELO} from '../../stores/chain/hardcoded/chains/Celo';
 import {INK} from '../../stores/chain/hardcoded/chains/Ink';
 import {LINEA} from '../../stores/chain/hardcoded/chains/Linea';
@@ -102,7 +101,6 @@ const HARD_CODED_CHAINS = [
   AVALANCHE,
   BASE,
   BNB,
-  BLAST,
   CELO,
   INK,
   LINEA,
@@ -175,22 +173,22 @@ const AURORA_CHAIN_IDS_BY_PROTOCOL: ReadonlyArray<
   [
     Protocol.V2,
     [
-      1, 42161, 137, 10, 56, 43114, 81457, 130, 480, 1868, 143, 4217, 196,
-      59144, 4326, 4663, 5042, 8453, 57073,
+      1, 42161, 137, 10, 56, 43114, 130, 480, 1868, 143, 4217, 196, 59144, 4326,
+      4663, 5042, 8453, 57073,
     ],
   ],
   [
     Protocol.V3,
     [
-      1, 42161, 137, 10, 42220, 56, 43114, 81457, 130, 480, 7777777, 1868, 143,
-      4217, 196, 59144, 4326, 4663, 5042, 57073, 8453,
+      1, 42161, 137, 10, 42220, 56, 43114, 130, 480, 7777777, 1868, 143, 4217,
+      196, 59144, 4326, 4663, 5042, 57073, 8453,
     ],
   ],
   [
     Protocol.V4,
     [
-      11155111, 42161, 137, 480, 7777777, 130, 81457, 1, 1868, 10, 56, 143,
-      4217, 196, 43114, 42220, 59144, 4326, 4663, 5042, 57073, 8453,
+      11155111, 42161, 137, 480, 7777777, 130, 1, 1868, 10, 56, 143, 4217, 196,
+      43114, 42220, 59144, 4326, 4663, 5042, 57073, 8453,
     ],
   ],
 ];
