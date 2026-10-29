@@ -11,6 +11,7 @@ import {TradeType} from '../../models/quote/TradeType';
 import {Protocol} from '../../models/pool/Protocol';
 import {V4Pool} from '../../models/pool/V4Pool';
 import {STABLE_SWAP_NG} from '../../lib/poolCaching/util/aggHooksAddressesAllowlist';
+import {DEFAULT_EVENT_LOOP_SLICE_MS} from '../../lib/eventLoopSlicer';
 
 // Extends V4Pool so `pool instanceof V4Pool` is true — required by
 // `isAggHookPool` / `routeUsesAggHook` to recognize hooked pools in tests.
@@ -118,7 +119,8 @@ describe('QuoteBestSplitFinder', () => {
     }) as QuoteBasic;
 
   const createFinderWithYieldSlice = (
-    splitSearchYieldSliceMs: number
+    splitSearchYieldSliceMs: number,
+    now?: () => number
   ): QuoteBestSplitFinder<MockPool> =>
     new QuoteBestSplitFinder<MockPool>(
       0n,
@@ -129,8 +131,38 @@ describe('QuoteBestSplitFinder', () => {
       0n,
       false,
       0,
-      splitSearchYieldSliceMs
+      splitSearchYieldSliceMs,
+      now
     );
+
+  // Split-search clock that only the finder reads, so the timeout trips at
+  // a fixed point in the DFS however loaded the machine is.
+  const createSteppingClock = (stepMs: number): (() => number) => {
+    let nowMs = 0;
+    return () => {
+      nowMs += stepMs;
+      return nowMs;
+    };
+  };
+
+  const emittedEarlyExitReasonTags = (): string[] =>
+    vi
+      .mocked(mockContext.metrics.count)
+      .mock.calls.filter(([metricName]) =>
+        metricName.includes('QuoteBestSplitFinder.EarlyExit')
+      )
+      .flatMap(([, , opts]) => opts?.tags ?? [])
+      .filter(tag => tag.startsWith('earlyExitReason:'));
+
+  // The finder's own elapsed reading, as logged on its observability line.
+  const loggedElapsedMs = (): unknown => {
+    const extra = vi
+      .mocked(mockContext.logger.debug)
+      .mock.calls.find(
+        ([msg]) => msg === 'QuoteBestSplitFinder observability'
+      )?.[1];
+    return extra instanceof Error ? undefined : extra?.elapsedMs;
+  };
 
   // Six routes over distinct pools with concave outputs, so the DFS explores
   // and ranks real multi-leg combinations up to four legs, and a search that
@@ -626,16 +658,15 @@ describe('QuoteBestSplitFinder', () => {
     });
 
     it('still stops at the timeout early-exit when the slice is 0, taking at least the timeout budget', async () => {
-      // A fully sliced search on this fixture runs for hundreds of ms, so the
-      // 20 ms budget below genuinely cuts it short.
+      // The clock advances 1 ms per finder read, and this fixture's DFS makes
+      // far more than 20 reads, so the budget cuts the search short at the
+      // same point on every run.
       const percentageToQuotes = createConcaveSixRouteQuotes();
-      const slicedFinder = createFinderWithYieldSlice(0);
-      // A small but non-trivial budget: large enough that Date.now()'s
-      // millisecond rounding (the same clock the timeout check itself reads)
-      // can't make a genuinely-elapsed-but-sub-tick search look like it beat
-      // the budget.
+      const slicedFinder = createFinderWithYieldSlice(
+        0,
+        createSteppingClock(1)
+      );
       const timeoutMs = 20;
-      const startedAt = Date.now();
       await slicedFinder.findBestSplits(
         ChainId.MAINNET,
         percentageToQuotes,
@@ -647,17 +678,44 @@ describe('QuoteBestSplitFinder', () => {
         [],
         mockContext
       );
-      const elapsedMs = Date.now() - startedAt;
-      // Never equality: the budget is a floor on wall-clock time, not an
-      // exact tick count.
-      expect(elapsedMs).toBeGreaterThanOrEqual(timeoutMs);
+      // Measured on the finder's own clock: it stopped only once the budget
+      // had elapsed, never before.
+      expect(loggedElapsedMs()).toBeGreaterThanOrEqual(timeoutMs);
+      expect(emittedEarlyExitReasonTags()).toEqual(['earlyExitReason:timeout']);
+    });
 
+    it('reports a timeout, not no_new_routes, when the budget runs out before a level adds anything', async () => {
+      // The 100% routes land at level 1 (which has no timeout check); the
+      // clock then reads past the budget, so the first level-2 DFS check
+      // trips with zero level-2 combinations added — the shape that tagged
+      // timeouts as no_new_routes.
+      const percentageToQuotes = createConcaveSixRouteQuotes();
+      const timeoutMs = 20;
+      const clockReadingsMs = [0];
+      const finderOutOfBudgetAfterStart = createFinderWithYieldSlice(
+        0,
+        () => clockReadingsMs.shift() ?? timeoutMs + 1
+      );
+
+      const result = await finderOutOfBudgetAfterStart.findBestSplits(
+        ChainId.MAINNET,
+        percentageToQuotes,
+        5,
+        4,
+        100,
+        timeoutMs,
+        TradeType.ExactIn,
+        [],
+        mockContext
+      );
+
+      expect(result.length).toBeGreaterThan(0);
+      expect(result.every(split => split.length === 1)).toBe(true);
+      expect(emittedEarlyExitReasonTags()).toEqual(['earlyExitReason:timeout']);
       expect(vi.mocked(mockContext.metrics.count).mock.calls).toContainEqual([
-        expect.stringContaining('QuoteBestSplitFinder.EarlyExit'),
+        expect.stringContaining('QuoteBestSplitFinder.TimedOut'),
         1,
-        expect.objectContaining({
-          tags: expect.arrayContaining(['earlyExitReason:timeout']),
-        }),
+        {tags: ['hasResult:true']},
       ]);
     });
 
@@ -920,21 +978,25 @@ describe('QuoteBestSplitFinder', () => {
         createMockQuote(createMockRoute([pools[7]!], 25), 25n),
       ]);
 
-      // Mock Date.now to let levels 2-3 complete then trip timeout deeper in
-      // the recursion. The exact call count needed is implementation-detail-
-      // sensitive; 50 free calls comfortably covers levels 1-3 for this small
-      // search space, and any later call returns past the timeout horizon.
+      // The finder's clock lets levels 2-3 complete then trips the timeout
+      // deeper in the recursion. The exact read count needed is
+      // implementation-detail-sensitive; 50 free reads comfortably covers
+      // levels 1-3 for this small search space, and any later read returns
+      // past the timeout horizon.
       const startTime = 1_000_000;
       const timeoutMs = 100;
       let calls = 0;
-      const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
-        calls += 1;
-        if (calls === 1) return startTime;
-        if (calls < 50) return startTime + 1; // well within timeoutMs
-        return startTime + timeoutMs + 1;
-      });
+      const clockFinder = createFinderWithYieldSlice(
+        DEFAULT_EVENT_LOOP_SLICE_MS,
+        () => {
+          calls += 1;
+          if (calls === 1) return startTime;
+          if (calls < 50) return startTime + 1; // well within timeoutMs
+          return startTime + timeoutMs + 1;
+        }
+      );
 
-      await finder.findBestSplits(
+      await clockFinder.findBestSplits(
         ChainId.MAINNET,
         percentageToQuotes,
         25,
@@ -960,8 +1022,6 @@ describe('QuoteBestSplitFinder', () => {
           msg === 'QuoteBestSplitFinder observability'
       );
       expect(observabilityCall?.[1]?.earlyExitReason).toBe('timeout');
-
-      dateNowSpy.mockRestore();
     });
 
     it('tracks the EXACT_OUT best combination direction-aware (lower input is better)', async () => {

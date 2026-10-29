@@ -21,9 +21,9 @@ import {
   EventLoopSlicer,
 } from '../../lib/eventLoopSlicer';
 
-export class QuoteBestSplitFinder<TPool extends Pool>
-  implements IQuoteBestSplitFinder<TPool>
-{
+export class QuoteBestSplitFinder<
+  TPool extends Pool,
+> implements IQuoteBestSplitFinder<TPool> {
   /**
    * Maximum number of quotes to return per percentage, after filtering for
    * validity, while constructing splits. The total returned across both route
@@ -249,8 +249,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
   // finishes or reaches its RouteSplitTimeoutMs budget (up to 30 s on the
   // async config) while every other request on the process waits. It hands the loop back
   // (setImmediate, via EventLoopSlicer) after each slice of this many ms.
-  // Sliced on performance.now so the timeout's Date.now reads are untouched.
+  // Sliced on performance.now so the timeout's `now` reads are untouched.
   private readonly splitSearchYieldSliceMs: number;
+
+  // Wall clock (epoch ms) for the split-search timeout budget and its latency
+  // metrics. The default calls through `Date.now` on every read rather than
+  // capturing the function, so a `Date.now` spy installed after construction
+  // still takes effect.
+  private readonly now: () => number;
 
   constructor(
     aggHookPartitionToleranceBps = 0n,
@@ -261,7 +267,8 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     aggHookProjectedLossToleranceQT = 0n,
     splitFinderBoundedGrowthEnabled = false,
     shadowCheckpointMs = 0,
-    splitSearchYieldSliceMs = DEFAULT_EVENT_LOOP_SLICE_MS
+    splitSearchYieldSliceMs = DEFAULT_EVENT_LOOP_SLICE_MS,
+    now: () => number = () => Date.now()
   ) {
     this.AGG_HOOK_PARTITION_TOLERANCE_BPS = aggHookPartitionToleranceBps;
     this.AGG_HOOK_PARTITION_GAS_TOLERANCE_UNITS =
@@ -277,6 +284,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     this.SHADOW_CHECKPOINT_MS = shadowCheckpointMs;
     assertValidSliceMs(splitSearchYieldSliceMs);
     this.splitSearchYieldSliceMs = splitSearchYieldSliceMs;
+    this.now = now;
   }
 
   private routeHasGivenAddressAsInputOrOutput(
@@ -2249,7 +2257,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // key was added. Used to log the discovery level of the top results when
     // findBestSplits returns.
     const combinationFirstSeenLevel = new Map<string, number>();
-    const startTime = Date.now();
+    const startTime = this.now();
     const chainLatencyTags = [`chain:${ChainId[chainId]}`];
     const levelLatenciesMs = new Map<number, number>();
     const filterSortLatenciesMs = new Map<number, number>();
@@ -2270,7 +2278,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     };
     const recordLevelLatency = (level: number, levelStartTime: number) => {
       if (!levelLatenciesMs.has(level)) {
-        levelLatenciesMs.set(level, Date.now() - levelStartTime);
+        levelLatenciesMs.set(level, this.now() - levelStartTime);
       }
     };
     const emitFindBestSplitsLatencyMetrics = (elapsedMs: number) => {
@@ -2626,7 +2634,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     };
 
     // First, add all 100% routes from the best quotes
-    const levelOneStartTime = Date.now();
+    const levelOneStartTime = this.now();
     const fullQuotes = percentageToSortedQuotes.get(100) || [];
     // Try all 100% routes since they're the most efficient
     for (let i = 0; i < fullQuotes.length; i++) {
@@ -2636,7 +2644,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // If we only want single routes, return early
     if (maxSplits === 1) {
       recordLevelLatency(1, levelOneStartTime);
-      emitFindBestSplitsLatencyMetrics(Date.now() - startTime);
+      emitFindBestSplitsLatencyMetrics(this.now() - startTime);
       return result;
     }
 
@@ -2653,7 +2661,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       bestCombinationKey,
       bestFoundAtLevel,
       combinationsFound: result.length,
-      elapsedMs: Date.now() - startTime,
+      elapsedMs: this.now() - startTime,
     });
 
     // Largest percentage bucket that actually has quotes and can appear as a
@@ -2678,7 +2686,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       currentRoutes: RouteBasic<TPool>[]
     ) => {
       // Check for timeout
-      if (Date.now() - startTime > timeoutMs) {
+      if (this.now() - startTime > timeoutMs) {
         timedOut = true;
         earlyExitReason = 'timeout';
         return;
@@ -2734,7 +2742,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         percent += percentageStep
       ) {
         // Check for timeout in the percentage loop
-        if (Date.now() - startTime > timeoutMs) {
+        if (this.now() - startTime > timeoutMs) {
           timedOut = true;
           earlyExitReason = 'timeout';
           return;
@@ -2746,7 +2754,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         // Try each available quote
         for (const quote of availableQuotes) {
           // Check for timeout in the inner loop
-          if (Date.now() - startTime > timeoutMs) {
+          if (this.now() - startTime > timeoutMs) {
             timedOut = true;
             earlyExitReason = 'timeout';
             return;
@@ -2784,7 +2792,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         );
         continue;
       }
-      const levelStartTime = Date.now();
+      const levelStartTime = this.now();
       currentSearchLevel = level;
       await ctx.metrics.count(
         buildMetricKey(`QuoteBestSplitFinder.Level.Invocations.${level}`),
@@ -2833,7 +2841,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         combinationsFound: result.length,
         cumulativeUniqueCombinations: combinations.size,
         newCombinationsThisLevel: combinationsAddedThisLevel,
-        elapsedMs: Date.now() - startTime,
+        elapsedMs: this.now() - startTime,
         timedOut,
       });
 
@@ -2846,14 +2854,14 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       // the case it's meant to size, undercounting the bug shape.
       lastUnfilteredResult = result.slice();
       // Filter and sort results after each level to keep array size manageable
-      const filterSortStartTime = Date.now();
+      const filterSortStartTime = this.now();
       result = this.filterAndSortResults(
         result,
         maxSplitRoutes,
         quoteMap,
         tradeType
       );
-      filterSortLatenciesMs.set(level, Date.now() - filterSortStartTime);
+      filterSortLatenciesMs.set(level, this.now() - filterSortStartTime);
       resultSorted = true;
       // Shadow-budget snapshot at the level boundary. Boundary granularity
       // — not exact elapsed — keeps this off the hot DFS path; for the
@@ -2871,7 +2879,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
         this.SHADOW_CHECKPOINT_MS > 0 &&
         shadowCheckpointBest === undefined &&
         result.length > 0 &&
-        Date.now() - startTime >= this.SHADOW_CHECKPOINT_MS
+        this.now() - startTime >= this.SHADOW_CHECKPOINT_MS
       ) {
         shadowCheckpointBest = this.bestScoredCombination(
           result,
@@ -2889,7 +2897,15 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       // but never with an empty result: for huge trades the shallow buckets
       // are all empty and the first complete combinations only appear at
       // deeper levels, so an empty level here proves nothing about them.
-      if (combinationsAddedThisLevel === 0 && result.length > 0) {
+      // Nor for a level the timeout cut short: zero adds there means the
+      // budget ran out before the DFS reached a leaf, not that the level is
+      // exhausted, so earlyExitReason must stay 'timeout' (the loop's
+      // `!timedOut` guard ends the search anyway).
+      if (
+        combinationsAddedThisLevel === 0 &&
+        result.length > 0 &&
+        !wasTruncatedThisLevel
+      ) {
         ctx.logger.debug(
           `QuoteBestSplitFinder: No new routes added at level ${level}, exiting early`
         );
@@ -2995,7 +3011,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
       topResultsDiscoveryLevels,
     });
 
-    const elapsedMs = Date.now() - startTime;
+    const elapsedMs = this.now() - startTime;
     emitFindBestSplitsLatencyMetrics(elapsedMs);
 
     ctx.logger.debug('QuoteBestSplitFinder observability', {
@@ -3019,7 +3035,7 @@ export class QuoteBestSplitFinder<TPool extends Pool>
     // is wrong-signed for EXACT_OUT (lower is better there).
     const winnerFoundAtLevel =
       result.length > 0
-        ? combinationFirstSeenLevel.get(getCombinationKey(result[0])) ?? 0
+        ? (combinationFirstSeenLevel.get(getCombinationKey(result[0])) ?? 0)
         : 0;
     // Coarsened bucket-shape tag: the largest split-eligible percentage
     // bucket, bounded to 5 values. `le20` is the huge-trade shape where only
