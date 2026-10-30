@@ -684,13 +684,27 @@ export class BasicTopPoolsSelector
       // The counter tallies every matching pool before the dedupe check, so
       // `available` counts pools an earlier stage already selected too.
       let experimentPoolsAvailable = 0;
+      let blockedRoutingTokenDrops = 0;
+      const chainHasBlockedRoutingTokens =
+        RoutingBlockList.hasBlockedRoutingTokens(chainId);
       const experimentPools = pools.filter(pool => {
         const hooks = (pool as V4PoolInfo).hooks?.toLowerCase();
         if (!hooks || !experimentHookAddresses.has(hooks)) {
           return false;
         }
-        // Reads the pre-filter universe, so the canonical-pools rule has to
-        // be re-applied here.
+        // Reads the pre-filter universe, so the routing block list and the
+        // canonical-pools rule have to be re-applied here.
+        if (
+          chainHasBlockedRoutingTokens &&
+          RoutingBlockList.isPoolThroughBlockedRoutingToken(
+            chainId,
+            pool.token0.id,
+            pool.token1.id
+          )
+        ) {
+          blockedRoutingTokenDrops++;
+          return false;
+        }
         if (
           !CanonicalPools.isPoolAdmitted(
             chainId,
@@ -710,6 +724,12 @@ export class BasicTopPoolsSelector
         return true;
       });
       allPools = [...allPools, ...experimentPools];
+      RoutingBlockList.countDroppedPools(
+        chainId,
+        blockedRoutingTokenDrops,
+        ctx,
+        METRIC_BLOCKED_ROUTING_TOKEN_POOL
+      );
       ctx.logger.debug('Manually appended experiment pools', {
         chainId,
         experiment,

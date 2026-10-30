@@ -21,6 +21,7 @@ import {RouteNamespaceContext} from '../../models/hooks/namespaces';
 import {getMaxFilteredPoolCount} from './TopPoolsSelector';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
 import {CanonicalPools} from '../../lib/CanonicalPools';
+import {RoutingBlockList} from '../../lib/RoutingBlockList';
 import {shortenByRandomJitter} from '../../lib/refreshJitter';
 
 // Upper bound on serialized size of a getPoolsForTokens cache entry, derived
@@ -51,6 +52,9 @@ export const EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS = 60;
 // next refresh tries again. Short, because the held snapshot is already past
 // its normal TTL; the stale-serve bound still caps its total age.
 export const DEFERRED_SNAPSHOT_RETRY_TTL_SECONDS = 60;
+
+const METRIC_CACHED_POOLS_FOR_TOKENS_BLOCKED_ROUTING_TOKEN_POOL =
+  buildMetricKey('PoolDiscoverer.getPoolsForTokens.BlockedRoutingTokenPool');
 
 // On the memo + skip-reparse path the getPools cache holds this prefix plus a
 // per-load counter instead of the JSON-stringified snapshot: that string was
@@ -1030,11 +1034,21 @@ export abstract class BaseCachingPoolDiscoverer<
             ctx
           );
           // The cached list is the selector's output from an earlier
-          // process, so a token that gained a canonical-pools entry since
-          // is re-filtered here like the deny-set above rather than served
-          // for the rest of the TTL.
+          // process, so a token blocked on every hop or given a
+          // canonical-pools entry since is re-filtered here like the
+          // deny-set above rather than served for the rest of the TTL.
           retrievedPools = CanonicalPools.filterAdmittedPools(
-            retrievedPools,
+            RoutingBlockList.dropPoolsThroughBlockedRoutingTokens(
+              retrievedPools,
+              chainId,
+              pool => ({
+                poolId: pool.id,
+                token0: pool.token0.id,
+                token1: pool.token1.id,
+              }),
+              ctx,
+              METRIC_CACHED_POOLS_FOR_TOKENS_BLOCKED_ROUTING_TOKEN_POOL
+            ),
             chainId
           );
           cachedEntryUsable =

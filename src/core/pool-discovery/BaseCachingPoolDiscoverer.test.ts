@@ -461,6 +461,83 @@ describe('BaseCachingPoolDiscoverer', () => {
     }
   });
 
+  describe('routing block list on a cached pools-for-tokens hit', () => {
+    const hookr = new Address('0x18e674231a58c239dc7daedcffe15ec3a24cff5c');
+    const weth = new Address('0x0bd7d308f8e1639fab988df18a8011f41eacad73');
+    const cachedPool = (id: string, token0: string, token1: string) => ({
+      id,
+      feeTier: '100',
+      tickSpacing: '1',
+      hooks: '0x0000000000000000000000000000000000000000',
+      liquidity: '1000',
+      token0: {id: token0},
+      token1: {id: token1},
+      tvlETH: 1000,
+      tvlUSD: 1000,
+    });
+    // wHOOKR appears checksummed in one pool and lowercase in the other.
+    const wrapperPools = [
+      cachedPool(
+        '0xdd0ebece3c0cca47a21e552da73a8a0a1f14f613',
+        hookr.address,
+        '0x0cB7b36476d577C683f7Ec03994ddC0e006a97bd'
+      ),
+      cachedPool(
+        '0x7aa37359d6d6ed87f6762b91ba3d57bcac91dac3',
+        '0x0cb7b36476d577c683f7ec03994ddc0e006a97bd',
+        weth.address
+      ),
+    ];
+    const directPool = cachedPool(
+      '0xd8b750f564321ce68b4b3d8498616da96fad798d',
+      hookr.address,
+      weth.address
+    );
+    const blockedMetric = buildMetricKey(
+      'PoolDiscoverer.getPoolsForTokens.BlockedRoutingTokenPool'
+    );
+    const readCachedHit = (chainId: ChainId) =>
+      poolDiscoverer.getPoolsForTokens(
+        chainId,
+        Protocol.V3,
+        hookr,
+        weth,
+        topPoolSelector,
+        undefined,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        ctx
+      );
+
+    beforeEach(() => {
+      getPoolsForTokensCache.get = vi
+        .fn()
+        .mockResolvedValue(JSON.stringify([...wrapperPools, directPool]));
+      // The drop counter is fire-and-forget and chains .catch on the result.
+      vi.mocked(ctx.metrics.count).mockResolvedValue(undefined);
+    });
+
+    it('drops pools through wHOOKR on Robinhood and counts them', async () => {
+      const pools = await readCachedHit(ChainId.ROBINHOOD);
+
+      expect(pools).toEqual([directPool]);
+      expect(ctx.metrics.count).toHaveBeenCalledWith(blockedMetric, 2, {
+        tags: ['chain:ROBINHOOD', 'status:success'],
+      });
+    });
+
+    it('serves the same cached pools on a chain where wHOOKR is not listed', async () => {
+      const pools = await readCachedHit(ChainId.MAINNET);
+
+      expect(pools).toEqual([...wrapperPools, directPool]);
+      expect(ctx.metrics.count).not.toHaveBeenCalledWith(
+        blockedMetric,
+        expect.anything(),
+        expect.anything()
+      );
+    });
+  });
+
   it('should fetch pools for tokens and cache them if not available in cache', async () => {
     const chainId = ChainId.MAINNET;
     const protocol = Protocol.V2;

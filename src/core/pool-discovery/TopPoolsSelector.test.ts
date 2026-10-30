@@ -1253,6 +1253,85 @@ describe('BasicTopPoolsSelector', () => {
         expect(result.map(p => p.id)).toContain(mockV4Pool.id);
       });
 
+      describe('routing block list', () => {
+        const hookr = '0x18e674231a58c239dc7daedcffe15ec3a24cff5c';
+        const wHookrChecksummed = '0x0cB7b36476d577C683f7Ec03994ddC0e006a97bd';
+        const weth = '0x0bd7d308f8e1639fab988df18a8011f41eacad73';
+        const experimentPoolWith = (
+          id: string,
+          token0: string,
+          token1: string
+        ): V4PoolInfo => ({
+          ...makeExperimentPool(id, experimentHookAddress, /* tvlUSD= */ 1),
+          token0: {id: token0},
+          token1: {id: token1},
+        });
+        const filterWithExperiment = (
+          pools: UniPoolInfo[],
+          chainId: ChainId,
+          metricCtx: Context
+        ) =>
+          selector.filterPools(
+            pools,
+            chainId,
+            tokenIn,
+            tokenOut,
+            Protocol.V4,
+            HooksOptions.HOOKS_INCLUSIVE,
+            createNamespaceContext([
+              new ExperimentalHooksNamespace(
+                Experiment.GuideStar_Stable_Stable
+              ),
+            ]),
+            metricCtx,
+            {shouldUseCache: true}
+          );
+
+        it('does not append an experiment pool through wHOOKR on Robinhood', async () => {
+          // wHOOKR is checksummed here; the block list stores it lowercase.
+          const wrapperPool = experimentPoolWith(
+            '0xexp_whookr',
+            hookr,
+            wHookrChecksummed
+          );
+          const controlPool = experimentPoolWith('0xexp_hookr', hookr, weth);
+          const metricCtx = buildTestContext();
+
+          const result = await filterWithExperiment(
+            [wrapperPool, controlPool, mockV4Pool],
+            ChainId.ROBINHOOD,
+            metricCtx
+          );
+
+          expect(result.map(p => p.id)).not.toContain('0xexp_whookr');
+          expect(result.map(p => p.id)).toContain('0xexp_hookr');
+          // One drop from the selection filter, one from the append.
+          expect(
+            metricCtx.metrics.countStore[METRIC_BLOCKED_ROUTING_TOKEN_POOL]
+          ).toBe(2);
+        });
+
+        it('appends the same experiment pool on a chain where wHOOKR is not listed', async () => {
+          const wrapperPool = experimentPoolWith(
+            '0xexp_whookr',
+            hookr,
+            wHookrChecksummed
+          );
+          const metricCtx = buildTestContext();
+
+          const result = await filterWithExperiment(
+            [wrapperPool, mockV4Pool],
+            ChainId.MAINNET,
+            metricCtx
+          );
+
+          expect(result.map(p => p.id)).toContain('0xexp_whookr');
+          expect(
+            metricCtx.metrics.countStore[METRIC_BLOCKED_ROUTING_TOKEN_POOL]
+          ).toBeUndefined();
+        });
+      });
+
       it('is a no-op when experiment is undefined', async () => {
         // Assert directly on the manual-append debug log since the experiment
         // pool may still be pulled in via the generic top-N path regardless
