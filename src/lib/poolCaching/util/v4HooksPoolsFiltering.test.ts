@@ -2067,6 +2067,54 @@ describe('permissioned-hook pools listed by pool id', () => {
         .includes(GROMA_POOL_ID)
     ).toBe(true);
   });
+
+  describe('Base deployment', () => {
+    const BASE_GROMA_HOOK = '0xd49f2426c19cba72d7ae919d7704f3497b234888';
+    const BASE_V4GRO = '0x020ea771fd46a30b9def546463f8b4cdd199352e';
+    const BASE_USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+    // The hook's PRIMARY_MARKET_POOL_ID, as read on chain.
+    const BASE_GROMA_POOL_ID =
+      '0x1eba073a6a00bc20e051d73c534afd965fd5a3b8e6c6fb7aba993293c617a16e';
+    const createBaseGromaPool = (overrides: Partial<V4SubgraphPool> = {}) =>
+      createGromaPool({
+        id: BASE_GROMA_POOL_ID,
+        hooks: BASE_GROMA_HOOK,
+        token0: {
+          id: BASE_V4GRO,
+          symbol: 'v4GRO',
+          name: 'Uniswap v4 GromaCoin',
+          decimals: '18',
+        },
+        token1: {
+          id: BASE_USDC,
+          symbol: 'USDC',
+          name: 'USD Coin',
+          decimals: '6',
+        },
+        ...overrides,
+      });
+    const filterBase = (pools: V4SubgraphPool[]) =>
+      v4HooksPoolsFiltering(ChainId.BASE, pools, mockLogger, mockMetric).map(
+        p => p.id.toLowerCase()
+      );
+
+    it('the listed id is the keccak of the v4GRO/USDC fee-0 PoolKey on the Groma hook', () => {
+      expect(
+        computeV4PoolId(BASE_V4GRO, BASE_USDC, 0, 1, BASE_GROMA_HOOK)
+      ).toBe(BASE_GROMA_POOL_ID);
+    });
+
+    it('admits the Groma pool from the shared registry', () => {
+      expect(filterBase([createBaseGromaPool()])).toContain(BASE_GROMA_POOL_ID);
+    });
+
+    it('drops an unlisted pool on the Groma hook', () => {
+      const unlistedId = '0x' + '2'.repeat(64);
+      expect(filterBase([createBaseGromaPool({id: unlistedId})])).not.toContain(
+        unlistedId
+      );
+    });
+  });
 });
 
 describe('v4HooksPoolsFiltering dynamic ZLCA hooks', () => {
