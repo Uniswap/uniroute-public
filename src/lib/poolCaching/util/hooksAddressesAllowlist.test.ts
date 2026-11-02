@@ -14,12 +14,14 @@ import {
   getTvlBypassHookAddresses,
   getZlcaQuoteTwinHook,
   GRO_PERMISSIONED_HOOK_ON_SEPOLIA,
+  GRO_PERMISSIONED_HOOK_ON_BASE,
   HOOKS_ADDRESSES_ALLOWLIST,
   isZlcaHookPricedFromQuoter,
   isZlcaHookSettleBeforeSwap,
   LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
   NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
   SLIPSTREAM_AGG_HOOK_ON_BASE,
+  METRIC_AGGREGATOR_HOOK_ON_BASE,
   WETH_HOOKS_ADDRESS_ON_ARBITRUM,
   WETH_HOOKS_ADDRESS_ON_BASE,
   WETH_HOOKS_ADDRESS_ON_MAINNET,
@@ -246,12 +248,15 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     expect(monad).toHaveLength(10);
     // Numeric chain order (1 < 143 < 8453 < 11155111): the two mainnet FewV2
     // shells, then the 10 Monad xStock wrappers, then the Base Slipstream
-    // singleton, then Groma's Sepolia hook, and nothing else.
+    // singleton, Base Metric aggregator and Base Groma hook, then Groma's
+    // Sepolia hook, and nothing else.
     expect(quoterPriced).toEqual([
       `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET}`,
       `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET_2}`,
       ...monad,
       `${ChainId.BASE}:${SLIPSTREAM_AGG_HOOK_ON_BASE}`,
+      `${ChainId.BASE}:${METRIC_AGGREGATOR_HOOK_ON_BASE}`,
+      `${ChainId.BASE}:${GRO_PERMISSIONED_HOOK_ON_BASE}`,
       `${ChainId.SEPOLIA}:${GRO_PERMISSIONED_HOOK_ON_SEPOLIA}`,
     ]);
   });

@@ -601,6 +601,11 @@ export const DUALPOOL_HOOK_ON_MAINNET =
 export const SLIPSTREAM_AGG_HOOK_ON_BASE =
   '0xa1dfe862f1111f5e9d466fd4d7297d7d4fa76888';
 
+// Metric Aggregator (ZLCA): zero-liquidity, fills against external Metric OMM
+// pools. Declared above ZLCA_HOOKS_PER_CHAIN, which references it at load.
+export const METRIC_AGGREGATOR_HOOK_ON_BASE =
+  '0x4d4044d6f5c62389d7f79cf86435a220b7bb2888';
+
 // Groma's GroPrimaryMarketHook (groma-dev/gromacoin), source-verified on
 // Etherscan (solc 0.8.26). Mints and redeems GRO at NAV inside `beforeSwap`
 // against its v4GRO permissions adapter, so its pool holds no liquidity; it
@@ -610,6 +615,11 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
 // references it at module load.
 export const GRO_PERMISSIONED_HOOK_ON_SEPOLIA =
   '0xe14faba2f92e9f48b36ba6dd08bbc69333a80888';
+// Groma GroPrimaryMarketHook (Base), white-glove permissioned partner.
+// Zero-liquidity NAV mint/redeem (in ZLCA_HOOKS_PER_CHAIN below);
+// permissionedTokens.ts registration still pending Groma's deployment data.
+export const GRO_PERMISSIONED_HOOK_ON_BASE =
+  '0xd49f2426c19cba72d7ae919d7704f3497b234888';
 // flETH 1:1 ETH-wrapper hooks (flETHHooks). Defined here (above ZLCA_HOOKS_PER_CHAIN)
 // because they are referenced in that map. Identical source across Ethereum,
 // Unichain, Robinhood, Ink, Arbitrum (Base is a separate earlier build).
@@ -736,6 +746,19 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.BASE]: {
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    // External Metric pools span 18/6/8 decimals and the init price is cosmetic
+    // → sqrtPriceFromQuoter.
+    [METRIC_AGGREGATOR_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    // Groma NAV mint/redeem: a real buy burned ~701k gas (maxGas() reports
+    // 100000, but that's the read-only quote budget, not execution). Fills at
+    // NAV so slot0 drifts → sqrtPriceFromQuoter.
+    [GRO_PERMISSIONED_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 700_000n,
       sqrtPriceFromQuoter: true,
     },
     [ETH_FLETH_AUTO_WRAP_HOOKS_ADDRESS_ON_BASE]: {gasOverheadPerHop: 500_000n},
@@ -1148,6 +1171,16 @@ export const FLAUNCH_POSITION_MANAGER_ON_MAINNET =
   '0xb741a710e456fc6d7f76c88f5c56b27d05e8a5dc';
 export const FLAUNCH_ANY_POSITION_MANAGER_ON_MAINNET =
   '0x0215c3ef94ef3e86c32e847c662ad649000965dc';
+// Flaunch PositionManager v1.6.0 — new version of the allowlisted launchpad;
+// same CREATE2 address across chains.
+export const FLAUNCH_POSITION_MANAGER_V1_6_ON_MAINNET =
+  '0x54bedd41afdf57722518cf6dd826a70d81e9a5dc';
+export const FLAUNCH_POSITION_MANAGER_V1_6_ON_BASE =
+  '0x54bedd41afdf57722518cf6dd826a70d81e9a5dc';
+export const FLAUNCH_POSITION_MANAGER_V1_6_ON_ARBITRUM =
+  '0x54bedd41afdf57722518cf6dd826a70d81e9a5dc';
+export const FLAUNCH_POSITION_MANAGER_V1_6_ON_ROBINHOOD =
+  '0x54bedd41afdf57722518cf6dd826a70d81e9a5dc';
 export const NFTX_V4_HOOK_ON_ROBINHOOD =
   '0xaa49adadd33c5e953b645567afb10cbbba63afc4';
 export const LAUNCHPAD_V4_HOOK_ON_ROBINHOOD =
@@ -1807,6 +1840,9 @@ export const PEACH_ADAPTIVE_POOL_DEFAULT_HOOK_ON_ARC =
   '0x8c960de62a26a688b72e6cbf644f46715642a080';
 export const MYSPHERE_LAUNCH_HOOK_ON_BASE =
   '0x71028ea6999e2c415b46cc022ed0a9fdca2e2044';
+// GenesisHookV5 (Base), operator-governed dynamic-fee market-making hook.
+export const GENESIS_HOOK_V5_ON_BASE =
+  '0xd6155ce86ff3a33f52493e08cf77d7bbdf21fffc';
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
 > &
@@ -1897,6 +1933,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     NFTX_V4_HOOK_ON_MAINNET_2,
     FLAUNCH_POSITION_MANAGER_ON_MAINNET,
     FLAUNCH_ANY_POSITION_MANAGER_ON_MAINNET,
+    FLAUNCH_POSITION_MANAGER_V1_6_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET_2,
     PROGRAMMABLE_CLASSIC_FEE_HOOK_ON_MAINNET,
     PROGRAMMABLE_STOCK_PAIRED_FEE_HOOK_ON_MAINNET,
@@ -1959,6 +1996,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     THE_POOL_ON_ARBITRUM,
     NFTX_V4_HOOK_ON_ARBITRUM,
     FLAUNCH_ANYPOSM_VESTED_ON_ARBITRUM,
+    FLAUNCH_POSITION_MANAGER_V1_6_ON_ARBITRUM,
     GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
@@ -2003,6 +2041,10 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BANKR_INDEX_HOOK_ON_BASE,
     FEE_HOOK_ON_BASE,
     MYSPHERE_LAUNCH_HOOK_ON_BASE,
+    GRO_PERMISSIONED_HOOK_ON_BASE,
+    METRIC_AGGREGATOR_HOOK_ON_BASE,
+    FLAUNCH_POSITION_MANAGER_V1_6_ON_BASE,
+    GENESIS_HOOK_V5_ON_BASE,
     BASESTONK_ADVANCED_FEE_HOOK_V6_ON_BASE,
     MEMEFUN_HOOK_ON_BASE,
     MOTHERSHIP_LP_MANAGER_ON_BASE,
@@ -2360,6 +2402,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     KLIK_HOOK_ON_ROBINHOOD,
     FLAUNCH_POSM_ON_ROBINHOOD,
     FLAUNCH_POSM_ON_ROBINHOOD_2,
+    FLAUNCH_POSITION_MANAGER_V1_6_ON_ROBINHOOD,
     RIVERS_LAUNCH_HOOK_V4_ON_ROBINHOOD,
     WICK_HOOK_ON_ROBINHOOD,
     LENDS_PROTOCOL_HOOK_ON_ROBINHOOD,
