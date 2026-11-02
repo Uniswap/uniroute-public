@@ -10,10 +10,13 @@ import {
   FEW_V2_SHELL_HOOK_ON_MAINNET,
   FEW_V2_SHELL_HOOK_ON_MAINNET_2,
   getProtocolForAggHookAddress,
+  getSettleBeforeSwapHooks,
   getTvlBypassHookAddresses,
+  getZlcaQuoteTwinHook,
   GRO_PERMISSIONED_HOOK_ON_SEPOLIA,
   HOOKS_ADDRESSES_ALLOWLIST,
   isZlcaHookPricedFromQuoter,
+  isZlcaHookSettleBeforeSwap,
   LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
   NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
   SLIPSTREAM_AGG_HOOK_ON_BASE,
@@ -33,6 +36,7 @@ import {
   STABLE_SWAP_NG,
   UNISWAP_AGG_HOOK_ON_TEMPO,
 } from './aggHooksAddressesAllowlist';
+import {XSTOCK_WRAP_HOOKS_ON_MONAD} from './xStockWrapHooks';
 import {Protocol} from '../../../models/pool/Protocol';
 import {ChainId} from '@uniswap/sdk-core';
 
@@ -300,6 +304,54 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     expect(
       isZlcaHookPricedFromQuoter(999_999, SLIPSTREAM_AGG_HOOK_ON_BASE)
     ).toBe(false);
+  });
+
+  it('flags exactly the Monad xStock wrap hooks as settle-before-swap', () => {
+    // Each wrap hook takes its input inside beforeSwap. No other registered
+    // hook does, so no other route changes its calldata order.
+    const flagged = Object.keys(ZLCA_HOOKS_PER_CHAIN).flatMap(chainIdStr =>
+      getSettleBeforeSwapHooks(Number(chainIdStr)).map(
+        hook => `${chainIdStr}:${hook}`
+      )
+    );
+
+    expect(flagged).toEqual(
+      XSTOCK_WRAP_HOOKS_ON_MONAD.map(({hook}) => `${ChainId.MONAD}:${hook}`)
+    );
+  });
+
+  it('gives each settle-before-swap hook its own quote twin', () => {
+    const quoteTwins = XSTOCK_WRAP_HOOKS_ON_MONAD.map(({hook}) =>
+      getZlcaQuoteTwinHook(ChainId.MONAD, hook)
+    );
+
+    expect(quoteTwins).toEqual(
+      XSTOCK_WRAP_HOOKS_ON_MONAD.map(({quoteTwinHook}) => quoteTwinHook)
+    );
+    expect(new Set(quoteTwins).size).toBe(XSTOCK_WRAP_HOOKS_ON_MONAD.length);
+    // A twin is quote-time code only: it never becomes a routable hook.
+    for (const twin of quoteTwins) {
+      expect(HOOKS_ADDRESSES_ALLOWLIST[ChainId.MONAD]).not.toContain(twin);
+    }
+  });
+
+  it('isZlcaHookSettleBeforeSwap matches the flag case-insensitively and per chain', () => {
+    const [{hook}] = XSTOCK_WRAP_HOOKS_ON_MONAD;
+
+    expect(isZlcaHookSettleBeforeSwap(ChainId.MONAD, hook)).toBe(true);
+    expect(
+      isZlcaHookSettleBeforeSwap(
+        ChainId.MONAD,
+        hook.toUpperCase().replace('0X', '0x')
+      )
+    ).toBe(true);
+    expect(isZlcaHookSettleBeforeSwap(MAINNET, hook)).toBe(false);
+    expect(
+      isZlcaHookSettleBeforeSwap(ChainId.MONAD, WETH_HOOKS_ADDRESS_ON_MONAD)
+    ).toBe(false);
+    expect(
+      getZlcaQuoteTwinHook(ChainId.MONAD, WETH_HOOKS_ADDRESS_ON_MONAD)
+    ).toBe(undefined);
   });
 
   it('every zero-measured-TVL hook is allowlisted on its chain', () => {

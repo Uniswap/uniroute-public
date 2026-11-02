@@ -145,7 +145,10 @@ import {IPoolTransferProbe} from '../stores/fee-on-transfer/pool-probe/PoolTrans
 import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
-import {getProtocolForAggHookAddress} from '../lib/poolCaching/util/hooksAddressesAllowlist';
+import {
+  getProtocolForAggHookAddress,
+  isZlcaHookSettleBeforeSwap,
+} from '../lib/poolCaching/util/hooksAddressesAllowlist';
 import {RedisCache} from '@uniswap/lib-cache/redis';
 import {CHAIN_TO_GAS_LIMIT_MAP} from './simulator/routing-api-port/gasLimit';
 import {SwapOptionsUniversalRouter} from './simulator/sor-port/simulation-provider';
@@ -3090,6 +3093,9 @@ export class UniRouteBL implements IUniRoutedBL {
             sqrtPriceX96: v4Pool.sqrtPriceX96.toString(),
             sqrtRatioX96: v4Pool.sqrtPriceX96.toString(),
             hooks: v4Pool.hooks,
+            ...(isZlcaHookSettleBeforeSwap(chain.chainId, v4Pool.hooks) && {
+              settleBeforeSwap: true,
+            }),
           };
         }
 

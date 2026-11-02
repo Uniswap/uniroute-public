@@ -9,7 +9,10 @@ import {
   getDynamicZlcaHooksVersion,
 } from './dynamicZlcaHooks';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
-import {XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD} from './xStockWrapHooks';
+import {
+  XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD,
+  XSTOCK_WRAP_HOOKS_ON_MONAD,
+} from './xStockWrapHooks';
 import {
   AGG_HOOKS_ON_TEMPO,
   FLUID_DEX_1,
@@ -661,24 +664,46 @@ export interface ZlcaHookConfig {
    * V4Quoter always executes the hook.
    */
   sqrtPriceFromQuoter?: boolean;
+  /**
+   * The hook takes the swap input out of the PoolManager inside
+   * `beforeSwap` (an ERC-4626 wrapper's `take` before `vault.deposit`), so
+   * the input must be settled before the swap runs. Routes through the hook
+   * are flagged `settleBeforeSwap` in the quote response, and the calldata
+   * UniRoute simulates and the Trading API sends is encoded SETTLE then
+   * SWAP. Without it the swap reverts whenever the PoolManager holds less of
+   * the input token than the swap amount.
+   */
+  settleBeforeSwap?: boolean;
+  /**
+   * Address of a deployed contract whose code stands in for this hook's code
+   * in quote `eth_call`s only. A settle-before-swap hook reverts under the
+   * V4Quoter, which never settles the input, so the quote runs the hook's
+   * view-math twin (an ERC4626RoutingHook) in its place. Simulation and
+   * execution always run the real hook.
+   */
+  quoteTwinHook?: string;
 }
 
 // Shared ZLCA config for the xStock ERC-4626 vault wrap hooks. 250_000n is a
 // conservative per-hop estimate (the vaults have no flow yet to measure
 // directly); recalibrate once the pools see prod swaps. Kept as one const so
 // the gas figure stays a single source of truth as more Wave-N xStock vaults
-// are allowlisted.
+// are allowlisted. The wrap hook takes its input inside beforeSwap, so it
+// settles before the swap and quotes through its ERC4626RoutingHook twin.
 const XSTOCK_VAULT_WRAP_ZLCA_CONFIG: ZlcaHookConfig = {
   gasOverheadPerHop: 250_000n,
   sqrtPriceFromQuoter: true,
+  settleBeforeSwap: true,
 };
 
-// Every xStock wrap hook (from xStockWrapHooks.ts) gets the same config. Built
-// here so ZLCA_HOOKS_PER_CHAIN can reference it as one entry at module load.
+// Every xStock wrap hook (from xStockWrapHooks.ts) gets the shared config plus
+// its own quote twin. Built here so ZLCA_HOOKS_PER_CHAIN can reference it as
+// one entry at module load.
 const XSTOCK_WRAP_HOOKS_ZLCA_ON_MONAD: Record<string, ZlcaHookConfig> =
   Object.fromEntries(
-    XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD.map(
-      hook => [hook, XSTOCK_VAULT_WRAP_ZLCA_CONFIG] as const
+    XSTOCK_WRAP_HOOKS_ON_MONAD.map(
+      ({hook, quoteTwinHook}) =>
+        [hook, {...XSTOCK_VAULT_WRAP_ZLCA_CONFIG, quoteTwinHook}] as const
     )
   );
 
@@ -765,6 +790,32 @@ export function isZlcaHookPricedFromQuoter(
     ZLCA_HOOKS_PER_CHAIN[chainId]?.[hooks.toLowerCase()]
       ?.sqrtPriceFromQuoter === true
   );
+}
+
+/** Whether `hooks` on `chainId` is a ZLCA hook flagged `settleBeforeSwap`. */
+export function isZlcaHookSettleBeforeSwap(
+  chainId: number,
+  hooks: string
+): boolean {
+  return (
+    ZLCA_HOOKS_PER_CHAIN[chainId]?.[hooks.toLowerCase()]?.settleBeforeSwap ===
+    true
+  );
+}
+
+/** The lowercased ZLCA hooks on `chainId` flagged `settleBeforeSwap`. */
+export function getSettleBeforeSwapHooks(chainId: number): string[] {
+  return Object.entries(ZLCA_HOOKS_PER_CHAIN[chainId] ?? {})
+    .filter(([, config]) => config.settleBeforeSwap === true)
+    .map(([hook]) => hook);
+}
+
+/** The quote-time twin of the ZLCA hook `hooks` on `chainId`, if it has one. */
+export function getZlcaQuoteTwinHook(
+  chainId: number,
+  hooks: string
+): string | undefined {
+  return ZLCA_HOOKS_PER_CHAIN[chainId]?.[hooks.toLowerCase()]?.quoteTwinHook;
 }
 
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';

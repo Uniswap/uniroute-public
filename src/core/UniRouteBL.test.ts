@@ -56,6 +56,7 @@ import {IRoutesRepository} from '../stores/route/IRoutesRepository';
 import {V2Pool} from '../models/pool/V2Pool';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V4Pool} from '../models/pool/V4Pool';
+import {XSTOCK_WRAP_HOOKS_ON_MONAD} from '../lib/poolCaching/util/xStockWrapHooks';
 import {GasEstimateProvider} from './gas/estimator/GasEstimateProvider';
 import {NoGasEstimator} from './gas/estimator/IGasEstimator';
 import {ChainId} from '../lib/config';
@@ -132,20 +133,28 @@ import {FeatureGatedTokensRepository} from '../stores/compliance/FeatureGatedTok
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
 // addresses are actually deployed in production.
-vi.mock('src/lib/poolCaching/util/hooksAddressesAllowlist', () => ({
-  AGG_HOOKS_PER_CHAIN: {},
-  AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
-  UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
-  getAggHooksForChain: (chainId: number) =>
-    chainId === 1 ? ['0xaaaa000000000000000000000000000000000001'] : [],
-  // MAINNET_AGG_HOOK – must match the literal used in the tests below.
-  // Returns a non-undefined Protocol string so callers treat it as an agg hook.
-  getProtocolForAggHookAddress: (hookAddress: string, chainId: number) =>
-    chainId === 1 &&
-    hookAddress.toLowerCase() === '0xaaaa000000000000000000000000000000000001'
-      ? 'CurveStableSwapNG'
-      : undefined,
-}));
+vi.mock(
+  'src/lib/poolCaching/util/hooksAddressesAllowlist',
+  async importOriginal => ({
+    isZlcaHookSettleBeforeSwap: (
+      await importOriginal<
+        typeof import('../lib/poolCaching/util/hooksAddressesAllowlist')
+      >()
+    ).isZlcaHookSettleBeforeSwap,
+    AGG_HOOKS_PER_CHAIN: {},
+    AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
+    UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
+    getAggHooksForChain: (chainId: number) =>
+      chainId === 1 ? ['0xaaaa000000000000000000000000000000000001'] : [],
+    // MAINNET_AGG_HOOK – must match the literal used in the tests below.
+    // Returns a non-undefined Protocol string so callers treat it as an agg hook.
+    getProtocolForAggHookAddress: (hookAddress: string, chainId: number) =>
+      chainId === 1 &&
+      hookAddress.toLowerCase() === '0xaaaa000000000000000000000000000000000001'
+        ? 'CurveStableSwapNG'
+        : undefined,
+  })
+);
 
 class FakeQuoteStrategy implements IQuoteStrategy {
   constructor(
@@ -2111,6 +2120,84 @@ describe('UniRouteBL', () => {
   });
 
   describe('response formatting', () => {
+    it('flags a V4 pool through a settle-before-swap hook and no other pool', async () => {
+      const [{hook: wrapHook}] = XSTOCK_WRAP_HOOKS_ON_MONAD;
+      const xStock = new Address('0x90A2a4c76b5D8c0bc892A69EA28Aa775a8f2dD48');
+      const wxStock = new Address('0xE7E553Cd128F0011777323A0b44a7b96EA1CB540');
+      const monadRequest = new QuoteRequest({
+        ...baseRequest,
+        tokenInAddress: xStock.address,
+        tokenInChainId: ChainId.MONAD,
+        tokenOutAddress: wxStock.address,
+        tokenOutChainId: ChainId.MONAD,
+        protocols: 'v4',
+        tradeType: 'EXACT_IN',
+      });
+      const v4PoolWithHook = (hooks: string): V4Pool =>
+        new V4Pool(
+          xStock,
+          wxStock,
+          0,
+          60,
+          hooks,
+          0n,
+          V4Pool.computePoolId(xStock, wxStock, 0, 60, hooks),
+          BigInt('79228162514264337593543950336'),
+          0n
+        );
+      const gasDetails = {
+        gasUse: BigInt('150000'),
+        gasPriceInWei: BigInt('30000000000'),
+        gasCostInWei: BigInt('4500000000000000'),
+        gasCostInEth: 0.0045,
+      };
+      const splitQuote = new QuoteSplit([
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [v4PoolWithHook(wrapHook)], 50),
+          BigInt('500000000000000000'),
+          undefined,
+          gasDetails
+        ),
+        new QuoteBasic(
+          new RouteBasic(Protocol.V4, [v4PoolWithHook(ADDRESS_ZERO)], 50),
+          BigInt('500000000000000000'),
+          undefined,
+          gasDetails
+        ),
+      ]);
+      mockedRpcProviderMap.set(ChainId.MONAD, mockProvider);
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(splitQuote),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+
+      const response = await uniRouteBL.quote(ctx, monadRequest);
+
+      expect(
+        response.route.map(route =>
+          route.pools.map(pool => [pool.hooks, pool.settleBeforeSwap])
+        )
+      ).toEqual([[[wrapHook, true]], [[ADDRESS_ZERO, undefined]]]);
+    });
+
     it('should correctly format single route response', async () => {
       const request = new QuoteRequest({
         ...baseRequest,
