@@ -196,7 +196,6 @@ function parseChainIds(raw: string | undefined): number[] {
 const BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.MAINNET]: 12,
   [ChainId.UNICHAIN]: 1,
-  [ChainId.BASE]: 2,
   [ChainId.ARBITRUM]: 0.25,
   [ChainId.AVAX]: 2,
   [ChainId.XLAYER]: 3,
@@ -204,6 +203,82 @@ const BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.SEPOLIA]: 12,
 };
 const DEFAULT_BLOCK_TIME_SECONDS = 2;
+
+// A run of blocks at one cadence: each block after `fromBlock`, up to and
+// including the next segment's `fromBlock`, follows its parent by
+// `blockTimeMs`.
+interface BlockTimeSegment {
+  fromBlock: bigint;
+  blockTimeMs: bigint;
+}
+
+// Base's Denim upgrade moves block production from 2s to 200ms. The first
+// Denim block, 53,556,127 (unix 1793901601), still lands on the 2s grid from
+// genesis (1686789347 + 2 * 53,556,127); every later block is 200ms after its
+// parent.
+const BASE_DENIM_FORK_BLOCK = 53_556_127n;
+// Base Sepolia's equivalent: block 48,418,656 (unix 1792605600 =
+// 1695768288 + 2 * 48,418,656).
+const BASE_SEPOLIA_DENIM_FORK_BLOCK = 48_418_656n;
+
+// Chains whose block time changed at a hard fork, segments ordered by
+// fromBlock. Takes precedence over BLOCK_TIME_SECONDS_BY_CHAIN, whose single
+// rate would mis-estimate any window after (or crossing) the fork.
+const BLOCK_TIME_SCHEDULE_BY_CHAIN: Record<
+  number,
+  readonly BlockTimeSegment[]
+> = {
+  [ChainId.BASE]: [
+    {fromBlock: 0n, blockTimeMs: 2_000n},
+    {fromBlock: BASE_DENIM_FORK_BLOCK, blockTimeMs: 200n},
+  ],
+  [ChainId.BASE_SEPOLIA]: [
+    {fromBlock: 0n, blockTimeMs: 2_000n},
+    {fromBlock: BASE_SEPOLIA_DENIM_FORK_BLOCK, blockTimeMs: 200n},
+  ],
+};
+
+function blockTimeScheduleFor(chainId: number): readonly BlockTimeSegment[] {
+  const schedule = BLOCK_TIME_SCHEDULE_BY_CHAIN[chainId];
+  if (schedule) return schedule;
+  const blockTimeSeconds =
+    BLOCK_TIME_SECONDS_BY_CHAIN[chainId] ?? DEFAULT_BLOCK_TIME_SECONDS;
+  return [
+    {fromBlock: 0n, blockTimeMs: BigInt(Math.round(blockTimeSeconds * 1000))},
+  ];
+}
+
+/**
+ * Estimated wall-clock ms from `fromBlock` to `toBlock` on `chainId`, summing
+ * each block-time segment the window covers. Negative when `toBlock` is
+ * already behind `fromBlock` (an overdue migration).
+ */
+export function estimateMsBetweenBlocks(
+  chainId: number,
+  fromBlock: bigint,
+  toBlock: bigint
+): number {
+  if (toBlock < fromBlock) {
+    return -estimateMsBetweenBlocks(chainId, toBlock, fromBlock);
+  }
+  const schedule = blockTimeScheduleFor(chainId);
+  let elapsedMs = 0n;
+  schedule.forEach((segment, index) => {
+    const nextFromBlock = schedule[index + 1]?.fromBlock;
+    const windowStart =
+      index > 0 && segment.fromBlock > fromBlock
+        ? segment.fromBlock
+        : fromBlock;
+    const windowEnd =
+      nextFromBlock !== undefined && nextFromBlock < toBlock
+        ? nextFromBlock
+        : toBlock;
+    if (windowEnd > windowStart) {
+      elapsedMs += (windowEnd - windowStart) * segment.blockTimeMs;
+    }
+  });
+  return Number(elapsedMs);
+}
 
 const ADDRESS_ZERO_LOWER = '0x0000000000000000000000000000000000000000';
 
@@ -678,9 +753,6 @@ export async function buildCcaScheduledPools(
       try {
         const auctions = auctionsByChain.get(chainId) ?? [];
         const s3Key = CCA_SCHEDULED_POOLS_S3_KEY(config.s3BaseKey, chainId);
-        const blockTimeMs =
-          (BLOCK_TIME_SECONDS_BY_CHAIN[chainId] ?? DEFAULT_BLOCK_TIME_SECONDS) *
-          1000;
 
         const {
           entries: previous,
@@ -711,8 +783,13 @@ export async function buildCcaScheduledPools(
             BigInt(info.currency) < BigInt(info.token)
               ? [info.currency, info.token]
               : [info.token, info.currency];
-          const blocksRemaining = Number(info.migrationBlock) - currentBlock;
-          const activateAtMs = nowMs() + blocksRemaining * blockTimeMs;
+          const activateAtMs =
+            nowMs() +
+            estimateMsBetweenBlocks(
+              chainId,
+              BigInt(currentBlock),
+              info.migrationBlock
+            );
           return {
             id: poolId.toLowerCase(),
             token0: {id: token0.toLowerCase()},

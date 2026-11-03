@@ -6,6 +6,7 @@ import {
   buildCcaScheduledPools,
   clearHookPermissionMemoForTesting,
   computeCcaPoolId,
+  estimateMsBetweenBlocks,
   isAutoApprovedCcaHook,
   CcaScheduledPoolEntry,
   CcaScheduledPoolsWriterConfig,
@@ -265,6 +266,74 @@ describe('computeCcaPoolId', () => {
   });
 });
 
+// Base mainnet Denim fork: block 53,556,127 is at unix 1793901601 (still on
+// the 2s grid); later blocks are 200ms apart. Expected values below are
+// derived from block TIMESTAMPS on each side of the fork, not from the
+// schedule under test.
+const BASE = 8453;
+const BASE_DENIM_BLOCK = 53_556_127n;
+
+describe('estimateMsBetweenBlocks', () => {
+  it('keeps Base at 2s blocks entirely before Denim', () => {
+    // Blocks 53,000,000 (ts 1792789347) → 53,001,000 (ts 1792791347).
+    expect(estimateMsBetweenBlocks(BASE, 53_000_000n, 53_001_000n)).toBe(
+      2_000_000
+    );
+  });
+
+  it('uses 200ms blocks on Base entirely after Denim', () => {
+    // 600 blocks after the fork block: ts 1793901601 + 120.
+    expect(
+      estimateMsBetweenBlocks(
+        BASE,
+        BASE_DENIM_BLOCK + 1_000n,
+        BASE_DENIM_BLOCK + 1_600n
+      )
+    ).toBe(120_000);
+  });
+
+  it('splits a Base window that crosses the Denim fork', () => {
+    // Block 53,556,027 is at ts 1793901401 (100 blocks earlier on the 2s
+    // grid); block 53,556,227 is at ts 1793901621 (100 x 200ms after the
+    // fork block). 1793901621 - 1793901401 = 220 s.
+    expect(estimateMsBetweenBlocks(BASE, 53_556_027n, 53_556_227n)).toBe(
+      220_000
+    );
+  });
+
+  it('times the fork block itself at the old 2s cadence', () => {
+    // ts 1793901599 → 1793901601, then 1793901601 → 1793901601.2.
+    expect(
+      estimateMsBetweenBlocks(BASE, BASE_DENIM_BLOCK - 1n, BASE_DENIM_BLOCK)
+    ).toBe(2_000);
+    expect(
+      estimateMsBetweenBlocks(BASE, BASE_DENIM_BLOCK, BASE_DENIM_BLOCK + 1n)
+    ).toBe(200);
+  });
+
+  it('goes negative for an overdue migration across the fork', () => {
+    expect(estimateMsBetweenBlocks(BASE, 53_556_227n, 53_556_027n)).toBe(
+      -220_000
+    );
+  });
+
+  it('splits a Base Sepolia window that crosses its Denim fork', () => {
+    // Block 48,418,556 is at ts 1792605400 (100 blocks before the fork on
+    // the 2s grid from genesis 1695768288); block 48,418,756 is at ts
+    // 1792605620 (100 x 200ms after fork block 48,418,656 at 1792605600).
+    expect(estimateMsBetweenBlocks(84532, 48_418_556n, 48_418_756n)).toBe(
+      220_000
+    );
+  });
+
+  it('leaves fixed-cadence and unlisted chains on a single rate', () => {
+    expect(estimateMsBetweenBlocks(1, 1_000n, 2_000n)).toBe(12_000_000);
+    expect(estimateMsBetweenBlocks(42161, 1_000n, 2_000n)).toBe(250_000);
+    // Unlisted chain falls back to the 2s default.
+    expect(estimateMsBetweenBlocks(999_999, 1_000n, 2_000n)).toBe(2_000_000);
+  });
+});
+
 describe('buildCcaScheduledPools', () => {
   const NOW = 1_800_000_000_000;
   const CURRENT_BLOCK = 1_000;
@@ -374,6 +443,65 @@ describe('buildCcaScheduledPools', () => {
     // 1000 blocks out on Robinhood: ~100 s, not the ~33 min a 2 s block
     // time would estimate.
     expect(writtenEntries(4663)[0].activateAtMs).toBe(NOW + 1_000 * 100);
+  });
+
+  describe('Base Denim block-time schedule', () => {
+    beforeEach(() => {
+      config = {...config, chainIds: [BASE]};
+      pendingAuctions = [{...pendingAuctions[0]!, chainId: BASE}];
+    });
+
+    it('estimates a post-Denim migration from 200ms blocks', async () => {
+      // 600 blocks out after the fork: 120 s. A 2s rate would say 20 min,
+      // far past the serve-side activation slack, so the pool would stay
+      // unroutable until a run after migration.
+      deps.getBlockNumber = async () => 53_600_000;
+      initializerInfo = {...initializerInfo, migrationBlock: 53_600_600n};
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(writtenEntries(BASE)[0].activateAtMs).toBe(NOW + 120_000);
+    });
+
+    it('estimates a migration window that crosses the Denim fork', async () => {
+      // ts 1793901401 → 1793901621 (see estimateMsBetweenBlocks tests).
+      deps.getBlockNumber = async () => 53_556_027;
+      initializerInfo = {...initializerInfo, migrationBlock: 53_556_227n};
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(writtenEntries(BASE)[0].activateAtMs).toBe(NOW + 220_000);
+    });
+
+    it('keeps the pre-Denim 2s estimate unchanged', async () => {
+      deps.getBlockNumber = async () => 53_000_000;
+      initializerInfo = {...initializerInfo, migrationBlock: 53_001_000n};
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(writtenEntries(BASE)[0].activateAtMs).toBe(NOW + 2_000_000);
+    });
+
+    it('skips the auction with a failure metric when the Base block read fails', async () => {
+      // No current block means no activation estimate: the entry must not
+      // be written with a guessed activateAtMs.
+      deps.getBlockNumber = async () => {
+        throw new Error('rpc unavailable');
+      };
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(writtenEntries(BASE)).toHaveLength(0);
+      expect(metric.metrics).toContainEqual({
+        key: 'CcaScheduledPools.auctionReadError',
+        value: 1,
+        tags: {
+          chain: 'BASE',
+          status: 'failure',
+          reason: 'initializers_read_failed',
+        },
+      });
+    });
   });
 
   it('anchors expiry at write time when migration is permitted but overdue', async () => {
