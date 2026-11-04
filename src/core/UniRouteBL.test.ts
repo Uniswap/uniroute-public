@@ -7546,6 +7546,109 @@ describe('UniRouteBL', () => {
     });
   });
 
+  describe('request priorityFeePerGasWei', () => {
+    // Names every parameter, so a parameter added before the tip changes the
+    // type at its position and fails to compile instead of shifting an index.
+    class TipRecordingQuoteStrategy extends MockedQuoteStrategy {
+      public readonly receivedTips: (bigint | undefined)[] = [];
+
+      override async findBestQuoteCandidates(
+        ctx: Context,
+        chain: Chain,
+        tokenInCurrencyInfo: CurrencyInfo,
+        tokenOutCurrencyInfo: CurrencyInfo,
+        amount: bigint,
+        tradeType: TradeType,
+        protocols: Protocol[],
+        serviceConfig: IUniRouteServiceConfig,
+        routes: RouteBasic<Pool>[],
+        tokensInfo: Map<string, Erc20Token | null>,
+        metricTags: string[],
+        _blockNumber?: number,
+        _testAggHooks?: boolean,
+        _supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
+        priorityFeePerGasWei?: bigint
+      ): Promise<QuoteSplit[]> {
+        this.receivedTips.push(priorityFeePerGasWei);
+        return super.findBestQuoteCandidates(
+          ctx,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          amount,
+          tradeType,
+          protocols,
+          serviceConfig,
+          routes,
+          tokensInfo,
+          metricTags
+        );
+      }
+    }
+
+    async function quoteFromJson(requestJson: Record<string, unknown>) {
+      const strategy = new TipRecordingQuoteStrategy();
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        strategy,
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+      // Decoded the way the HTTP handler decodes a TAPI request body.
+      const response = await uniRouteBL.quote(
+        ctx,
+        QuoteRequest.fromJson(
+          {...baseRequest, tradeType: 'EXACT_IN', ...requestJson},
+          {ignoreUnknownFields: true}
+        )
+      );
+      return {response, receivedTips: strategy.receivedTips};
+    }
+
+    it('passes the JSON request tip to the quote strategy as wei', async () => {
+      const {response, receivedTips} = await quoteFromJson({
+        priorityFeePerGasWei: '2050000000',
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(receivedTips).toEqual([2_050_000_000n]);
+    });
+
+    it('passes no tip when the request omits the field', async () => {
+      const {receivedTips} = await quoteFromJson({});
+
+      expect(receivedTips).toEqual([undefined]);
+    });
+
+    it('rejects a malformed tip with a 400 before routing', async () => {
+      const {response, receivedTips} = await quoteFromJson({
+        priorityFeePerGasWei: '2.05 gwei',
+      });
+
+      expect(response.error?.code).toBe(400);
+      expect(quoteErrorReasonOf(response.error)).toBe(
+        QuoteErrorReason.PRIORITY_FEE_INVALID
+      );
+      expect(receivedTips).toEqual([]);
+    });
+  });
+
   describe('request maxRoutingTimeMs budget', () => {
     // Returns the RouteFinder config the strategy was invoked with.
     async function routeFinderConfigForRequest(

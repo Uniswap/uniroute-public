@@ -24,7 +24,8 @@ export interface IQuoteStrategy {
     metricTags: string[],
     blockNumber?: number,
     testAggHooks?: boolean,
-    supplementalHookCodeOverrides?: Readonly<Record<string, string>>
+    supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
+    priorityFeePerGasWei?: bigint
   ): Promise<QuoteSplit[]>;
 
   name(): string;

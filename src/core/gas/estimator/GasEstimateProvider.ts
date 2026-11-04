@@ -20,6 +20,12 @@ const METRIC_GAS_ORACLE_RPC_CALL = buildMetricKey('GasOracle.RpcCall');
 const METRIC_GAS_ORACLE_RPC_CALL_LATENCY = buildMetricKey(
   'GasOracle.RpcCall.Latency.dist'
 );
+const METRIC_GAS_ORACLE_PRIORITY_FEE = buildMetricKey('GasOracle.PriorityFee');
+const HEX_QUANTITY = /^0x[0-9a-fA-F]+$/;
+// eth_feeHistory with blockCount 1 returns two base fees: the newest
+// block's, then the one after it.
+const FEE_HISTORY_NEWEST_BLOCK_INDEX = 0;
+const FEE_HISTORY_NEXT_BLOCK_INDEX = 1;
 
 export interface IGasEstimateProvider {
   estimateGas(
@@ -38,7 +44,8 @@ export interface IGasEstimateProvider {
   getCurrentGasPrice(
     ctx: Context,
     chainId: ChainId,
-    blockNumber?: number
+    blockNumber?: number,
+    priorityFeePerGasWei?: bigint
   ): Promise<number>;
 }
 
@@ -143,22 +150,48 @@ export class GasEstimateProvider implements IGasEstimateProvider {
   public async getCurrentGasPrice(
     ctx: Context,
     chainId: ChainId,
-    blockNumber?: number
+    blockNumber?: number,
+    priorityFeePerGasWei?: bigint
   ): Promise<number> {
     const provider = this.rpcProviderMap.get(chainId)!;
 
-    if (blockNumber !== undefined) {
-      const blockHex = '0x' + blockNumber.toString(16);
-      const feeHistory = await this.timedRpcSend(
+    if (priorityFeePerGasWei !== undefined) {
+      // A failed eth_feeHistory is already counted on GasOracle.RpcCall.
+      const baseFeePerGas = await this.getBaseFeePerGas(
         ctx,
         chainId,
         provider,
-        'eth_feeHistory',
-        ['0x1', blockHex, []]
+        blockNumber
+      ).catch(() => undefined);
+      void ctx.metrics
+        .count(METRIC_GAS_ORACLE_PRIORITY_FEE, 1, {
+          tags: [
+            `chain:${ChainId[chainId]}`,
+            ...buildStatusTags(
+              baseFeePerGas !== undefined,
+              MetricFailureReason.BASE_FEE_UNAVAILABLE
+            ),
+          ],
+        })
+        .catch(() => {});
+      if (baseFeePerGas !== undefined) {
+        return Number(baseFeePerGas + priorityFeePerGasWei);
+      }
+      // Without a base fee the tip has nothing to add to: eth_gasPrice
+      // already holds a full price on legacy chains, so the tip is dropped.
+      ctx.logger.warn(
+        'Priority fee ignored: base fee unavailable, using eth_gasPrice',
+        {chain: ChainId[chainId]}
       );
-      const baseFeePerGas = feeHistory.baseFeePerGas?.[0];
-      if (baseFeePerGas) {
-        return parseInt(baseFeePerGas, 16);
+    } else if (blockNumber !== undefined) {
+      const baseFeePerGas = await this.getBaseFeePerGas(
+        ctx,
+        chainId,
+        provider,
+        blockNumber
+      );
+      if (baseFeePerGas !== undefined) {
+        return Number(baseFeePerGas);
       }
     }
 
@@ -170,6 +203,45 @@ export class GasEstimateProvider implements IGasEstimateProvider {
       []
     );
     return parseInt(gasPrice, 16);
+  }
+
+  /**
+   * The pinned block's own base fee, or the next block's when quoting at the
+   * latest block. Undefined when the response has no usable base fee. Throws
+   * when the eth_feeHistory call fails.
+   */
+  private async getBaseFeePerGas(
+    ctx: Context,
+    chainId: ChainId,
+    provider: JsonRpcProvider,
+    blockNumber?: number
+  ): Promise<bigint | undefined> {
+    const newestBlock =
+      blockNumber !== undefined ? '0x' + blockNumber.toString(16) : 'latest';
+    const feeHistory: unknown = await this.timedRpcSend(
+      ctx,
+      chainId,
+      provider,
+      'eth_feeHistory',
+      ['0x1', newestBlock, []]
+    );
+    if (
+      typeof feeHistory !== 'object' ||
+      feeHistory === null ||
+      !('baseFeePerGas' in feeHistory) ||
+      !Array.isArray(feeHistory.baseFeePerGas)
+    ) {
+      return undefined;
+    }
+    const baseFeePerGas: unknown =
+      feeHistory.baseFeePerGas[
+        blockNumber !== undefined
+          ? FEE_HISTORY_NEWEST_BLOCK_INDEX
+          : FEE_HISTORY_NEXT_BLOCK_INDEX
+      ];
+    return typeof baseFeePerGas === 'string' && HEX_QUANTITY.test(baseFeePerGas)
+      ? BigInt(baseFeePerGas)
+      : undefined;
   }
 
   private async timedRpcSend(

@@ -6,7 +6,10 @@ import {
   StateOverride,
   TokenBalanceOverride,
 } from '../../gen/uniroute/v1/api_pb';
-import {QuoteRequestValidator} from './QuoteRequestValidator';
+import {
+  MAX_PRIORITY_FEE_PER_GAS_WEI,
+  QuoteRequestValidator,
+} from './QuoteRequestValidator';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {Chain} from '../models/chain/Chain';
@@ -538,6 +541,63 @@ describe('QuoteRequestValidator', () => {
       expect(result?.error).toBeDefined();
       expect(result?.error?.code).toBe(400);
       expect(result?.error?.message).toBe('Amount must be greater than zero');
+    });
+
+    describe('priorityFeePerGasWei', () => {
+      function setupValidChain() {
+        vi.mocked(mockChainRepository.getChain).mockResolvedValue(
+          createMockChain(ChainId.MAINNET)
+        );
+        vi.mocked(mockTokenProvider.searchForToken).mockImplementation(
+          async (_chain, tokenRaw) =>
+            new CurrencyInfo(false, new Address(tokenRaw))
+        );
+      }
+
+      it.each([
+        ['MetaMask mainnet tip, 2.05 gwei', '2050000000'],
+        ['zero', '0'],
+        ['the cap', MAX_PRIORITY_FEE_PER_GAS_WEI.toString()],
+      ])('accepts %s', async (_name, priorityFeePerGasWei) => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.priorityFeePerGasWei = priorityFeePerGasWei;
+
+        expect(await validator.validateInputs(request, ctx)).toBeUndefined();
+      });
+
+      it('accepts a request without the field', async () => {
+        setupValidChain();
+        const request = QuoteRequest.fromJson(createValidRequest().toJson());
+
+        expect(request.priorityFeePerGasWei).toBeUndefined();
+        expect(await validator.validateInputs(request, ctx)).toBeUndefined();
+      });
+
+      it.each([
+        [
+          'one wei above the cap',
+          (MAX_PRIORITY_FEE_PER_GAS_WEI + 1n).toString(),
+        ],
+        ['u64 max', '18446744073709551615'],
+        ['a non-numeric string', 'abc'],
+        ['an empty string', ''],
+        ['a hex string', '0x7a308480'],
+        ['a negative value', '-1'],
+        ['a decimal fraction', '2.05'],
+        ['surrounding whitespace', ' 2050000000'],
+      ])('rejects %s with a 400', async (_name, priorityFeePerGasWei) => {
+        setupValidChain();
+        const request = createValidRequest();
+        request.priorityFeePerGasWei = priorityFeePerGasWei;
+
+        const result = await validator.validateInputs(request, ctx);
+
+        expect(result?.error?.code).toBe(400);
+        expect(quoteErrorReasonOf(result?.error)).toBe(
+          QuoteErrorReason.PRIORITY_FEE_INVALID
+        );
+      });
     });
 
     describe('stateOverrides', () => {

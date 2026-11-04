@@ -1,4 +1,4 @@
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, vi} from 'vitest';
 import {GasEstimateProvider} from './GasEstimateProvider';
 import {RouteBasic} from '../../../models/route/RouteBasic';
 import {
@@ -351,21 +351,23 @@ describe('GasEstimateProvider', () => {
   });
 });
 
-describe('GasEstimateProvider.getCurrentGasPrice gas oracle metrics', () => {
-  const buildProvider = (send: (method: string) => Promise<unknown>) => {
-    const rpcProviderMap = new Map<ChainId, JsonRpcProvider>();
-    rpcProviderMap.set(ChainId.MAINNET, {
-      send,
-    } as unknown as JsonRpcProvider);
-    return new GasEstimateProvider(
-      rpcProviderMap,
-      new OnDemandGasEstimator(BigInt(2)),
-      new OnDemandGasEstimator(BigInt(3)),
-      new OnDemandGasEstimator(BigInt(4)),
-      new OnDemandGasEstimator(BigInt(5))
-    );
-  };
+const buildProvider = (
+  send: (method: string, params: unknown[]) => Promise<unknown>
+) => {
+  const rpcProviderMap = new Map<ChainId, JsonRpcProvider>();
+  rpcProviderMap.set(ChainId.MAINNET, {
+    send,
+  } as unknown as JsonRpcProvider);
+  return new GasEstimateProvider(
+    rpcProviderMap,
+    new OnDemandGasEstimator(BigInt(2)),
+    new OnDemandGasEstimator(BigInt(3)),
+    new OnDemandGasEstimator(BigInt(4)),
+    new OnDemandGasEstimator(BigInt(5))
+  );
+};
 
+describe('GasEstimateProvider.getCurrentGasPrice gas oracle metrics', () => {
   it('emits success metrics for eth_gasPrice', async () => {
     const provider = buildProvider(async () => '0x3b9aca00');
     const ctx = buildTestContext();
@@ -435,5 +437,222 @@ describe('GasEstimateProvider.getCurrentGasPrice gas oracle metrics', () => {
         }),
       })
     );
+  });
+});
+
+describe('GasEstimateProvider.getCurrentGasPrice with a priority fee', () => {
+  const METAMASK_TIP_WEI = 2_050_000_000n;
+  // Mainnet responses to eth_feeHistory ["0x1", "latest", []] and
+  // eth_gasPrice, captured from a public RPC at block 0x191dea2.
+  const MAINNET_FEE_HISTORY = {
+    baseFeePerGas: ['0x313534c', '0x2f78333'],
+    gasUsedRatio: [0.35869681666666664],
+    baseFeePerBlobGas: ['0x3238c0', '0x2b6830'],
+    blobGasUsedRatio: [0.047619047619047616],
+    oldestBlock: '0x191dea2',
+    reward: [[]],
+  };
+  const MAINNET_GAS_PRICE = '0x31355d9';
+  // BNB Chain's response to the same eth_feeHistory call: zero base fee.
+  const BNB_FEE_HISTORY = {
+    baseFeePerGas: ['0x0', '0x0'],
+    gasUsedRatio: [0.16010154285714287],
+    baseFeePerBlobGas: ['0x1', '0x1'],
+    blobGasUsedRatio: [0.16666666666666666],
+    oldestBlock: '0x7d6973f',
+    reward: [[]],
+  };
+
+  const recordingProvider = (feeHistory: () => Promise<unknown>) => {
+    const calls: {method: string; params: unknown[]}[] = [];
+    const provider = buildProvider(async (method, params) => {
+      calls.push({method, params});
+      return method === 'eth_feeHistory' ? feeHistory() : MAINNET_GAS_PRICE;
+    });
+    return {provider, calls};
+  };
+
+  const priorityFeeCountTags = (countSpy: {
+    mock: {calls: unknown[][]};
+  }): unknown[] =>
+    countSpy.mock.calls
+      .filter(
+        ([metricName]) =>
+          metricName === 'UniRouteService.Metric.GasOracle.PriorityFee'
+      )
+      .map(([, , opts]) => opts);
+
+  it('prices gas at the next block base fee plus the tip', async () => {
+    const {provider, calls} = recordingProvider(
+      async () => MAINNET_FEE_HISTORY
+    );
+    const ctx = buildTestContext();
+    const countSpy = vi.spyOn(ctx.metrics, 'count');
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      ctx,
+      ChainId.MAINNET,
+      undefined,
+      METAMASK_TIP_WEI
+    );
+
+    expect(gasPrice).toBe(Number(0x2f78333n + METAMASK_TIP_WEI));
+    expect(calls).toEqual([
+      {method: 'eth_feeHistory', params: ['0x1', 'latest', []]},
+    ]);
+    expect(priorityFeeCountTags(countSpy)).toEqual([
+      {tags: ['chain:MAINNET', 'status:success']},
+    ]);
+  });
+
+  it('adds the tip to the pinned block base fee', async () => {
+    const {provider, calls} = recordingProvider(
+      async () => MAINNET_FEE_HISTORY
+    );
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      buildTestContext(),
+      ChainId.MAINNET,
+      12345,
+      METAMASK_TIP_WEI
+    );
+
+    expect(gasPrice).toBe(Number(0x313534cn + METAMASK_TIP_WEI));
+    expect(calls).toEqual([
+      {method: 'eth_feeHistory', params: ['0x1', '0x3039', []]},
+    ]);
+  });
+
+  it('returns the tip alone on a chain whose base fee is zero', async () => {
+    const {provider} = recordingProvider(async () => BNB_FEE_HISTORY);
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      buildTestContext(),
+      ChainId.MAINNET,
+      undefined,
+      50_000_000n
+    );
+
+    expect(gasPrice).toBe(50_000_000);
+  });
+
+  it('prices a zero tip at the base fee, below eth_gasPrice', async () => {
+    const {provider} = recordingProvider(async () => MAINNET_FEE_HISTORY);
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      buildTestContext(),
+      ChainId.MAINNET,
+      undefined,
+      0n
+    );
+
+    expect(gasPrice).toBe(Number(0x2f78333n));
+    expect(gasPrice).toBeLessThan(Number(MAINNET_GAS_PRICE));
+  });
+
+  it.each([
+    [
+      'eth_feeHistory rejects',
+      async () => {
+        throw new Error('method not supported');
+      },
+    ],
+    ['the response has no baseFeePerGas', async () => ({oldestBlock: '0x1'})],
+    [
+      'the response has no next-block base fee',
+      async () => ({baseFeePerGas: ['0x313534c']}),
+    ],
+    [
+      'the base fee is not a hex quantity',
+      async () => ({baseFeePerGas: ['0x313534c', 51598156]}),
+    ],
+  ])(
+    'drops the tip and uses eth_gasPrice when %s',
+    async (_name, feeHistory) => {
+      const {provider, calls} = recordingProvider(feeHistory);
+      const ctx = buildTestContext();
+      const countSpy = vi.spyOn(ctx.metrics, 'count');
+
+      const gasPrice = await provider.getCurrentGasPrice(
+        ctx,
+        ChainId.MAINNET,
+        undefined,
+        METAMASK_TIP_WEI
+      );
+
+      expect(gasPrice).toBe(Number(MAINNET_GAS_PRICE));
+      expect(calls.map(call => call.method)).toEqual([
+        'eth_feeHistory',
+        'eth_gasPrice',
+      ]);
+      expect(priorityFeeCountTags(countSpy)).toEqual([
+        {
+          tags: [
+            'chain:MAINNET',
+            'status:failure',
+            'reason:base_fee_unavailable',
+          ],
+        },
+      ]);
+    }
+  );
+
+  it('reads the pinned block base fee through the same shape check without a tip', async () => {
+    const {provider, calls} = recordingProvider(
+      async () => MAINNET_FEE_HISTORY
+    );
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      buildTestContext(),
+      ChainId.MAINNET,
+      12345
+    );
+
+    expect(gasPrice).toBe(Number(0x313534cn));
+    expect(calls).toEqual([
+      {method: 'eth_feeHistory', params: ['0x1', '0x3039', []]},
+    ]);
+  });
+
+  it('uses eth_gasPrice at a pinned block without a tip when the base fee is not a hex quantity', async () => {
+    const {provider, calls} = recordingProvider(async () => ({
+      baseFeePerGas: [51598156, 49775411],
+    }));
+
+    const gasPrice = await provider.getCurrentGasPrice(
+      buildTestContext(),
+      ChainId.MAINNET,
+      12345
+    );
+
+    expect(gasPrice).toBe(Number(MAINNET_GAS_PRICE));
+    expect(calls.map(call => call.method)).toEqual([
+      'eth_feeHistory',
+      'eth_gasPrice',
+    ]);
+  });
+
+  it('still fails a pinned-block quote without a tip when eth_feeHistory rejects', async () => {
+    const {provider} = recordingProvider(async () => {
+      throw new Error('method not supported');
+    });
+
+    await expect(
+      provider.getCurrentGasPrice(buildTestContext(), ChainId.MAINNET, 12345)
+    ).rejects.toThrow('method not supported');
+  });
+
+  it('keeps eth_gasPrice and emits no priority-fee metric without a tip', async () => {
+    const {provider, calls} = recordingProvider(
+      async () => MAINNET_FEE_HISTORY
+    );
+    const ctx = buildTestContext();
+    const countSpy = vi.spyOn(ctx.metrics, 'count');
+
+    const gasPrice = await provider.getCurrentGasPrice(ctx, ChainId.MAINNET);
+
+    expect(gasPrice).toBe(Number(MAINNET_GAS_PRICE));
+    expect(calls.map(call => call.method)).toEqual(['eth_gasPrice']);
+    expect(priorityFeeCountTags(countSpy)).toEqual([]);
   });
 });

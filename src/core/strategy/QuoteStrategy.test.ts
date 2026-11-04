@@ -97,8 +97,13 @@ class TestGasEstimateProvider extends GasEstimateProvider {
     );
   }
 
-  async getCurrentGasPrice(_ctx: Context, _chainId: ChainId): Promise<number> {
-    return 30000000000; // 30 gwei
+  async getCurrentGasPrice(
+    _ctx: Context,
+    _chainId: ChainId,
+    _blockNumber?: number,
+    priorityFeePerGasWei?: bigint
+  ): Promise<number> {
+    return 30000000000 + Number(priorityFeePerGasWei ?? 0n); // 30 gwei + tip
   }
 
   async estimateGas(
@@ -296,6 +301,43 @@ function runStrategyTests(
       expect(
         bestQuoteCandidates[0].quotes[0].route.path[0].address.toString()
       ).equals('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640');
+    });
+
+    it('prices quote gas with the request priority fee', async () => {
+      const strategy = createStrategy(strategyClass);
+      const priorityFeePerGasWei = 2_050_000_000n;
+
+      const bestQuoteCandidates = await strategy.findBestQuoteCandidates(
+        ctx,
+        chain,
+        new CurrencyInfo(false, tokenInAddress),
+        new CurrencyInfo(false, tokenOutAddress),
+        amount,
+        TradeType.ExactIn,
+        [Protocol.V2],
+        serviceConfig,
+        [
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              tokenInAddress,
+              tokenOutAddress,
+              new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]),
+        ],
+        new Map(),
+        ['chain:MAINNET', 'tradeType:EXACT_IN'],
+        undefined,
+        undefined,
+        undefined,
+        priorityFeePerGasWei
+      );
+
+      expect(bestQuoteCandidates[0].quotes[0].gasDetails?.gasPriceInWei).toBe(
+        30_000_000_000n + priorityFeePerGasWei
+      );
     });
 
     it('should return quotes sorted by gas-adjusted amount (EXACT_IN: raw - gasCostInQuoteToken)', async () => {

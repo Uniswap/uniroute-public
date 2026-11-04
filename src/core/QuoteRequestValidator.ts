@@ -27,6 +27,18 @@ const MAX_CODE_OVERRIDE_HEX_LEN = 49154;
 // numeric uint256 max so the resolver can always encode into 32 bytes.
 const MAX_AMOUNT_LEN = 80;
 const MAX_UINT256 = (1n << 256n) - 1n;
+// The gas estimators carry the gas price as a JS number. The cap keeps the
+// tip far below Number.MAX_SAFE_INTEGER (~9e6 gwei). The base fee it is
+// added to comes from eth_feeHistory and is not capped here.
+export const MAX_PRIORITY_FEE_PER_GAS_WEI = 1_000n * 10n ** 9n;
+// BigInt() alone also accepts hex, whitespace and the empty string.
+const DECIMAL_DIGITS = /^[0-9]{1,30}$/;
+
+function isValidPriorityFeePerGasWei(value: string): boolean {
+  return (
+    DECIMAL_DIGITS.test(value) && BigInt(value) <= MAX_PRIORITY_FEE_PER_GAS_WEI
+  );
+}
 
 export interface IQuoteRequestValidator {
   /**
@@ -155,6 +167,19 @@ export class QuoteRequestValidator {
           code: 400,
           message: 'TokenInChainId and TokenOutChainId must be the same',
           data: quoteErrorData(QuoteErrorReason.CHAIN_MISMATCH),
+        },
+      });
+    }
+
+    if (
+      request.priorityFeePerGasWei !== undefined &&
+      !isValidPriorityFeePerGasWei(request.priorityFeePerGasWei)
+    ) {
+      return new QuoteResponse({
+        error: {
+          code: 400,
+          message: `priorityFeePerGasWei must be a decimal wei amount from 0 to ${MAX_PRIORITY_FEE_PER_GAS_WEI}`,
+          data: quoteErrorData(QuoteErrorReason.PRIORITY_FEE_INVALID),
         },
       });
     }

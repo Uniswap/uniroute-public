@@ -408,6 +408,7 @@ export class UniRouteBL implements IUniRoutedBL {
       portionBips,
       portionRecipient,
       requestBlockNumber,
+      priorityFeePerGasWei,
       requestSource,
       universalRouterSwapsteps,
     } = parsed;
@@ -446,6 +447,7 @@ export class UniRouteBL implements IUniRoutedBL {
       forceMixed,
       portionBips,
       universalRouterVersion: options?.universalRouterVersion,
+      priorityFeePerGasWei: request.priorityFeePerGasWei,
     });
 
     try {
@@ -836,6 +838,7 @@ export class UniRouteBL implements IUniRoutedBL {
         requestBlockNumber,
         gasPrice,
         resolvedStateOverrides,
+        priorityFeePerGasWei,
         erc4626Snapshot?.hookCodeOverrides
       );
 
@@ -1050,6 +1053,10 @@ export class UniRouteBL implements IUniRoutedBL {
       portionBips: request.portionBips,
       portionRecipient: request.portionRecipient,
       requestBlockNumber: request.blockNumber,
+      priorityFeePerGasWei:
+        request.priorityFeePerGasWei === undefined
+          ? undefined
+          : BigInt(request.priorityFeePerGasWei),
       requestSource: options?.requestSource?.toLowerCase() || 'unknown',
       universalRouterSwapsteps: options?.universalRouterSwapsteps === true,
     };
@@ -1960,6 +1967,7 @@ export class UniRouteBL implements IUniRoutedBL {
     requestBlockNumber: number | undefined,
     gasPrice: bigint | undefined,
     resolvedStateOverrides: ResolvedStateOverride[] | undefined,
+    priorityFeePerGasWei: bigint | undefined,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>
   ): Promise<{
     bestQuoteCandidates: QuoteSplit[];
@@ -1984,7 +1992,8 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags,
         requestBlockNumber,
         options?.testAggHooks,
-        supplementalHookCodeOverrides
+        supplementalHookCodeOverrides,
+        priorityFeePerGasWei
       );
     } catch (error) {
       if (

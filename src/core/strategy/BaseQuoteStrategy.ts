@@ -50,7 +50,8 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     metricTags: string[],
     blockNumber?: number,
     testAggHooks?: boolean,
-    supplementalHookCodeOverrides?: Readonly<Record<string, string>>
+    supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
+    priorityFeePerGasWei?: bigint
   ): Promise<QuoteSplit[]>;
 
   abstract name(): string;

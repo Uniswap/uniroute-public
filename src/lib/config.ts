@@ -910,6 +910,11 @@ export enum MetricFailureReason {
   NO_CANONICAL_POOL_PRESENT = 'no_canonical_pool_present',
   /** Building a TopPoolsSelector selection view from a snapshot threw. */
   SELECTION_VIEW_BUILD_ERROR = 'selection_view_build_error',
+  /**
+   * eth_feeHistory failed or returned no base fee, so a request's priority
+   * fee was dropped and the gas price fell back to eth_gasPrice.
+   */
+  BASE_FEE_UNAVAILABLE = 'base_fee_unavailable',
 }
 
 /** `status:` tag, plus the hardcoded `reason:` tag on failure. */
