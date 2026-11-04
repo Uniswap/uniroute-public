@@ -1,7 +1,7 @@
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 import {Context} from '@uniswap/lib-uni/context';
-import {createAddress, toExtendedChainId} from '@uniswap/lib-data-api';
+import {createAddress, toExtendedChainId} from '@uniswap/lib-data-types';
 import {
   canonicalTokenKey,
   type ListV3RoutablePoolsByAddressesOptions,

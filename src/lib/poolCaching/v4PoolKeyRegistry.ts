@@ -25,7 +25,7 @@ import {
 } from '@aws-sdk/client-s3';
 import {DYNAMIC_FEE_FLAG} from '@uniswap/v4-sdk';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
-import type {ExtendedChainId} from '@uniswap/lib-data-api';
+import type {ExtendedChainId} from '@uniswap/lib-data-types';
 import type {
   RoutablePoolsService,
   V4PoolKey,

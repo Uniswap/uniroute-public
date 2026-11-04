@@ -29,7 +29,7 @@ import {
   createAddress,
   toExtendedChainId,
   type ExtendedChainId,
-} from '@uniswap/lib-data-api';
+} from '@uniswap/lib-data-types';
 import {
   getPermissionedAdapterTokens,
   getPermissionedHookAddresses,

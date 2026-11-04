@@ -13,7 +13,7 @@ import {ADDRESS_ZERO, Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
 import {ethers} from 'ethers';
 import type {Context} from '@uniswap/lib-uni/context';
-import {toExtendedChainId} from '@uniswap/lib-data-api';
+import {toExtendedChainId} from '@uniswap/lib-data-types';
 import type {
   RoutablePoolsService,
   V3RoutablePool,
