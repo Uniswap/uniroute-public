@@ -399,6 +399,8 @@ describe('buildCcaScheduledPools', () => {
       fetchPendingAuctions: vi.fn(async () => pendingAuctions),
       readLbpInitializer: vi.fn(async () => initializerInfo),
       getBlockNumber: vi.fn(async () => CURRENT_BLOCK),
+      // 12 s blocks, as mainnet's whole-second header timestamps report them.
+      getBlockTimestampSecs: async (_chainId, blockNumber) => blockNumber * 12,
       nowMs: () => NOW,
     };
   });
@@ -437,6 +439,10 @@ describe('buildCcaScheduledPools', () => {
   it('estimates a Robinhood activation from its ~100ms blocks', async () => {
     config = {...config, chainIds: [4663]};
     pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
+    // Ten blocks per second, as Robinhood's whole-second header timestamps
+    // report them.
+    deps.getBlockTimestampSecs = async (_chainId, blockNumber) =>
+      Math.floor(blockNumber / 10);
 
     await buildCcaScheduledPools(testLogger, metric, config, deps);
 
@@ -461,6 +467,26 @@ describe('buildCcaScheduledPools', () => {
       await buildCcaScheduledPools(testLogger, metric, config, deps);
 
       expect(writtenEntries(BASE)[0].activateAtMs).toBe(NOW + 120_000);
+    });
+
+    it('does not measure block time on Base, estimating from the schedule', async () => {
+      const measuredBlocks: number[] = [];
+      deps.getBlockTimestampSecs = async (_chainId, blockNumber) => {
+        measuredBlocks.push(blockNumber);
+        return blockNumber * 12;
+      };
+      deps.getBlockNumber = async () => 53_600_000;
+      initializerInfo = {...initializerInfo, migrationBlock: 53_600_600n};
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      expect(measuredBlocks).toEqual([]);
+      expect(writtenEntries(BASE)[0].activateAtMs).toBe(NOW + 120_000);
+      expect(
+        metric.metrics.filter(
+          m => m.key === 'CcaScheduledPools.blockTimeMeasurement'
+        )
+      ).toEqual([]);
     });
 
     it('estimates a migration window that crosses the Denim fork', async () => {
@@ -1494,6 +1520,117 @@ describe('buildCcaScheduledPools', () => {
 
     expect(writtenEntries(1)).toHaveLength(0);
     expect(deps.getBlockNumber).not.toHaveBeenCalled();
+  });
+  it('estimates activation from the block time measured on-chain, not a published cadence', async () => {
+    // Five blocks per second (Base after Denim): 100 blocks span 20 s.
+    deps.getBlockTimestampSecs = async (_chainId, blockNumber) =>
+      Math.floor(blockNumber / 5);
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const entries = writtenEntries(1);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].activateAtMs).toBe(NOW + 1_000 * 200);
+    expect(
+      metric.metrics.filter(
+        m => m.key === 'CcaScheduledPools.blockTimeMeasurement'
+      )
+    ).toEqual([
+      {
+        key: 'CcaScheduledPools.blockTimeMeasurement',
+        value: 1,
+        tags: {chain: 'MAINNET', status: 'success'},
+      },
+    ]);
+  });
+
+  it('samples behind the head, so a node a few blocks behind still serves both', async () => {
+    const asked: number[] = [];
+    deps.getBlockTimestampSecs = async (_chainId, blockNumber) => {
+      asked.push(blockNumber);
+      return blockNumber * 12;
+    };
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    expect(asked.sort((a, b) => a - b)).toEqual([
+      CURRENT_BLOCK - 110,
+      CURRENT_BLOCK - 10,
+    ]);
+  });
+
+  const measurementFailures: Array<{
+    name: string;
+    getBlockTimestampSecs: CcaScheduledPoolsWriterDeps['getBlockTimestampSecs'];
+    reason: string;
+  }> = [
+    {
+      name: 'the RPC read throws',
+      getBlockTimestampSecs: async () => {
+        throw new Error('eth_getBlockByNumber: timeout');
+      },
+      reason: 'rpc_error',
+    },
+    {
+      name: 'the node answering has no header for the newer sample',
+      getBlockTimestampSecs: async (_chainId, blockNumber) =>
+        blockNumber === CURRENT_BLOCK - 10 ? undefined : blockNumber * 12,
+      reason: 'block_unavailable',
+    },
+  ];
+  for (const failure of measurementFailures) {
+    it(`falls back to the published cadence, with a failure count, when ${failure.name}`, async () => {
+      deps.getBlockTimestampSecs = failure.getBlockTimestampSecs;
+
+      await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+      const entries = writtenEntries(1);
+      expect(entries).toHaveLength(1);
+      // sdk-core's mainnet cadence: 12 s blocks.
+      expect(entries[0].activateAtMs).toBe(NOW + 1_000 * 12_000);
+      expect(
+        metric.metrics.filter(
+          m => m.key === 'CcaScheduledPools.blockTimeMeasurement'
+        )
+      ).toEqual([
+        {
+          key: 'CcaScheduledPools.blockTimeMeasurement',
+          value: 1,
+          tags: {chain: 'MAINNET', status: 'failure', reason: failure.reason},
+        },
+      ]);
+    });
+  }
+
+  it('counts a chain with no published cadence separately and uses the default', async () => {
+    const UNLISTED_CHAIN = 99999;
+    pendingAuctions[0] = {...pendingAuctions[0], chainId: UNLISTED_CHAIN};
+    config = {...config, chainIds: [UNLISTED_CHAIN]};
+    deps.getBlockTimestampSecs = async () => {
+      throw new Error('eth_getBlockByNumber: timeout');
+    };
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    const entries = writtenEntries(UNLISTED_CHAIN);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].activateAtMs).toBe(NOW + 1_000 * 2_000);
+    expect(
+      metric.metrics
+        .filter(m => m.key === 'CcaScheduledPools.blockTimeMeasurement')
+        .map(m => m.tags?.reason)
+    ).toEqual(['rpc_error', 'unlisted_chain']);
+  });
+
+  it('falls back to the published cadence of a listed chain', async () => {
+    config = {...config, chainIds: [4663]};
+    pendingAuctions = [{...pendingAuctions[0]!, chainId: 4663}];
+    deps.getBlockTimestampSecs = async () => undefined;
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    // Robinhood's published 100 ms blocks, not the 2 s default.
+    expect(writtenEntries(4663)[0].activateAtMs).toBe(NOW + 1_000 * 100);
   });
 });
 

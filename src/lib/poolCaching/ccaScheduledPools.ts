@@ -143,6 +143,14 @@ export interface CcaScheduledPoolsWriterDeps {
     auctionAddress: string
   ) => Promise<LbpInitializerInfo>;
   getBlockNumber: (chainId: number) => Promise<number>;
+  /**
+   * Timestamp (unix seconds) of the block at `blockNumber`; undefined when
+   * the node answering has no such block yet.
+   */
+  getBlockTimestampSecs: (
+    chainId: number,
+    blockNumber: number
+  ) => Promise<number | undefined>;
   nowMs?: () => number;
 }
 
@@ -188,12 +196,22 @@ function parseChainIds(raw: string | undefined): number[] {
   return parsed;
 }
 
-// Approximate seconds per block, only used to estimate activateAtMs. The
-// estimate self-corrects every cron run, so precision doesn't matter far out,
-// but the last run before migration must land inside the serve-side
-// activation slack: overstating the block time pushes that estimate past
-// migration, and the pool stays unroutable until the next run.
-const BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
+// Blocks a block-time measurement spans: the newer sample's timestamp against
+// the one this many blocks earlier. Header timestamps are whole seconds, so
+// the span sets the precision (10 s of Robinhood's 100 ms blocks bound the
+// error at 10 %). The estimate self-corrects every cron run, but the last run
+// before migration must land inside the serve-side activation slack:
+// overstating the block time pushes that estimate past migration, and the
+// pool stays unroutable until the next run.
+const BLOCK_TIME_SAMPLE_BLOCKS = 100;
+// Both samples sit this far behind the block number just read: uniRPC
+// balances across nodes, and one a few blocks behind the one that answered
+// eth_blockNumber has no header for the head yet.
+const BLOCK_TIME_SAMPLE_LAG_BLOCKS = 10;
+// Published cadence per chain, used only when the measurement fails. A
+// value that is too short moves activateAtMs earlier, so an entry could
+// serve before its migration block; too long only delays it to the next run.
+const FALLBACK_BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.MAINNET]: 12,
   [ChainId.UNICHAIN]: 1,
   [ChainId.ARBITRUM]: 0.25,
@@ -202,7 +220,106 @@ const BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.ROBINHOOD]: 0.1,
   [ChainId.SEPOLIA]: 12,
 };
-const DEFAULT_BLOCK_TIME_SECONDS = 2;
+const DEFAULT_FALLBACK_BLOCK_TIME_SECONDS = 2;
+
+type BlockTimeMeasurementFailure =
+  | 'chain_too_short'
+  | 'block_unavailable'
+  | 'rpc_error';
+
+async function sampleBlockTimeMs(
+  chainId: number,
+  currentBlock: number,
+  getBlockTimestampSecs: CcaScheduledPoolsWriterDeps['getBlockTimestampSecs']
+): Promise<
+  {blockTimeMs: number} | {reason: BlockTimeMeasurementFailure; detail: string}
+> {
+  const newerBlock = currentBlock - BLOCK_TIME_SAMPLE_LAG_BLOCKS;
+  const olderBlock = newerBlock - BLOCK_TIME_SAMPLE_BLOCKS;
+  if (olderBlock < 0) {
+    return {reason: 'chain_too_short', detail: `head ${currentBlock}`};
+  }
+  let newerTimestamp: number | undefined;
+  let olderTimestamp: number | undefined;
+  try {
+    [newerTimestamp, olderTimestamp] = await Promise.all([
+      getBlockTimestampSecs(chainId, newerBlock),
+      getBlockTimestampSecs(chainId, olderBlock),
+    ]);
+  } catch (error) {
+    return {
+      reason: 'rpc_error',
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (newerTimestamp === undefined || olderTimestamp === undefined) {
+    return {
+      reason: 'block_unavailable',
+      detail: `blocks ${olderBlock} and ${newerBlock} at head ${currentBlock}`,
+    };
+  }
+  const spanSecs = newerTimestamp - olderTimestamp;
+  if (!Number.isFinite(spanSecs) || spanSecs <= 0) {
+    return {reason: 'rpc_error', detail: `timestamp span ${spanSecs}`};
+  }
+  return {blockTimeMs: (spanSecs * 1000) / BLOCK_TIME_SAMPLE_BLOCKS};
+}
+
+/**
+ * Block time in milliseconds measured from the chain itself, so a cadence
+ * change is reflected on the next run with no config change. Falls back to
+ * the published cadence when the measurement fails, with a warn and a
+ * failure count per cause; a chain with no published cadence gets its own
+ * count on top.
+ */
+async function measureBlockTimeMs(
+  chainId: number,
+  currentBlock: number,
+  getBlockTimestampSecs: CcaScheduledPoolsWriterDeps['getBlockTimestampSecs'],
+  logger: Logger,
+  metric: IMetric,
+  tags: Record<string, string>
+): Promise<number> {
+  const sample = await sampleBlockTimeMs(
+    chainId,
+    currentBlock,
+    getBlockTimestampSecs
+  );
+  if ('blockTimeMs' in sample) {
+    metric.putMetric(
+      'CcaScheduledPools.blockTimeMeasurement',
+      1,
+      MetricLoggerUnit.Count,
+      {...tags, status: 'success'}
+    );
+    return sample.blockTimeMs;
+  }
+  logger.warn(
+    'CCA scheduled pools: block time measurement failed; using the published cadence',
+    {chainId, reason: sample.reason, detail: sample.detail}
+  );
+  metric.putMetric(
+    'CcaScheduledPools.blockTimeMeasurement',
+    1,
+    MetricLoggerUnit.Count,
+    {...tags, status: 'failure', reason: sample.reason}
+  );
+  const published = FALLBACK_BLOCK_TIME_SECONDS_BY_CHAIN[chainId];
+  if (published !== undefined) {
+    return published * 1000;
+  }
+  logger.warn(
+    'CCA scheduled pools: no published block time for chain; using the default',
+    {chainId, defaultSecs: DEFAULT_FALLBACK_BLOCK_TIME_SECONDS}
+  );
+  metric.putMetric(
+    'CcaScheduledPools.blockTimeMeasurement',
+    1,
+    MetricLoggerUnit.Count,
+    {...tags, status: 'failure', reason: 'unlisted_chain'}
+  );
+  return DEFAULT_FALLBACK_BLOCK_TIME_SECONDS * 1000;
+}
 
 // A run of blocks at one cadence: each block after `fromBlock`, up to and
 // including the next segment's `fromBlock`, follows its parent by
@@ -222,8 +339,8 @@ const BASE_DENIM_FORK_BLOCK = 53_556_127n;
 const BASE_SEPOLIA_DENIM_FORK_BLOCK = 48_418_656n;
 
 // Chains whose block time changed at a hard fork, segments ordered by
-// fromBlock. Takes precedence over BLOCK_TIME_SECONDS_BY_CHAIN, whose single
-// rate would mis-estimate any window after (or crossing) the fork.
+// fromBlock. Takes precedence over a measured or published single rate,
+// which would mis-estimate any window after (or crossing) the fork.
 const BLOCK_TIME_SCHEDULE_BY_CHAIN: Record<
   number,
   readonly BlockTimeSegment[]
@@ -238,30 +355,42 @@ const BLOCK_TIME_SCHEDULE_BY_CHAIN: Record<
   ],
 };
 
-function blockTimeScheduleFor(chainId: number): readonly BlockTimeSegment[] {
-  const schedule = BLOCK_TIME_SCHEDULE_BY_CHAIN[chainId];
+function forkBlockTimeScheduleFor(
+  chainId: number
+): readonly BlockTimeSegment[] | undefined {
+  return BLOCK_TIME_SCHEDULE_BY_CHAIN[chainId];
+}
+
+function blockTimeScheduleFor(
+  chainId: number,
+  blockTimeMs?: number
+): readonly BlockTimeSegment[] {
+  const schedule = forkBlockTimeScheduleFor(chainId);
   if (schedule) return schedule;
-  const blockTimeSeconds =
-    BLOCK_TIME_SECONDS_BY_CHAIN[chainId] ?? DEFAULT_BLOCK_TIME_SECONDS;
-  return [
-    {fromBlock: 0n, blockTimeMs: BigInt(Math.round(blockTimeSeconds * 1000))},
-  ];
+  const singleRateMs =
+    blockTimeMs ??
+    (FALLBACK_BLOCK_TIME_SECONDS_BY_CHAIN[chainId] ??
+      DEFAULT_FALLBACK_BLOCK_TIME_SECONDS) * 1000;
+  return [{fromBlock: 0n, blockTimeMs: BigInt(Math.round(singleRateMs))}];
 }
 
 /**
  * Estimated wall-clock ms from `fromBlock` to `toBlock` on `chainId`, summing
  * each block-time segment the window covers. Negative when `toBlock` is
- * already behind `fromBlock` (an overdue migration).
+ * already behind `fromBlock` (an overdue migration). A chain without a
+ * hard-fork schedule uses `blockTimeMs` (the measured cadence) when given,
+ * else its published cadence.
  */
 export function estimateMsBetweenBlocks(
   chainId: number,
   fromBlock: bigint,
-  toBlock: bigint
+  toBlock: bigint,
+  blockTimeMs?: number
 ): number {
   if (toBlock < fromBlock) {
-    return -estimateMsBetweenBlocks(chainId, toBlock, fromBlock);
+    return -estimateMsBetweenBlocks(chainId, toBlock, fromBlock, blockTimeMs);
   }
-  const schedule = blockTimeScheduleFor(chainId);
+  const schedule = blockTimeScheduleFor(chainId, blockTimeMs);
   let elapsedMs = 0n;
   schedule.forEach((segment, index) => {
     const nextFromBlock = schedule[index + 1]?.fromBlock;
@@ -586,6 +715,7 @@ export function makePendingLbpAuctionsFetcher(
 export function makeOnChainLbpInitializerReader(uniRpcEndpoint: string): {
   readLbpInitializer: CcaScheduledPoolsWriterDeps['readLbpInitializer'];
   getBlockNumber: CcaScheduledPoolsWriterDeps['getBlockNumber'];
+  getBlockTimestampSecs: CcaScheduledPoolsWriterDeps['getBlockTimestampSecs'];
 } {
   const providers = new Map<number, ethers.providers.StaticJsonRpcProvider>();
   const providerFor = (chainId: number) => {
@@ -628,6 +758,8 @@ export function makeOnChainLbpInitializerReader(uniRpcEndpoint: string): {
       };
     },
     getBlockNumber: chainId => providerFor(chainId).getBlockNumber(),
+    getBlockTimestampSecs: async (chainId, blockNumber) =>
+      (await providerFor(chainId).getBlock(blockNumber))?.timestamp,
   };
 }
 
@@ -760,17 +892,38 @@ export async function buildCcaScheduledPools(
           sanitized: previousSanitized,
         } = await readPreviousEntries(deps.s3, config.s3Bucket, s3Key, logger);
 
-        // One block-number read per run, fetched lazily (idle chains with an
-        // empty registry never touch the RPC).
-        let currentBlockPromise: Promise<number> | undefined;
-        const getCurrentBlock = () =>
-          (currentBlockPromise ??= deps.getBlockNumber(chainId));
+        // One block-number read and one block-time measurement per run,
+        // fetched lazily (idle chains with an empty registry never touch the
+        // RPC). A chain with a fork schedule is not measured: the schedule
+        // takes precedence over any single rate, so a measurement would go
+        // unused.
+        let blockContextPromise:
+          | Promise<{currentBlock: number; blockTimeMs: number | undefined}>
+          | undefined;
+        const getBlockContext = () =>
+          (blockContextPromise ??= (async () => {
+            const currentBlock = await deps.getBlockNumber(chainId);
+            const blockTimeMs = forkBlockTimeScheduleFor(chainId)
+              ? undefined
+              : await measureBlockTimeMs(
+                  chainId,
+                  currentBlock,
+                  deps.getBlockTimestampSecs,
+                  logger,
+                  metric,
+                  tags
+                );
+            return {currentBlock, blockTimeMs};
+          })());
 
         const buildEntry = (
           auctionAddress: string,
           strategyAddress: string,
           info: LbpInitializerInfo,
-          currentBlock: number
+          {
+            currentBlock,
+            blockTimeMs,
+          }: {currentBlock: number; blockTimeMs: number | undefined}
         ): CcaScheduledPoolEntry => {
           const poolId = computeCcaPoolId(
             info.currency,
@@ -788,7 +941,8 @@ export async function buildCcaScheduledPools(
             estimateMsBetweenBlocks(
               chainId,
               BigInt(currentBlock),
-              info.migrationBlock
+              info.migrationBlock,
+              blockTimeMs
             );
           return {
             id: poolId.toLowerCase(),
@@ -892,7 +1046,7 @@ export async function buildCcaScheduledPools(
                     auction.address,
                     auction.lbpStrategyAddress,
                     info,
-                    await getCurrentBlock()
+                    await getBlockContext()
                   )
                 );
               } catch (error) {
@@ -1002,7 +1156,7 @@ export async function buildCcaScheduledPools(
                         entry.auctionAddress,
                         entry.strategyAddress,
                         info,
-                        await getCurrentBlock()
+                        await getBlockContext()
                       ),
                     ];
                   } catch (error) {
