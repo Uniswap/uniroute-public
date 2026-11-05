@@ -106,7 +106,7 @@ export type SnapshotLoad<TPool> =
     };
 
 // Base class for pool discoverers that fetch pools from a remote source and caches them.
-// Will be used in the future to fetch/cache pools from different sources (e.g. subgraph, s3, indexer etc.).
+// Will be used in the future to fetch/cache pools from different sources (e.g. S3 snapshots, an indexer etc.).
 // All pools (returned by `_getPools`) will be lazily fetched from the remote source and cached.
 // Local cache items will expire after a certain time controlled by config.
 // `getPoolsForTokens` is the main method that will be called externally to get all pools involving any of the given tokens.

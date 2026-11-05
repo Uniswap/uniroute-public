@@ -758,10 +758,10 @@ export class BasicTopPoolsSelector
     }
 
     // 10. Finally, manually add some direct pairs pools if not already discovered/selected.
-    // This is to handle the case where a direct pool exists but was not returned by the subgraph query.
-    // Only add the direct pairs if we have at least one pool from the subgraph to allow static provider fallback to kick in.
+    // This is to handle the case where a direct pool exists but is not in the pool snapshot.
+    // Only add the direct pairs if we have at least one pool from the snapshot to allow static provider fallback to kick in.
     // Ensures that new pools can be swapped on immediately, and that if a pool was filtered out of the
-    // subgraph query for some reason (e.g. trackedReserveETH was 0), then we still consider it.
+    // snapshot for some reason (e.g. trackedReserveETH was 0), then we still consider it.
     if (allPools.length > 0 && directPairs.length === 0) {
       directPairs = await this.manuallyGenerateDirectPairs(
         protocol,

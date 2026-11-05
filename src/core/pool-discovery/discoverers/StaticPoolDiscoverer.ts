@@ -59,7 +59,7 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     return 'StaticPoolDiscovererV2';
   }
 
-  // Static pool discoverers are used when we don't have a subgraph to query for pools, so there is no use for this method.
+  // Static pool discoverers are used when there is no pool snapshot to query, so there is no use for this method.
   public override async getPools(
     chainId: ChainId,
     protocol: Protocol,
@@ -165,7 +165,7 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     return 'StaticPoolDiscovererV3';
   }
 
-  // Static pool discoverers are used when we don't have a subgraph to query for pools, so there is no use for this method.
+  // Static pool discoverers are used when there is no pool snapshot to query, so there is no use for this method.
   protected override async _getPools(
     chainId: ChainId,
     protocol: Protocol,
@@ -265,7 +265,7 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     return 'StaticPoolDiscovererV4';
   }
 
-  // Static pool discoverers are used when we don't have a subgraph to query for pools, so there is no use for this method.
+  // Static pool discoverers are used when there is no pool snapshot to query, so there is no use for this method.
   protected override async _getPools(
     chainId: ChainId,
     protocol: Protocol,
