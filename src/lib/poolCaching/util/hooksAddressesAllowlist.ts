@@ -608,6 +608,15 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
 export const METRIC_AGGREGATOR_HOOK_ON_BASE =
   '0x4d4044d6f5c62389d7f79cf86435a220b7bb2888';
 
+// Zero-liquidity external-fill adapters. Declared above ZLCA_HOOKS_PER_CHAIN,
+// which references them at module load.
+export const LOOPER_LFJ_HOOK_ON_AVALANCHE =
+  '0xf309d6570ed3e7f3c8e1e2de3a22a37bd92a6888';
+export const SPARK_PSM3_HOOK_ON_BASE =
+  '0x74f7d1513b19a0eef351db0f6e48a290aaf02888';
+export const LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET =
+  '0x361395fb06581ccba1c55c25be790a2995652888';
+
 // Groma's GroPrimaryMarketHook (groma-dev/gromacoin), source-verified on
 // Etherscan (solc 0.8.26). Mints and redeems GRO at NAV inside `beforeSwap`
 // against its v4GRO permissions adapter, so its pool holds no liquidity; it
@@ -753,6 +762,14 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     // Pool is 1:1 with equal decimals, so slot0's 2^96 placeholder is already
     // correct — no sqrtPriceFromQuoter needed.
     [FLETH_HOOK_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
+    [LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET]: {
+      gasOverheadPerHop: 500_000n,
+      settleBeforeSwap: true,
+      // One-way LST->WETH: only the wstETH input is ever taken from the PM.
+      poolManagerBalanceSlots: {
+        '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0': 0n,
+      },
+    },
   },
   [ChainId.BASE]: {
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
@@ -773,6 +790,17 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
       sqrtPriceFromQuoter: true,
     },
     [ETH_FLETH_AUTO_WRAP_HOOKS_ADDRESS_ON_BASE]: {gasOverheadPerHop: 500_000n},
+    // 6- vs 18-decimal pairs, so slot0's placeholder needs the quoter price.
+    [SPARK_PSM3_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': 9n,
+        '0x820c137fa70c8691f0e44dc420a5e53c168921dc': 2n,
+        '0x5875eee11cf8398102fdad704c9e96607675467a': 2n,
+      },
+    },
   },
   // xStock ERC-4626 vault wrap hooks (one per vault): a vault deposit/redeem
   // runs inside beforeSwap, so settlement is outside the PoolManager against a
@@ -790,6 +818,16 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.ARBITRUM_ONE]: {
     [FLETH_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 500_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 50_000n},
+  },
+  [ChainId.AVALANCHE]: {
+    [LOOPER_LFJ_HOOK_ON_AVALANCHE]: {
+      gasOverheadPerHop: 500_000n,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7': 51n,
+        '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
+      },
+    },
   },
   [ChainId.XLAYER]: {
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_XLAYER]: {gasOverheadPerHop: 50_000n},
@@ -1850,6 +1888,8 @@ export const SELL_ONLY_HOOK_ON_MAINNET =
   '0x56c6038207e87424d3a1dab544526f75761428a0';
 export const IMDUEL_HOOK_ON_MAINNET =
   '0xa92f72dcdd90229c32f6d51229f4cc5c916410cc';
+export const COLLECTION_HOOK_ON_MAINNET =
+  '0xf4b101ea2008a01f7944b019109e7d22095ea0cc';
 export const CHANGING_FEE_HOOK_ON_POLYGON =
   '0x3a9671f5ac0ee185cc168ec0fc66e334a24d6080';
 export const BITNA_HOOK_ON_BASE = '0x5d3eda1369c42f9a4fe450f3da599b32aeda6840';
@@ -1858,6 +1898,18 @@ export const CHANGING_FEE_HOOK_ON_BASE =
 export const TAX_HOOK_V2_ON_BASE = '0xf32850c195e059fbbd779282d319708159ba65cf';
 export const RYFT_POOL_HOOK_ON_ROBINHOOD =
   '0x56b6f9d5afe2335dcbb974777357088e38e620cc';
+export const LAUNCH_POOL_HOOK_ON_ROBINHOOD =
+  '0x6649600c1f4ac7b538fd0de01e0a4ff5937660cc';
+export const OFIN_HOOK_ON_ROBINHOOD =
+  '0x59f2e3877d9aeab72d2a58cb9328d95ec567afec';
+// Second HookrHook launchpad-singleton deployment (distinct from
+// HOOKR_HOOK_ON_ROBINHOOD above, 0xe7c3...e8cc).
+export const HOOKR_HOOK_ON_ROBINHOOD_2 =
+  '0xd0005624da88a688bcab3dbfb4d1cb23d32ca0cc';
+export const SNOW_LAUNCH_HOOK_ON_ROBINHOOD =
+  '0x0c983373e1e3d2189ce27aaab3b2fbe8323beacc';
+export const PLAYR_HOOK_ON_ROBINHOOD =
+  '0x3fe3b596663b46ecfd9475dfed537cb396329acc';
 export const FLASH_V3_HOOK_ON_BASE =
   '0x6aeabb2029dcc4758c168a0651dc4f49ad9928cc';
 export const REFERRAL_COIN_HOOK_ON_BASE =
@@ -1984,6 +2036,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
     LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
     DUALPOOL_HOOK_ON_MAINNET,
+    LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET,
     PRICE_IMPACT_DYNAMIC_FEE_HOOK_ON_MAINNET,
     NFTX_V4_HOOK_ON_MAINNET,
@@ -2023,6 +2076,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ACCUMULATION_HOOK_ON_MAINNET,
     SELL_ONLY_HOOK_ON_MAINNET,
     IMDUEL_HOOK_ON_MAINNET,
+    COLLECTION_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -2094,7 +2148,11 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SINGLETON_FLOOR_HOOK_ON_BNB,
     PANGEA_MULTICHAIN_HOOK_ON_BNB,
   ],
-  [ChainId.AVALANCHE]: [ADDRESS_ZERO, AEGIS_DFM_ON_AVALANCHE],
+  [ChainId.AVALANCHE]: [
+    ADDRESS_ZERO,
+    AEGIS_DFM_ON_AVALANCHE,
+    LOOPER_LFJ_HOOK_ON_AVALANCHE,
+  ],
   [ChainId.BASE_GOERLI]: [ADDRESS_ZERO],
   [ChainId.BASE_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.BASE]: [
@@ -2104,6 +2162,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     MYSPHERE_LAUNCH_HOOK_ON_BASE,
     GRO_PERMISSIONED_HOOK_ON_BASE,
     METRIC_AGGREGATOR_HOOK_ON_BASE,
+    SPARK_PSM3_HOOK_ON_BASE,
     FLAUNCH_POSITION_MANAGER_V1_6_ON_BASE,
     GENESIS_HOOK_V5_ON_BASE,
     BASESTONK_ADVANCED_FEE_HOOK_V6_ON_BASE,
@@ -2611,6 +2670,11 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     PONS_V2_MEME_HOOK_ON_ROBINHOOD_5,
     BANKR_INDEX_HOOK_ON_ROBINHOOD,
     RYFT_POOL_HOOK_ON_ROBINHOOD,
+    LAUNCH_POOL_HOOK_ON_ROBINHOOD,
+    OFIN_HOOK_ON_ROBINHOOD,
+    HOOKR_HOOK_ON_ROBINHOOD_2,
+    SNOW_LAUNCH_HOOK_ON_ROBINHOOD,
+    PLAYR_HOOK_ON_ROBINHOOD,
   ],
   [CHAIN_ID_INK]: [
     ADDRESS_ZERO,
