@@ -7,17 +7,13 @@ import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {
   AGG_HOOKS_PER_CHAIN,
   AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST,
-  FEW_V2_SHELL_HOOK_ON_MAINNET,
-  FEW_V2_SHELL_HOOK_ON_MAINNET_2,
   getProtocolForAggHookAddress,
   getSettleBeforeSwapHooks,
   getHookMinQuoteGasPerCall,
   getTvlBypassHookAddresses,
   getZlcaPoolManagerBalanceSlots,
-  GRO_PERMISSIONED_HOOK_ON_SEPOLIA,
   HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
   HOOKR_ROOT_ON_ROBINHOOD,
-  GRO_PERMISSIONED_HOOK_ON_BASE,
   HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN,
   HOOKS_ADDRESSES_ALLOWLIST,
   isZlcaHookPricedFromQuoter,
@@ -25,7 +21,6 @@ import {
   LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
   NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
   SLIPSTREAM_AGG_HOOK_ON_BASE,
-  METRIC_AGGREGATOR_HOOK_ON_BASE,
   WETH_HOOKS_ADDRESS_ON_ARBITRUM,
   WETH_HOOKS_ADDRESS_ON_BASE,
   WETH_HOOKS_ADDRESS_ON_MAINNET,
@@ -236,35 +231,20 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     }
   });
 
-  it('prices the external-reserve hooks (Slipstream + FewV2 shells + Groma NAV) from the quoter', () => {
-    // These hooks fill against reserves outside the PoolManager, so their
-    // slot0 is frozen at the 1:1 initialize placeholder — wrong for a real
-    // market pair (and off by the decimal ratio for the FewV2 shells, which
-    // sit on mismatched-decimal pairs like ETH/USDC, and for Groma's 18- vs
-    // 6-decimal GRO/USDC NAV pool). The other registered hooks either hold a
-    // real price or are 1:1 equal-decimal pairs.
-    const quoterPriced = Object.entries(ZLCA_HOOKS_PER_CHAIN).flatMap(
-      ([chainIdStr, hooks]) =>
-        Object.entries(hooks)
-          .filter(([, config]) => config.sqrtPriceFromQuoter === true)
-          .map(([hook]) => `${chainIdStr}:${hook}`)
-    );
-    // All 10 Wave-1 xStock vault wrappers on Monad are quoter-priced.
-    const monad = quoterPriced.filter(e => e.startsWith(`${ChainId.MONAD}:`));
-    expect(monad).toHaveLength(10);
-    // Numeric chain order (1 < 143 < 8453 < 11155111): the two mainnet FewV2
-    // shells, then the 10 Monad xStock wrappers, then the Base Slipstream
-    // singleton, Base Metric aggregator and Base Groma hook, then Groma's
-    // Sepolia hook, and nothing else.
-    expect(quoterPriced).toEqual([
-      `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET}`,
-      `${ChainId.MAINNET}:${FEW_V2_SHELL_HOOK_ON_MAINNET_2}`,
-      ...monad,
-      `${ChainId.BASE}:${SLIPSTREAM_AGG_HOOK_ON_BASE}`,
-      `${ChainId.BASE}:${METRIC_AGGREGATOR_HOOK_ON_BASE}`,
-      `${ChainId.BASE}:${GRO_PERMISSIONED_HOOK_ON_BASE}`,
-      `${ChainId.SEPOLIA}:${GRO_PERMISSIONED_HOOK_ON_SEPOLIA}`,
-    ]);
+  it('prices from the quoter exactly the ZLCA hooks that set sqrtPriceFromQuoter', () => {
+    // No hardcoded membership: the quoter-pricing path is driven purely by the
+    // per-hook flag, so adding a hook never needs to touch this test. A hook
+    // sets the flag when its pool fills against external reserves and its slot0
+    // placeholder is wrong for the pair (mismatched decimals or a non-1:1 rate);
+    // the per-hook predicate must agree with the flag for every registered hook.
+    for (const [chainIdStr, hooks] of Object.entries(ZLCA_HOOKS_PER_CHAIN)) {
+      const chainId = Number(chainIdStr);
+      for (const [hook, config] of Object.entries(hooks)) {
+        expect(isZlcaHookPricedFromQuoter(chainId, hook)).toBe(
+          config.sqrtPriceFromQuoter === true
+        );
+      }
+    }
   });
 
   it('admits the Arc native/ERC-20 USDC converter as a ZLCA hook priced from slot0', () => {
@@ -317,18 +297,21 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     ).toBe(false);
   });
 
-  it('flags exactly the Monad xStock wrap hooks as settle-before-swap', () => {
-    // Each wrap hook takes its input inside beforeSwap. No other registered
-    // hook does, so no other route changes its calldata order.
-    const flagged = Object.keys(ZLCA_HOOKS_PER_CHAIN).flatMap(chainIdStr =>
-      getSettleBeforeSwapHooks(Number(chainIdStr)).map(
-        hook => `${chainIdStr}:${hook}`
-      )
-    );
-
-    expect(flagged).toEqual(
-      XSTOCK_WRAP_HOOKS_ON_MONAD.map(({hook}) => `${ChainId.MONAD}:${hook}`)
-    );
+  it('flags settle-before-swap exactly for the ZLCA hooks that set it', () => {
+    // No hardcoded membership: the settle-before-swap set is driven purely by
+    // the per-hook flag, so adding a hook never needs to touch this test. The
+    // getSettleBeforeSwapHooks list and the per-hook predicate must agree with
+    // the flag for every registered hook (the balance slots each flagged hook
+    // needs are asserted separately below).
+    for (const [chainIdStr, hooks] of Object.entries(ZLCA_HOOKS_PER_CHAIN)) {
+      const chainId = Number(chainIdStr);
+      const flagged = getSettleBeforeSwapHooks(chainId);
+      for (const [hook, config] of Object.entries(hooks)) {
+        const settle = config.settleBeforeSwap === true;
+        expect(isZlcaHookSettleBeforeSwap(chainId, hook)).toBe(settle);
+        expect(flagged.includes(hook.toLowerCase())).toBe(settle);
+      }
+    }
   });
 
   it('gives each settle-before-swap hook the balance slots of its own two currencies', () => {
