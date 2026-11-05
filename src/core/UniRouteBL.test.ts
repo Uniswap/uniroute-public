@@ -135,25 +135,29 @@ import {FeatureGatedTokensRepository} from '../stores/compliance/FeatureGatedTok
 // addresses are actually deployed in production.
 vi.mock(
   'src/lib/poolCaching/util/hooksAddressesAllowlist',
-  async importOriginal => ({
-    isZlcaHookSettleBeforeSwap: (
+  async importOriginal => {
+    const actual =
       await importOriginal<
         typeof import('../lib/poolCaching/util/hooksAddressesAllowlist')
-      >()
-    ).isZlcaHookSettleBeforeSwap,
-    AGG_HOOKS_PER_CHAIN: {},
-    AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
-    UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
-    getAggHooksForChain: (chainId: number) =>
-      chainId === 1 ? ['0xaaaa000000000000000000000000000000000001'] : [],
-    // MAINNET_AGG_HOOK – must match the literal used in the tests below.
-    // Returns a non-undefined Protocol string so callers treat it as an agg hook.
-    getProtocolForAggHookAddress: (hookAddress: string, chainId: number) =>
-      chainId === 1 &&
-      hookAddress.toLowerCase() === '0xaaaa000000000000000000000000000000000001'
-        ? 'CurveStableSwapNG'
-        : undefined,
-  })
+      >();
+    return {
+      isZlcaHookSettleBeforeSwap: actual.isZlcaHookSettleBeforeSwap,
+      getHookMinQuoteGasPerCall: actual.getHookMinQuoteGasPerCall,
+      AGG_HOOKS_PER_CHAIN: {},
+      AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
+      UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
+      getAggHooksForChain: (chainId: number) =>
+        chainId === 1 ? ['0xaaaa000000000000000000000000000000000001'] : [],
+      // MAINNET_AGG_HOOK – must match the literal used in the tests below.
+      // Returns a non-undefined Protocol string so callers treat it as an agg hook.
+      getProtocolForAggHookAddress: (hookAddress: string, chainId: number) =>
+        chainId === 1 &&
+        hookAddress.toLowerCase() ===
+          '0xaaaa000000000000000000000000000000000001'
+          ? 'CurveStableSwapNG'
+          : undefined,
+    };
+  }
 );
 
 class FakeQuoteStrategy implements IQuoteStrategy {

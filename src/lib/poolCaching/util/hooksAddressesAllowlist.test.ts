@@ -11,10 +11,14 @@ import {
   FEW_V2_SHELL_HOOK_ON_MAINNET_2,
   getProtocolForAggHookAddress,
   getSettleBeforeSwapHooks,
+  getHookMinQuoteGasPerCall,
   getTvlBypassHookAddresses,
   getZlcaPoolManagerBalanceSlots,
   GRO_PERMISSIONED_HOOK_ON_SEPOLIA,
+  HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
+  HOOKR_ROOT_ON_ROBINHOOD,
   GRO_PERMISSIONED_HOOK_ON_BASE,
+  HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN,
   HOOKS_ADDRESSES_ALLOWLIST,
   isZlcaHookPricedFromQuoter,
   isZlcaHookSettleBeforeSwap,
@@ -41,6 +45,8 @@ import {
 import {XSTOCK_WRAP_HOOKS_ON_MONAD} from './xStockWrapHooks';
 import {Protocol} from '../../../models/pool/Protocol';
 import {ChainId} from '@uniswap/sdk-core';
+import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
+import {utils} from 'ethers';
 
 const MAINNET = ChainId.MAINNET;
 const CHAIN_ID_TEMPO = 4217;
@@ -369,6 +375,60 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
         ).toBe(true);
       }
     }
+  });
+
+  it('every minimum-quote-gas hook is lowercase and allowlisted on its chain', () => {
+    for (const [chainIdStr, hooks] of Object.entries(
+      HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN
+    )) {
+      const allowlist = allowlistFor(chainIdStr);
+      for (const [hook, minGas] of Object.entries(hooks)) {
+        expect(hook, `minimum-quote-gas hook ${hook} on ${chainIdStr}`).toBe(
+          hook.toLowerCase()
+        );
+        expect(
+          allowlist.has(hook),
+          `minimum-quote-gas hook ${hook} on chain ${chainIdStr} is missing from HOOKS_ADDRESSES_ALLOWLIST`
+        ).toBe(true);
+        expect(Number.isSafeInteger(minGas) && minGas > 0).toBe(true);
+      }
+    }
+  });
+
+  describe('getHookMinQuoteGasPerCall', () => {
+    // Written out rather than read from the registry, so a changed entry fails here.
+    const hookrRootMinimumGas = 8_000_000;
+
+    it('returns the listed minimum for a hook on its chain, in any case', () => {
+      expect(
+        getHookMinQuoteGasPerCall(ChainId.ROBINHOOD, [HOOKR_ROOT_ON_ROBINHOOD])
+      ).toBe(hookrRootMinimumGas);
+      expect(
+        getHookMinQuoteGasPerCall(ChainId.ROBINHOOD, [
+          utils.getAddress(HOOKR_ROOT_ON_ROBINHOOD),
+        ])
+      ).toBe(hookrRootMinimumGas);
+    });
+
+    it('takes the largest listed minimum across a route hook set', () => {
+      expect(
+        getHookMinQuoteGasPerCall(ChainId.ROBINHOOD, [
+          ADDRESS_ZERO,
+          HOOKR_ROOT_ON_ROBINHOOD,
+          HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
+        ])
+      ).toBe(hookrRootMinimumGas);
+    });
+
+    it('is undefined for unlisted hooks, empty routes and other chains', () => {
+      expect(
+        getHookMinQuoteGasPerCall(ChainId.ROBINHOOD, [ADDRESS_ZERO])
+      ).toBeUndefined();
+      expect(getHookMinQuoteGasPerCall(ChainId.ROBINHOOD, [])).toBeUndefined();
+      expect(
+        getHookMinQuoteGasPerCall(ChainId.BASE, [HOOKR_ROOT_ON_ROBINHOOD])
+      ).toBeUndefined();
+    });
   });
 
   it('getTvlBypassHookAddresses unions both registries and is undefined elsewhere', () => {

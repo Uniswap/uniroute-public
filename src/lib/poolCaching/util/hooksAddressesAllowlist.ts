@@ -1486,6 +1486,40 @@ export function getTvlBypassHookAddresses(
   return result;
 }
 
+/**
+ * Per-call quote gas for hooks whose swap callback reverts below a `gasleft()`
+ * floor that sits above the chain's per-call quote limit
+ * (`env:multicallGasLimitByChain`); `OnChainQuoteFetcher` raises a route
+ * through one of them to this value. Keys are lowercase, and every hook must
+ * also be in `HOOKS_ADDRESSES_ALLOWLIST`.
+ */
+export const HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN: Partial<
+  Record<ChainId, Readonly<Record<string, number>>>
+> &
+  Record<number, Readonly<Record<string, number>>> = {
+  [ChainId.ROBINHOOD]: {
+    // beforeSwap reverts 0x897f2822 below ~6.8M gasleft; a quote through it
+    // uses ~1.5M.
+    [HOOKR_ROOT_ON_ROBINHOOD]: 8_000_000,
+  },
+};
+
+export function getHookMinQuoteGasPerCall(
+  chainId: number,
+  hooks: Iterable<string>
+): number | undefined {
+  const minGasByHook = HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN[chainId];
+  if (minGasByHook === undefined) return undefined;
+  let largest: number | undefined;
+  for (const hook of hooks) {
+    const minGas = minGasByHook[hook.toLowerCase()];
+    if (minGas !== undefined && (largest === undefined || minGas > largest)) {
+      largest = minGas;
+    }
+  }
+  return largest;
+}
+
 export const B20_HOOK_ON_BASE = '0xf85f1f3082cfbc5e1149972309b25054e4d420cc';
 export const LAUNCH_HOOK_4_ON_BASE =
   '0xa068cf4c52abdd3479145c4b3cbd8e3d71542a44';
