@@ -12,7 +12,7 @@ import {
   getProtocolForAggHookAddress,
   getSettleBeforeSwapHooks,
   getTvlBypassHookAddresses,
-  getZlcaQuoteTwinHook,
+  getZlcaPoolManagerBalanceSlots,
   GRO_PERMISSIONED_HOOK_ON_SEPOLIA,
   GRO_PERMISSIONED_HOOK_ON_BASE,
   HOOKS_ADDRESSES_ALLOWLIST,
@@ -325,18 +325,16 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     );
   });
 
-  it('gives each settle-before-swap hook its own quote twin', () => {
-    const quoteTwins = XSTOCK_WRAP_HOOKS_ON_MONAD.map(({hook}) =>
-      getZlcaQuoteTwinHook(ChainId.MONAD, hook)
-    );
-
-    expect(quoteTwins).toEqual(
-      XSTOCK_WRAP_HOOKS_ON_MONAD.map(({quoteTwinHook}) => quoteTwinHook)
-    );
-    expect(new Set(quoteTwins).size).toBe(XSTOCK_WRAP_HOOKS_ON_MONAD.length);
-    // A twin is quote-time code only: it never becomes a routable hook.
-    for (const twin of quoteTwins) {
-      expect(HOOKS_ADDRESSES_ALLOWLIST[ChainId.MONAD]).not.toContain(twin);
+  it('gives each settle-before-swap hook the balance slots of its own two currencies', () => {
+    for (const {hook, underlying, wrapper} of XSTOCK_WRAP_HOOKS_ON_MONAD) {
+      expect(getZlcaPoolManagerBalanceSlots(ChainId.MONAD, hook)).toEqual({
+        [underlying]: 263n,
+        [wrapper]: 101n,
+      });
+    }
+    // Each settle-before-swap hook needs slots, or its quotes revert.
+    for (const hook of getSettleBeforeSwapHooks(ChainId.MONAD)) {
+      expect(getZlcaPoolManagerBalanceSlots(ChainId.MONAD, hook)).toBeDefined();
     }
   });
 
@@ -355,7 +353,7 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
       isZlcaHookSettleBeforeSwap(ChainId.MONAD, WETH_HOOKS_ADDRESS_ON_MONAD)
     ).toBe(false);
     expect(
-      getZlcaQuoteTwinHook(ChainId.MONAD, WETH_HOOKS_ADDRESS_ON_MONAD)
+      getZlcaPoolManagerBalanceSlots(ChainId.MONAD, WETH_HOOKS_ADDRESS_ON_MONAD)
     ).toBe(undefined);
   });
 

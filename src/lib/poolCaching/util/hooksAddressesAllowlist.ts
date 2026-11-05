@@ -10,6 +10,8 @@ import {
 } from './dynamicZlcaHooks';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
 import {
+  XSTOCK_BALANCE_SLOT,
+  XSTOCK_VAULT_BALANCE_SLOT,
   XSTOCK_WRAP_HOOK_ADDRESSES_ON_MONAD,
   XSTOCK_WRAP_HOOKS_ON_MONAD,
 } from './xStockWrapHooks';
@@ -685,13 +687,13 @@ export interface ZlcaHookConfig {
    */
   settleBeforeSwap?: boolean;
   /**
-   * Address of a deployed contract whose code stands in for this hook's code
-   * in quote `eth_call`s only. A settle-before-swap hook reverts under the
-   * V4Quoter, which never settles the input, so the quote runs the hook's
-   * view-math twin (an ERC4626RoutingHook) in its place. Simulation and
-   * execution always run the real hook.
+   * Storage slot of each pool currency's `balanceOf` mapping, keyed by the
+   * lowercased currency. A settle-before-swap hook takes the input out of the
+   * PoolManager, and the V4Quoter never settles it, so a quote funds the
+   * PoolManager's balance of these currencies with an `eth_call` state
+   * override and runs the real hook.
    */
-  quoteTwinHook?: string;
+  poolManagerBalanceSlots?: Readonly<Record<string, bigint>>;
 }
 
 // Shared ZLCA config for the xStock ERC-4626 vault wrap hooks. 250_000n is a
@@ -699,7 +701,7 @@ export interface ZlcaHookConfig {
 // directly); recalibrate once the pools see prod swaps. Kept as one const so
 // the gas figure stays a single source of truth as more Wave-N xStock vaults
 // are allowlisted. The wrap hook takes its input inside beforeSwap, so it
-// settles before the swap and quotes through its ERC4626RoutingHook twin.
+// settles before the swap.
 const XSTOCK_VAULT_WRAP_ZLCA_CONFIG: ZlcaHookConfig = {
   gasOverheadPerHop: 250_000n,
   sqrtPriceFromQuoter: true,
@@ -707,13 +709,22 @@ const XSTOCK_VAULT_WRAP_ZLCA_CONFIG: ZlcaHookConfig = {
 };
 
 // Every xStock wrap hook (from xStockWrapHooks.ts) gets the shared config plus
-// its own quote twin. Built here so ZLCA_HOOKS_PER_CHAIN can reference it as
-// one entry at module load.
+// the balance slots of its own two currencies. Built here so
+// ZLCA_HOOKS_PER_CHAIN can reference it as one entry at module load.
 const XSTOCK_WRAP_HOOKS_ZLCA_ON_MONAD: Record<string, ZlcaHookConfig> =
   Object.fromEntries(
     XSTOCK_WRAP_HOOKS_ON_MONAD.map(
-      ({hook, quoteTwinHook}) =>
-        [hook, {...XSTOCK_VAULT_WRAP_ZLCA_CONFIG, quoteTwinHook}] as const
+      ({hook, underlying, wrapper}) =>
+        [
+          hook,
+          {
+            ...XSTOCK_VAULT_WRAP_ZLCA_CONFIG,
+            poolManagerBalanceSlots: {
+              [underlying]: XSTOCK_BALANCE_SLOT,
+              [wrapper]: XSTOCK_VAULT_BALANCE_SLOT,
+            },
+          },
+        ] as const
     )
   );
 
@@ -833,12 +844,16 @@ export function getSettleBeforeSwapHooks(chainId: number): string[] {
     .map(([hook]) => hook);
 }
 
-/** The quote-time twin of the ZLCA hook `hooks` on `chainId`, if it has one. */
-export function getZlcaQuoteTwinHook(
+/**
+ * The `balanceOf` mapping slots, keyed by lowercased currency, that quotes
+ * through the ZLCA hook `hooks` on `chainId` fund for the PoolManager.
+ */
+export function getZlcaPoolManagerBalanceSlots(
   chainId: number,
   hooks: string
-): string | undefined {
-  return ZLCA_HOOKS_PER_CHAIN[chainId]?.[hooks.toLowerCase()]?.quoteTwinHook;
+): Readonly<Record<string, bigint>> | undefined {
+  return ZLCA_HOOKS_PER_CHAIN[chainId]?.[hooks.toLowerCase()]
+    ?.poolManagerBalanceSlots;
 }
 
 const MEV_X_HOMELANDER_ADDRESS = '0xdfe0f6d6cdda8f8ea47d6c5bddbdea51425290c0';
