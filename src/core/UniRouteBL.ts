@@ -146,6 +146,8 @@ import {BigNumber} from '@ethersproject/bignumber';
 import {JsonRpcProvider} from '@ethersproject/providers';
 import assert from 'assert';
 import {
+  getHookMinSwapGasLimit,
+  MAX_HOOK_MIN_SWAP_GAS_LIMIT,
   getProtocolForAggHookAddress,
   isZlcaHookSettleBeforeSwap,
 } from '../lib/poolCaching/util/hooksAddressesAllowlist';
@@ -2768,6 +2770,48 @@ export class UniRouteBL implements IUniRoutedBL {
     });
   }
 
+  private async hookMinSwapGasLimit(
+    ctx: Context,
+    chain: Chain,
+    quoteSplit: QuoteSplit
+  ): Promise<number | undefined> {
+    const summedFloor = getHookMinSwapGasLimit(
+      chain.chainId,
+      quoteSplit.quotes.flatMap(quote =>
+        quote.route.path.flatMap(pool =>
+          pool instanceof V4Pool ? [pool.hooks] : []
+        )
+      )
+    );
+    if (summedFloor === undefined) return undefined;
+    if (summedFloor <= MAX_HOOK_MIN_SWAP_GAS_LIMIT) {
+      await ctx.metrics.count(
+        buildMetricKey('QuoteResponse.HookMinGasLimit'),
+        1,
+        {tags: [`chain:${ChainId[chain.chainId]}`, 'status:success']}
+      );
+      return summedFloor;
+    }
+    // The capped floor may still be short of what the route needs.
+    ctx.logger.warn('Hook swap gas floor above cap; capping minGasLimit', {
+      chainId: chain.chainId,
+      summedFloor,
+      cap: MAX_HOOK_MIN_SWAP_GAS_LIMIT,
+    });
+    await ctx.metrics.count(
+      buildMetricKey('QuoteResponse.HookMinGasLimit'),
+      1,
+      {
+        tags: [
+          `chain:${ChainId[chain.chainId]}`,
+          'status:failure',
+          'reason:above_cap',
+        ],
+      }
+    );
+    return MAX_HOOK_MIN_SWAP_GAS_LIMIT;
+  }
+
   async populateQuoteResponse(
     ctx: Context,
     blockNumber: number,
@@ -3255,6 +3299,12 @@ export class UniRouteBL implements IUniRoutedBL {
           portionAmountDecimals: portionAmountDecimals.toExact(),
         };
 
+    const hookMinGasLimit = await this.hookMinSwapGasLimit(
+      ctx,
+      chain,
+      quoteSplit
+    );
+
     // Finally construct and return the QuoteResponse
     const quoteResponse = new QuoteResponse({
       blockNumber: blockNumber.toString(),
@@ -3289,6 +3339,7 @@ export class UniRouteBL implements IUniRoutedBL {
       priceImpact: this.formatPriceImpact(quoteSplit.swapInfo?.priceImpact),
       quoteId: ctx.requestId,
       usdBucket: usdBucket.toString(),
+      minGasLimit: hookMinGasLimit?.toString(),
     });
 
     // Log detailed error if simulation failed

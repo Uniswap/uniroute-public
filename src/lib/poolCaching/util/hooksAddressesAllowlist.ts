@@ -1524,21 +1524,37 @@ export function getTvlBypassHookAddresses(
   return result;
 }
 
+type HookMinGas = Readonly<{
+  /** Per-call gas for the on-chain quote of a route through the hook. */
+  quoteGasPerCall: number;
+  /** Gas-limit floor each swap through the hook adds to its transaction. */
+  swapGasLimit: number;
+}>;
+
 /**
- * Per-call quote gas for hooks whose swap callback reverts below a `gasleft()`
- * floor that sits above the chain's per-call quote limit
- * (`env:multicallGasLimitByChain`); `OnChainQuoteFetcher` raises a route
- * through one of them to this value. Keys are lowercase, and every hook must
- * also be in `HOOKS_ADDRESSES_ALLOWLIST`.
+ * Gas minimums for hooks whose swap callback reverts below a `gasleft()`
+ * floor. `OnChainQuoteFetcher` raises the per-call quote gas of a route
+ * through one of them to `quoteGasPerCall` (the chain's per-call limit,
+ * `env:multicallGasLimitByChain`, sits below the floor), and the quote
+ * response carries the sum of `swapGasLimit` over the route's swaps through
+ * listed hooks as `minGasLimit`, because the heuristic and simulated
+ * `gasUseEstimate` only count gas used, not the gas the hook needs left. Keys
+ * are lowercase, and every hook must also be in `HOOKS_ADDRESSES_ALLOWLIST`.
  */
-export const HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN: Partial<
-  Record<ChainId, Readonly<Record<string, number>>>
+export const HOOK_MIN_GAS_PER_CHAIN: Partial<
+  Record<ChainId, Readonly<Record<string, HookMinGas>>>
 > &
-  Record<number, Readonly<Record<string, number>>> = {
+  Record<number, Readonly<Record<string, HookMinGas>>> = {
   [ChainId.ROBINHOOD]: {
     // beforeSwap reverts 0x897f2822 below ~6.8M gasleft; a quote through it
-    // uses ~1.5M.
-    [HOOKR_ROOT_ON_ROBINHOOD]: 8_000_000,
+    // uses ~1.5M. A Universal Router swap through it estimates at ~7.5M
+    // (eth_estimateGas) and reverts at 7M; 10M is that estimate with trading's
+    // 1.3x gas-limit buffer, rounded up. Floors add up: two swaps through it in
+    // one transaction estimate at up to ~15M, three at ~22.3M.
+    [HOOKR_ROOT_ON_ROBINHOOD]: {
+      quoteGasPerCall: 8_000_000,
+      swapGasLimit: 10_000_000,
+    },
   },
 };
 
@@ -1546,16 +1562,41 @@ export function getHookMinQuoteGasPerCall(
   chainId: number,
   hooks: Iterable<string>
 ): number | undefined {
-  const minGasByHook = HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN[chainId];
+  const minGasByHook = HOOK_MIN_GAS_PER_CHAIN[chainId];
   if (minGasByHook === undefined) return undefined;
   let largest: number | undefined;
   for (const hook of hooks) {
-    const minGas = minGasByHook[hook.toLowerCase()];
+    const minGas = minGasByHook[hook.toLowerCase()]?.quoteGasPerCall;
     if (minGas !== undefined && (largest === undefined || minGas > largest)) {
       largest = minGas;
     }
   }
   return largest;
+}
+
+/**
+ * Trading rejects a quote whose `minGasLimit` exceeds this
+ * (`MAX_ROUTER_MIN_GAS_LIMIT` there), so the summed swap floor is capped here.
+ */
+export const MAX_HOOK_MIN_SWAP_GAS_LIMIT = 30_000_000;
+
+/**
+ * Sum of `swapGasLimit` over `hooks`, one entry per swap (pool hop) in the
+ * transaction, so a hook crossed twice counts twice. Undefined when none is
+ * listed. Not capped; see `MAX_HOOK_MIN_SWAP_GAS_LIMIT`.
+ */
+export function getHookMinSwapGasLimit(
+  chainId: number,
+  hooks: Iterable<string>
+): number | undefined {
+  const minGasByHook = HOOK_MIN_GAS_PER_CHAIN[chainId];
+  if (minGasByHook === undefined) return undefined;
+  let total: number | undefined;
+  for (const hook of hooks) {
+    const minGas = minGasByHook[hook.toLowerCase()]?.swapGasLimit;
+    if (minGas !== undefined) total = (total ?? 0) + minGas;
+  }
+  return total;
 }
 
 export const B20_HOOK_ON_BASE = '0xf85f1f3082cfbc5e1149972309b25054e4d420cc';

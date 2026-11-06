@@ -10,11 +10,13 @@ import {
   getProtocolForAggHookAddress,
   getSettleBeforeSwapHooks,
   getHookMinQuoteGasPerCall,
+  getHookMinSwapGasLimit,
   getTvlBypassHookAddresses,
   getZlcaPoolManagerBalanceSlots,
   HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
   HOOKR_ROOT_ON_ROBINHOOD,
-  HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN,
+  HOOK_MIN_GAS_PER_CHAIN,
+  MAX_HOOK_MIN_SWAP_GAS_LIMIT,
   HOOKS_ADDRESSES_ALLOWLIST,
   isZlcaHookPricedFromQuoter,
   isZlcaHookSettleBeforeSwap,
@@ -360,20 +362,32 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     }
   });
 
-  it('every minimum-quote-gas hook is lowercase and allowlisted on its chain', () => {
-    for (const [chainIdStr, hooks] of Object.entries(
-      HOOK_MIN_QUOTE_GAS_PER_CALL_PER_CHAIN
-    )) {
+  it('every minimum-gas hook is lowercase, allowlisted, and swaps above its quote gas', () => {
+    for (const [chainIdStr, hooks] of Object.entries(HOOK_MIN_GAS_PER_CHAIN)) {
       const allowlist = allowlistFor(chainIdStr);
-      for (const [hook, minGas] of Object.entries(hooks)) {
-        expect(hook, `minimum-quote-gas hook ${hook} on ${chainIdStr}`).toBe(
+      for (const [hook, {quoteGasPerCall, swapGasLimit}] of Object.entries(
+        hooks
+      )) {
+        expect(hook, `minimum-gas hook ${hook} on ${chainIdStr}`).toBe(
           hook.toLowerCase()
         );
         expect(
           allowlist.has(hook),
-          `minimum-quote-gas hook ${hook} on chain ${chainIdStr} is missing from HOOKS_ADDRESSES_ALLOWLIST`
+          `minimum-gas hook ${hook} on chain ${chainIdStr} is missing from HOOKS_ADDRESSES_ALLOWLIST`
         ).toBe(true);
-        expect(Number.isSafeInteger(minGas) && minGas > 0).toBe(true);
+        expect(
+          Number.isSafeInteger(quoteGasPerCall) && quoteGasPerCall > 0
+        ).toBe(true);
+        // The swap transaction carries Universal Router and settle overhead on
+        // top of the hook's gasleft() floor, which the quote call does not.
+        expect(
+          Number.isSafeInteger(swapGasLimit) && swapGasLimit > quoteGasPerCall,
+          `swapGasLimit for ${hook} on ${chainIdStr}`
+        ).toBe(true);
+        expect(
+          swapGasLimit,
+          `swapGasLimit for ${hook} on ${chainIdStr} exceeds the cap`
+        ).toBeLessThanOrEqual(MAX_HOOK_MIN_SWAP_GAS_LIMIT);
       }
     }
   });
@@ -410,6 +424,66 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
       expect(getHookMinQuoteGasPerCall(ChainId.ROBINHOOD, [])).toBeUndefined();
       expect(
         getHookMinQuoteGasPerCall(ChainId.BASE, [HOOKR_ROOT_ON_ROBINHOOD])
+      ).toBeUndefined();
+    });
+  });
+
+  it('caps the swap floor at the 30M trading accepts', () => {
+    // Trading's MAX_ROUTER_MIN_GAS_LIMIT, written out: uniroute can't import it.
+    expect(MAX_HOOK_MIN_SWAP_GAS_LIMIT).toBe(30_000_000);
+  });
+
+  describe('getHookMinSwapGasLimit', () => {
+    // Written out rather than read from the registry, so a changed entry fails here.
+    const hookrRootSwapGasLimit = 10_000_000;
+
+    it('returns the listed swap floor for a hook on its chain, in any case', () => {
+      expect(
+        getHookMinSwapGasLimit(ChainId.ROBINHOOD, [HOOKR_ROOT_ON_ROBINHOOD])
+      ).toBe(hookrRootSwapGasLimit);
+      expect(
+        getHookMinSwapGasLimit(ChainId.ROBINHOOD, [
+          utils.getAddress(HOOKR_ROOT_ON_ROBINHOOD),
+        ])
+      ).toBe(hookrRootSwapGasLimit);
+    });
+
+    it('counts only the listed hooks among a route hook set', () => {
+      expect(
+        getHookMinSwapGasLimit(ChainId.ROBINHOOD, [
+          ADDRESS_ZERO,
+          HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
+          HOOKR_ROOT_ON_ROBINHOOD,
+        ])
+      ).toBe(hookrRootSwapGasLimit);
+    });
+
+    it('adds a floor per swap through a listed hook', () => {
+      expect(
+        getHookMinSwapGasLimit(ChainId.ROBINHOOD, [
+          HOOKR_ROOT_ON_ROBINHOOD,
+          ADDRESS_ZERO,
+          utils.getAddress(HOOKR_ROOT_ON_ROBINHOOD),
+        ])
+      ).toBe(20_000_000);
+      expect(
+        getHookMinSwapGasLimit(
+          ChainId.ROBINHOOD,
+          Array(4).fill(HOOKR_ROOT_ON_ROBINHOOD)
+        )
+      ).toBe(40_000_000);
+    });
+
+    it('is undefined for unlisted hooks, empty routes and other chains', () => {
+      expect(
+        getHookMinSwapGasLimit(ChainId.ROBINHOOD, [
+          ADDRESS_ZERO,
+          HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD,
+        ])
+      ).toBeUndefined();
+      expect(getHookMinSwapGasLimit(ChainId.ROBINHOOD, [])).toBeUndefined();
+      expect(
+        getHookMinSwapGasLimit(ChainId.BASE, [HOOKR_ROOT_ON_ROBINHOOD])
       ).toBeUndefined();
     });
   });

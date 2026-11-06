@@ -143,6 +143,8 @@ vi.mock(
     return {
       isZlcaHookSettleBeforeSwap: actual.isZlcaHookSettleBeforeSwap,
       getHookMinQuoteGasPerCall: actual.getHookMinQuoteGasPerCall,
+      getHookMinSwapGasLimit: actual.getHookMinSwapGasLimit,
+      MAX_HOOK_MIN_SWAP_GAS_LIMIT: actual.MAX_HOOK_MIN_SWAP_GAS_LIMIT,
       AGG_HOOKS_PER_CHAIN: {},
       AGG_HOOKS_PROTOCOL_CACHED_ROUTES_FILTER_OUT_LIST: new Set(),
       UNISWAP_AGG_HOOK_ON_TEMPO: '0x0000000000000000000000000000000000000000',
@@ -721,6 +723,185 @@ describe('UniRouteBL', () => {
     getGasPrice: vi.fn().mockResolvedValue(BigNumber.from('0')),
   } as unknown as JsonRpcProvider;
   mockedRpcProviderMap.set(ChainId.MAINNET, mockProvider);
+
+  describe('minGasLimit for routes through a hook with a gasleft() floor', () => {
+    // HOOKR_ROOT on Robinhood, checksummed as pool data carries it while the
+    // registry keys are lowercase; the expected floor is written out, not read
+    // from the registry.
+    const hookrRoot = '0x89c9FB50d1f03192230FFB1c279BB6E7d3Fe6aCc';
+    const hookrModularV6 = '0xb3ca29cf721380cee8b8e4755f3865ebc68fe8cc';
+    const tokenOutOnRobinhood = '0x1111111111111111111111111111111111111111';
+    const providers = new Map<ChainId, JsonRpcProvider>([
+      [ChainId.MAINNET, mockProvider],
+      [ChainId.ROBINHOOD, mockProvider],
+    ]);
+
+    const intermediate = '0x2222222222222222222222222222222222222222';
+    let poolCount = 0;
+
+    function v4Pool(tokenIn: string, tokenOut: string, hooks: string): V4Pool {
+      return new V4Pool(
+        new Address(tokenIn),
+        new Address(tokenOut),
+        3000,
+        60,
+        hooks,
+        BigInt('1000000000000'),
+        `0x${(++poolCount).toString(16).padStart(64, '0')}`,
+        BigInt('79228162514264337593543950336'),
+        BigInt('0')
+      );
+    }
+
+    // One leg; one pool per hook, chained ETH -> intermediate... -> tokenOut.
+    function v4Route(
+      chainTokenOut: string,
+      ...hooksPerHop: string[]
+    ): QuoteBasic {
+      const tokens = [
+        'ETH',
+        ...hooksPerHop.slice(1).map(() => intermediate),
+        chainTokenOut,
+      ];
+      return new QuoteBasic(
+        new RouteBasic(
+          Protocol.V4,
+          hooksPerHop.map((hooks, hop) =>
+            v4Pool(tokens[hop], tokens[hop + 1], hooks)
+          )
+        ),
+        BigInt('1234567890'),
+        undefined,
+        {
+          gasUse: BigInt('97000'),
+          gasPriceInWei: BigInt('10000000'),
+          gasCostInWei: BigInt('970000000000'),
+          gasCostInEth: 0.00000097,
+          gasCostInQuoteToken: BigInt('1000'),
+        }
+      );
+    }
+
+    async function quoteThrough(
+      chainId: ChainId,
+      tokenOut: string,
+      quotes: QuoteBasic[]
+    ) {
+      const uniRouteBL = new UniRouteBL(
+        serviceConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(new QuoteSplit(quotes)),
+        dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        providers,
+        stateOverrideResolver
+      );
+      return uniRouteBL.quote(
+        ctx,
+        new QuoteRequest({
+          ...baseRequest,
+          tokenInChainId: chainId,
+          tokenOutChainId: chainId,
+          tokenOutAddress: tokenOut,
+          tradeType: 'EXACT_IN',
+        })
+      );
+    }
+
+    it('sets the hook swap floor on a Robinhood route through HOOKR_ROOT', async () => {
+      const response = await quoteThrough(
+        ChainId.ROBINHOOD,
+        tokenOutOnRobinhood,
+        [v4Route(tokenOutOnRobinhood, hookrRoot)]
+      );
+
+      expect(response.minGasLimit).toBe('10000000');
+      expect(response.gasUseEstimate).toBe('97000');
+      expect(response.toJson()).toHaveProperty('minGasLimit', '10000000');
+    });
+
+    it('sets it when only one leg of a split crosses the hook', async () => {
+      const response = await quoteThrough(
+        ChainId.ROBINHOOD,
+        tokenOutOnRobinhood,
+        [
+          v4Route(tokenOutOnRobinhood, ADDRESS_ZERO),
+          v4Route(tokenOutOnRobinhood, hookrRoot),
+        ]
+      );
+
+      expect(response.minGasLimit).toBe('10000000');
+    });
+
+    it('adds a floor per swap through the hook, across legs and hops', async () => {
+      const twoLegs = await quoteThrough(
+        ChainId.ROBINHOOD,
+        tokenOutOnRobinhood,
+        [
+          v4Route(tokenOutOnRobinhood, hookrRoot),
+          v4Route(tokenOutOnRobinhood, ADDRESS_ZERO, hookrRoot),
+        ]
+      );
+      const twoHops = await quoteThrough(
+        ChainId.ROBINHOOD,
+        tokenOutOnRobinhood,
+        [v4Route(tokenOutOnRobinhood, hookrRoot, hookrRoot)]
+      );
+
+      expect(twoLegs.minGasLimit).toBe('20000000');
+      expect(twoHops.minGasLimit).toBe('20000000');
+    });
+
+    it('caps the summed floor at 30M', async () => {
+      const response = await quoteThrough(
+        ChainId.ROBINHOOD,
+        tokenOutOnRobinhood,
+        [
+          v4Route(tokenOutOnRobinhood, hookrRoot, hookrRoot),
+          v4Route(tokenOutOnRobinhood, hookrRoot, hookrRoot),
+        ]
+      );
+
+      expect(response.minGasLimit).toBe('30000000');
+    });
+
+    it('leaves it unset for hookless and other-hook routes on Robinhood', async () => {
+      const response = await quoteThrough(
+        ChainId.ROBINHOOD,
+        tokenOutOnRobinhood,
+        [
+          v4Route(tokenOutOnRobinhood, ADDRESS_ZERO),
+          v4Route(tokenOutOnRobinhood, hookrModularV6),
+        ]
+      );
+
+      expect(response.minGasLimit).toBeUndefined();
+      expect(response.toJson()).not.toHaveProperty('minGasLimit');
+    });
+
+    it('leaves it unset for the same hook address on another chain', async () => {
+      const response = await quoteThrough(
+        ChainId.MAINNET,
+        baseRequest.tokenOutAddress,
+        [v4Route(baseRequest.tokenOutAddress, hookrRoot)]
+      );
+
+      expect(response.minGasLimit).toBeUndefined();
+    });
+  });
 
   describe('gas conversion trust passed through quote()', () => {
     it.each([
