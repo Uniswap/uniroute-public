@@ -1,4 +1,5 @@
 import {FakeTokenHandler} from '../../tests/test-utils/FakeTokenHandler';
+import {create, fromJson, toJson} from '@bufbuild/protobuf';
 import {getGasToken} from '../lib/tokenUtils';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
 import {OnChainQuoteFetchError} from '../stores/quote/OnChainQuoteFetchError';
@@ -34,10 +35,12 @@ import {QuoteType} from '../models/quote/QuoteType';
 import {QuoteOptions} from './IUniRouteBL';
 import {
   QuoteRequest,
-  GetCachedRoutesRequest,
-  DeleteCachedRoutesRequest,
-  MethodParameters,
   PerHopSlippage,
+  DeleteCachedRoutesRequestSchema,
+  GetCachedRoutesRequestSchema,
+  MethodParametersSchema,
+  QuoteRequestSchema,
+  QuoteResponseSchema,
 } from '../../gen/uniroute/v1/api_pb';
 
 import {buildTestContext} from '@uniswap/lib-testhelpers';
@@ -811,7 +814,7 @@ describe('UniRouteBL', () => {
       );
       return uniRouteBL.quote(
         ctx,
-        new QuoteRequest({
+        create(QuoteRequestSchema, {
           ...baseRequest,
           tokenInChainId: chainId,
           tokenOutChainId: chainId,
@@ -830,7 +833,10 @@ describe('UniRouteBL', () => {
 
       expect(response.minGasLimit).toBe('10000000');
       expect(response.gasUseEstimate).toBe('97000');
-      expect(response.toJson()).toHaveProperty('minGasLimit', '10000000');
+      expect(toJson(QuoteResponseSchema, response)).toHaveProperty(
+        'minGasLimit',
+        '10000000'
+      );
     });
 
     it('sets it when only one leg of a split crosses the hook', async () => {
@@ -889,7 +895,9 @@ describe('UniRouteBL', () => {
       );
 
       expect(response.minGasLimit).toBeUndefined();
-      expect(response.toJson()).not.toHaveProperty('minGasLimit');
+      expect(toJson(QuoteResponseSchema, response)).not.toHaveProperty(
+        'minGasLimit'
+      );
     });
 
     it('leaves it unset for the same hook address on another chain', async () => {
@@ -1001,7 +1009,7 @@ describe('UniRouteBL', () => {
         );
         await bl.quote(
           ctx,
-          new QuoteRequest({
+          create(QuoteRequestSchema, {
             ...baseRequest,
             tokenInAddress: fifa.toString().toLowerCase(),
             tokenOutAddress: usdt.toString().toLowerCase(),
@@ -1018,7 +1026,7 @@ describe('UniRouteBL', () => {
   describe('quote caching behavior', () => {
     it('should not use cached routes for FAST quote type in sync mode (start with empty cache)', async () => {
       // First call to cache routes
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -1057,7 +1065,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should not use cached routes for FRESH quote type in sync mode (start with empty cache)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         quoteType: 'FRESH',
@@ -1095,7 +1103,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should use cached routes for FAST quote type in async mode (start with empty cache)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -1134,7 +1142,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should not use cached routes for FRESH quote type in async mode (start with empty cache)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         quoteType: 'FRESH',
@@ -1251,7 +1259,7 @@ describe('UniRouteBL', () => {
       const testCtx = buildTestContext(handlerContext);
       const response = await buildBL().quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       expect(response.error?.code).toBe(404);
@@ -1315,7 +1323,7 @@ describe('UniRouteBL', () => {
       const testCtx = buildTestContext(handlerContext);
       const response = await buildBL().quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       // Positive cache wins: no short-circuit, no header, hitsCachedRoutes=true.
@@ -1345,7 +1353,7 @@ describe('UniRouteBL', () => {
           serviceConfigAsync
         ).quote(
           testCtx,
-          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
         );
 
         expect(response.error?.code).toBe(404);
@@ -1360,7 +1368,7 @@ describe('UniRouteBL', () => {
           serviceConfigAsync
         ).quote(
           testCtx,
-          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
         );
 
         expect(response.error?.code).toBe(404);
@@ -1385,7 +1393,7 @@ describe('UniRouteBL', () => {
           new IncompleteQuoteStrategy(batchError)
         ).quote(
           testCtx,
-          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
         );
 
         expect(response.error?.code).toBe(404);
@@ -1408,7 +1416,7 @@ describe('UniRouteBL', () => {
         await expect(
           buildBL(new FailingQuoteStrategy()).quote(
             testCtx,
-            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
           )
         ).rejects.toBeInstanceOf(OnChainQuoteFetchError);
         expect(
@@ -1529,7 +1537,7 @@ describe('UniRouteBL', () => {
           )
             .quote(
               testCtx,
-              new QuoteRequest({
+              create(QuoteRequestSchema, {
                 ...baseRequest,
                 amount: amountAboveUint128.toString(),
                 tradeType: 'EXACT_IN',
@@ -1588,7 +1596,10 @@ describe('UniRouteBL', () => {
             )
               .quote(
                 testCtx,
-                new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+                create(QuoteRequestSchema, {
+                  ...baseRequest,
+                  tradeType: 'EXACT_IN',
+                })
               )
               .then(
                 () => undefined,
@@ -1637,7 +1648,10 @@ describe('UniRouteBL', () => {
               new FailingRpcProvider(ethersCallTimeoutError(UNIRPC_TIMEOUT_MS))
             ).quote(
               testCtx,
-              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+              create(QuoteRequestSchema, {
+                ...baseRequest,
+                tradeType: 'EXACT_IN',
+              })
             )
           ).rejects.toBeInstanceOf(OnChainQuoteFetchError);
 
@@ -1668,7 +1682,10 @@ describe('UniRouteBL', () => {
           )
             .quote(
               testCtx,
-              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+              create(QuoteRequestSchema, {
+                ...baseRequest,
+                tradeType: 'EXACT_IN',
+              })
             )
             .then(
               () => undefined,
@@ -1704,7 +1721,10 @@ describe('UniRouteBL', () => {
               new FailingRpcProvider(ethersCallTimeoutError(UNIRPC_TIMEOUT_MS))
             ).quote(
               testCtx,
-              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+              create(QuoteRequestSchema, {
+                ...baseRequest,
+                tradeType: 'EXACT_IN',
+              })
             )
           ).rejects.toBeInstanceOf(OnChainQuoteFetchError);
 
@@ -1886,7 +1906,7 @@ describe('UniRouteBL', () => {
       const testCtx = buildTestContext();
       const response = await buildBL(countingRepository).quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       // The fallback (not a plain cache miss) fired, invoked fresh
@@ -1904,7 +1924,7 @@ describe('UniRouteBL', () => {
       const testCtx = buildTestContext();
       const response = await buildBL(countingRepository).quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       expect(testCtx.metrics.countStore[fallbackMetric]).toBeUndefined();
@@ -1919,7 +1939,7 @@ describe('UniRouteBL', () => {
   // read from or write to the route cache regardless of sync/async mode.
   describe('external protocol caching behavior', () => {
     it('should NOT cache routes for external-only protocol in sync mode (second call still misses)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         protocols: Protocol.CURVESTABLESWAPNG,
@@ -1957,7 +1977,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should NOT cache routes for external-only protocol in async mode (second call still misses)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         protocols: Protocol.CURVESTABLESWAPNG,
@@ -2003,7 +2023,7 @@ describe('UniRouteBL', () => {
           AggHooksWriteEnabled: false,
         },
       };
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         protocols: `${Protocol.V2},${Protocol.V3},${Protocol.V4},${Protocol.MIXED},${Protocol.CURVESTABLESWAPNG}`,
@@ -2041,7 +2061,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should cache routes for all-Uniswap protocols in async mode (second call hits cache)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         // defaults to v2,v3,v4,mixed — all Uniswap, no external
@@ -2079,12 +2099,12 @@ describe('UniRouteBL', () => {
     });
 
     it('should NOT cross-contaminate: external protocol request must not hit the Uniswap route cache', async () => {
-      const uniswapRequest = new QuoteRequest({
+      const uniswapRequest = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         // defaults to v2,v3,v4,mixed
       });
-      const externalRequest = new QuoteRequest({
+      const externalRequest = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         protocols: Protocol.CURVESTABLESWAPNG,
@@ -2133,12 +2153,12 @@ describe('UniRouteBL', () => {
   });
 
   describe('AggHooksReadEnabled / AggHooksWriteEnabled feature flags', () => {
-    const uniswapOnlyRequest = new QuoteRequest({
+    const uniswapOnlyRequest = create(QuoteRequestSchema, {
       ...baseRequest,
       tradeType: 'EXACT_IN',
       // defaults to v2,v3,v4,mixed
     });
-    const mixedRequest = new QuoteRequest({
+    const mixedRequest = create(QuoteRequestSchema, {
       ...baseRequest,
       tradeType: 'EXACT_IN',
       protocols: `${Protocol.V2},${Protocol.V3},${Protocol.V4},${Protocol.MIXED},${Protocol.CURVESTABLESWAPNG}`,
@@ -2309,7 +2329,7 @@ describe('UniRouteBL', () => {
       const [{hook: wrapHook}] = XSTOCK_WRAP_HOOKS_ON_MONAD;
       const xStock = new Address('0x90A2a4c76b5D8c0bc892A69EA28Aa775a8f2dD48');
       const wxStock = new Address('0xE7E553Cd128F0011777323A0b44a7b96EA1CB540');
-      const monadRequest = new QuoteRequest({
+      const monadRequest = create(QuoteRequestSchema, {
         ...baseRequest,
         tokenInAddress: xStock.address,
         tokenInChainId: ChainId.MONAD,
@@ -2384,7 +2404,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should correctly format single route response', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -2452,7 +2472,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should handle error response when no routes found', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -2492,7 +2512,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should correctly adjust gas for EXACT_IN trade type', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -2554,7 +2574,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should correctly adjust gas for EXACT_OUT trade type', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
       });
@@ -2616,7 +2636,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should include portion fields in response when portion parameters are provided', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         portionBips: 50, // 0.5%
@@ -2703,7 +2723,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should include portion fields in response when portion parameters are provided with 2 routes split 60/40', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         portionBips: 50, // 0.5%
@@ -2846,7 +2866,7 @@ describe('UniRouteBL', () => {
     it('should correctly distribute large amounts across multiple routes using BigInt arithmetic', async () => {
       // Test with large amount that exceeds Number.MAX_SAFE_INTEGER to verify BigInt conversion fix
       const largeAmount = '1000000000000000000000000'; // 1e24, exceeds MAX_SAFE_INTEGER
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         amount: largeAmount,
         tradeType: 'EXACT_IN',
@@ -3000,7 +3020,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should include portion fields in response for EXACT_OUT trade type', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
         portionBips: 50, // 0.5%
@@ -3088,7 +3108,7 @@ describe('UniRouteBL', () => {
       // Same fixture as the EXACT_IN portion test above, but with the
       // swapsteps flag on. UniRoute should leave amounts raw and not emit
       // any portion fields — Trading owns the fee math in this mode.
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         portionBips: 50, // 0.5% — would normally be applied
@@ -3169,7 +3189,7 @@ describe('UniRouteBL', () => {
       // covered by the SwapStepsFactory unit tests.
       const USDT = '0xdAC17F958D2ee523a2206206994597C13D831ec7';
       const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         tokenInAddress: USDT,
@@ -3222,11 +3242,11 @@ describe('UniRouteBL', () => {
       // swapSteps populated; one V2_SWAP_EXACT_IN step covering the whole input.
       // Carried as Struct -> toJson() yields the flat {type,...} SDK shape.
       expect(response.perHopSlippage).toBe(PerHopSlippage.OFF);
-      expect(response.toJson()).toMatchObject({
+      expect(toJson(QuoteResponseSchema, response)).toMatchObject({
         perHopSlippage: 'PER_HOP_SLIPPAGE_OFF',
       });
       expect(response.swapSteps).toHaveLength(1);
-      const step = response.swapSteps[0].toJson() as Record<string, unknown>;
+      const step = response.swapSteps[0] as Record<string, unknown>;
       expect(step.type).toBe('V2_SWAP_EXACT_IN');
       expect(step.recipient).toBe('0x0000000000000000000000000000000000000002');
       expect(step.amountIn).toBe('1000000000000000000');
@@ -3235,7 +3255,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should leave swapSteps empty when universalRouterSwapsteps is false (or absent)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -3286,7 +3306,7 @@ describe('UniRouteBL', () => {
       // EXACT_OUT normally adds the portion to amountIn before routing. In
       // swapsteps mode that adjustment must be skipped — the route should
       // serve the raw user-requested output amount.
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
         portionBips: 50, // 0.5% — would add 5e15 to amountIn under legacy path
@@ -3481,7 +3501,7 @@ describe('UniRouteBL', () => {
       );
 
     it('omits routeCandidates when the flag is not set', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -3498,7 +3518,7 @@ describe('UniRouteBL', () => {
     });
 
     it('excludes the served route and caps alternatives at 5 for EXACT_IN', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         includeRouteCandidates: true,
@@ -3531,7 +3551,7 @@ describe('UniRouteBL', () => {
     });
 
     it('sorts ascending for EXACT_OUT (lowest required input first)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
         includeRouteCandidates: true,
@@ -3554,7 +3574,7 @@ describe('UniRouteBL', () => {
     });
 
     it('ranks by gas-adjusted amount when every candidate has gas details', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         includeRouteCandidates: true,
@@ -3580,7 +3600,7 @@ describe('UniRouteBL', () => {
     });
 
     it('ranks all candidates by raw amount when any lacks gas details', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         includeRouteCandidates: true,
@@ -3609,7 +3629,7 @@ describe('UniRouteBL', () => {
     });
 
     it('excludes simulation-failed candidates', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         includeRouteCandidates: true,
@@ -3665,7 +3685,7 @@ describe('UniRouteBL', () => {
     });
 
     it('stops simulating candidates after MaxSeededAttempts seeded reverts', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -3732,7 +3752,7 @@ describe('UniRouteBL', () => {
     });
 
     it('excludes candidates whose trade build failed', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         includeRouteCandidates: true,
@@ -3792,7 +3812,7 @@ describe('UniRouteBL', () => {
     });
 
     it('keeps debugLogs routeCandidates output unchanged (desc, uncapped)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
         debugLogs: true,
@@ -3821,7 +3841,7 @@ describe('UniRouteBL', () => {
 
   describe('pool details updates', () => {
     it('should update pool details in response', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -3905,7 +3925,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should skip MainUpdateBestQuotePoolsWithFreshDetails when simulation already ran (SUCCESS)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -3998,7 +4018,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should call MainUpdateBestQuotePoolsWithFreshDetails when simulation is disabled (UNATTEMPTED)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         // No simulateFromAddress → simulation disabled → status will be UNATTEMPTED
@@ -4045,7 +4065,7 @@ describe('UniRouteBL', () => {
 
   describe('getCachedRoutes', () => {
     it('should return not found if no routes are cached', async () => {
-      const request = new GetCachedRoutesRequest({
+      const request = create(GetCachedRoutesRequestSchema, {
         chainId: 1,
         tokenInAddress: 'ETH',
         tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
@@ -4083,7 +4103,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should return cached routes when they exist', async () => {
-      const request = new GetCachedRoutesRequest({
+      const request = create(GetCachedRoutesRequestSchema, {
         chainId: 1,
         tokenInAddress: '0x0000000000000000000000000000000000000000',
         tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
@@ -4188,7 +4208,7 @@ describe('UniRouteBL', () => {
       // Create a spy to track the getRoutes call
       const getRoutesSpy = vi.spyOn(routeRepository, 'getRoutes');
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         hooksOptions: HooksOptions.NO_HOOKS, // Not HOOKS_INCLUSIVE
@@ -4238,7 +4258,7 @@ describe('UniRouteBL', () => {
           PoolsForTokensHooksVariantCacheEnabled: true,
         },
       };
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         hooksOptions: HooksOptions.NO_HOOKS,
@@ -4289,7 +4309,7 @@ describe('UniRouteBL', () => {
           PoolsForTokensHooksVariantCacheEnabled: true,
         },
       };
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         hooksOptions: HooksOptions.HOOKS_ONLY,
@@ -4332,7 +4352,7 @@ describe('UniRouteBL', () => {
       // Create a spy to track the getRoutes call
       const getRoutesSpy = vi.spyOn(routeRepository, 'getRoutes');
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         hooksOptions: HooksOptions.HOOKS_INCLUSIVE,
@@ -4377,7 +4397,7 @@ describe('UniRouteBL', () => {
       // Create a spy to track the getRoutes call
       const getRoutesSpy = vi.spyOn(routeRepository, 'getRoutes');
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         // hooksOptions is undefined by default, but gets defaulted to HOOKS_INCLUSIVE
@@ -4479,7 +4499,7 @@ describe('UniRouteBL', () => {
       );
       await uniRouteBL.quote(
         ctx,
-        new QuoteRequest({
+        create(QuoteRequestSchema, {
           ...baseRequest,
           tradeType: 'EXACT_IN',
           tokenOutAddress,
@@ -4518,7 +4538,7 @@ describe('UniRouteBL', () => {
     };
 
     it('simulates encodeSwaps calldata (not legacy) and tags sim metrics with swapSteps:true', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest, // ETH in, USDC out
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -4625,7 +4645,7 @@ describe('UniRouteBL', () => {
       // must still match the legs, which allocateAmounts sums to the raw
       // amountIn (last leg absorbs the remainder).
       const amountIn = 1_000_000_000_000_000_001n;
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest, // ETH in, USDC out
         amount: amountIn.toString(),
         tradeType: 'EXACT_IN',
@@ -4720,7 +4740,7 @@ describe('UniRouteBL', () => {
     });
 
     it('falls back to legacy calldata when the factory throws (MIXED EXACT_OUT)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -4819,7 +4839,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890', // Enable simulation
@@ -4968,7 +4988,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890', // Enable simulation
@@ -5052,7 +5072,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should return populated quote with Failed status when simulation is disabled but quote building fails', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         // No simulateFromAddress - simulation disabled
@@ -5143,7 +5163,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -5258,7 +5278,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -5390,7 +5410,7 @@ describe('UniRouteBL', () => {
           },
         };
         const SEEDED_SWAPPER = '0x1234567890123456789012345678901234567890';
-        const request = new QuoteRequest({
+        const request = create(QuoteRequestSchema, {
           ...baseRequest,
           tradeType: 'EXACT_IN',
           simulateFromAddress: SEEDED_SWAPPER,
@@ -5491,7 +5511,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -5597,7 +5617,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -5700,7 +5720,7 @@ describe('UniRouteBL', () => {
       },
     };
 
-    const simulationRequest = new QuoteRequest({
+    const simulationRequest = create(QuoteRequestSchema, {
       ...{
         tokenInAddress: 'ETH',
         tokenInChainId: 1,
@@ -6056,7 +6076,7 @@ describe('UniRouteBL', () => {
         },
       };
 
-      const requestWithoutSimulate = new QuoteRequest({
+      const requestWithoutSimulate = create(QuoteRequestSchema, {
         ...{
           tokenInAddress: 'ETH',
           tokenInChainId: 1,
@@ -6107,7 +6127,7 @@ describe('UniRouteBL', () => {
 
   describe('deleteCachedRoutes', () => {
     it('should return success true even if no routes are cached to delete', async () => {
-      const request = new DeleteCachedRoutesRequest({
+      const request = create(DeleteCachedRoutesRequestSchema, {
         chainId: 1,
         tokenInAddress: '0x0000000000000000000000000000000000000000',
         tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
@@ -6146,7 +6166,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should successfully delete cached routes when they exist', async () => {
-      const request = new DeleteCachedRoutesRequest({
+      const request = create(DeleteCachedRoutesRequestSchema, {
         chainId: 1,
         tokenInAddress: '0x0000000000000000000000000000000000000000',
         tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
@@ -6202,7 +6222,7 @@ describe('UniRouteBL', () => {
       );
 
       // Verify the route exists before deletion
-      const getRequest = new GetCachedRoutesRequest({
+      const getRequest = create(GetCachedRoutesRequestSchema, {
         chainId: 1,
         tokenInAddress: '0x0000000000000000000000000000000000000000',
         tokenOutAddress: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
@@ -6229,7 +6249,7 @@ describe('UniRouteBL', () => {
 
   describe('V4 fake tick spacing filtering', () => {
     it('should filter out V4 pools with fake tick spacing from response', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6341,7 +6361,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should re-assign amountIn to new first pool when fake pool was first (ExactIn)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6425,7 +6445,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should re-assign amountOut to new last pool when fake pool was last (ExactIn)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6509,7 +6529,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should re-assign amountIn to new first pool when fake pool was first (ExactOut)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
       });
@@ -6593,7 +6613,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should re-assign amountOut to new last pool when fake pool was last (ExactOut)', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
       });
@@ -6679,7 +6699,7 @@ describe('UniRouteBL', () => {
 
   describe('formatPriceImpact', () => {
     it('should return "0" when priceImpact is undefined', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6739,7 +6759,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should return the value as string when priceImpact is within -100 to 100', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6776,7 +6796,7 @@ describe('UniRouteBL', () => {
           BigInt('1000000000000000000'),
           TradeType.ExactIn,
           5.5, // priceImpact within range
-          new MethodParameters({
+          create(MethodParametersSchema, {
             to: '0x1234567890123456789012345678901234567890',
             calldata: '0x1234567890abcdef',
             value: '0x0',
@@ -6814,7 +6834,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should clamp priceImpact to 100 when value exceeds 100', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6851,7 +6871,7 @@ describe('UniRouteBL', () => {
           BigInt('1000000000000000000'),
           TradeType.ExactIn,
           150, // priceImpact exceeds 100
-          new MethodParameters({
+          create(MethodParametersSchema, {
             to: '0x1234567890123456789012345678901234567890',
             calldata: '0x1234567890abcdef',
             value: '0x0',
@@ -6889,7 +6909,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should clamp priceImpact to -100 when value is less than -100', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -6926,7 +6946,7 @@ describe('UniRouteBL', () => {
           BigInt('1000000000000000000'),
           TradeType.ExactIn,
           -150, // priceImpact less than -100
-          new MethodParameters({
+          create(MethodParametersSchema, {
             to: '0x1234567890123456789012345678901234567890',
             calldata: '0x1234567890abcdef',
             value: '0x0',
@@ -6964,7 +6984,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should handle edge cases: exactly 100, exactly -100, and 0', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -7001,7 +7021,7 @@ describe('UniRouteBL', () => {
           BigInt('1000000000000000000'),
           TradeType.ExactIn,
           100, // exactly 100
-          new MethodParameters({
+          create(MethodParametersSchema, {
             to: '0x1234567890123456789012345678901234567890',
             calldata: '0x1234567890abcdef',
             value: '0x0',
@@ -7068,7 +7088,7 @@ describe('UniRouteBL', () => {
           BigInt('1000000000000000000'),
           TradeType.ExactIn,
           -100, // exactly -100
-          new MethodParameters({
+          create(MethodParametersSchema, {
             to: '0x1234567890123456789012345678901234567890',
             calldata: '0x1234567890abcdef',
             value: '0x0',
@@ -7137,7 +7157,7 @@ describe('UniRouteBL', () => {
           BigInt('1000000000000000000'),
           TradeType.ExactIn,
           0, // exactly 0
-          new MethodParameters({
+          create(MethodParametersSchema, {
             to: '0x1234567890123456789012345678901234567890',
             calldata: '0x1234567890abcdef',
             value: '0x0',
@@ -7174,7 +7194,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should handle priceImpact calculation errors gracefully and default to 0', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         simulateFromAddress: '0x1234567890123456789012345678901234567890',
@@ -7351,7 +7371,7 @@ describe('UniRouteBL', () => {
 
   describe('gas estimation', () => {
     it('should not call updateQuotesGasDetails when GasEstimation is disabled', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -7448,7 +7468,7 @@ describe('UniRouteBL', () => {
     }
 
     it('should use reduced RouteFinder config on sync cache miss with partial protocols', async () => {
-      const request = new QuoteRequest(partialProtocolsRequest);
+      const request = create(QuoteRequestSchema, partialProtocolsRequest);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
       const strategySpy = vi.spyOn(
@@ -7488,7 +7508,7 @@ describe('UniRouteBL', () => {
 
     it('should use original RouteFinder config on sync cache miss with all protocols', async () => {
       // baseRequest already has protocols: 'v2,v3,v4,mixed' (all protocols)
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -7534,7 +7554,7 @@ describe('UniRouteBL', () => {
       // Full uniswap-native set + external protocols (e.g. CurveStableSwap) — the agg-hooks shadow shape.
       // Should NOT trigger the reduced config: with all uniswap natives available, the
       // search space is rich enough to warrant the full RouteFinder budget.
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         protocols: 'v2,v3,v4,mixed,CurveStableSwap',
         tradeType: 'EXACT_IN',
@@ -7577,7 +7597,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should use original RouteFinder config on sync cache hit', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -7646,7 +7666,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should use original RouteFinder config on async cache miss with partial protocols', async () => {
-      const request = new QuoteRequest(partialProtocolsRequest);
+      const request = create(QuoteRequestSchema, partialProtocolsRequest);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
       const strategySpy = vi.spyOn(
@@ -7691,7 +7711,7 @@ describe('UniRouteBL', () => {
         QuoteService: QuoteService.QuickRoute,
       };
 
-      const request = new QuoteRequest(partialProtocolsRequest);
+      const request = create(QuoteRequestSchema, partialProtocolsRequest);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
       const strategySpy = vi.spyOn(
@@ -7798,7 +7818,8 @@ describe('UniRouteBL', () => {
       // Decoded the way the HTTP handler decodes a TAPI request body.
       const response = await uniRouteBL.quote(
         ctx,
-        QuoteRequest.fromJson(
+        fromJson(
+          QuoteRequestSchema,
           {...baseRequest, tradeType: 'EXACT_IN', ...requestJson},
           {ignoreUnknownFields: true}
         )
@@ -7840,7 +7861,7 @@ describe('UniRouteBL', () => {
       requestOverrides: Record<string, unknown>,
       config: IUniRouteServiceConfig = serviceConfig
     ): Promise<IUniRouteServiceConfig['RouteFinder']> {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
         ...requestOverrides,
@@ -8138,7 +8159,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       expect(testCtx.metrics.countStore[LEAK_METRIC]).toBe(1);
@@ -8179,7 +8200,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       expect(testCtx.metrics.countStore[LEAK_METRIC]).toBeUndefined();
@@ -8224,7 +8245,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       const leakCall = countSpy.mock.calls.find(
@@ -8270,7 +8291,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
       const leakCall = countSpy.mock.calls.find(
@@ -8316,7 +8337,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'}),
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'}),
         {testAggHooks: true}
       );
 
@@ -8369,7 +8390,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'}),
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'}),
         {testAggHooks: false}
       );
 
@@ -8422,7 +8443,7 @@ describe('UniRouteBL', () => {
 
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+        create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
         // no options passed
       );
 
@@ -8476,7 +8497,7 @@ describe('UniRouteBL', () => {
       // External protocol without testAggHooks — treated as unexpected.
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({
+        create(QuoteRequestSchema, {
           ...baseRequest,
           tradeType: 'EXACT_IN',
           protocols: Protocol.CURVESTABLESWAPNG,
@@ -8534,7 +8555,7 @@ describe('UniRouteBL', () => {
       // External protocol + testAggHooks=true — this is the expected path.
       await uniRouteBL.quote(
         testCtx,
-        new QuoteRequest({
+        create(QuoteRequestSchema, {
           ...baseRequest,
           tradeType: 'EXACT_IN',
           protocols: Protocol.CURVESTABLESWAPNG,
@@ -8568,7 +8589,7 @@ describe('UniRouteBL', () => {
     );
 
     it('should return error for FOT token with EXACT_OUT trade type', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_OUT',
       });
@@ -8605,7 +8626,7 @@ describe('UniRouteBL', () => {
     });
 
     it('should still return a quote for FOT token with EXACT_IN trade type', async () => {
-      const request = new QuoteRequest({
+      const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
       });
@@ -8775,7 +8796,10 @@ describe('UniRouteBL', () => {
           const response = await buildFotIntermediaryBL(
             new FotIntermediaryRoutesRepository(true),
             quoteStrategy
-          ).quote(testCtx, new QuoteRequest({...baseRequest, tradeType}));
+          ).quote(
+            testCtx,
+            create(QuoteRequestSchema, {...baseRequest, tradeType})
+          );
 
           expect(response.error).toBeUndefined();
           expect(quoteStrategy.receivedRoutes).toHaveLength(1);
@@ -8797,7 +8821,7 @@ describe('UniRouteBL', () => {
           quoteStrategy
         ).quote(
           testCtx,
-          new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+          create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
         );
 
         expect(quoteStrategy.receivedRoutes).toEqual([[]]);
@@ -8895,7 +8919,10 @@ describe('UniRouteBL', () => {
 
             const response = await buildProbedBL(probe, quoteStrategy).quote(
               testCtx,
-              new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+              create(QuoteRequestSchema, {
+                ...baseRequest,
+                tradeType: 'EXACT_IN',
+              })
             );
 
             expect(response.error).toBeUndefined();
@@ -8924,7 +8951,7 @@ describe('UniRouteBL', () => {
 
           await buildProbedBL(probe, quoteStrategy).quote(
             buildTestContext(),
-            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
           );
 
           expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
@@ -8940,7 +8967,7 @@ describe('UniRouteBL', () => {
 
           await buildProbedBL(probe, quoteStrategy).quote(
             testCtx,
-            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
           );
 
           expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
@@ -8958,7 +8985,7 @@ describe('UniRouteBL', () => {
 
           await buildProbedBL(probe, quoteStrategy).quote(
             buildTestContext(),
-            new QuoteRequest({...baseRequest, tradeType: 'EXACT_IN'})
+            create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
           );
 
           expect(probe.requests).toEqual([]);

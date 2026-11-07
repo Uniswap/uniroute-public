@@ -51,7 +51,8 @@ import {NoRouteCacheRepository} from '../stores/route/uniroutes/NoRouteCacheRepo
 import {UniRoutesRepository} from '../stores/route/uniroutes/UniRoutesRepository';
 import {TokenProvider} from '../stores/token/provider/TokenProvider';
 import {FakeTokenHandler} from '../../tests/test-utils/FakeTokenHandler';
-import {QuoteRequest} from '../../gen/uniroute/v1/api_pb';
+import {create} from '@bufbuild/protobuf';
+import {QuoteRequestSchema} from '../../gen/uniroute/v1/api_pb';
 import {QuoteErrorReason, quoteErrorReasonOf} from '../lib/quoteErrorReason';
 
 class FakePoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
@@ -261,7 +262,7 @@ describe('UniRouteBL.quote routing block list', () => {
   };
 
   const quoteRequest = (tokenInAddress: string) =>
-    new QuoteRequest({
+    create(QuoteRequestSchema, {
       tokenInAddress,
       tokenInChainId: ChainId.ROBINHOOD,
       tokenOutAddress: weth,

@@ -1,10 +1,12 @@
 import {describe, expect, it, beforeEach, vi} from 'vitest';
 
+import {create, fromJson, toJson} from '@bufbuild/protobuf';
 import {
   QuoteRequest,
-  RawStateOverride,
-  StateOverride,
-  TokenBalanceOverride,
+  QuoteRequestSchema,
+  RawStateOverrideSchema,
+  StateOverrideSchema,
+  TokenBalanceOverrideSchema,
 } from '../../gen/uniroute/v1/api_pb';
 import {
   MAX_PRIORITY_FEE_PER_GAS_WEI,
@@ -48,7 +50,7 @@ describe('QuoteRequestValidator', () => {
   });
 
   const createValidRequest = (): QuoteRequest => {
-    return new QuoteRequest({
+    return create(QuoteRequestSchema, {
       tokenInAddress: '0x1111111111111111111111111111111111111111',
       tokenInChainId: ChainId.MAINNET,
       tokenOutAddress: '0x2222222222222222222222222222222222222222',
@@ -568,7 +570,10 @@ describe('QuoteRequestValidator', () => {
 
       it('accepts a request without the field', async () => {
         setupValidChain();
-        const request = QuoteRequest.fromJson(createValidRequest().toJson());
+        const request = fromJson(
+          QuoteRequestSchema,
+          toJson(QuoteRequestSchema, createValidRequest())
+        );
 
         expect(request.priorityFeePerGasWei).toBeUndefined();
         expect(await validator.validateInputs(request, ctx)).toBeUndefined();
@@ -629,20 +634,20 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1000',
               }),
             },
           }),
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'rawState',
-              value: new RawStateOverride({
+              value: create(RawStateOverrideSchema, {
                 contractAddress: '0x3333333333333333333333333333333333333333',
                 stateDiff: {[VALID_SLOT]: VALID_VALUE},
                 codeOverride: '0x60aa',
@@ -666,10 +671,10 @@ describe('QuoteRequestValidator', () => {
         request.tokenInChainId = ChainId.POLYGON;
         request.tokenOutChainId = ChainId.POLYGON;
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1',
@@ -694,10 +699,10 @@ describe('QuoteRequestValidator', () => {
         const request = createValidRequest();
         request.tokenInAddress = 'ETH';
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 // ERC-20 (USDC) — not native.
                 tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
@@ -722,10 +727,10 @@ describe('QuoteRequestValidator', () => {
         const request = createValidRequest();
         request.tokenInAddress = '0x0000000000000000000000000000000000000000';
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1000000000000000000',
@@ -746,10 +751,10 @@ describe('QuoteRequestValidator', () => {
         const request = createValidRequest();
         request.tokenInAddress = 'ETH';
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1000000000000000000',
@@ -784,10 +789,10 @@ describe('QuoteRequestValidator', () => {
         request.tokenOutChainId = ChainId.SEPOLIA;
         request.tokenInAddress = '0x0000000000000000000000000000000000000000';
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1000000000000000000',
@@ -807,10 +812,10 @@ describe('QuoteRequestValidator', () => {
         // tokenInAddress is a non-native ERC-20 (already set non-native
         // by createValidRequest with 0x1111...).
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1000000000000000000',
@@ -833,10 +838,10 @@ describe('QuoteRequestValidator', () => {
         const sharedToken = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
         const sharedAccount = '0x000000000000000000000000000000000000dEaD';
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: sharedToken,
                 accountAddress: sharedAccount,
                 amount: '1000',
@@ -844,10 +849,10 @@ describe('QuoteRequestValidator', () => {
               }),
             },
           }),
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: sharedToken,
                 accountAddress: sharedAccount,
                 amount: '2000',
@@ -870,10 +875,10 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'rawState',
-              value: new RawStateOverride({
+              value: create(RawStateOverrideSchema, {
                 contractAddress: '0x3333333333333333333333333333333333333333',
                 // stateDiff and codeOverride both omitted.
               }),
@@ -890,19 +895,17 @@ describe('QuoteRequestValidator', () => {
       it('rejects > 16 entries', async () => {
         setupValidChain();
         const request = createValidRequest();
-        request.stateOverrides = Array.from(
-          {length: 17},
-          () =>
-            new StateOverride({
-              kind: {
-                case: 'tokenBalance',
-                value: new TokenBalanceOverride({
-                  tokenAddress: '0x0000000000000000000000000000000000000000',
-                  accountAddress: '0x000000000000000000000000000000000000dEaD',
-                  amount: '1',
-                }),
-              },
-            })
+        request.stateOverrides = Array.from({length: 17}, () =>
+          create(StateOverrideSchema, {
+            kind: {
+              case: 'tokenBalance',
+              value: create(TokenBalanceOverrideSchema, {
+                tokenAddress: '0x0000000000000000000000000000000000000000',
+                accountAddress: '0x000000000000000000000000000000000000dEaD',
+                amount: '1',
+              }),
+            },
+          })
         );
         const result = await validator.validateInputs(request, ctx);
         expect(result?.error?.message).toMatch(/exceeds max of 16/);
@@ -912,10 +915,10 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'rawState',
-              value: new RawStateOverride({
+              value: create(RawStateOverrideSchema, {
                 contractAddress: '0x3333333333333333333333333333333333333333',
                 stateDiff: {'0xnothex': VALID_VALUE},
               }),
@@ -932,10 +935,10 @@ describe('QuoteRequestValidator', () => {
         // Over 24KB + 0x prefix.
         const tooLarge = '0x' + 'aa'.repeat(24577);
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'rawState',
-              value: new RawStateOverride({
+              value: create(RawStateOverrideSchema, {
                 contractAddress: '0x3333333333333333333333333333333333333333',
                 stateDiff: {},
                 codeOverride: tooLarge,
@@ -951,10 +954,10 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1',
@@ -971,10 +974,10 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1',
@@ -994,10 +997,10 @@ describe('QuoteRequestValidator', () => {
         const request = createValidRequest();
         const overUint256 = (1n << 256n).toString();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: overUint256,
@@ -1013,10 +1016,10 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: '0x0000000000000000000000000000000000000000',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1'.repeat(81),
@@ -1032,10 +1035,10 @@ describe('QuoteRequestValidator', () => {
         setupValidChain();
         const request = createValidRequest();
         request.stateOverrides = [
-          new StateOverride({
+          create(StateOverrideSchema, {
             kind: {
               case: 'tokenBalance',
-              value: new TokenBalanceOverride({
+              value: create(TokenBalanceOverrideSchema, {
                 tokenAddress: 'not-an-address',
                 accountAddress: '0x000000000000000000000000000000000000dEaD',
                 amount: '1',

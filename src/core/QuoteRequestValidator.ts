@@ -2,8 +2,10 @@ import {
   QuoteRequest,
   QuoteResponse,
   StateOverride,
+  QuoteResponseSchema,
 } from '../../gen/uniroute/v1/api_pb';
 import {ChainId, SUPPORTED_CHAINS} from '../lib/config';
+import {create} from '@bufbuild/protobuf';
 import {EnumUtils} from '../lib/EnumUtils';
 import {Protocol} from '../models/pool/Protocol';
 import {isAddress} from 'ethers/lib/utils';
@@ -73,7 +75,7 @@ export class QuoteRequestValidator {
   ): Promise<QuoteResponse | undefined> {
     // Check if chainId is supported
     if (!SUPPORTED_CHAINS.some(chainId => chainId === request.tokenInChainId)) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: `Unsupported chainId: ${request.tokenInChainId}`,
@@ -101,7 +103,7 @@ export class QuoteRequestValidator {
       (!Number.isFinite(request.slippageTolerance * 100) ||
         request.slippageTolerance < 0)
     ) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message:
@@ -115,7 +117,7 @@ export class QuoteRequestValidator {
       .split(',')
       .map(p => EnumUtils.stringToEnum(Protocol, p));
     if (protocols.length === 1 && protocols[0] === Protocol.MIXED) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: 'Mixed protocol cannot be specified explicitly',
@@ -126,7 +128,7 @@ export class QuoteRequestValidator {
 
     // Input amount must be greater than zero
     if (BigInt(request.amount) <= 0) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: 'Amount must be greater than zero',
@@ -140,7 +142,7 @@ export class QuoteRequestValidator {
       request.tokenInAddress.toLowerCase() ===
       request.tokenOutAddress.toLowerCase()
     ) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: 'Token in and out must not be the same',
@@ -151,7 +153,7 @@ export class QuoteRequestValidator {
 
     // recipient must not be an invalid address
     if (request.recipient && !isAddress(request.recipient)) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: 'Recipient must be a valid address',
@@ -162,7 +164,7 @@ export class QuoteRequestValidator {
 
     // check if tokenInChainId and tokenOutChainId are the same
     if (request.tokenInChainId !== request.tokenOutChainId) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: 'TokenInChainId and TokenOutChainId must be the same',
@@ -175,7 +177,7 @@ export class QuoteRequestValidator {
       request.priorityFeePerGasWei !== undefined &&
       !isValidPriorityFeePerGasWei(request.priorityFeePerGasWei)
     ) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: `priorityFeePerGasWei must be a decimal wei amount from 0 to ${MAX_PRIORITY_FEE_PER_GAS_WEI}`,
@@ -197,7 +199,7 @@ export class QuoteRequestValidator {
           `reason:${stateOverrideError.reason}`,
         ],
       });
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: stateOverrideError.message,
@@ -226,7 +228,7 @@ export class QuoteRequestValidator {
       tokenInWrappedAddress.address.toLowerCase() ===
       tokenOutWrappedAddress.address.toLowerCase()
     ) {
-      return new QuoteResponse({
+      return create(QuoteResponseSchema, {
         error: {
           code: 400,
           message: 'Token in and out must not be the same',

@@ -1,9 +1,10 @@
 import {describe, expect, it, vi} from 'vitest';
+import {create} from '@bufbuild/protobuf';
 import {Context} from '@uniswap/lib-uni/context';
 import {
-  RawStateOverride,
-  StateOverride,
-  TokenBalanceOverride,
+  RawStateOverrideSchema,
+  StateOverrideSchema,
+  TokenBalanceOverrideSchema,
 } from '../../../gen/uniroute/v1/api_pb';
 import {ChainId} from '../../lib/config';
 import {NATIVE_TOKEN_SENTINEL} from './TokenBalanceSlotResolver';
@@ -29,10 +30,10 @@ describe('StateOverrideResolver', () => {
     const r = new StateOverrideResolver();
     const out = await r.resolve(
       [
-        new StateOverride({
+        create(StateOverrideSchema, {
           kind: {
             case: 'tokenBalance',
-            value: new TokenBalanceOverride({
+            value: create(TokenBalanceOverrideSchema, {
               tokenAddress: NATIVE_TOKEN_SENTINEL,
               accountAddress: '0x000000000000000000000000000000000000dEaD',
               amount: '42',
@@ -53,10 +54,10 @@ describe('StateOverrideResolver', () => {
     const r = new StateOverrideResolver();
     const out = await r.resolve(
       [
-        new StateOverride({
+        create(StateOverrideSchema, {
           kind: {
             case: 'tokenBalance',
-            value: new TokenBalanceOverride({
+            value: create(TokenBalanceOverrideSchema, {
               tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
               accountAddress: '0x000000000000000000000000000000000000dEaD',
               amount: '7',
@@ -79,10 +80,10 @@ describe('StateOverrideResolver', () => {
     const ctx = fakeCtx();
     const out = await r.resolve(
       [
-        new StateOverride({
+        create(StateOverrideSchema, {
           kind: {
             case: 'tokenBalance',
-            value: new TokenBalanceOverride({
+            value: create(TokenBalanceOverrideSchema, {
               tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
               accountAddress: '0x000000000000000000000000000000000000dEaD',
               amount: '7',
@@ -122,10 +123,10 @@ describe('StateOverrideResolver', () => {
     const r = new StateOverrideResolver();
     const out = await r.resolve(
       [
-        new StateOverride({
+        create(StateOverrideSchema, {
           kind: {
             case: 'rawState',
-            value: new RawStateOverride({
+            value: create(RawStateOverrideSchema, {
               contractAddress: '0x1111111111111111111111111111111111111111',
               stateDiff: {[SLOT]: VAL},
               codeOverride: '0xdead',
@@ -145,7 +146,7 @@ describe('StateOverrideResolver', () => {
     const r = new StateOverrideResolver();
     const ctx = fakeCtx();
     const out = await r.resolve(
-      [new StateOverride()], // kind unset
+      [create(StateOverrideSchema)], // kind unset
       ChainId.MAINNET,
       ctx
     );
@@ -176,20 +177,20 @@ describe('StateOverrideResolver', () => {
     const ctx = fakeCtx();
     const out = await r.resolve(
       [
-        new StateOverride({
+        create(StateOverrideSchema, {
           kind: {
             case: 'tokenBalance',
-            value: new TokenBalanceOverride({
+            value: create(TokenBalanceOverrideSchema, {
               tokenAddress: NATIVE_TOKEN_SENTINEL,
               accountAddress: '0x000000000000000000000000000000000000dEaD',
               amount: '-1', // invalid
             }),
           },
         }),
-        new StateOverride({
+        create(StateOverrideSchema, {
           kind: {
             case: 'tokenBalance',
-            value: new TokenBalanceOverride({
+            value: create(TokenBalanceOverrideSchema, {
               tokenAddress: NATIVE_TOKEN_SENTINEL,
               accountAddress: '0x000000000000000000000000000000000000dEaD',
               amount: '5',

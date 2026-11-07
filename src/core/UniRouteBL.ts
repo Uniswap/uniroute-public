@@ -4,7 +4,6 @@ import {CurrencyAmount, TradeType as SdkTradeType} from '@uniswap/sdk-core';
 import {CanonicalPools} from '../lib/CanonicalPools';
 import {
   DebugInfo,
-  DebugRouteCandidate,
   DeleteCachedRoutesRequest,
   DeleteCachedRoutesResponse,
   GetCachedRoutesBucketResponse,
@@ -12,14 +11,25 @@ import {
   GetCachedRoutesResponse,
   InspectCacheKeyRequest,
   InspectCacheKeyResponse,
-  MethodParameters,
   PerHopSlippage,
   PoolInRoute,
   QuoteRequest,
   QuoteResponse,
   Route,
   RouteCandidate,
-  TokenInRoute,
+  DebugInfoSchema,
+  DebugRouteCandidateSchema,
+  DeleteCachedRoutesResponseSchema,
+  GetCachedRoutesBucketResponseSchema,
+  GetCachedRoutesResponseSchema,
+  InspectCacheKeyResponseSchema,
+  MethodParametersSchema,
+  PoolInRouteSchema,
+  QuoteRequestSchema,
+  QuoteResponseSchema,
+  RouteSchema,
+  RouteCandidateSchema,
+  TokenInRouteSchema,
 } from '../../gen/uniroute/v1/api_pb';
 import {
   buildSwapMethodParameters,
@@ -105,7 +115,8 @@ import {
   buildSwapSpecification,
   buildSwapStepsMethodParameters,
 } from './swap/SwapStepsBuilder';
-import {Struct} from '@bufbuild/protobuf';
+import {create} from '@bufbuild/protobuf';
+import type {JsonObject} from '@bufbuild/protobuf';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {IQuoteRequestValidator} from './QuoteRequestValidator';
 import {
@@ -480,7 +491,7 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags.push(`status:${QuoteStatus.NoRoute}`);
         metricTags.push('reason:fot_exact_out');
         await emitCallMetrics(metricTags);
-        return new QuoteResponse({
+        return create(QuoteResponseSchema, {
           error: {
             code: 400,
             message: 'FOT tokens are not supported for EXACT_OUT trade type',
@@ -503,7 +514,7 @@ export class UniRouteBL implements IUniRoutedBL {
         metricTags.push(`status:${QuoteStatus.NoRoute}`);
         metricTags.push('reason:xstock_exact_out');
         await emitCallMetrics(metricTags);
-        return new QuoteResponse({
+        return create(QuoteResponseSchema, {
           error: {
             code: 400,
             message: 'xStock tokens are not supported for EXACT_OUT trade type',
@@ -538,7 +549,7 @@ export class UniRouteBL implements IUniRoutedBL {
           metricTags.push(`status:${QuoteStatus.NoRoute}`);
           metricTags.push('reason:state_override_resolve_failed');
           await emitCallMetrics(metricTags);
-          return new QuoteResponse({
+          return create(QuoteResponseSchema, {
             error: {
               code: 400,
               message: `${result.failedCount} state override(s) could not be resolved; check STATE_OVERRIDE_NOT_APPLIED logs for per-entry detail`,
@@ -554,7 +565,7 @@ export class UniRouteBL implements IUniRoutedBL {
           metricTags.push(`status:${QuoteStatus.NoRoute}`);
           metricTags.push('reason:state_override_duplicate_write');
           await emitCallMetrics(metricTags);
-          return new QuoteResponse({
+          return create(QuoteResponseSchema, {
             error: {
               code: 400,
               message: `Duplicate state override write at ${collision}; each (contract, slot/balance/code) target must be written by at most one entry`,
@@ -913,7 +924,7 @@ export class UniRouteBL implements IUniRoutedBL {
       );
 
       if (status === QuoteStatus.NoRoute) {
-        return new QuoteResponse({
+        return create(QuoteResponseSchema, {
           error: {
             code: 404,
             message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
@@ -1286,7 +1297,7 @@ export class UniRouteBL implements IUniRoutedBL {
       });
       ctx.handlerContext.responseHeader.set('x-no-route-cache-hit', 'true');
       return {
-        shortCircuit: new QuoteResponse({
+        shortCircuit: create(QuoteResponseSchema, {
           error: {
             code: 404,
             message: `No valid quotes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
@@ -1874,7 +1885,7 @@ export class UniRouteBL implements IUniRoutedBL {
       ctx.logger.debug('No routes found');
       return {
         routes: filteredRoutes,
-        forceMixedNoRouteResponse: new QuoteResponse({
+        forceMixedNoRouteResponse: create(QuoteResponseSchema, {
           error: {
             code: 404,
             message: `No mixed valid routes found for pair ${request.tokenInAddress} -> ${request.tokenOutAddress}`,
@@ -2567,7 +2578,7 @@ export class UniRouteBL implements IUniRoutedBL {
           // (payload will accept nsCtx when we expand).
           // TODO: https://linear.app/uniswap/issue/ROUTE-1103/tech-debt-admin-getcachedroutes-request-payload-to-modify-to-accept
           const adminProtocols = [...UNISWAP_NATIVE_PROTOCOLS]; // All protocols
-          const adminQuoteRequest = new QuoteRequest(); // Empty — we're not doing a full quote
+          const adminQuoteRequest = create(QuoteRequestSchema); // Empty — we're not doing a full quote
           const readResult =
             await this.cachedRoutesRepository.readCachedRoutesAtBucket(
               EMPTY_NAMESPACE_CONTEXT,
@@ -2603,7 +2614,7 @@ export class UniRouteBL implements IUniRoutedBL {
             );
 
             bucketResponses.push(
-              new GetCachedRoutesBucketResponse({
+              create(GetCachedRoutesBucketResponseSchema, {
                 usdBucket: usdBucket,
                 routes: protoRoutes,
                 found: true,
@@ -2621,17 +2632,17 @@ export class UniRouteBL implements IUniRoutedBL {
       }
 
       if (bucketResponses.length === 0) {
-        return new GetCachedRoutesResponse({
+        return create(GetCachedRoutesResponseSchema, {
           buckets: [],
         });
       }
 
-      return new GetCachedRoutesResponse({
+      return create(GetCachedRoutesResponseSchema, {
         buckets: bucketResponses,
       });
     } catch (error) {
       ctx.logger.error('Error getting cached routes:', error);
-      return new GetCachedRoutesResponse({
+      return create(GetCachedRoutesResponseSchema, {
         buckets: [],
       });
     }
@@ -2678,19 +2689,19 @@ export class UniRouteBL implements IUniRoutedBL {
       );
 
       if (success) {
-        return new DeleteCachedRoutesResponse({
+        return create(DeleteCachedRoutesResponseSchema, {
           success: true,
           message: 'Cached routes deleted successfully',
         });
       } else {
-        return new DeleteCachedRoutesResponse({
+        return create(DeleteCachedRoutesResponseSchema, {
           success: false,
           message: 'Failed to delete cached routes',
         });
       }
     } catch (error) {
       ctx.logger.error('Error deleting cached routes:', error);
-      return new DeleteCachedRoutesResponse({
+      return create(DeleteCachedRoutesResponseSchema, {
         success: false,
         message: 'Error deleting cached routes',
         error: {
@@ -2762,7 +2773,7 @@ export class UniRouteBL implements IUniRoutedBL {
       response.status = 'not_found';
     }
 
-    return new InspectCacheKeyResponse({
+    return create(InspectCacheKeyResponseSchema, {
       key: response.key,
       type: response.type,
       value: response.value,
@@ -3090,7 +3101,7 @@ export class UniRouteBL implements IUniRoutedBL {
           isTokenOrderSwapped ? p.token0.address : p.token1.address
         )!;
 
-        const tokenInInRoute = new TokenInRoute({
+        const tokenInInRoute = create(TokenInRouteSchema, {
           address: tokenIn.address.address,
           decimals: tokenIn.decimals,
           symbol: tokenIn.symbol,
@@ -3099,7 +3110,7 @@ export class UniRouteBL implements IUniRoutedBL {
           sellFeeBps: tokenIn.feeOnTransfer?.sellFeeBps?.toString(),
         });
 
-        const tokenOutInRoute = new TokenInRoute({
+        const tokenOutInRoute = create(TokenInRouteSchema, {
           address: tokenOut.address.address,
           decimals: tokenOut.decimals,
           symbol: tokenOut.symbol,
@@ -3186,7 +3197,7 @@ export class UniRouteBL implements IUniRoutedBL {
               : quoteAmountsIn[quoteIndex].toString();
         }
 
-        return new PoolInRoute({
+        return create(PoolInRouteSchema, {
           type: protocolToPoolTypeString(p.protocol),
           address: p.address.address,
           tokenIn: tokenInInRoute,
@@ -3283,9 +3294,11 @@ export class UniRouteBL implements IUniRoutedBL {
       }
     }
     // Emit the SDK SwapStep[] shape verbatim ({type,...}/{action,...}) as
-    // Struct, rather than the proto oneof wrapper.
-    const swapStepStructs = internalSwapSteps.map(step =>
-      Struct.fromJsonString(JSON.stringify(step))
+    // google.protobuf.Struct, rather than the proto oneof wrapper. protobuf-es
+    // v2 represents a Struct field as a plain JsonObject, so round-trip through
+    // JSON to strip class instances / bigints before assigning.
+    const swapStepStructs = internalSwapSteps.map(
+      step => JSON.parse(JSON.stringify(step)) as JsonObject
     );
 
     // In swapsteps mode Trading owns fee math and exposes portion fields itself,
@@ -3306,7 +3319,7 @@ export class UniRouteBL implements IUniRoutedBL {
     );
 
     // Finally construct and return the QuoteResponse
-    const quoteResponse = new QuoteResponse({
+    const quoteResponse = create(QuoteResponseSchema, {
       blockNumber: blockNumber.toString(),
       quoteAmount: correctedQuote.toString(),
       quoteAmountDecimals: correctedQuoteDecimals.toExact(),
@@ -3321,7 +3334,7 @@ export class UniRouteBL implements IUniRoutedBL {
       gasUseEstimateQuoteDecimals: finalGasUseEstimateQuoteDecimals.toExact(),
       gasUseEstimateUSD: finalGasUseEstimateUSD.toString(),
       routeString,
-      route: filteredAllPools.map(pools => new Route({pools})),
+      route: filteredAllPools.map(pools => create(RouteSchema, {pools})),
       perHopSlippage: PerHopSlippage.OFF,
       hitsCachedRoutes: usedCachedRoutes,
       debugInfo: debugInfo,
@@ -3329,7 +3342,7 @@ export class UniRouteBL implements IUniRoutedBL {
       simulationStatus: quoteSplit.simulationResult?.status.toString(),
       simulationError: isSimulationError(quoteSplit.simulationResult?.status),
       simulationDescription: quoteSplit.simulationResult?.description,
-      methodParameters: new MethodParameters({
+      methodParameters: create(MethodParametersSchema, {
         to: quoteSplit.swapInfo?.methodParameters?.to,
         calldata: quoteSplit.swapInfo?.methodParameters?.calldata,
         value: quoteSplit.swapInfo?.methodParameters?.value,
@@ -3460,13 +3473,12 @@ export class UniRouteBL implements IUniRoutedBL {
         return aFirst ? -1 : 1;
       })
       .slice(0, MAX_ROUTE_CANDIDATES)
-      .map(
-        candidate =>
-          new RouteCandidate({
-            routeString: candidate.routeString,
-            quoteAmount: candidate.quoteAmount.toString(),
-            quoteGasAdjusted: candidate.quoteGasAdjusted?.toString(),
-          })
+      .map(candidate =>
+        create(RouteCandidateSchema, {
+          routeString: candidate.routeString,
+          quoteAmount: candidate.quoteAmount.toString(),
+          quoteGasAdjusted: candidate.quoteGasAdjusted?.toString(),
+        })
       );
   }
 
@@ -3493,14 +3505,13 @@ export class UniRouteBL implements IUniRoutedBL {
             : 0;
       });
 
-    return new DebugInfo({
+    return create(DebugInfoSchema, {
       routesConsidered: routes.map(r => r.toString()),
-      routeCandidates: sortedRouteCandidates.map(
-        candidate =>
-          new DebugRouteCandidate({
-            routeString: candidate.routeString,
-            quoteAmount: candidate.totalQuoteAmount.toString(),
-          })
+      routeCandidates: sortedRouteCandidates.map(candidate =>
+        create(DebugRouteCandidateSchema, {
+          routeString: candidate.routeString,
+          quoteAmount: candidate.totalQuoteAmount.toString(),
+        })
       ),
     });
   }
@@ -4060,7 +4071,7 @@ export class UniRouteBL implements IUniRoutedBL {
         const token0Info = tokensInfo.get(pool.token0.address);
         const token1Info = tokensInfo.get(pool.token1.address);
 
-        const tokenInInRoute = new TokenInRoute({
+        const tokenInInRoute = create(TokenInRouteSchema, {
           address: pool.token0.address,
           decimals: token0Info?.decimals ?? 0,
           symbol: token0Info?.symbol ?? 'UNKNOWN',
@@ -4069,7 +4080,7 @@ export class UniRouteBL implements IUniRoutedBL {
           sellFeeBps: token0Info?.feeOnTransfer?.sellFeeBps?.toString(),
         });
 
-        const tokenOutInRoute = new TokenInRoute({
+        const tokenOutInRoute = create(TokenInRouteSchema, {
           address: pool.token1.address,
           decimals: token1Info?.decimals ?? 0,
           symbol: token1Info?.symbol ?? 'UNKNOWN',
@@ -4078,7 +4089,7 @@ export class UniRouteBL implements IUniRoutedBL {
           sellFeeBps: token1Info?.feeOnTransfer?.sellFeeBps?.toString(),
         });
 
-        const poolInRoute = new PoolInRoute({
+        const poolInRoute = create(PoolInRouteSchema, {
           type: protocolToPoolTypeString(pool.protocol),
           address: pool.address.address,
           tokenIn: tokenInInRoute,
@@ -4088,7 +4099,7 @@ export class UniRouteBL implements IUniRoutedBL {
         pools.push(poolInRoute);
       }
 
-      protoRoutes.push(new Route({pools}));
+      protoRoutes.push(create(RouteSchema, {pools}));
     }
 
     return protoRoutes;

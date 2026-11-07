@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
+import {create} from '@bufbuild/protobuf';
 import {utils} from 'ethers';
-import {TokenBalanceOverride} from '../../../gen/uniroute/v1/api_pb';
+import {TokenBalanceOverrideSchema} from '../../../gen/uniroute/v1/api_pb';
 import {ChainId} from '../../lib/config';
 import {
   NATIVE_TOKEN_SENTINEL,
@@ -14,7 +15,7 @@ describe('TokenBalanceSlotResolver', () => {
   it('resolves native (zero-address) override to a balance entry, not stateDiff', () => {
     const account = '0x000000000000000000000000000000000000dEaD';
     const out = resolver.resolve(
-      new TokenBalanceOverride({
+      create(TokenBalanceOverrideSchema, {
         tokenAddress: NATIVE_TOKEN_SENTINEL,
         accountAddress: account,
         amount: '1000',
@@ -31,7 +32,7 @@ describe('TokenBalanceSlotResolver', () => {
     // Even if the caller mistakenly passes a slot for native, it's ignored.
     const account = '0x000000000000000000000000000000000000dEaD';
     const out = resolver.resolve(
-      new TokenBalanceOverride({
+      create(TokenBalanceOverrideSchema, {
         tokenAddress: NATIVE_TOKEN_SENTINEL,
         accountAddress: account,
         amount: '500',
@@ -47,7 +48,7 @@ describe('TokenBalanceSlotResolver', () => {
     const token = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
     const account = '0x000000000000000000000000000000000000dEaD';
     const out = resolver.resolve(
-      new TokenBalanceOverride({
+      create(TokenBalanceOverrideSchema, {
         tokenAddress: token,
         accountAddress: account,
         amount: '1234',
@@ -73,7 +74,7 @@ describe('TokenBalanceSlotResolver', () => {
     const token = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
     expect(() =>
       resolver.resolve(
-        new TokenBalanceOverride({
+        create(TokenBalanceOverrideSchema, {
           tokenAddress: token,
           accountAddress: '0x000000000000000000000000000000000000dEaD',
           amount: '1',
@@ -87,7 +88,7 @@ describe('TokenBalanceSlotResolver', () => {
   it('rejects negative amounts with reason invalid_amount', () => {
     try {
       resolver.resolve(
-        new TokenBalanceOverride({
+        create(TokenBalanceOverrideSchema, {
           tokenAddress: NATIVE_TOKEN_SENTINEL,
           accountAddress: '0x000000000000000000000000000000000000dEaD',
           amount: '-1',
@@ -111,7 +112,7 @@ describe('TokenBalanceSlotResolver', () => {
     for (const bad of ['not-a-number', '1.5', '1e10']) {
       try {
         resolver.resolve(
-          new TokenBalanceOverride({
+          create(TokenBalanceOverrideSchema, {
             tokenAddress: NATIVE_TOKEN_SENTINEL,
             accountAddress: '0x000000000000000000000000000000000000dEaD',
             amount: bad,
@@ -129,7 +130,7 @@ describe('TokenBalanceSlotResolver', () => {
   it('rejects negative balanceMappingSlot', () => {
     expect(() =>
       resolver.resolve(
-        new TokenBalanceOverride({
+        create(TokenBalanceOverrideSchema, {
           tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
           accountAddress: '0x000000000000000000000000000000000000dEaD',
           amount: '1',
@@ -143,7 +144,7 @@ describe('TokenBalanceSlotResolver', () => {
   it('rejects malformed balanceMappingSlot strings', () => {
     expect(() =>
       resolver.resolve(
-        new TokenBalanceOverride({
+        create(TokenBalanceOverrideSchema, {
           tokenAddress: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
           accountAddress: '0x000000000000000000000000000000000000dEaD',
           amount: '1',
