@@ -607,6 +607,22 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
 // pools. Declared above ZLCA_HOOKS_PER_CHAIN, which references it at load.
 export const METRIC_AGGREGATOR_HOOK_ON_BASE =
   '0x4d4044d6f5c62389d7f79cf86435a220b7bb2888';
+// Same external-fill Metric OMM family as METRIC_AGGREGATOR_HOOK_ON_BASE
+// above. Declared above ZLCA_HOOKS_PER_CHAIN, which references them at load.
+export const METRIC_UNIVERSAL_HOOK_ON_MAINNET =
+  '0xa7d43ce1acd60e4c552ba9184f853414be74a888';
+export const METRIC_UNIVERSAL_HOOK_ON_AVALANCHE =
+  '0x1ae3f0dc1c5596b98a6405db7d27d841ddea6888';
+export const METRIC_UNIVERSAL_HOOK_ON_ROBINHOOD =
+  '0xc950b5a49b1f746b05eccc9343acab60577ce888';
+export const METRIC_MARKETS_HOOK_ON_BASE =
+  '0x4d22c18a077d60f719f7d2647498d1d862b72888';
+export const METRIC_UNIVERSAL_HOOK_ON_BASE =
+  '0x867c0d11f07dae3db381f4106d3113afe450e888';
+export const METRIC_UNIVERSAL_HOOK_ON_ARBITRUM =
+  '0x9540206e19f2d45826582411a1ff7383d5682888';
+export const METRIC_UNIVERSAL_HOOK_ON_BNB =
+  '0x99973f3f9ab825e4033dffd829caaec8acd52888';
 
 // Zero-liquidity external-fill adapters. Declared above ZLCA_HOOKS_PER_CHAIN,
 // which references them at module load.
@@ -770,6 +786,10 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0': 0n,
       },
     },
+    [METRIC_UNIVERSAL_HOOK_ON_MAINNET]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
   [ChainId.BASE]: {
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
@@ -779,6 +799,14 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     // External Metric pools span 18/6/8 decimals and the init price is cosmetic
     // → sqrtPriceFromQuoter.
     [METRIC_AGGREGATOR_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    [METRIC_MARKETS_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    [METRIC_UNIVERSAL_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
     },
@@ -818,6 +846,16 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.ARBITRUM_ONE]: {
     [FLETH_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 500_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 50_000n},
+    [METRIC_UNIVERSAL_HOOK_ON_ARBITRUM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+  },
+  [ChainId.BNB]: {
+    [METRIC_UNIVERSAL_HOOK_ON_BNB]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
   [ChainId.AVALANCHE]: {
     [LOOPER_LFJ_HOOK_ON_AVALANCHE]: {
@@ -828,12 +866,20 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
       },
     },
+    [METRIC_UNIVERSAL_HOOK_ON_AVALANCHE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
   [ChainId.XLAYER]: {
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_XLAYER]: {gasOverheadPerHop: 50_000n},
   },
   [ChainId.ROBINHOOD]: {
     [FLETH_HOOK_ON_ROBINHOOD]: {gasOverheadPerHop: 500_000n},
+    [METRIC_UNIVERSAL_HOOK_ON_ROBINHOOD]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
   [CHAIN_ID_INK]: {
     [FLETH_HOOK_ON_INK]: {gasOverheadPerHop: 500_000n},
@@ -1994,11 +2040,30 @@ export const MYSPHERE_LAUNCH_HOOK_ON_BASE =
 // GenesisHookV5 (Base), operator-governed dynamic-fee market-making hook.
 export const GENESIS_HOOK_V5_ON_BASE =
   '0xd6155ce86ff3a33f52493e08cf77d7bbdf21fffc';
+export const PROTO_HOOK_ON_MAINNET =
+  '0x60ec590a5a9638fc5524b790a1327ccb20e56844';
+export const POOL_AGL_HOOK = '0x0000000456b76bc801253ef2366664750f602840';
+export const RAVENHOOD_HOOK_ON_ROBINHOOD =
+  '0x7f2c33c3aad9e769b41ff6b8a021357f2092f0cc';
+export const INCOME_MARKET_HOOK_1000_ON_ROBINHOOD =
+  '0x4adbfa936020fb330587ee1862478316da5ba0cc';
+export const WFIATHOOK_ON_BASE = '0xb37db659c8e32c3957f75ccd1088d8e9f4ea48c0';
+export const UNI_HOOKS_SHARED_ON_MAINNET =
+  '0xbec48053a223449fd03c63a7780e9e7d481feacc';
+export const UNI_HOOKS_SHARED_ON_BASE =
+  '0x672e67407fecbabbddd858a292041a561eafaacc';
+export const UNI_HOOKS_SHARED_ON_ARBITRUM =
+  '0x95f2c2f7dca90f82fbffc5ea7dd481cce7c16acc';
+export const UNI_HOOKS_SHARED_ON_UNICHAIN =
+  '0x38596756be9ff4807ee9c295169e0d3f4eeaaacc';
+export const UNI_HOOKS_SHARED_ON_ROBINHOOD =
+  '0x4444dfb154b71c8eab9ad61ed8476c242da12acc';
 export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<ChainId, Array<string>>
 > &
   Record<number, Array<string>> = {
   [ChainId.MAINNET]: [
+    UNI_HOOKS_SHARED_ON_MAINNET,
     STANDARD_LAUNCH_HOOK_ON_MAINNET,
     PANGEA_FEE_HOOK_ON_MAINNET,
     PANGEA_FEE_HOOK_2_ON_MAINNET,
@@ -2118,6 +2183,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SELL_ONLY_HOOK_ON_MAINNET,
     IMDUEL_HOOK_ON_MAINNET,
     COLLECTION_HOOK_ON_MAINNET,
+    PROTO_HOOK_ON_MAINNET,
+    POOL_AGL_HOOK,
+    METRIC_UNIVERSAL_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -2131,10 +2199,13 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     DYNAMIC_VOLUME_HOOK_ON_OPTIMISM,
     AEGIS_DFM_ON_OPTIMISM,
     BACKGEOORACLE_ON_OPTIMISM,
+    POOL_AGL_HOOK,
   ],
   [ChainId.OPTIMISM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.OPTIMISM_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.ARBITRUM_ONE]: [
+    METRIC_UNIVERSAL_HOOK_ON_ARBITRUM,
+    UNI_HOOKS_SHARED_ON_ARBITRUM,
     ALPHIX_HOOK_ON_ARBITRUM,
     ADDRESS_ZERO,
     FLETH_HOOK_ON_ARBITRUM,
@@ -2154,6 +2225,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FLAUNCH_ANYPOSM_VESTED_ON_ARBITRUM,
     FLAUNCH_POSITION_MANAGER_V1_6_ON_ARBITRUM,
     GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM,
+    POOL_AGL_HOOK,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
   [ChainId.ARBITRUM_SEPOLIA]: [ADDRESS_ZERO],
@@ -2163,13 +2235,15 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AEGIS_V1_1_ON_POLYGON,
     AEGIS_DFM_ON_POLYGON,
     FINDEX_HOOK_V2_ON_POLYGON,
+    POOL_AGL_HOOK,
   ],
   [ChainId.POLYGON_MUMBAI]: [ADDRESS_ZERO],
-  [ChainId.CELO]: [ADDRESS_ZERO, AEGIS_DFM_ON_CELO],
+  [ChainId.CELO]: [ADDRESS_ZERO, AEGIS_DFM_ON_CELO, POOL_AGL_HOOK],
   [ChainId.CELO_ALFAJORES]: [ADDRESS_ZERO],
   [ChainId.GNOSIS]: [ADDRESS_ZERO],
   [ChainId.MOONBEAM]: [ADDRESS_ZERO],
   [ChainId.BNB]: [
+    METRIC_UNIVERSAL_HOOK_ON_BNB,
     ADDRESS_ZERO,
     APEFUN_LAUNCH_FEE_HOOK_ON_BNB,
     BASEDBID_HOOK_ON_BNB,
@@ -2188,15 +2262,23 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     CLANKER_HOOK_DYNAMIC_FEE_V2_ON_BNB,
     SINGLETON_FLOOR_HOOK_ON_BNB,
     PANGEA_MULTICHAIN_HOOK_ON_BNB,
+    POOL_AGL_HOOK,
   ],
   [ChainId.AVALANCHE]: [
     ADDRESS_ZERO,
     AEGIS_DFM_ON_AVALANCHE,
     LOOPER_LFJ_HOOK_ON_AVALANCHE,
+    POOL_AGL_HOOK,
+    METRIC_UNIVERSAL_HOOK_ON_AVALANCHE,
   ],
   [ChainId.BASE_GOERLI]: [ADDRESS_ZERO],
   [ChainId.BASE_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.BASE]: [
+    METRIC_UNIVERSAL_HOOK_ON_BASE,
+    WFIATHOOK_ON_BASE,
+    UNI_HOOKS_SHARED_ON_BASE,
+    POOL_AGL_HOOK,
+    METRIC_MARKETS_HOOK_ON_BASE,
     MEMESTOCK_HOOK_ON_BASE,
     BANKR_INDEX_HOOK_ON_BASE,
     FEE_HOOK_ON_BASE,
@@ -2363,6 +2445,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.WORLDCHAIN]: [ADDRESS_ZERO, AEGIS_DFM_ON_WORLDCHAIN],
   [ChainId.UNICHAIN_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.UNICHAIN]: [
+    UNI_HOOKS_SHARED_ON_UNICHAIN,
     TAMA_DYNAMIC_FEE_HOOK_ON_UNICHAIN,
     ADDRESS_ZERO,
     FLETH_HOOK_ON_UNICHAIN,
@@ -2405,6 +2488,10 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.LINEA]: [ADDRESS_ZERO],
   [ChainId.MEGAETH]: [ADDRESS_ZERO],
   [ChainId.ROBINHOOD]: [
+    INCOME_MARKET_HOOK_1000_ON_ROBINHOOD,
+    UNI_HOOKS_SHARED_ON_ROBINHOOD,
+    METRIC_UNIVERSAL_HOOK_ON_ROBINHOOD,
+    RAVENHOOD_HOOK_ON_ROBINHOOD,
     GREENWODE_HOOK_V2_ON_ROBINHOOD,
     ZEALZ_FAIR_LAUNCH_HOOK_ON_ROBINHOOD,
     MEME_HOOK_V4_ON_ROBINHOOD,
