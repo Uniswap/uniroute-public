@@ -90,6 +90,7 @@ const perChainBaseSwapCost = (id: ChainId): BigNumber => {
     case ChainId.MEGAETH:
     case ChainId.ROBINHOOD:
     case ChainId.INK:
+    case ChainId.ELYSIUM:
       return BigNumber.from(2000);
     case ChainId.ARBITRUM:
       return BigNumber.from(5000);
@@ -136,6 +137,7 @@ const osakaCostPerInitTick = (id: ChainId): BigNumber => {
     case ChainId.MEGAETH:
     case ChainId.ROBINHOOD:
     case ChainId.INK:
+    case ChainId.ELYSIUM:
       return BigNumber.from(31000);
     case ChainId.ARBITRUM:
       return BigNumber.from(31000);
@@ -179,6 +181,7 @@ const osakaCostPerHop = (id: ChainId): BigNumber => {
     case ChainId.MEGAETH:
     case ChainId.ROBINHOOD:
     case ChainId.INK:
+    case ChainId.ELYSIUM:
       return BigNumber.from(80000);
     case ChainId.ARBITRUM:
       return BigNumber.from(80000);

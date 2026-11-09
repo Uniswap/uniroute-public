@@ -51,6 +51,7 @@ import {
   PATHUSD_TEMPO,
   USDC_ARC,
   USDC_INK,
+  USDC_ELYSIUM,
   getGasToken,
 } from '../../lib/tokenUtils';
 import {Context} from '@uniswap/lib-uni/context';
@@ -102,6 +103,7 @@ export const usdGasTokensByChain: {[chainId in ChainId]?: Token[]} = {
   [ChainId.MEGAETH]: [USDM_MEGAETH],
   [ChainId.ROBINHOOD]: [USDG_ROBINHOOD],
   [ChainId.INK]: [USDC_INK],
+  [ChainId.ELYSIUM]: [USDC_ELYSIUM],
 };
 
 export type NativePool = V2Pool | V3Pool | V4Pool;

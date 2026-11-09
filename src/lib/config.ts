@@ -224,6 +224,7 @@ export enum ChainId {
   MEGAETH = __PLACEHOLDER__,
   ROBINHOOD = __PLACEHOLDER__,
   INK = __PLACEHOLDER__,
+  ELYSIUM = __PLACEHOLDER__,
 }
 
 export interface IUniRouteServiceConfig {
@@ -952,6 +953,7 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 export const V2_SUPPORTED = [
@@ -976,6 +978,7 @@ export const V2_SUPPORTED = [
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 export const V4_SUPPORTED = [
@@ -1002,6 +1005,7 @@ export const V4_SUPPORTED = [
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 export const MIXED_SUPPORTED = [
@@ -1023,6 +1027,7 @@ export const MIXED_SUPPORTED = [
   ChainId.MEGAETH,
   ChainId.ROBINHOOD,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 // Arbitrum One + Arbitrum Orbit chains that share the same L1-cost gas model
@@ -1104,6 +1109,7 @@ export const poolSelectionConfig: Record<ChainId, IPoolSelectionConfig> = {
   [ChainId.MEGAETH]: {...defaultPoolSelectionConfig},
   [ChainId.ROBINHOOD]: {...defaultPoolSelectionConfig},
   [ChainId.INK]: {...defaultPoolSelectionConfig},
+  [ChainId.ELYSIUM]: {...defaultPoolSelectionConfig},
 };
 
 export const aggHooksPoolSelectionPerChainConfig: Record<
@@ -1135,6 +1141,7 @@ export const aggHooksPoolSelectionPerChainConfig: Record<
   [ChainId.MEGAETH]: {...aggHooksPoolSelectionConfig},
   [ChainId.ROBINHOOD]: {...aggHooksPoolSelectionConfig},
   [ChainId.INK]: {...aggHooksPoolSelectionConfig},
+  [ChainId.ELYSIUM]: {...aggHooksPoolSelectionConfig},
 };
 
 // Mapping of chainId to Set of token addresses that require gasPrice to be passed to simulation
@@ -1167,6 +1174,7 @@ export const needsGasPriceFetchingMapping: Record<ChainId, Set<string>> = {
   [ChainId.MEGAETH]: new Set<string>(),
   [ChainId.ROBINHOOD]: new Set<string>(),
   [ChainId.INK]: new Set<string>(),
+  [ChainId.ELYSIUM]: new Set<string>(),
 };
 
 export const needsGasPriceFetching = (
