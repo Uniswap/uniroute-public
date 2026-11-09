@@ -57,6 +57,10 @@ import {
 import {
   ActivityFilterPool,
   filterPoolsByRecentActivity,
+  minKeptShareFor,
+  POOL_ACTIVITY_MIN_KEPT_SHARE,
+  PoolActivityFilterConfig,
+  PoolActivitySkipReason,
   poolActivityExemptions,
   poolActivityFilterConfigFromEnv,
 } from './util/poolActivityFilter';
@@ -263,6 +267,7 @@ function carryForward<T extends {id: string}>(
 function applyPoolActivityFilter<T extends ActivityFilterPool>(
   chainId: number,
   pools: T[],
+  minKeptShare: number,
   logger: Logger,
   metricInstance: IMetric,
   metricTags: Record<string, string>
@@ -270,7 +275,8 @@ function applyPoolActivityFilter<T extends ActivityFilterPool>(
   const {pools: keptPools, outcome} = filterPoolsByRecentActivity(
     pools,
     poolActivityExemptions(chainId),
-    Date.now()
+    Date.now(),
+    minKeptShare
   );
   if (outcome.status === 'skipped') {
     metricInstance.putMetric(
@@ -279,8 +285,12 @@ function applyPoolActivityFilter<T extends ActivityFilterPool>(
       MetricLoggerUnit.Count,
       {...metricTags, status: 'failure', reason: outcome.reason}
     );
+    const wouldKeep =
+      outcome.reason === PoolActivitySkipReason.KEPT_SHARE_BELOW_FLOOR
+        ? ` (would keep ${outcome.kept}, dropped=${outcome.dropped} exempt=${outcome.exempt}, floor=${outcome.minKeptShare})`
+        : '';
     logger.warn(
-      `Pool activity filter skipped, caching all ${pools.length} pools: ${outcome.reason}`
+      `Pool activity filter skipped, caching all ${pools.length} pools: ${outcome.reason}${wouldKeep}`
     );
     return keptPools;
   }
@@ -315,7 +325,7 @@ async function cachePoolsForChainProtocol(
   config: CachePoolsConfig,
   logger: Logger,
   metricInstance: IMetric,
-  activityFilterTargets: ReadonlySet<string>
+  activityFilter: PoolActivityFilterConfig
 ): Promise<void> {
   const {protocol, chainId, provider, extraPoolSources} = chainProtocol;
   const metricTags = {chainId: String(chainId), protocol: String(protocol)};
@@ -337,10 +347,12 @@ async function cachePoolsForChainProtocol(
     pools = (await provider.getPools()) as Array<
       V2SubgraphPool | V3SubgraphPool | V4SubgraphPool
     >;
-    if (activityFilterTargets.has(targetKey(chainId, protocol))) {
+    const target = targetKey(chainId, protocol);
+    if (activityFilter.targets.has(target)) {
       pools = applyPoolActivityFilter(
         chainId,
         pools,
+        minKeptShareFor(activityFilter, target),
         logger,
         metricInstance,
         metricTags
@@ -1063,6 +1075,22 @@ export async function cacheAllPools(
       `POOL_CACHING_ACTIVITY_FILTER_TARGETS entries ignored, not code-supported Aurora combos: ${activityFilter.ignoredEntries.join(',')}`
     );
   }
+  if (
+    activityFilter.minKeptShareUnparseable ||
+    activityFilter.invalidMinKeptShareKeys.length > 0
+  ) {
+    metricInstance.putMetric(
+      'CachePools.activityFilter.misconfigured',
+      1,
+      MetricLoggerUnit.Count,
+      {status: 'failure', reason: 'invalid_min_kept_share'}
+    );
+    cronLogger.warn(
+      activityFilter.minKeptShareUnparseable
+        ? 'POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET ignored, not a JSON object: every combo keeps the default floor'
+        : `POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET entries ignored, not a supported combo with a share in (0, ${POOL_ACTIVITY_MIN_KEPT_SHARE}]: ${activityFilter.invalidMinKeptShareKeys.join(',')}`
+    );
+  }
 
   applyAuroraPoolSources(
     chainProtocols,
@@ -1106,7 +1134,7 @@ export async function cacheAllPools(
         config,
         cronLogger,
         metricInstance,
-        activityFilter.targets
+        activityFilter
       )
     );
     allRawTasks.push(...rawTasks);

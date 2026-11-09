@@ -1730,6 +1730,8 @@ describe('cacheAllPools pool activity filter', () => {
     s3CacheKey: 'poolCacheGzip.json',
   };
   const savedTargets = process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS;
+  const savedFloors =
+    process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET;
   let metric: MockMetric;
 
   beforeEach(() => {
@@ -1745,6 +1747,12 @@ describe('cacheAllPools pool activity filter', () => {
       delete process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS;
     } else {
       process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = savedTargets;
+    }
+    if (savedFloors === undefined) {
+      delete process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET;
+    } else {
+      process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET =
+        savedFloors;
     }
   });
 
@@ -1768,7 +1776,10 @@ describe('cacheAllPools pool activity filter', () => {
     return parsed;
   }
 
-  function cacheRobinhoodV4(pools: ReturnType<typeof robinhoodV4Pool>[]) {
+  function cacheRobinhoodV4(
+    pools: ReturnType<typeof robinhoodV4Pool>[],
+    logger: Logger = createMockLogger()
+  ) {
     mockChainProtocols = [
       {
         protocol: Protocol.V4,
@@ -1777,7 +1788,22 @@ describe('cacheAllPools pool activity filter', () => {
         provider: {getPools: async () => pools},
       },
     ];
-    return cacheAllPools(createMockLogger(), metric, config);
+    return cacheAllPools(logger, metric, config);
+  }
+
+  // 1 active pool in 100 keeps 1%: under the 2% default floor, over a 0.5%
+  // per-combo floor. Base V3 is in this shape.
+  function mostlyIdlePools() {
+    const nowMs = Date.now();
+    return [
+      robinhoodV4Pool('0xactive', nowMs - 60_000),
+      ...Array.from({length: 99}, (_, index) =>
+        robinhoodV4Pool(
+          `0xidle${index}`,
+          nowMs - POOL_ACTIVITY_WINDOW_MS - 60_000
+        )
+      ),
+    ];
   }
 
   it('writes only recently changed pools, without the timestamp, for a listed combo', async () => {
@@ -1832,6 +1858,90 @@ describe('cacheAllPools pool activity filter', () => {
           },
         }),
       ])
+    );
+  });
+
+  it('writes every pool and logs the counts it would keep when the kept share is under the default floor', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V4';
+    const logger = createMockLogger();
+    await cacheRobinhoodV4(mostlyIdlePools(), logger);
+
+    expect(writtenPools()).toHaveLength(100);
+    expect(metric.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.skipped',
+          tags: {
+            chainId: '4663',
+            protocol: 'V4',
+            status: 'failure',
+            reason: 'kept_share_below_floor',
+          },
+        }),
+      ])
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[PoolCachingCron] [4663_V4] Pool activity filter skipped, caching all 100 pools: kept_share_below_floor (would keep 1, dropped=99 exempt=0, floor=0.02)'
+    );
+  });
+
+  it('prunes the same list when the combo has a lower floor', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET =
+      '{"4663:V4":0.005}';
+    await cacheRobinhoodV4(mostlyIdlePools());
+
+    expect(writtenPools().map(pool => pool.id)).toEqual(['0xactive']);
+    expect(metric.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.dropped',
+          value: 99,
+          tags: {chainId: '4663', protocol: 'V4', status: 'success'},
+        }),
+      ])
+    );
+  });
+
+  it('keeps the default floor and reports an override that would raise it', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET =
+      '{"4663:V4":0.5}';
+    await cacheRobinhoodV4(mostlyIdlePools());
+
+    expect(writtenPools()).toHaveLength(100);
+    expect(metric.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.misconfigured',
+          tags: {status: 'failure', reason: 'invalid_min_kept_share'},
+        }),
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.skipped',
+          tags: expect.objectContaining({reason: 'kept_share_below_floor'}),
+        }),
+      ])
+    );
+  });
+
+  it('keeps the default floor and reports an override that is not a JSON object', async () => {
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4663:V4';
+    process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET =
+      '4663:V4=0.005';
+    const logger = createMockLogger();
+    await cacheRobinhoodV4(mostlyIdlePools(), logger);
+
+    expect(writtenPools()).toHaveLength(100);
+    expect(metric.calls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'CachePools.activityFilter.misconfigured',
+          tags: {status: 'failure', reason: 'invalid_min_kept_share'},
+        }),
+      ])
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[PoolCachingCron] POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET ignored, not a JSON object: every combo keeps the default floor'
     );
   });
 

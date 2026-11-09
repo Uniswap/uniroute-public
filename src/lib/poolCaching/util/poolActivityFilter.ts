@@ -22,7 +22,9 @@ export const POOL_ACTIVITY_SIGNAL_MAX_STALENESS_MS = 6 * 60 * 60 * 1000;
  * When the filter would keep less than this share of a combo's pools, the
  * activity signal is more likely wrong than the pools idle, so the filter
  * keeps the whole list instead. Robinhood V4 on dev keeps ~7.7% (26.4k of
- * 341.6k), about four times this floor.
+ * 341.6k), about four times this floor. A combo whose list is mostly idle by
+ * construction can lower its own floor through
+ * POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET; no combo can raise it.
  */
 export const POOL_ACTIVITY_MIN_KEPT_SHARE = 0.02;
 
@@ -40,7 +42,22 @@ export enum PoolActivitySkipReason {
 
 export type PoolActivityFilterOutcome =
   | {status: 'pruned'; kept: number; dropped: number; exempt: number}
-  | {status: 'skipped'; reason: PoolActivitySkipReason};
+  | {
+      status: 'skipped';
+      reason:
+        | PoolActivitySkipReason.NO_ACTIVITY_SIGNAL
+        | PoolActivitySkipReason.STALE_ACTIVITY_SIGNAL;
+    }
+  // The counts the prune would have produced, so a combo's floor can be set
+  // from a measured share.
+  | {
+      status: 'skipped';
+      reason: PoolActivitySkipReason.KEPT_SHARE_BELOW_FLOOR;
+      kept: number;
+      dropped: number;
+      exempt: number;
+      minKeptShare: number;
+    };
 
 export interface PoolActivityFilterResult<T extends ActivityFilterPool> {
   /** The pools to cache, each without `lastStateChangeAtMs`. */
@@ -61,6 +78,70 @@ export interface PoolActivityFilterConfig {
   targets: ReadonlySet<string>;
   /** Entries of the env value that name no code-supported Aurora combo. */
   ignoredEntries: string[];
+  /** Per-combo floors below POOL_ACTIVITY_MIN_KEPT_SHARE, by `targetKey`. */
+  minKeptShareByTarget: ReadonlyMap<string, number>;
+  /**
+   * Keys of POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET whose value
+   * is not a share in (0, POOL_ACTIVITY_MIN_KEPT_SHARE]; those combos keep the
+   * default floor.
+   */
+  invalidMinKeptShareKeys: string[];
+  /** The override is not a JSON object; every combo keeps the default floor. */
+  minKeptShareUnparseable: boolean;
+}
+
+/** The floor that applies to a combo: its override, else the default. */
+export function minKeptShareFor(
+  config: Pick<PoolActivityFilterConfig, 'minKeptShareByTarget'>,
+  target: string
+): number {
+  return (
+    config.minKeptShareByTarget.get(target) ?? POOL_ACTIVITY_MIN_KEPT_SHARE
+  );
+}
+
+/**
+ * JSON object of `chainId:protocol` to a kept-share floor, e.g.
+ * '{"8453:V3":0.005}'. A value must be a finite share in
+ * (0, POOL_ACTIVITY_MIN_KEPT_SHARE], so an override can only lower the floor.
+ * A bad value, or a key outside AURORA_SUPPORTED_TARGETS, leaves that combo on
+ * the default floor and is reported, rather than failing the cron: the
+ * default is the safer value, since it keeps the full list more often.
+ */
+export function parseMinKeptShareByTarget(raw: string | undefined): {
+  byTarget: ReadonlyMap<string, number>;
+  invalidKeys: string[];
+  unparseable: boolean;
+} {
+  const byTarget = new Map<string, number>();
+  const invalidKeys: string[] = [];
+  if (!raw || raw.trim() === '') {
+    return {byTarget, invalidKeys, unparseable: false};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {byTarget, invalidKeys, unparseable: true};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {byTarget, invalidKeys, unparseable: true};
+  }
+  for (const [key, value] of Object.entries(parsed)) {
+    const target = key.trim().toUpperCase();
+    const share = typeof value === 'number' ? value : Number.NaN;
+    if (
+      AURORA_SUPPORTED_TARGETS.has(target) &&
+      Number.isFinite(share) &&
+      share > 0 &&
+      share <= POOL_ACTIVITY_MIN_KEPT_SHARE
+    ) {
+      byTarget.set(target, share);
+    } else {
+      invalidKeys.push(key.trim());
+    }
+  }
+  return {byTarget, invalidKeys, unparseable: false};
 }
 
 /**
@@ -72,10 +153,12 @@ export interface PoolActivityFilterConfig {
  */
 export function poolActivityFilterConfigFromEnv(): PoolActivityFilterConfig {
   const raw = process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS?.trim();
+  const minKeptShare = parseMinKeptShareByTarget(
+    process.env.POOL_CACHING_ACTIVITY_FILTER_MIN_KEPT_SHARE_BY_TARGET
+  );
   const targets = new Set<string>();
   const ignoredEntries: string[] = [];
-  if (!raw) return {targets, ignoredEntries};
-  for (const entry of raw.split(',')) {
+  for (const entry of raw ? raw.split(',') : []) {
     const target = entry.trim().toUpperCase();
     if (AURORA_SUPPORTED_TARGETS.has(target)) {
       targets.add(target);
@@ -83,7 +166,13 @@ export function poolActivityFilterConfigFromEnv(): PoolActivityFilterConfig {
       ignoredEntries.push(entry.trim());
     }
   }
-  return {targets, ignoredEntries};
+  return {
+    targets,
+    ignoredEntries,
+    minKeptShareByTarget: minKeptShare.byTarget,
+    invalidMinKeptShareKeys: minKeptShare.invalidKeys,
+    minKeptShareUnparseable: minKeptShare.unparseable,
+  };
 }
 
 /**
@@ -127,12 +216,14 @@ function isExempt(
  * Keeps pools whose state changed within POOL_ACTIVITY_WINDOW_MS of `nowMs`,
  * exempt pools, and pools without a timestamp (extra sources and manual
  * entries). A pool's creation is a state change, so a new pool stays cached
- * for the whole window before its first swap.
+ * for the whole window before its first swap. When the kept pools would be
+ * fewer than `minKeptShare` of the list, the whole list is kept.
  */
 export function filterPoolsByRecentActivity<T extends ActivityFilterPool>(
   pools: T[],
   exemptions: PoolActivityExemptions,
-  nowMs: number
+  nowMs: number,
+  minKeptShare: number
 ): PoolActivityFilterResult<T> {
   let newestMs = Number.NEGATIVE_INFINITY;
   for (const pool of pools) {
@@ -176,12 +267,16 @@ export function filterPoolsByRecentActivity<T extends ActivityFilterPool>(
       dropped++;
     }
   }
-  if (kept.length < pools.length * POOL_ACTIVITY_MIN_KEPT_SHARE) {
+  if (kept.length < pools.length * minKeptShare) {
     return {
       pools: pools.map(withoutActivityTimestamp),
       outcome: {
         status: 'skipped',
         reason: PoolActivitySkipReason.KEPT_SHARE_BELOW_FLOOR,
+        kept: kept.length,
+        dropped,
+        exempt,
+        minKeptShare,
       },
     };
   }
