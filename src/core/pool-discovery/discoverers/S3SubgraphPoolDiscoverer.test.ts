@@ -974,17 +974,19 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
   const getPoolsForTokens = (
     hooksOptions?: HooksOptions
   ): Promise<V4PoolInfo[]> =>
-    discoverer.getPoolsForTokens(
-      ChainId.MAINNET,
-      Protocol.V4,
-      new Address(WETH),
-      new Address(NEW_TOKEN),
-      new PassthroughTopPoolsSelector(),
-      hooksOptions,
-      false,
-      EMPTY_NAMESPACE_CONTEXT,
-      mockContext
-    );
+    discoverer
+      .getPoolsForTokens(
+        ChainId.MAINNET,
+        Protocol.V4,
+        new Address(WETH),
+        new Address(NEW_TOKEN),
+        new PassthroughTopPoolsSelector(),
+        hooksOptions,
+        false,
+        EMPTY_NAMESPACE_CONTEXT,
+        mockContext
+      )
+      .then(result => result.pools);
 
   beforeEach(() => {
     s3Client = {
@@ -1271,7 +1273,7 @@ describe('S3SubgraphPoolDiscovererV4 CCA scheduled pools merge', () => {
         (await aggSelector.filterPools(...args)) as V4PoolInfo[],
     };
 
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V4,
       new Address(WETH),

@@ -55,7 +55,10 @@ import {QuoteBasic} from '../models/quote/QuoteBasic';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {TradeType} from '../models/quote/TradeType';
 import {SimpleQuoteSelector} from './quote/selector/SimpleQuoteSelector';
-import {IRoutesRepository} from '../stores/route/IRoutesRepository';
+import {
+  IRoutesRepository,
+  RouteDiscoveryResult,
+} from '../stores/route/IRoutesRepository';
 import {V2Pool} from '../models/pool/V2Pool';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V4Pool} from '../models/pool/V4Pool';
@@ -265,7 +268,7 @@ class TestQuoteFetcher implements IQuoteFetcher {
   }
 }
 
-class TestRoutesRepository implements IRoutesRepository<Pool> {
+class TestRoutesRepository implements IRoutesRepository {
   public async fetchRoutesForTokens(
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     chain: Chain,
@@ -285,8 +288,8 @@ class TestRoutesRepository implements IRoutesRepository<Pool> {
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: UniContext
-  ): Promise<RouteBasic<Pool>[]> {
-    return [];
+  ): Promise<RouteDiscoveryResult> {
+    return {routes: [], degradedReasons: []};
   }
 
   public async getRoutes(
@@ -307,18 +310,21 @@ class TestRoutesRepository implements IRoutesRepository<Pool> {
     nsCtx: RouteNamespaceContext,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: UniContext
-  ): Promise<RouteBasic[]> {
-    return [
-      new RouteBasic(Protocol.V2, [
-        new V2Pool(
-          tokenInCurrencyInfo.wrappedAddress,
-          tokenOutCurrencyInfo.wrappedAddress,
-          new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
-          BigInt('1000000000000'),
-          BigInt('1000000000000')
-        ),
-      ]),
-    ];
+  ): Promise<RouteDiscoveryResult> {
+    return {
+      routes: [
+        new RouteBasic(Protocol.V2, [
+          new V2Pool(
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress,
+            new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+            BigInt('1000000000000'),
+            BigInt('1000000000000')
+          ),
+        ]),
+      ],
+      degradedReasons: [],
+    };
   }
 }
 
@@ -576,8 +582,8 @@ class FixedRoutesRepository extends TestRoutesRepository {
     super();
   }
 
-  override async getRoutes(): Promise<RouteBasic[]> {
-    return [...this.routes];
+  override async getRoutes(): Promise<RouteDiscoveryResult> {
+    return {routes: [...this.routes], degradedReasons: []};
   }
 }
 
@@ -1869,13 +1875,13 @@ describe('UniRouteBL', () => {
 
       public async getRoutes(
         ...args: Parameters<TestRoutesRepository['getRoutes']>
-      ): Promise<RouteBasic[]> {
+      ): Promise<RouteDiscoveryResult> {
         this.getRoutesCalls++;
         return super.getRoutes(...args);
       }
     }
 
-    const buildBL = (routesRepository: IRoutesRepository<Pool>) =>
+    const buildBL = (routesRepository: IRoutesRepository) =>
       new UniRouteBL(
         serviceConfig,
         redisCache,
@@ -8716,14 +8722,20 @@ describe('UniRouteBL', () => {
           chain: Chain,
           tokenInCurrencyInfo: CurrencyInfo,
           tokenOutCurrencyInfo: CurrencyInfo
-        ): Promise<RouteBasic[]> {
+        ): Promise<RouteDiscoveryResult> {
           const fotRoute = fotIntermediaryRoute(
             tokenInCurrencyInfo,
             tokenOutCurrencyInfo
           );
-          return this.includeDirectRoute
-            ? [directRoute(tokenInCurrencyInfo, tokenOutCurrencyInfo), fotRoute]
-            : [fotRoute];
+          return {
+            routes: this.includeDirectRoute
+              ? [
+                  directRoute(tokenInCurrencyInfo, tokenOutCurrencyInfo),
+                  fotRoute,
+                ]
+              : [fotRoute],
+            degradedReasons: [],
+          };
         }
       }
 

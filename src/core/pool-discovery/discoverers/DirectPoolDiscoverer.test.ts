@@ -35,16 +35,16 @@ function fakeRepository(failExplicitCombos = false): {
 } {
   const calls: RecordedCall[] = [];
   let poolCounter = 0;
-  const repository: IPoolsRepository<V4Pool> = {
-    getPools: async (
-      _ctx,
-      _chain,
-      tokenIn,
-      tokenOut,
-      feeAmounts,
-      tickSpacings,
-      hooks
-    ) => {
+  class FakePoolsRepository implements IPoolsRepository<V4Pool> {
+    async getPools(
+      _ctx: Context,
+      _chain: ChainId,
+      tokenIn: Address,
+      tokenOut: Address,
+      feeAmounts?: number[],
+      tickSpacings?: number[],
+      hooks?: string[]
+    ): Promise<V4Pool[]> {
       calls.push({feeAmounts, tickSpacings, hooks});
       if (failExplicitCombos && feeAmounts !== undefined) {
         throw new Error('registry candidate read failed');
@@ -62,8 +62,31 @@ function fakeRepository(failExplicitCombos = false): {
           0n
         ),
       ];
-    },
-  };
+    }
+    async probePools(
+      ctx: Context,
+      chain: ChainId,
+      tokenIn: Address,
+      tokenOut: Address,
+      feeAmounts?: number[],
+      tickSpacings?: number[],
+      hooks?: string[]
+    ): Promise<{pools: V4Pool[]; failedProbeCount: number}> {
+      return {
+        pools: await this.getPools(
+          ctx,
+          chain,
+          tokenIn,
+          tokenOut,
+          feeAmounts,
+          tickSpacings,
+          hooks
+        ),
+        failedProbeCount: 0,
+      };
+    }
+  }
+  const repository = new FakePoolsRepository();
   return {repository, calls};
 }
 
@@ -94,7 +117,7 @@ function makeDiscoverer(
 function probe(
   discoverer: DirectPoolDiscovererV4,
   hooksOptions?: HooksOptions
-): Promise<unknown[]> {
+): Promise<{pools: unknown[]; failedProbeCount: number}> {
   const ctx = {
     logger: {debug: vi.fn(), warn: vi.fn(), error: vi.fn()},
     metrics: {count: vi.fn(), dist: vi.fn()},
@@ -110,7 +133,7 @@ function probe(
         tokenOut: Address,
         ctx: Context,
         hooksOptions?: HooksOptions
-      ) => Promise<unknown[]>;
+      ) => Promise<{pools: unknown[]; failedProbeCount: number}>;
     }
   )._getPoolsForTokens(
     ChainId.MAINNET,
@@ -140,7 +163,7 @@ describe('DirectPoolDiscovererV4 PoolKey registry union', () => {
 
   it('probes registry PoolKeys in a second, isolated repository call', async () => {
     const {repository, calls} = fakeRepository();
-    const pools = await probe(
+    const {pools} = await probe(
       makeDiscoverer(
         repository,
         fakeRegistry([{fee: 375, tickSpacing: 4, hooks: ADDRESS_ZERO}])
@@ -178,7 +201,7 @@ describe('DirectPoolDiscovererV4 PoolKey registry union', () => {
 
   it('keeps canonical results when the registry probe fails', async () => {
     const {repository, calls} = fakeRepository(true);
-    const pools = await probe(
+    const {pools, failedProbeCount} = await probe(
       makeDiscoverer(
         repository,
         fakeRegistry([{fee: 375, tickSpacing: 4, hooks: ADDRESS_ZERO}])
@@ -186,6 +209,7 @@ describe('DirectPoolDiscovererV4 PoolKey registry union', () => {
     );
     expect(calls).toHaveLength(2);
     expect(pools).toHaveLength(1);
+    expect(failedProbeCount).toBe(1);
   });
 
   it('keeps canonical results when the registry lookup itself throws', async () => {
@@ -195,7 +219,10 @@ describe('DirectPoolDiscovererV4 PoolKey registry union', () => {
         throw new Error('registry backend exploded');
       },
     };
-    const pools = await probe(makeDiscoverer(repository, throwingRegistry));
+    const {pools, failedProbeCount} = await probe(
+      makeDiscoverer(repository, throwingRegistry)
+    );
     expect(pools).toHaveLength(1);
+    expect(failedProbeCount).toBe(1);
   });
 });

@@ -82,7 +82,7 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
-  ): Promise<V2PoolInfo[]> {
+  ): Promise<{pools: V2PoolInfo[]; failedProbeCount: number}> {
     const bases = BASE_TOKENS_PER_CHAIN[chainId];
     const basesAddresses = bases.map(
       base => new Address(base.address.toLowerCase())
@@ -102,13 +102,16 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     ctx.logger.debug('relevantTokens v2', allTokens);
     ctx.logger.debug('allPairs v2', allPairs);
 
-    const pools = (
-      await Promise.all(
-        allPairs.map(async ([tokenA, tokenB]) => {
-          return this.poolRepository.getPools(ctx, chainId, tokenA, tokenB);
-        })
+    const probeResults = await Promise.all(
+      allPairs.map(([tokenA, tokenB]) =>
+        this.poolRepository.probePools(ctx, chainId, tokenA, tokenB)
       )
-    ).flat();
+    );
+    const pools = probeResults.flatMap(result => result.pools);
+    const failedProbeCount = probeResults.reduce(
+      (sum, result) => sum + result.failedProbeCount,
+      0
+    );
 
     const poolAddressSet = new Set<string>();
     const poolInfos: V2PoolInfo[] = _(pools)
@@ -140,7 +143,7 @@ export class StaticPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
       .compact()
       .value();
 
-    return poolInfos;
+    return {pools: poolInfos, failedProbeCount};
   }
 }
 
@@ -180,7 +183,7 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
-  ): Promise<V3PoolInfo[]> {
+  ): Promise<{pools: V3PoolInfo[]; failedProbeCount: number}> {
     const bases = BASE_TOKENS_PER_CHAIN[chainId];
     const basesAddresses = bases.map(
       base => new Address(base.address.toLowerCase())
@@ -200,13 +203,16 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     ctx.logger.debug('relevantTokens v3', allTokens);
     ctx.logger.debug('allPairs v3', allPairs);
 
-    const pools = (
-      await Promise.all(
-        allPairs.map(async ([tokenA, tokenB]) => {
-          return this.poolRepository.getPools(ctx, chainId, tokenA, tokenB);
-        })
+    const probeResults = await Promise.all(
+      allPairs.map(([tokenA, tokenB]) =>
+        this.poolRepository.probePools(ctx, chainId, tokenA, tokenB)
       )
-    ).flat();
+    );
+    const pools = probeResults.flatMap(result => result.pools);
+    const failedProbeCount = probeResults.reduce(
+      (sum, result) => sum + result.failedProbeCount,
+      0
+    );
 
     const poolAddressSet = new Set<string>();
     const poolInfos: V3PoolInfo[] = _(pools)
@@ -240,7 +246,7 @@ export class StaticPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
       .compact()
       .value();
 
-    return poolInfos;
+    return {pools: poolInfos, failedProbeCount};
   }
 }
 
@@ -280,7 +286,7 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
-  ): Promise<V4PoolInfo[]> {
+  ): Promise<{pools: V4PoolInfo[]; failedProbeCount: number}> {
     const bases = BASE_TOKENS_PER_CHAIN[chainId];
     const basesAddresses = bases.map(
       base => new Address(base.address.toLowerCase())
@@ -300,13 +306,16 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     ctx.logger.debug('relevantTokens v4', allTokens);
     ctx.logger.debug('allPairs v4', allPairs);
 
-    const pools = (
-      await Promise.all(
-        allPairs.map(async ([tokenA, tokenB]) => {
-          return this.poolRepository.getPools(ctx, chainId, tokenA, tokenB);
-        })
+    const probeResults = await Promise.all(
+      allPairs.map(([tokenA, tokenB]) =>
+        this.poolRepository.probePools(ctx, chainId, tokenA, tokenB)
       )
-    ).flat();
+    );
+    const pools = probeResults.flatMap(result => result.pools);
+    const failedProbeCount = probeResults.reduce(
+      (sum, result) => sum + result.failedProbeCount,
+      0
+    );
 
     const poolAddressSet = new Set<string>();
     const poolInfos: V4PoolInfo[] = _(pools)
@@ -342,6 +351,6 @@ export class StaticPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
       .compact()
       .value();
 
-    return poolInfos;
+    return {pools: poolInfos, failedProbeCount};
   }
 }

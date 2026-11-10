@@ -1,7 +1,6 @@
 import {Address} from '../../../models/address/Address';
 import {Chain} from '../../../models/chain/Chain';
 import {Pool} from '../../../models/pool/Pool';
-import {RouteBasic} from '../../../models/route/RouteBasic';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
 import {
   IPoolDiscoverer,
@@ -45,6 +44,8 @@ import {isExternalProtocol, logElapsedTime} from '../../../lib/helpers';
 import {getProtocolForAggHookAddress} from '../../../lib/poolCaching/util/hooksAddressesAllowlist';
 import {getHardcodedV4Pools} from '../../../core/pool-discovery/discoverers/hardcoded-v4-pools';
 import {routeSetCountsForLogging} from '../../../lib/observability';
+import {DiscoveryResult} from '../../../core/pool-discovery/discoveryDegraded';
+import {RouteDiscoveryResult} from '../IRoutesRepository';
 
 export class UniRoutesRepository extends BaseRoutesRepository {
   constructor(
@@ -67,9 +68,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: UniContext
-  ): Promise<RouteBasic<Pool>[]> {
+  ): Promise<RouteDiscoveryResult> {
     // Only fetch pools for requested protocols
-    const poolPromises: Promise<UniPoolInfo[]>[] = [];
+    const poolPromises: Promise<DiscoveryResult<UniPoolInfo>>[] = [];
     const chainMetricTag = `chain:${ChainId[chain.chainId]}`;
     // Phase timings are best-effort: a metrics-pipeline failure must never
     // fail a quote whose pools were fetched successfully.
@@ -105,7 +106,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       topPoolSelector: ITopPoolsSelector<UniPoolInfo>,
       skipCache: boolean,
       pair: [Address, Address]
-    ): Promise<UniPoolInfo[]> => {
+    ): Promise<DiscoveryResult<UniPoolInfo>> => {
       const poolsForTokensStartTime = Date.now();
       return this.poolDiscoverer
         .getPoolsForTokens(
@@ -135,7 +136,7 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       protocolMetricValue: string,
       topPoolSelector: ITopPoolsSelector<UniPoolInfo>,
       skipCache: boolean
-    ): Promise<UniPoolInfo[]> =>
+    ): Promise<DiscoveryResult<UniPoolInfo>> =>
       Promise.all(
         discoveryPairs.map(pair =>
           fetchPoolsForTokensWithLatency(
@@ -148,9 +149,22 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         )
       ).then(results => {
         const poolsById = new Map<string, UniPoolInfo>();
-        for (const pool of results.flat())
-          poolsById.set(pool.id.toLowerCase(), pool);
-        return Array.from(poolsById.values());
+        for (const result of results) {
+          for (const pool of result.pools)
+            poolsById.set(pool.id.toLowerCase(), pool);
+        }
+        const degradedReasons = [
+          ...new Set(results.flatMap(result => result.degradedReasons)),
+        ];
+        const failedProbeCount = results.reduce(
+          (sum, result) => sum + result.failedProbeCount,
+          0
+        );
+        return {
+          pools: Array.from(poolsById.values()),
+          degradedReasons,
+          failedProbeCount,
+        };
       });
 
     if (
@@ -166,7 +180,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         )
       );
     } else {
-      poolPromises.push(Promise.resolve([]));
+      poolPromises.push(
+        Promise.resolve({pools: [], degradedReasons: [], failedProbeCount: 0})
+      );
     }
 
     if (protocols.includes(Protocol.V3)) {
@@ -179,7 +195,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         )
       );
     } else {
-      poolPromises.push(Promise.resolve([]));
+      poolPromises.push(
+        Promise.resolve({pools: [], degradedReasons: [], failedProbeCount: 0})
+      );
     }
 
     if (
@@ -195,7 +213,9 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         )
       );
     } else {
-      poolPromises.push(Promise.resolve([]));
+      poolPromises.push(
+        Promise.resolve({pools: [], degradedReasons: [], failedProbeCount: 0})
+      );
     }
 
     // External protocols (StableSwap, FluidDex, etc.) are V4 hook-based pools.
@@ -226,12 +246,19 @@ export class UniRoutesRepository extends BaseRoutesRepository {
         )
       );
     } else {
-      poolPromises.push(Promise.resolve([]));
+      poolPromises.push(
+        Promise.resolve({pools: [], degradedReasons: [], failedProbeCount: 0})
+      );
     }
 
     const poolsFetchStartTime = Date.now();
-    let [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] =
-      await Promise.all(poolPromises);
+    const poolResults = await Promise.all(poolPromises);
+    let [poolsV2, poolsV3, rawPoolsV4, rawExternalPools] = poolResults.map(
+      result => result.pools
+    );
+    const degradedReasons = [
+      ...new Set(poolResults.flatMap(result => result.degradedReasons)),
+    ];
     await safeLogElapsedTime('GetRoutes.PoolsFetch', poolsFetchStartTime, [
       chainMetricTag,
     ]);
@@ -584,7 +611,10 @@ export class UniRoutesRepository extends BaseRoutesRepository {
       routeCounts: routeSetCountsForLogging(allRoutes, chain.chainId),
     });
 
-    return allRoutes;
+    return {
+      routes: allRoutes,
+      degradedReasons,
+    };
   }
 
   /**

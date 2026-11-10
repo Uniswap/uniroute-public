@@ -9,7 +9,12 @@ import {Context} from '@uniswap/lib-uni/context';
 import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
 import {V2Pool} from '../../../models/pool/V2Pool';
 import {Address} from '../../../models/address/Address';
-import {USDC_MAINNET, USDT_MAINNET} from '../../../lib/tokenUtils';
+import {
+  DAI_MAINNET,
+  USDC_MAINNET,
+  USDT_MAINNET,
+  WRAPPED_NATIVE_CURRENCY,
+} from '../../../lib/tokenUtils';
 import {V3Pool} from 'src/models/pool/V3Pool';
 import {V4Pool} from 'src/models/pool/V4Pool';
 import {IRedisCache} from '@uniswap/lib-cache';
@@ -30,6 +35,23 @@ import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
 } from '../../../models/hooks/namespaces';
+import {DiscoveryDegradedReason} from '../discoveryDegraded';
+
+// Two base tokens (not tokenIn/tokenOut in these tests) that
+// createUniquePairs will always probe as a pair, used to simulate one failed
+// probe among many in the fixed base-token x tokenIn/tokenOut grid.
+const FAILING_BASE_PAIR_ADDRESSES = new Set(
+  [WRAPPED_NATIVE_CURRENCY[ChainId.MAINNET]!.address, DAI_MAINNET.address].map(
+    address => address.toLowerCase()
+  )
+);
+
+function isFailingBasePair(tokenA: Address, tokenB: Address): boolean {
+  return (
+    FAILING_BASE_PAIR_ADDRESSES.has(tokenA.address.toLowerCase()) &&
+    FAILING_BASE_PAIR_ADDRESSES.has(tokenB.address.toLowerCase())
+  );
+}
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -69,6 +91,7 @@ describe('StaticPoolDiscovererV2', () => {
   beforeEach(() => {
     poolRepositoryV2 = {
       getPools: vi.fn().mockResolvedValue([]),
+      probePools: vi.fn().mockResolvedValue({pools: [], failedProbeCount: 0}),
     } as unknown as IPoolsRepository<V2Pool>;
 
     getPoolsCache = {
@@ -101,11 +124,13 @@ describe('StaticPoolDiscovererV2', () => {
       BigInt(2000)
     );
 
-    poolRepositoryV2.getPools = vi.fn().mockResolvedValue([dummyPool]);
+    poolRepositoryV2.probePools = vi
+      .fn()
+      .mockResolvedValue({pools: [dummyPool], failedProbeCount: 0});
 
     const tokenIn = new Address(USDC_MAINNET.address);
     const tokenOut = new Address(USDT_MAINNET.address);
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V2,
       tokenIn,
@@ -145,7 +170,7 @@ describe('StaticPoolDiscovererV2', () => {
 
     const tokenIn = new Address(USDC_MAINNET.address);
     const tokenOut = new Address(USDT_MAINNET.address);
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V2,
       tokenIn,
@@ -159,7 +184,70 @@ describe('StaticPoolDiscovererV2', () => {
 
     expect(pools.length).toEqual(1);
     expect(pools[0]).toEqual(cachedPool);
-    expect(poolRepositoryV2.getPools).not.toHaveBeenCalled();
+    expect(poolRepositoryV2.probePools).not.toHaveBeenCalled();
+  });
+
+  it('sums probePools failed-probe counts and keeps pools from the other pairs', async () => {
+    const dummyPool = new V2Pool(
+      new Address(USDC_MAINNET.address),
+      new Address(USDT_MAINNET.address),
+      new Address('0x1111111111111111111111111111111111111111'),
+      BigInt(1000),
+      BigInt(2000)
+    );
+    class FakeV2PoolsRepositoryWithFailingBasePair implements IPoolsRepository<V2Pool> {
+      public probePoolCallCount = 0;
+
+      async probePools(
+        _ctx: Context,
+        _chainId: ChainId,
+        tokenInAddress: Address,
+        tokenOutAddress: Address
+      ): Promise<{pools: V2Pool[]; failedProbeCount: number}> {
+        this.probePoolCallCount += 1;
+        if (isFailingBasePair(tokenInAddress, tokenOutAddress)) {
+          return {pools: [], failedProbeCount: 1};
+        }
+        return {pools: [dummyPool], failedProbeCount: 0};
+      }
+
+      async getPools(): Promise<V2Pool[]> {
+        throw new Error(
+          'StaticPoolDiscovererV2 must probe pools through probePools, not getPools'
+        );
+      }
+    }
+    const repository = new FakeV2PoolsRepositoryWithFailingBasePair();
+    discoverer = new StaticPoolDiscovererV2(
+      serviceConfig,
+      repository,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      FeatureGatedTokensRepository.empty()
+    );
+
+    const tokenIn = new Address(USDC_MAINNET.address);
+    const tokenOut = new Address(USDT_MAINNET.address);
+    const result = await discoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V2,
+      tokenIn,
+      tokenOut,
+      topPoolsSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    // The non-failing pairs all resolve to the same dummyPool object, which
+    // StaticPoolDiscovererV2 de-dupes by pool address.
+    expect(result.pools).toHaveLength(1);
+    expect(result.pools[0].id).toEqual(dummyPool.address.address);
+    expect(repository.probePoolCallCount).toBeGreaterThan(1);
   });
 });
 
@@ -175,6 +263,7 @@ describe('StaticPoolDiscovererV3', () => {
   beforeEach(() => {
     poolRepositoryV3 = {
       getPools: vi.fn().mockResolvedValue([]),
+      probePools: vi.fn().mockResolvedValue({pools: [], failedProbeCount: 0}),
     } as unknown as IPoolsRepository<V3Pool>;
 
     getPoolsCache = {
@@ -209,11 +298,13 @@ describe('StaticPoolDiscovererV3', () => {
       BigInt(1000) // tickCurrent
     );
 
-    poolRepositoryV3.getPools = vi.fn().mockResolvedValue([dummyPool]);
+    poolRepositoryV3.probePools = vi
+      .fn()
+      .mockResolvedValue({pools: [dummyPool], failedProbeCount: 0});
 
     const tokenIn = new Address(USDC_MAINNET.address);
     const tokenOut = new Address(USDT_MAINNET.address);
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V3,
       tokenIn,
@@ -253,7 +344,7 @@ describe('StaticPoolDiscovererV3', () => {
 
     const tokenIn = new Address(USDC_MAINNET.address);
     const tokenOut = new Address(USDT_MAINNET.address);
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V3,
       tokenIn,
@@ -267,7 +358,70 @@ describe('StaticPoolDiscovererV3', () => {
 
     expect(pools.length).toEqual(1);
     expect(pools[0]).toEqual(cachedPool);
-    expect(poolRepositoryV3.getPools).not.toHaveBeenCalled();
+    expect(poolRepositoryV3.probePools).not.toHaveBeenCalled();
+  });
+
+  it('sums probePools failed-probe counts and keeps pools from the other pairs', async () => {
+    const dummyPool = new V3Pool(
+      new Address(USDC_MAINNET.address),
+      new Address(USDT_MAINNET.address),
+      3000,
+      new Address('0x1111111111111111111111111111111111111111'),
+      BigInt(1000),
+      BigInt(1000),
+      BigInt(1000)
+    );
+    class FakeV3PoolsRepositoryWithFailingBasePair implements IPoolsRepository<V3Pool> {
+      public probePoolCallCount = 0;
+
+      async probePools(
+        _ctx: Context,
+        _chainId: ChainId,
+        tokenInAddress: Address,
+        tokenOutAddress: Address
+      ): Promise<{pools: V3Pool[]; failedProbeCount: number}> {
+        this.probePoolCallCount += 1;
+        if (isFailingBasePair(tokenInAddress, tokenOutAddress)) {
+          return {pools: [], failedProbeCount: 1};
+        }
+        return {pools: [dummyPool], failedProbeCount: 0};
+      }
+
+      async getPools(): Promise<V3Pool[]> {
+        throw new Error(
+          'StaticPoolDiscovererV3 must probe pools through probePools, not getPools'
+        );
+      }
+    }
+    const repository = new FakeV3PoolsRepositoryWithFailingBasePair();
+    discoverer = new StaticPoolDiscovererV3(
+      serviceConfig,
+      repository,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      FeatureGatedTokensRepository.empty()
+    );
+
+    const tokenIn = new Address(USDC_MAINNET.address);
+    const tokenOut = new Address(USDT_MAINNET.address);
+    const result = await discoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V3,
+      tokenIn,
+      tokenOut,
+      topPoolsSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(result.pools).toHaveLength(1);
+    expect(result.pools[0].id).toEqual(dummyPool.address.address);
+    expect(repository.probePoolCallCount).toBeGreaterThan(1);
   });
 });
 
@@ -283,6 +437,7 @@ describe('StaticPoolDiscovererV4', () => {
   beforeEach(() => {
     poolRepositoryV4 = {
       getPools: vi.fn().mockResolvedValue([]),
+      probePools: vi.fn().mockResolvedValue({pools: [], failedProbeCount: 0}),
     } as unknown as IPoolsRepository<V4Pool>;
 
     getPoolsCache = {
@@ -319,11 +474,13 @@ describe('StaticPoolDiscovererV4', () => {
       1000n // tickCurrent
     );
 
-    poolRepositoryV4.getPools = vi.fn().mockResolvedValue([dummyPool]);
+    poolRepositoryV4.probePools = vi
+      .fn()
+      .mockResolvedValue({pools: [dummyPool], failedProbeCount: 0});
 
     const tokenIn = new Address(USDC_MAINNET.address);
     const tokenOut = new Address(USDT_MAINNET.address);
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V4,
       tokenIn,
@@ -365,7 +522,7 @@ describe('StaticPoolDiscovererV4', () => {
 
     const tokenIn = new Address(USDC_MAINNET.address);
     const tokenOut = new Address(USDT_MAINNET.address);
-    const pools = await discoverer.getPoolsForTokens(
+    const {pools} = await discoverer.getPoolsForTokens(
       ChainId.MAINNET,
       Protocol.V4,
       tokenIn,
@@ -379,6 +536,71 @@ describe('StaticPoolDiscovererV4', () => {
 
     expect(pools.length).toEqual(1);
     expect(pools[0]).toEqual(cachedPool);
-    expect(poolRepositoryV4.getPools).not.toHaveBeenCalled();
+    expect(poolRepositoryV4.probePools).not.toHaveBeenCalled();
+  });
+
+  it('sums probePools failed-probe counts and keeps pools from the other pairs', async () => {
+    const dummyPool = new V4Pool(
+      new Address(USDC_MAINNET.address),
+      new Address(USDT_MAINNET.address),
+      3000,
+      1,
+      '0x1111111111111111111111111111111111111111',
+      1000n,
+      '0x1111111111111111111111111111111111111111',
+      1000n,
+      1000n
+    );
+    class FakeV4PoolsRepositoryWithFailingBasePair implements IPoolsRepository<V4Pool> {
+      public probePoolCallCount = 0;
+
+      async probePools(
+        _ctx: Context,
+        _chainId: ChainId,
+        tokenInAddress: Address,
+        tokenOutAddress: Address
+      ): Promise<{pools: V4Pool[]; failedProbeCount: number}> {
+        this.probePoolCallCount += 1;
+        if (isFailingBasePair(tokenInAddress, tokenOutAddress)) {
+          return {pools: [], failedProbeCount: 1};
+        }
+        return {pools: [dummyPool], failedProbeCount: 0};
+      }
+
+      async getPools(): Promise<V4Pool[]> {
+        throw new Error(
+          'StaticPoolDiscovererV4 must probe pools through probePools, not getPools'
+        );
+      }
+    }
+    const repository = new FakeV4PoolsRepositoryWithFailingBasePair();
+    discoverer = new StaticPoolDiscovererV4(
+      serviceConfig,
+      repository,
+      getPoolsCache,
+      getPoolsForTokensCache,
+      FeatureGatedTokensRepository.empty()
+    );
+
+    const tokenIn = new Address(USDC_MAINNET.address);
+    const tokenOut = new Address(USDT_MAINNET.address);
+    const result = await discoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V4,
+      tokenIn,
+      tokenOut,
+      topPoolsSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(result.pools).toHaveLength(1);
+    expect(result.pools[0].id).toEqual(dummyPool.address.address);
+    expect(repository.probePoolCallCount).toBeGreaterThan(1);
   });
 });

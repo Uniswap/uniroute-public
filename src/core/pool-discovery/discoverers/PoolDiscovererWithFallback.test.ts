@@ -11,7 +11,7 @@ import {
   getUniRouteTestConfig,
   IUniRouteServiceConfig,
 } from '../../../lib/config';
-import {BaseCachingPoolDiscoverer} from '../BaseCachingPoolDiscoverer';
+import {DiscoveryDegradedReason, DiscoveryResult} from '../discoveryDegraded';
 import {
   IPoolDiscoverer,
   UniPoolInfo,
@@ -30,6 +30,13 @@ import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
 } from '../../../models/hooks/namespaces';
+
+class FakeDiscoverer<
+  TPool extends UniPoolInfo,
+> implements IPoolDiscoverer<TPool> {
+  getPools = vi.fn<IPoolDiscoverer<TPool>['getPools']>();
+  getPoolsForTokens = vi.fn<IPoolDiscoverer<TPool>['getPoolsForTokens']>();
+}
 
 // Mock pool data
 const mockV2Pool: V2PoolInfo = {
@@ -143,21 +150,15 @@ describe('PoolDiscovererWithFallback', () => {
   const tokenOut = new Address(USDT_MAINNET.address);
 
   describe('V2', () => {
-    let primaryDiscoverer: BaseCachingPoolDiscoverer<V2PoolInfo>;
-    let fallbackDiscoverer: BaseCachingPoolDiscoverer<V2PoolInfo>;
+    let primaryDiscoverer: IPoolDiscoverer<V2PoolInfo>;
+    let fallbackDiscoverer: IPoolDiscoverer<V2PoolInfo>;
     let discoverer: PoolDiscovererWithFallbackV2;
     const topPoolSelector = new TestTopPoolsSelectorV2();
 
     beforeEach(() => {
-      primaryDiscoverer = {
-        getPools: vi.fn(),
-        getPoolsForTokens: vi.fn(),
-      } as unknown as BaseCachingPoolDiscoverer<V2PoolInfo>;
+      primaryDiscoverer = new FakeDiscoverer<V2PoolInfo>();
 
-      fallbackDiscoverer = {
-        getPools: vi.fn(),
-        getPoolsForTokens: vi.fn(),
-      } as unknown as BaseCachingPoolDiscoverer<V2PoolInfo>;
+      fallbackDiscoverer = new FakeDiscoverer<V2PoolInfo>();
 
       discoverer = new PoolDiscovererWithFallbackV2(
         serviceConfig,
@@ -223,10 +224,12 @@ describe('PoolDiscovererWithFallback', () => {
 
     describe('getPoolsForTokens', () => {
       it('should use primary discoverer when it returns pools', async () => {
-        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV2Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV2Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V2,
           tokenIn,
@@ -243,11 +246,17 @@ describe('PoolDiscovererWithFallback', () => {
       });
 
       it('should use fallback discoverer when primary returns empty', async () => {
-        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue([]);
-        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV2Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV2Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V2,
           tokenIn,
@@ -267,10 +276,12 @@ describe('PoolDiscovererWithFallback', () => {
         vi.mocked(primaryDiscoverer.getPoolsForTokens).mockRejectedValue(
           new Error('Primary failed')
         );
-        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV2Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV2Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V2,
           tokenIn,
@@ -284,6 +295,83 @@ describe('PoolDiscovererWithFallback', () => {
         expect(pools).toEqual([mockV2Pool]);
         expect(primaryDiscoverer.getPoolsForTokens).toHaveBeenCalledTimes(1);
         expect(fallbackDiscoverer.getPoolsForTokens).toHaveBeenCalledTimes(1);
+      });
+
+      it('reports PRIMARY_DISCOVERER_ERROR when primary throws', async () => {
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockRejectedValue(
+          new Error('Primary failed')
+        );
+        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV2Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const result = await discoverer.getPoolsForTokens(
+          ChainId.MAINNET,
+          Protocol.V2,
+          tokenIn,
+          tokenOut,
+          topPoolSelector,
+          undefined,
+          false,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        );
+        expect(result.degradedReasons).toEqual([
+          DiscoveryDegradedReason.PRIMARY_DISCOVERER_ERROR,
+        ]);
+      });
+
+      it('unions the primary degraded reason with the fallback when primary returns a degraded empty result', async () => {
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [],
+          degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+          failedProbeCount: 1,
+        });
+        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV2Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const result = await discoverer.getPoolsForTokens(
+          ChainId.MAINNET,
+          Protocol.V2,
+          tokenIn,
+          tokenOut,
+          topPoolSelector,
+          undefined,
+          false,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        );
+        expect(result.degradedReasons).toEqual([
+          DiscoveryDegradedReason.PROBE_ERROR,
+        ]);
+      });
+
+      it('returns a degraded non-empty primary result as-is', async () => {
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV2Pool],
+          degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+          failedProbeCount: 1,
+        });
+        const result = await discoverer.getPoolsForTokens(
+          ChainId.MAINNET,
+          Protocol.V2,
+          tokenIn,
+          tokenOut,
+          topPoolSelector,
+          undefined,
+          false,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        );
+        expect(result).toEqual({
+          pools: [mockV2Pool],
+          degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+          failedProbeCount: 1,
+        });
+        expect(fallbackDiscoverer.getPoolsForTokens).not.toHaveBeenCalled();
       });
 
       it('should propagate error when both discoverers fail', async () => {
@@ -314,21 +402,15 @@ describe('PoolDiscovererWithFallback', () => {
   });
 
   describe('V3', () => {
-    let primaryDiscoverer: BaseCachingPoolDiscoverer<V3PoolInfo>;
-    let fallbackDiscoverer: BaseCachingPoolDiscoverer<V3PoolInfo>;
+    let primaryDiscoverer: IPoolDiscoverer<V3PoolInfo>;
+    let fallbackDiscoverer: IPoolDiscoverer<V3PoolInfo>;
     let discoverer: PoolDiscovererWithFallbackV3;
     const topPoolSelector = new TestTopPoolsSelectorV3();
 
     beforeEach(() => {
-      primaryDiscoverer = {
-        getPools: vi.fn(),
-        getPoolsForTokens: vi.fn(),
-      } as unknown as BaseCachingPoolDiscoverer<V3PoolInfo>;
+      primaryDiscoverer = new FakeDiscoverer<V3PoolInfo>();
 
-      fallbackDiscoverer = {
-        getPools: vi.fn(),
-        getPoolsForTokens: vi.fn(),
-      } as unknown as BaseCachingPoolDiscoverer<V3PoolInfo>;
+      fallbackDiscoverer = new FakeDiscoverer<V3PoolInfo>();
 
       discoverer = new PoolDiscovererWithFallbackV3(
         serviceConfig,
@@ -394,10 +476,12 @@ describe('PoolDiscovererWithFallback', () => {
 
     describe('getPoolsForTokens', () => {
       it('should use primary discoverer when it returns pools', async () => {
-        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV3Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV3Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V3,
           tokenIn,
@@ -414,11 +498,17 @@ describe('PoolDiscovererWithFallback', () => {
       });
 
       it('should use fallback discoverer when primary returns empty', async () => {
-        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue([]);
-        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV3Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV3Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V3,
           tokenIn,
@@ -437,21 +527,15 @@ describe('PoolDiscovererWithFallback', () => {
   });
 
   describe('V4', () => {
-    let primaryDiscoverer: BaseCachingPoolDiscoverer<V4PoolInfo>;
-    let fallbackDiscoverer: BaseCachingPoolDiscoverer<V4PoolInfo>;
+    let primaryDiscoverer: IPoolDiscoverer<V4PoolInfo>;
+    let fallbackDiscoverer: IPoolDiscoverer<V4PoolInfo>;
     let discoverer: PoolDiscovererWithFallbackV4;
     const topPoolSelector = new TestTopPoolsSelectorV4();
 
     beforeEach(() => {
-      primaryDiscoverer = {
-        getPools: vi.fn(),
-        getPoolsForTokens: vi.fn(),
-      } as unknown as BaseCachingPoolDiscoverer<V4PoolInfo>;
+      primaryDiscoverer = new FakeDiscoverer<V4PoolInfo>();
 
-      fallbackDiscoverer = {
-        getPools: vi.fn(),
-        getPoolsForTokens: vi.fn(),
-      } as unknown as BaseCachingPoolDiscoverer<V4PoolInfo>;
+      fallbackDiscoverer = new FakeDiscoverer<V4PoolInfo>();
 
       discoverer = new PoolDiscovererWithFallbackV4(
         serviceConfig,
@@ -517,10 +601,12 @@ describe('PoolDiscovererWithFallback', () => {
 
     describe('getPoolsForTokens', () => {
       it('should use primary discoverer when it returns pools', async () => {
-        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV4Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV4Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V4,
           tokenIn,
@@ -537,11 +623,17 @@ describe('PoolDiscovererWithFallback', () => {
       });
 
       it('should use fallback discoverer when primary returns empty', async () => {
-        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue([]);
-        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue([
-          mockV4Pool,
-        ]);
-        const pools = await discoverer.getPoolsForTokens(
+        vi.mocked(primaryDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        vi.mocked(fallbackDiscoverer.getPoolsForTokens).mockResolvedValue({
+          pools: [mockV4Pool],
+          degradedReasons: [],
+          failedProbeCount: 0,
+        });
+        const {pools} = await discoverer.getPoolsForTokens(
           ChainId.MAINNET,
           Protocol.V4,
           tokenIn,
@@ -560,27 +652,31 @@ describe('PoolDiscovererWithFallback', () => {
   });
 });
 
-class FakeRejectingDiscoverer<TPool extends UniPoolInfo>
-  implements IPoolDiscoverer<TPool>
-{
+class FakeRejectingDiscoverer<
+  TPool extends UniPoolInfo,
+> implements IPoolDiscoverer<TPool> {
   constructor(private readonly failure: () => Promise<never>) {}
   getPools(): Promise<TPool[]> {
     return this.failure();
   }
-  getPoolsForTokens(): Promise<TPool[]> {
+  getPoolsForTokens(): Promise<DiscoveryResult<TPool>> {
     return this.failure();
   }
 }
 
-class FakeResolvingDiscoverer<TPool extends UniPoolInfo>
-  implements IPoolDiscoverer<TPool>
-{
+class FakeResolvingDiscoverer<
+  TPool extends UniPoolInfo,
+> implements IPoolDiscoverer<TPool> {
   constructor(private readonly pools: TPool[]) {}
   getPools(): Promise<TPool[]> {
     return Promise.resolve(this.pools);
   }
-  getPoolsForTokens(): Promise<TPool[]> {
-    return Promise.resolve(this.pools);
+  getPoolsForTokens(): Promise<DiscoveryResult<TPool>> {
+    return Promise.resolve({
+      pools: this.pools,
+      degradedReasons: [],
+      failedProbeCount: 0,
+    });
   }
 }
 
@@ -626,17 +722,19 @@ describe('PoolDiscovererWithFallback primary-failure log fields', () => {
     const pools =
       call === 'getPools'
         ? await discoverer.getPools(ChainId.MAINNET, Protocol.V2, ctx)
-        : await discoverer.getPoolsForTokens(
-            ChainId.MAINNET,
-            Protocol.V2,
-            tokenIn,
-            tokenOut,
-            new TestTopPoolsSelectorV2(),
-            undefined,
-            false,
-            EMPTY_NAMESPACE_CONTEXT,
-            ctx
-          );
+        : (
+            await discoverer.getPoolsForTokens(
+              ChainId.MAINNET,
+              Protocol.V2,
+              tokenIn,
+              tokenOut,
+              new TestTopPoolsSelectorV2(),
+              undefined,
+              false,
+              EMPTY_NAMESPACE_CONTEXT,
+              ctx
+            )
+          ).pools;
     expect(pools).toEqual([mockV2Pool]);
 
     const warns = ctx.logger.outputs.filter(o => o.prefix === 'WARN:');

@@ -34,11 +34,17 @@ import {
   weth,
 } from '../../../tests/fixtures/nativeGasPools';
 
-class FakePoolsRepository<TPool extends Pool>
-  implements IPoolsRepository<TPool>
-{
+class FakePoolsRepository<
+  TPool extends Pool,
+> implements IPoolsRepository<TPool> {
   public calls = 0;
   constructor(private readonly pools: TPool[]) {}
+  async probePools(
+    ctx: UniContext,
+    chain: ChainId
+  ): Promise<{pools: TPool[]; failedProbeCount: number}> {
+    return {pools: await this.getPools(ctx, chain), failedProbeCount: 0};
+  }
   async getPools(_ctx: UniContext, _chain: ChainId): Promise<TPool[]> {
     this.calls++;
     return this.pools;

@@ -77,7 +77,10 @@ import {Protocol} from '../models/pool/Protocol';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V2Pool} from '../models/pool/V2Pool';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
-import {IRoutesRepository} from '../stores/route/IRoutesRepository';
+import {
+  IRoutesRepository,
+  RouteDiscoveryResult,
+} from '../stores/route/IRoutesRepository';
 import {IUniRoutedBL, QuoteOptions} from './IUniRouteBL';
 import {IGasEstimateProvider} from './gas/estimator/GasEstimateProvider';
 import {QuoteStatus} from '../models/quote/QuoteStatus';
@@ -275,7 +278,7 @@ export class UniRouteBL implements IUniRoutedBL {
     private readonly routeQuoteAllocator: IRouteQuoteAllocator<Pool>,
     private readonly gasEstimateProvider: IGasEstimateProvider,
     private readonly gasConverter: IGasConverter,
-    private readonly routeRepository: IRoutesRepository<Pool>,
+    private readonly routeRepository: IRoutesRepository,
     private readonly cachedRoutesRepository: ICachedRoutesRepository,
     private readonly noRouteCacheRepository: INoRouteCacheRepository,
     private readonly quoteStrategy: IQuoteStrategy,
@@ -657,7 +660,8 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes = cacheResult.usedCachedRoutes;
       }
       if (routes.length === 0) {
-        routes = await this.fetchFreshRoutes(
+        // TODO(ROUTE-2624): consume fresh.degradedReasons in the cache-hit decision.
+        const fresh = await this.fetchFreshRoutes(
           ctx,
           chain,
           tokenInCurrencyInfo,
@@ -670,6 +674,7 @@ export class UniRouteBL implements IUniRoutedBL {
           options?.testAggHooks,
           metricTags
         );
+        routes = fresh.routes;
       }
 
       metricTags.push(
@@ -722,21 +727,23 @@ export class UniRouteBL implements IUniRoutedBL {
           1,
           {tags: metricTags}
         );
+        // TODO(ROUTE-2624): consume fresh.degradedReasons in the cache-hit decision.
+        const fresh = await this.fetchFreshRoutes(
+          ctx,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          protocols,
+          tradeType,
+          fotInDirectSwap,
+          hooksOptions,
+          nsCtx,
+          options?.testAggHooks,
+          metricTags
+        );
         routes = await this.filterInvalidRoutes(
           ctx,
-          await this.fetchFreshRoutes(
-            ctx,
-            chain,
-            tokenInCurrencyInfo,
-            tokenOutCurrencyInfo,
-            protocols,
-            tradeType,
-            fotInDirectSwap,
-            hooksOptions,
-            nsCtx,
-            options?.testAggHooks,
-            metricTags
-          ),
+          fresh.routes,
           chain,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
@@ -1576,7 +1583,7 @@ export class UniRouteBL implements IUniRoutedBL {
     nsCtx: RouteNamespaceContext,
     testAggHooks: boolean | undefined,
     metricTags: string[]
-  ): Promise<RouteBasic<Pool>[]> {
+  ): Promise<RouteDiscoveryResult> {
     // Only NO_HOOKS is safe to cache under a variant key: it resolves to the
     // empty namespace context, so its pool lists are namespace-independent.
     // HOOKS_ONLY keeps the bypass — experiment namespaces force-append pools

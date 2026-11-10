@@ -4,6 +4,7 @@ import {Address} from '../../models/address/Address';
 import {HooksOptions} from 'src/models/hooks/HooksOptions';
 import {Protocol} from 'src/models/pool/Protocol';
 import {RouteNamespaceContext} from '../../models/hooks/namespaces';
+import {DiscoveryResult} from './discoveryDegraded';
 
 export type UniPoolInfo = V2PoolInfo | V3PoolInfo | V4PoolInfo;
 
@@ -40,7 +41,7 @@ export interface IPoolDiscoverer<TPool extends UniPoolInfo> {
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: Context
-  ): Promise<TPool[]>;
+  ): Promise<DiscoveryResult<TPool>>;
 }
 
 /**
@@ -98,6 +99,27 @@ export enum PoolsForTokensCacheSkipReason {
    * rollout flag / kill switch is enabled.
    */
   HooksOptionsUncacheable = 'hooks_options_uncacheable',
+}
+
+/**
+ * Reason a pools-for-tokens cache entry (the legacy array shape or the
+ * `:degraded` envelope) failed to parse or read and was re-derived instead of served.
+ */
+export enum PoolsForTokensCacheInvalidEntryReason {
+  InvalidLegacyJson = 'invalid_legacy_json',
+  InvalidDegradedEnvelope = 'invalid_degraded_envelope',
+  /** The degraded cache key failed to read and discovery was re-derived. */
+  DegradedReadError = 'degraded_read_error',
+}
+
+// Chain/protocol tag pair shared by every per-request pools-for-tokens
+// cache-observability metric, so `Cache.SkipWrite` and `Cache.InvalidEntry`
+// tag the same way instead of drifting independently.
+export function buildPoolsForTokensCacheTags(
+  chainId: ChainId,
+  protocol: Protocol
+): string[] {
+  return [`chain:${chainId}`, `protocol:${protocol}`];
 }
 
 /**
@@ -163,8 +185,7 @@ export async function trackPoolsForTokensCacheSkip(
     1,
     {
       tags: [
-        `chain:${details.chainId}`,
-        `protocol:${details.protocol}`,
+        ...buildPoolsForTokensCacheTags(details.chainId, details.protocol),
         `reason:${directive.skipReason}`,
       ],
     }

@@ -14,6 +14,7 @@ import {IUniRouteServiceConfig} from '../../../lib/config';
 import {HooksOptions} from '../../../models/hooks/HooksOptions';
 import {RouteNamespaceContext} from '../../../models/hooks/namespaces';
 import {summarizeBatchError} from '../../../stores/quote/OnChainQuoteFetchError';
+import {DiscoveryDegradedReason, DiscoveryResult} from '../discoveryDegraded';
 
 type PrimaryFailureLogFields = {
   errorName: string;
@@ -37,9 +38,9 @@ function toPrimaryFailureLogFields(error: unknown): PrimaryFailureLogFields {
   };
 }
 
-abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
-  implements IPoolDiscoverer<TPoolInfo>
-{
+abstract class BasePoolDiscovererWithFallback<
+  TPoolInfo extends UniPoolInfo,
+> implements IPoolDiscoverer<TPoolInfo> {
   constructor(
     protected serviceConfig: IUniRouteServiceConfig,
     protected primaryDiscoverer: IPoolDiscoverer<TPoolInfo>,
@@ -102,7 +103,10 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: Context
-  ): Promise<TPoolInfo[]> {
+  ): Promise<DiscoveryResult<TPoolInfo>> {
+    let primaryDegradedReasons: DiscoveryResult<TPoolInfo>['degradedReasons'] =
+      [];
+    let primaryFailedProbeCount = 0;
     try {
       const primaryPools = await this.primaryDiscoverer.getPoolsForTokens(
         chainId,
@@ -115,13 +119,15 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
         nsCtx,
         ctx
       );
-      if (primaryPools.length > 0) {
+      primaryDegradedReasons = primaryPools.degradedReasons;
+      primaryFailedProbeCount = primaryPools.failedProbeCount;
+      if (primaryPools.pools.length > 0) {
         ctx.logger.debug('Using primary discoverer pools for tokens', {
           chainId,
           protocol,
           tokenIn: tokenIn.toString(),
           tokenOut: tokenOut.toString(),
-          poolCount: primaryPools.length,
+          poolCount: primaryPools.pools.length,
         });
         return primaryPools;
       }
@@ -136,6 +142,9 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
         }
       );
     } catch (error) {
+      primaryDegradedReasons = [
+        DiscoveryDegradedReason.PRIMARY_DISCOVERER_ERROR,
+      ];
       ctx.logger.warn('Primary discoverer failed for tokens, falling back', {
         chainId,
         protocol,
@@ -162,9 +171,17 @@ abstract class BasePoolDiscovererWithFallback<TPoolInfo extends UniPoolInfo>
       protocol,
       tokenIn: tokenIn.toString(),
       tokenOut: tokenOut.toString(),
-      poolCount: fallbackPools.length,
+      poolCount: fallbackPools.pools.length,
     });
-    return fallbackPools;
+    const degradedReasons = [
+      ...new Set([...primaryDegradedReasons, ...fallbackPools.degradedReasons]),
+    ];
+    return {
+      pools: fallbackPools.pools,
+      degradedReasons,
+      failedProbeCount:
+        primaryFailedProbeCount + fallbackPools.failedProbeCount,
+    };
   }
 }
 

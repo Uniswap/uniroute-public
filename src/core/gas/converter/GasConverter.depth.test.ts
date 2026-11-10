@@ -29,6 +29,32 @@ class FakePoolsRepository<T extends Pool> implements IPoolsRepository<T> {
   constructor(
     private readonly getFixedPools: (blockNumber?: number) => T[] | Promise<T[]>
   ) {}
+  async probePools(
+    ctx: Context,
+    chain: ChainId,
+    tokenIn: Address,
+    tokenOut: Address,
+    fees?: number[],
+    tickSpacings?: number[],
+    hooks?: string[],
+    poolIds?: string[],
+    blockNumber?: number
+  ): Promise<{pools: T[]; failedProbeCount: number}> {
+    return {
+      pools: await this.getPools(
+        ctx,
+        chain,
+        tokenIn,
+        tokenOut,
+        fees,
+        tickSpacings,
+        hooks,
+        poolIds,
+        blockNumber
+      ),
+      failedProbeCount: 0,
+    };
+  }
   async getPools(
     _ctx: Context,
     _chain: ChainId,

@@ -1,4 +1,5 @@
 import {V2PoolInfo, V3PoolInfo, V4PoolInfo, UniPoolInfo} from '../interface';
+import {DiscoveryResult} from '../discoveryDegraded';
 import {Context} from '@uniswap/lib-uni/context';
 import {ChainId} from '../../../lib/config';
 import {Protocol} from '../../../models/pool/Protocol';
@@ -585,10 +586,13 @@ abstract class BaseS3SubgraphPoolDiscoverer<
     _tokenIn: Address,
     _tokenOut: Address,
     ctx: Context
-  ): Promise<TPoolInfo[]> {
+  ): Promise<{pools: TPoolInfo[]; failedProbeCount: number}> {
     // Use all retrieved pools (using BaseCachingPoolDiscoverer caching layer).
     // Filtering takes place in BaseCachingPoolDiscoverer.getPoolsForTokens, then cached.
-    return await this.getPools(chainId, protocol, ctx);
+    return {
+      pools: await this.getPools(chainId, protocol, ctx),
+      failedProbeCount: 0,
+    };
   }
 }
 
@@ -662,7 +666,7 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<V4P
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: Context
-  ): Promise<V4PoolInfo[]> {
+  ): Promise<DiscoveryResult<V4PoolInfo>> {
     const snapshot = nsCtx.erc4626Snapshot;
     const discoveryPairs =
       snapshot &&
@@ -692,17 +696,33 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<V4P
       )
     );
     const poolsById = new Map<string, V4PoolInfo>();
-    for (const pool of selectedPools.flat()) {
-      poolsById.set(pool.id.toLowerCase(), pool);
+    for (const result of selectedPools) {
+      for (const pool of result.pools) {
+        poolsById.set(pool.id.toLowerCase(), pool);
+      }
     }
     const pools = Array.from(poolsById.values());
+    const degradedReasons = [
+      ...new Set(selectedPools.flatMap(result => result.degradedReasons)),
+    ];
+    const failedProbeCount = selectedPools.reduce(
+      (sum, result) => sum + result.failedProbeCount,
+      0
+    );
+    const withSignal = (
+      selected: V4PoolInfo[]
+    ): DiscoveryResult<V4PoolInfo> => ({
+      pools: selected,
+      degradedReasons,
+      failedProbeCount,
+    });
     // The agg-hooks fetch (UniRoutesRepository's external-protocol path)
     // deliberately restricts its result to AGG_HOOKS pools; appending the
     // hookless CCA pool there would leak a plain V4 route into a request
     // whose protocol filter excluded V4. Property check, NOT instanceof:
     // PoolDiscoverer passes selectors through an anonymous adapter object.
     if (topPoolSelector.aggHooksOnly === true) {
-      return pools;
+      return withSignal(pools);
     }
     const withCca = await this.mergeCcaScheduledPools(pools, chainId, ctx, {
       tokenIn,
@@ -718,15 +738,15 @@ export class S3SubgraphPoolDiscovererV4 extends BaseS3SubgraphPoolDiscoverer<V4P
         snapshot
       )
     ) {
-      return withCca;
+      return withSignal(withCca);
     }
     const seen = new Set(withCca.map(pool => pool.id.toLowerCase()));
-    return [
+    return withSignal([
       ...withCca,
       ...synthesizeErc4626WrapperPools(snapshot, tokenIn, tokenOut).filter(
         pool => !seen.has(pool.id.toLowerCase())
       ),
-    ];
+    ]);
   }
 
   /**

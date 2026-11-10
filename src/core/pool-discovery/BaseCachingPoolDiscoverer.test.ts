@@ -2,6 +2,7 @@ import {afterEach, describe, beforeEach, it, expect, vi} from 'vitest';
 import {
   BaseCachingPoolDiscoverer,
   EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS,
+  DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
   POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES,
   SnapshotLoad,
   SnapshotLoadStatus,
@@ -15,6 +16,7 @@ import {
   ITopPoolsSelector,
   markPoolsForTokensUncacheable,
   PoolsForTokensCacheDirective,
+  PoolsForTokensCacheInvalidEntryReason,
   PoolsForTokensCacheSkipReason,
   UniPoolInfo,
 } from './interface';
@@ -27,12 +29,13 @@ import {
 } from '../../lib/config';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
 import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGatedTokensRepository';
+import {DiscoveryDegradedReason} from './discoveryDegraded';
 import {CanonicalPools} from '../../lib/CanonicalPools';
 import {
   EMPTY_NAMESPACE_CONTEXT,
   RouteNamespaceContext,
 } from '../../models/hooks/namespaces';
-import {buildTestContext} from '@uniswap/lib-testhelpers';
+import {buildTestContext, TestMetric} from '@uniswap/lib-testhelpers';
 
 class TestTopPoolsSelector implements ITopPoolsSelector<UniPoolInfo> {
   async filterPools(
@@ -138,20 +141,23 @@ class TestPoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
-  ): Promise<UniPoolInfo[]> {
-    return [
-      {
-        id: 'test-pool-for-tokens',
-        feeTier: '3000',
-        tickSpacing: '1',
-        hooks: '0x1111111111111111111111111111111111111111',
-        liquidity: '1000',
-        token0: {id: '0x1111111111111111111111111111111111111111'},
-        token1: {id: '0x2222222222222222222222222222222222222222'},
-        tvlETH: 1000,
-        tvlUSD: 1000,
-      },
-    ];
+  ): Promise<{pools: UniPoolInfo[]; failedProbeCount: number}> {
+    return {
+      pools: [
+        {
+          id: 'test-pool-for-tokens',
+          feeTier: '3000',
+          tickSpacing: '1',
+          hooks: '0x1111111111111111111111111111111111111111',
+          liquidity: '1000',
+          token0: {id: '0x1111111111111111111111111111111111111111'},
+          token1: {id: '0x2222222222222222222222222222222222222222'},
+          tvlETH: 1000,
+          tvlUSD: 1000,
+        },
+      ],
+      failedProbeCount: 0,
+    };
   }
 }
 
@@ -180,8 +186,11 @@ class ClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     return this.loadPools();
   }
 
-  protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
-    return [];
+  protected async _getPoolsForTokens(): Promise<{
+    pools: UniPoolInfo[];
+    failedProbeCount: number;
+  }> {
+    return {pools: [], failedProbeCount: 0};
   }
 }
 
@@ -304,7 +313,10 @@ describe('BaseCachingPoolDiscoverer', () => {
 
     ctx = {
       metrics: {
-        count: vi.fn(),
+        // Resolved, not a bare vi.fn(): the InvalidEntry metric call is
+        // fire-and-forget (`.catch(...)`), which throws on a mock returning
+        // undefined instead of a promise.
+        count: vi.fn().mockResolvedValue(undefined),
         dist: vi.fn(),
       },
       logger: {
@@ -395,7 +407,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       .fn()
       .mockResolvedValue(JSON.stringify(cachedPools));
 
-    const pools = await poolDiscoverer.getPoolsForTokens(
+    const {pools} = await poolDiscoverer.getPoolsForTokens(
       chainId,
       protocol,
       tokenIn,
@@ -443,7 +455,7 @@ describe('BaseCachingPoolDiscoverer', () => {
     });
 
     try {
-      const pools = await poolDiscoverer.getPoolsForTokens(
+      const {pools} = await poolDiscoverer.getPoolsForTokens(
         chainId,
         Protocol.V4,
         tokenIn,
@@ -497,17 +509,19 @@ describe('BaseCachingPoolDiscoverer', () => {
       'PoolDiscoverer.getPoolsForTokens.BlockedRoutingTokenPool'
     );
     const readCachedHit = (chainId: ChainId) =>
-      poolDiscoverer.getPoolsForTokens(
-        chainId,
-        Protocol.V3,
-        hookr,
-        weth,
-        topPoolSelector,
-        undefined,
-        false,
-        EMPTY_NAMESPACE_CONTEXT,
-        ctx
-      );
+      poolDiscoverer
+        .getPoolsForTokens(
+          chainId,
+          Protocol.V3,
+          hookr,
+          weth,
+          topPoolSelector,
+          undefined,
+          false,
+          EMPTY_NAMESPACE_CONTEXT,
+          ctx
+        )
+        .then(result => result.pools);
 
     beforeEach(() => {
       getPoolsForTokensCache.get = vi
@@ -557,7 +571,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       },
     ];
 
-    const pools = await poolDiscoverer.getPoolsForTokens(
+    const {pools} = await poolDiscoverer.getPoolsForTokens(
       chainId,
       protocol,
       tokenIn,
@@ -638,8 +652,11 @@ describe('BaseCachingPoolDiscoverer', () => {
     };
 
     class OversizedPoolDiscoverer extends TestPoolDiscoverer {
-      protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
-        return [oversizedPool];
+      protected async _getPoolsForTokens(): Promise<{
+        pools: UniPoolInfo[];
+        failedProbeCount: number;
+      }> {
+        return {pools: [oversizedPool], failedProbeCount: 0};
       }
     }
     const oversizedDiscoverer = new OversizedPoolDiscoverer(
@@ -648,7 +665,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       getPoolsForTokensCache
     );
 
-    const pools = await oversizedDiscoverer.getPoolsForTokens(
+    const {pools} = await oversizedDiscoverer.getPoolsForTokens(
       chainId,
       protocol,
       tokenIn,
@@ -722,7 +739,7 @@ describe('BaseCachingPoolDiscoverer', () => {
     const tokenOut = new Address('0x2222222222222222222222222222222222222222');
 
     const suppressingSelector = new CacheSuppressingTopPoolsSelector();
-    const pools = await poolDiscoverer.getPoolsForTokens(
+    const {pools} = await poolDiscoverer.getPoolsForTokens(
       chainId,
       protocol,
       tokenIn,
@@ -865,6 +882,114 @@ describe('BaseCachingPoolDiscoverer', () => {
     );
 
     expect(getPoolsForTokensCache.set).not.toHaveBeenCalled();
+  });
+
+  it('emits an InvalidEntry metric and re-derives when the legacy cache entry is not an array', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V2;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockResolvedValue(JSON.stringify({not: 'an array'}));
+
+    const {pools} = await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    // Re-derives through the normal miss path rather than throwing or
+    // serving the malformed entry.
+    expect(pools).toEqual([
+      {
+        id: 'test-pool-for-tokens',
+        feeTier: '3000',
+        tickSpacing: '1',
+        hooks: '0x1111111111111111111111111111111111111111',
+        liquidity: '1000',
+        token0: {id: '0x1111111111111111111111111111111111111111'},
+        token1: {id: '0x2222222222222222222222222222222222222222'},
+        tvlETH: 1000,
+        tvlUSD: 1000,
+      },
+    ]);
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache.InvalidEntry'),
+      1,
+      {
+        tags: [
+          `chain:${chainId}`,
+          `protocol:${protocol}`,
+          'status:failure',
+          `reason:${PoolsForTokensCacheInvalidEntryReason.InvalidLegacyJson}`,
+        ],
+      }
+    );
+  });
+
+  it('emits an InvalidEntry metric and re-derives when the degraded envelope fails to parse', async () => {
+    const chainId = ChainId.MAINNET;
+    const protocol = Protocol.V2;
+    const tokenIn = new Address('0x1111111111111111111111111111111111111111');
+    const tokenOut = new Address('0x2222222222222222222222222222222222222222');
+
+    getPoolsForTokensCache.get = vi
+      .fn()
+      .mockImplementation((key: string) =>
+        Promise.resolve(
+          key.endsWith(DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX)
+            ? 'not-json{'
+            : undefined
+        )
+      );
+
+    const {pools} = await poolDiscoverer.getPoolsForTokens(
+      chainId,
+      protocol,
+      tokenIn,
+      tokenOut,
+      topPoolSelector,
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    // Re-derives through the normal miss path rather than throwing or
+    // serving the malformed envelope.
+    expect(pools).toEqual([
+      {
+        id: 'test-pool-for-tokens',
+        feeTier: '3000',
+        tickSpacing: '1',
+        hooks: '0x1111111111111111111111111111111111111111',
+        liquidity: '1000',
+        token0: {id: '0x1111111111111111111111111111111111111111'},
+        token1: {id: '0x2222222222222222222222222222222222222222'},
+        tvlETH: 1000,
+        tvlUSD: 1000,
+      },
+    ]);
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache.InvalidEntry'),
+      1,
+      {
+        tags: [
+          `chain:${chainId}`,
+          `protocol:${protocol}`,
+          'status:failure',
+          `reason:${PoolsForTokensCacheInvalidEntryReason.InvalidDegradedEnvelope}`,
+        ],
+      }
+    );
   });
 
   // Regression for the cross-namespace cache-poisoning hazard called out in
@@ -1040,7 +1165,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       .mockImplementation(async (key: string) =>
         key === inclusiveKey ? JSON.stringify(inclusivePools) : undefined
       );
-    const noHooksResult = await poolDiscoverer.getPoolsForTokens(
+    const {pools: noHooksResult} = await poolDiscoverer.getPoolsForTokens(
       chainId,
       protocol,
       tokenIn,
@@ -1065,7 +1190,7 @@ describe('BaseCachingPoolDiscoverer', () => {
       .mockImplementation(async (key: string) =>
         key === noHooksKey ? JSON.stringify(noHooksPools) : undefined
       );
-    const inclusiveResult = await poolDiscoverer.getPoolsForTokens(
+    const {pools: inclusiveResult} = await poolDiscoverer.getPoolsForTokens(
       chainId,
       protocol,
       tokenIn,
@@ -1535,7 +1660,7 @@ describe('BaseCachingPoolDiscoverer', () => {
     });
 
     it('getPoolsForTokens miss path behaves identically with the flag on', async () => {
-      const first = await memoDiscoverer.getPoolsForTokens(
+      const {pools: first} = await memoDiscoverer.getPoolsForTokens(
         chainId,
         protocol,
         new Address('0x1111111111111111111111111111111111111111'),
@@ -2424,7 +2549,8 @@ class PairClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
   constructor(
     serviceConfig: IUniRouteServiceConfig,
     getPoolsForTokensCache: IRedisCache<string, string>,
-    private readonly loadPairPools: () => UniPoolInfo[]
+    private readonly loadPairPools: () => UniPoolInfo[],
+    private readonly loadFailedProbeCount: () => number = () => 0
   ) {
     super(
       serviceConfig,
@@ -2443,9 +2569,15 @@ class PairClosurePoolDiscoverer extends BaseCachingPoolDiscoverer<UniPoolInfo> {
     return [];
   }
 
-  protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
+  protected async _getPoolsForTokens(): Promise<{
+    pools: UniPoolInfo[];
+    failedProbeCount: number;
+  }> {
     this.pairLoads += 1;
-    return this.loadPairPools();
+    return {
+      pools: this.loadPairPools(),
+      failedProbeCount: this.loadFailedProbeCount(),
+    };
   }
 }
 
@@ -2466,10 +2598,62 @@ describe('BaseCachingPoolDiscoverer empty pools-for-tokens entries', () => {
   const normalTtlSeconds =
     baseConfig.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds;
 
-  const lookup = (
+  class RecordingCache extends InMemoryRedisCache<string, string> {
+    readonly writes: Array<{key: string; value: string; ttl?: number}> = [];
+    readonly reads: string[] = [];
+    override async get(
+      ...args: Parameters<InMemoryRedisCache<string, string>['get']>
+    ): Promise<string> {
+      const [key] = args;
+      this.reads.push(key);
+      return super.get(...args);
+    }
+    override async set(
+      key: string,
+      value: string,
+      opts?: Partial<SetOpts>
+    ): Promise<void> {
+      this.writes.push({key, value, ttl: opts?.ttl});
+      await super.set(key, value, opts);
+    }
+  }
+
+  class ConcurrentReadCache extends RecordingCache {
+    readonly requested: string[] = [];
+    private readonly degradedRequested = createDeferred<void>();
+
+    override async get(
+      ...args: Parameters<InMemoryRedisCache<string, string>['get']>
+    ): Promise<string> {
+      const [key] = args;
+      this.requested.push(key);
+      if (key.endsWith(DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX)) {
+        this.degradedRequested.resolve();
+      } else {
+        await this.degradedRequested.promise;
+      }
+      return super.get(...args);
+    }
+  }
+
+  class DegradedReadErrorCache extends RecordingCache {
+    override async get(
+      ...args: Parameters<InMemoryRedisCache<string, string>['get']>
+    ): Promise<string> {
+      if (args[0].endsWith(DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX)) {
+        const error = new Error('degraded cache unavailable');
+        error.name = 'RedisReadFailed';
+        throw error;
+      }
+      return super.get(...args);
+    }
+  }
+
+  const lookupResult = (
     discoverer: PairClosurePoolDiscoverer,
     selector: ITopPoolsSelector<UniPoolInfo> = new TestTopPoolsSelector(),
-    chainId: ChainId = ChainId.MAINNET
+    chainId: ChainId = ChainId.MAINNET,
+    ctx: ReturnType<typeof buildTestContext> = buildTestContext()
   ) =>
     discoverer.getPoolsForTokens(
       chainId,
@@ -2480,8 +2664,13 @@ describe('BaseCachingPoolDiscoverer empty pools-for-tokens entries', () => {
       undefined,
       false,
       EMPTY_NAMESPACE_CONTEXT,
-      buildTestContext()
+      ctx
     );
+  const lookup = (
+    discoverer: PairClosurePoolDiscoverer,
+    selector?: ITopPoolsSelector<UniPoolInfo>,
+    chainId?: ChainId
+  ) => lookupResult(discoverer, selector, chainId).then(result => result.pools);
 
   afterEach(() => {
     vi.useRealTimers();
@@ -2491,6 +2680,352 @@ describe('BaseCachingPoolDiscoverer empty pools-for-tokens entries', () => {
     expect(normalTtlSeconds).toBeGreaterThan(
       EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS
     );
+  });
+
+  it('requests both cache keys before the legacy read resolves', async () => {
+    const cache = new ConcurrentReadCache();
+    const discoverer = new PairClosurePoolDiscoverer(baseConfig, cache, () => [
+      POOL,
+    ]);
+    const key = discoverer.getPoolsForTokensCacheKey(
+      ChainId.MAINNET,
+      Protocol.V3,
+      TOKEN_A,
+      TOKEN_B
+    );
+
+    const result = await lookupResult(discoverer);
+
+    expect(result.pools).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(1);
+    expect(cache.requested).toEqual([
+      key,
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+    ]);
+  });
+
+  it('re-derives and reports a degraded-key read error', async () => {
+    const cache = new DegradedReadErrorCache();
+    const discoverer = new PairClosurePoolDiscoverer(baseConfig, cache, () => [
+      POOL,
+    ]);
+    const ctx = buildTestContext();
+    const countCalls: Array<{
+      metric: string;
+      value: number;
+      tags: string[];
+    }> = [];
+    class RecordingMetric extends TestMetric {
+      override async count(
+        metric: string,
+        value: number,
+        opts?: Parameters<TestMetric['count']>[2]
+      ): Promise<void> {
+        countCalls.push({metric, value, tags: opts?.tags ?? []});
+        await super.count(metric, value, opts);
+      }
+    }
+    ctx.metrics = new RecordingMetric();
+
+    const result = await lookupResult(discoverer, undefined, undefined, ctx);
+
+    expect(result.pools).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(1);
+    expect(countCalls).toContainEqual({
+      metric: buildMetricKey(
+        'PoolDiscoverer.getPoolsForTokens.Cache.InvalidEntry'
+      ),
+      value: 1,
+      tags: [
+        `chain:${ChainId.MAINNET}`,
+        `protocol:${Protocol.V3}`,
+        'status:failure',
+        `reason:${PoolsForTokensCacheInvalidEntryReason.DegradedReadError}`,
+      ],
+    });
+    expect(ctx.logger.outputs).toContainEqual({
+      prefix: 'WARN:',
+      msg: '[PairClosurePoolDiscoverer] Failed to read degraded pools-for-tokens cache entry',
+      extra: {
+        chainId: ChainId.MAINNET,
+        protocol: Protocol.V3,
+        errorName: 'RedisReadFailed',
+      },
+    });
+  });
+
+  it('caches a degraded empty selected list for 10 seconds', async () => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      cache,
+      () => [],
+      () => 1
+    );
+    const result = await lookupResult(discoverer);
+    expect(result).toEqual({
+      pools: [],
+      degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+      failedProbeCount: 1,
+    });
+    expect(cache.writes).toHaveLength(1);
+    expect(cache.writes[0].key).toBe(
+      discoverer.getPoolsForTokensCacheKey(
+        ChainId.MAINNET,
+        Protocol.V3,
+        TOKEN_A,
+        TOKEN_B
+      ) + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX
+    );
+    expect(JSON.parse(cache.writes[0].value)).toEqual(result);
+    expect(cache.writes[0].ttl).toBe(10);
+  });
+
+  it('caches a clean empty list for 60 seconds', async () => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      cache,
+      () => []
+    );
+    const result = await lookupResult(discoverer);
+    expect(result).toEqual({
+      pools: [],
+      degradedReasons: [],
+      failedProbeCount: 0,
+    });
+    expect(cache.writes).toEqual([
+      {
+        key: discoverer.getPoolsForTokensCacheKey(
+          ChainId.MAINNET,
+          Protocol.V3,
+          TOKEN_A,
+          TOKEN_B
+        ),
+        value: '[]',
+        ttl: EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS,
+      },
+    ]);
+  });
+
+  it('caches a degraded non-empty list for 10 seconds', async () => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      cache,
+      () => [POOL],
+      () => 1
+    );
+    const result = await lookupResult(discoverer);
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(cache.writes).toHaveLength(1);
+    expect(cache.writes[0].key).toBe(
+      discoverer.getPoolsForTokensCacheKey(
+        ChainId.MAINNET,
+        Protocol.V3,
+        TOKEN_A,
+        TOKEN_B
+      ) + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX
+    );
+    expect(JSON.parse(cache.writes[0].value)).toEqual(result);
+    expect(cache.writes[0].ttl).toBe(10);
+  });
+
+  it('caps a degraded entry at a configured TTL below 10 seconds', async () => {
+    const cache = new RecordingCache();
+    const config = getUniRouteTestConfig();
+    config.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds = 5;
+    const discoverer = new PairClosurePoolDiscoverer(
+      config,
+      cache,
+      () => [POOL],
+      () => 1
+    );
+    await lookupResult(discoverer);
+    expect(cache.writes[0].ttl).toBe(5);
+  });
+
+  it('serves a degraded entry with its reasons inside the TTL without re-probing', async () => {
+    const cache = new RecordingCache();
+    let failedProbeCount = 1;
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      cache,
+      () => [POOL],
+      () => failedProbeCount
+    );
+
+    const first = await lookupResult(discoverer);
+    expect(first.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(first.pools).toEqual([POOL]);
+    expect(discoverer.pairLoads).toBe(1);
+
+    // The probe would be clean, but the short-lived entry retains its signal.
+    failedProbeCount = 0;
+    const second = await lookupResult(discoverer);
+    expect(discoverer.pairLoads).toBe(1);
+    expect(second).toEqual(first);
+    expect(cache.reads.slice(-2)).toEqual([
+      discoverer.getPoolsForTokensCacheKey(
+        ChainId.MAINNET,
+        Protocol.V3,
+        TOKEN_A,
+        TOKEN_B
+      ),
+      discoverer.getPoolsForTokensCacheKey(
+        ChainId.MAINNET,
+        Protocol.V3,
+        TOKEN_A,
+        TOKEN_B
+      ) + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+    ]);
+  });
+
+  it('reads a legacy array entry as clean', async () => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      cache,
+      () => []
+    );
+    const key = discoverer.getPoolsForTokensCacheKey(
+      ChainId.MAINNET,
+      Protocol.V3,
+      TOKEN_A,
+      TOKEN_B
+    );
+    await cache.set(key, JSON.stringify([POOL]));
+    await cache.set(
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+      JSON.stringify({
+        pools: [],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        failedProbeCount: 2,
+      })
+    );
+    const result = await lookupResult(discoverer);
+    expect(result).toEqual({
+      pools: [POOL],
+      degradedReasons: [],
+      failedProbeCount: 0,
+    });
+    expect(discoverer.pairLoads).toBe(0);
+    expect(cache.reads).toEqual([
+      key,
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+    ]);
+  });
+
+  it('reads a degraded entry on a legacy miss without probing', async () => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(
+      baseConfig,
+      cache,
+      () => []
+    );
+    const key = discoverer.getPoolsForTokensCacheKey(
+      ChainId.MAINNET,
+      Protocol.V3,
+      TOKEN_A,
+      TOKEN_B
+    );
+    await cache.set(
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+      JSON.stringify({
+        pools: [POOL],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        failedProbeCount: 2,
+      })
+    );
+    const result = await lookupResult(discoverer);
+    expect(result).toEqual({
+      pools: [POOL],
+      degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+      failedProbeCount: 2,
+    });
+    expect(discoverer.pairLoads).toBe(0);
+    expect(cache.reads).toEqual([
+      key,
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+    ]);
+  });
+
+  it('re-derives an object under the legacy key without serving the degraded key', async () => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(baseConfig, cache, () => [
+      POOL,
+    ]);
+    const key = discoverer.getPoolsForTokensCacheKey(
+      ChainId.MAINNET,
+      Protocol.V3,
+      TOKEN_A,
+      TOKEN_B
+    );
+    await cache.set(
+      key,
+      JSON.stringify({
+        pools: [POOL],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        failedProbeCount: 1,
+      })
+    );
+    await cache.set(
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+      JSON.stringify({
+        pools: [],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        failedProbeCount: 1,
+      })
+    );
+    const result = await lookupResult(discoverer);
+    expect(result).toEqual({
+      pools: [POOL],
+      degradedReasons: [],
+      failedProbeCount: 0,
+    });
+    expect(discoverer.pairLoads).toBe(1);
+    expect(cache.reads).toEqual([
+      key,
+      key + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+    ]);
+  });
+
+  it.each([
+    [{degradedReasons: ['unknown'], failedProbeCount: 1}],
+    [
+      {
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        failedProbeCount: -1,
+      },
+    ],
+  ])('re-derives a malformed degraded entry: %j', async invalid => {
+    const cache = new RecordingCache();
+    const discoverer = new PairClosurePoolDiscoverer(baseConfig, cache, () => [
+      POOL,
+    ]);
+    await cache.set(
+      discoverer.getPoolsForTokensCacheKey(
+        ChainId.MAINNET,
+        Protocol.V3,
+        TOKEN_A,
+        TOKEN_B
+      ) + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX,
+      JSON.stringify({
+        pools: [POOL],
+        ...invalid,
+      })
+    );
+    const result = await lookupResult(discoverer);
+    expect(result).toEqual({
+      pools: [POOL],
+      degradedReasons: [],
+      failedProbeCount: 0,
+    });
+    expect(discoverer.pairLoads).toBe(1);
   });
 
   it('serves an empty result from cache within the empty TTL and re-discovers after it', async () => {
@@ -2654,8 +3189,11 @@ describe('BaseCachingPoolDiscoverer snapshot warmer', () => {
     protected async _getPools(): Promise<UniPoolInfo[]> {
       return pools.map(pool => ({...pool}));
     }
-    protected async _getPoolsForTokens(): Promise<UniPoolInfo[]> {
-      return [];
+    protected async _getPoolsForTokens(): Promise<{
+      pools: UniPoolInfo[];
+      failedProbeCount: number;
+    }> {
+      return {pools: [], failedProbeCount: 0};
     }
   }
 

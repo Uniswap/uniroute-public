@@ -1,6 +1,6 @@
 import {describe, beforeEach, it, expect, vi} from 'vitest';
 import {PoolDiscoverer} from './PoolDiscoverer';
-import {ChainId} from '../../lib/config';
+import {buildMetricKey, ChainId} from '../../lib/config';
 import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {
@@ -21,18 +21,34 @@ import {AGG_HOOKS_PER_CHAIN} from '../../lib/poolCaching/util/hooksAddressesAllo
 import {registryAdmissibleHookAddresses} from '../../lib/poolCaching/util/v4PoolKeyRegistryFormat';
 import {buildTestContext} from '@uniswap/lib-testhelpers';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+import {DiscoveryDegradedReason, DiscoveryResult} from './discoveryDegraded';
 
 const TOKEN_IN = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
 const TOKEN_OUT = new Address('0xdac17f958d2ee523a2206206994597c13d831ec7');
+
+class FakePoolDiscoverer<T extends UniPoolInfo> implements IPoolDiscoverer<T> {
+  constructor(
+    private readonly allPools: T[],
+    private readonly pairPools: T[],
+    private readonly degradedReasons: DiscoveryDegradedReason[] = [],
+    private readonly failedProbeCount = 0
+  ) {}
+
+  getPools = vi.fn(async (): Promise<T[]> => this.allPools);
+  getPoolsForTokens = vi.fn(
+    async (): Promise<DiscoveryResult<T>> => ({
+      pools: this.pairPools,
+      degradedReasons: this.degradedReasons,
+      failedProbeCount: this.failedProbeCount,
+    })
+  );
+}
 
 function makeDiscoverer<T extends UniPoolInfo>(
   getPoolsResult: T[] = [],
   getPoolsForTokensResult: T[] = []
 ): IPoolDiscoverer<T> {
-  return {
-    getPools: vi.fn().mockResolvedValue(getPoolsResult),
-    getPoolsForTokens: vi.fn().mockResolvedValue(getPoolsForTokensResult),
-  } as unknown as IPoolDiscoverer<T>;
+  return new FakePoolDiscoverer(getPoolsResult, getPoolsForTokensResult);
 }
 
 function makeSelector(): ITopPoolsSelector<UniPoolInfo> {
@@ -84,9 +100,175 @@ describe('PoolDiscoverer', () => {
 
     ctx = {
       metrics: {
-        count: vi.fn(),
+        count: vi.fn().mockResolvedValue(undefined),
       },
     } as unknown as Context;
+  });
+
+  it('reports one degraded discovery counter for a failed direct probe', async () => {
+    v2DirectPoolDiscoverer = new FakePoolDiscoverer<V2PoolInfo>(
+      [],
+      [],
+      [DiscoveryDegradedReason.PROBE_ERROR],
+      1
+    );
+    poolDiscoverer = new PoolDiscoverer(
+      v2PoolDiscoverer,
+      v3PoolDiscoverer,
+      v4PoolDiscoverer,
+      v2DirectPoolDiscoverer,
+      v3DirectPoolDiscoverer,
+      v4DirectPoolDiscoverer
+    );
+
+    const result = await poolDiscoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V2,
+      TOKEN_IN,
+      TOKEN_OUT,
+      makeSelector(),
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(ctx.metrics.count).toHaveBeenCalledTimes(2);
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      buildMetricKey('PoolDiscoverer.DegradedDiscovery'),
+      1,
+      {
+        tags: [
+          `chain:${ChainId[ChainId.MAINNET]}`,
+          `protocol:${Protocol.V2}`,
+          'status:failure',
+          'reason:probe_error',
+        ],
+      }
+    );
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      buildMetricKey('PoolDiscoverer.DegradedDiscovery.FailedProbes'),
+      1,
+      {
+        tags: [
+          `chain:${ChainId[ChainId.MAINNET]}`,
+          `protocol:${Protocol.V2}`,
+          'status:failure',
+          'reason:probe_error',
+        ],
+      }
+    );
+  });
+
+  it('counts one degraded discovery and sums failed probes across both arms', async () => {
+    v2PoolDiscoverer = new FakePoolDiscoverer<V2PoolInfo>(
+      [],
+      [],
+      [DiscoveryDegradedReason.PROBE_ERROR],
+      3
+    );
+    v2DirectPoolDiscoverer = new FakePoolDiscoverer<V2PoolInfo>(
+      [],
+      [],
+      [DiscoveryDegradedReason.PROBE_ERROR],
+      2
+    );
+    poolDiscoverer = new PoolDiscoverer(
+      v2PoolDiscoverer,
+      v3PoolDiscoverer,
+      v4PoolDiscoverer,
+      v2DirectPoolDiscoverer,
+      v3DirectPoolDiscoverer,
+      v4DirectPoolDiscoverer
+    );
+
+    const result = await poolDiscoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V2,
+      TOKEN_IN,
+      TOKEN_OUT,
+      makeSelector(),
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(ctx.metrics.count).toHaveBeenCalledTimes(2);
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      buildMetricKey('PoolDiscoverer.DegradedDiscovery'),
+      1,
+      expect.objectContaining({
+        tags: expect.arrayContaining(['reason:probe_error']),
+      })
+    );
+    expect(ctx.metrics.count).toHaveBeenCalledWith(
+      buildMetricKey('PoolDiscoverer.DegradedDiscovery.FailedProbes'),
+      5,
+      expect.objectContaining({
+        tags: expect.arrayContaining(['reason:probe_error']),
+      })
+    );
+  });
+
+  it('dedupes the degraded reason when both the protocol arm and the direct arm report the same failure', async () => {
+    v2PoolDiscoverer = new FakePoolDiscoverer<V2PoolInfo>(
+      [],
+      [],
+      [DiscoveryDegradedReason.PROBE_ERROR]
+    );
+    v2DirectPoolDiscoverer = new FakePoolDiscoverer<V2PoolInfo>(
+      [],
+      [],
+      [DiscoveryDegradedReason.PROBE_ERROR]
+    );
+    poolDiscoverer = new PoolDiscoverer(
+      v2PoolDiscoverer,
+      v3PoolDiscoverer,
+      v4PoolDiscoverer,
+      v2DirectPoolDiscoverer,
+      v3DirectPoolDiscoverer,
+      v4DirectPoolDiscoverer
+    );
+
+    const result = await poolDiscoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V2,
+      TOKEN_IN,
+      TOKEN_OUT,
+      makeSelector(),
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+
+    expect(result.degradedReasons).toEqual([
+      DiscoveryDegradedReason.PROBE_ERROR,
+    ]);
+    expect(ctx.metrics.count).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not count a clean discovery as degraded', async () => {
+    const result = await poolDiscoverer.getPoolsForTokens(
+      ChainId.MAINNET,
+      Protocol.V2,
+      TOKEN_IN,
+      TOKEN_OUT,
+      makeSelector(),
+      undefined,
+      false,
+      EMPTY_NAMESPACE_CONTEXT,
+      ctx
+    );
+    expect(result.degradedReasons).toEqual([]);
+    expect(ctx.metrics.count).not.toHaveBeenCalled();
   });
 
   // ── getPools ──────────────────────────────────────────────────────────────
@@ -185,7 +367,7 @@ describe('PoolDiscoverer', () => {
       );
       const selector = makeSelector();
 
-      const result = await poolDiscoverer.getPoolsForTokens(
+      const {pools: result} = await poolDiscoverer.getPoolsForTokens(
         ChainId.MAINNET,
         Protocol.V2,
         TOKEN_IN,
@@ -233,7 +415,7 @@ describe('PoolDiscoverer', () => {
       );
       const selector = makeSelector();
 
-      const result = await poolDiscoverer.getPoolsForTokens(
+      const {pools: result} = await poolDiscoverer.getPoolsForTokens(
         ChainId.MAINNET,
         Protocol.V3,
         TOKEN_IN,
@@ -281,7 +463,7 @@ describe('PoolDiscoverer', () => {
       );
       const selector = makeSelector();
 
-      const result = await poolDiscoverer.getPoolsForTokens(
+      const {pools: result} = await poolDiscoverer.getPoolsForTokens(
         ChainId.MAINNET,
         Protocol.V4,
         TOKEN_IN,
@@ -398,7 +580,7 @@ describe('PoolDiscoverer', () => {
       );
       const selector = makeSelector();
 
-      const result = await poolDiscoverer.getPoolsForTokens(
+      const {pools: result} = await poolDiscoverer.getPoolsForTokens(
         ChainId.MAINNET,
         Protocol.V4,
         TOKEN_IN,
@@ -438,7 +620,11 @@ describe('PoolDiscoverer', () => {
                 ctx,
                 {shouldUseCache: true}
               );
-              return result;
+              return {
+                pools: result,
+                degradedReasons: [],
+                failedProbeCount: 0,
+              };
             }
           ),
       } as unknown as IPoolDiscoverer<V3PoolInfo>;
@@ -546,17 +732,19 @@ describe('PoolDiscoverer', () => {
           [{id: 'v4-direct'} as V4PoolInfo]
         );
         const run = (parallel: boolean) =>
-          buildDiscoverer(parallel).getPoolsForTokens(
-            ChainId.MAINNET,
-            protocol,
-            TOKEN_IN,
-            TOKEN_OUT,
-            makeSelector(),
-            undefined,
-            false,
-            EMPTY_NAMESPACE_CONTEXT,
-            ctx
-          );
+          buildDiscoverer(parallel)
+            .getPoolsForTokens(
+              ChainId.MAINNET,
+              protocol,
+              TOKEN_IN,
+              TOKEN_OUT,
+              makeSelector(),
+              undefined,
+              false,
+              EMPTY_NAMESPACE_CONTEXT,
+              ctx
+            )
+            .then(result => result.pools);
         const sequential = await run(false);
         const parallel = await run(true);
         expect(parallel).toEqual(sequential);
@@ -570,7 +758,7 @@ describe('PoolDiscoverer', () => {
       v4PoolDiscoverer = makeDiscoverer<V4PoolInfo>([], [primaryPool]);
       v4DirectPoolDiscoverer = makeDiscoverer<V4PoolInfo>([], [directPool]);
 
-      const result = await buildDiscoverer(true).getPoolsForTokens(
+      const {pools: result} = await buildDiscoverer(true).getPoolsForTokens(
         ChainId.MAINNET,
         Protocol.V4,
         TOKEN_IN,
@@ -668,17 +856,17 @@ describe('PoolDiscoverer', () => {
 
   describe('V4 direct probe under an agg-hooks selector', () => {
     // Records every getPoolsForTokens call; returns `pools` as a probe would.
-    class RecordingDiscoverer<T extends UniPoolInfo>
-      implements IPoolDiscoverer<T>
-    {
+    class RecordingDiscoverer<
+      T extends UniPoolInfo,
+    > implements IPoolDiscoverer<T> {
       public forTokensCalls = 0;
       constructor(private readonly pools: T[]) {}
       async getPools(): Promise<T[]> {
         return [];
       }
-      async getPoolsForTokens(): Promise<T[]> {
+      async getPoolsForTokens(): Promise<DiscoveryResult<T>> {
         this.forTokensCalls += 1;
-        return this.pools;
+        return {pools: this.pools, degradedReasons: [], failedProbeCount: 0};
       }
     }
 
@@ -736,7 +924,7 @@ describe('PoolDiscoverer', () => {
         'skips the direct probe for an agg-hooks selector (hooksOptions %s)',
         async hooksOptions => {
           const {discoverer, primary, direct} = build(parallel);
-          const result = await discoverer.getPoolsForTokens(
+          const {pools: result} = await discoverer.getPoolsForTokens(
             ChainId.MAINNET,
             Protocol.V4,
             TOKEN_IN,
@@ -757,7 +945,7 @@ describe('PoolDiscoverer', () => {
         'still runs the direct probe for the standard selector (hooksOptions %s)',
         async hooksOptions => {
           const {discoverer, direct} = build(parallel);
-          const result = await discoverer.getPoolsForTokens(
+          const {pools: result} = await discoverer.getPoolsForTokens(
             ChainId.MAINNET,
             Protocol.V4,
             TOKEN_IN,

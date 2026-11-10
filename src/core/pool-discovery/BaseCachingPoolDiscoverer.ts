@@ -3,6 +3,7 @@ import {Protocol} from '../../models/pool/Protocol';
 import {Context} from '@uniswap/lib-uni/context';
 import {buildMetricKey, IUniRouteServiceConfig} from '../../lib/config';
 import {
+  buildPoolsForTokensCacheTags,
   IPoolDiscoverer,
   IPoolSnapshotWarmer,
   isPoolsArrayMemoStable,
@@ -10,6 +11,7 @@ import {
   markPoolsArrayMemoStable,
   markPoolsForTokensUncacheable,
   PoolsForTokensCacheDirective,
+  PoolsForTokensCacheInvalidEntryReason,
   PoolsForTokensCacheSkipReason,
   trackPoolsForTokensCacheSkip,
   UniPoolInfo,
@@ -23,6 +25,7 @@ import {FeatureGatedTokensRepository} from '../../stores/compliance/FeatureGated
 import {CanonicalPools} from '../../lib/CanonicalPools';
 import {RoutingBlockList} from '../../lib/RoutingBlockList';
 import {shortenByRandomJitter} from '../../lib/refreshJitter';
+import {DiscoveryDegradedReason, DiscoveryResult} from './discoveryDegraded';
 
 // Upper bound on serialized size of a getPoolsForTokens cache entry, derived
 // from the selector's pool-count cap and a pessimistic per-pool byte estimate.
@@ -44,9 +47,33 @@ export const POOLS_FOR_TOKENS_CACHE_VALUE_MAX_BYTES =
 // TTL ceiling for a pools-for-tokens entry whose selected list is empty. A
 // pair with no pools would otherwise re-run discovery (on-chain probes, a
 // full-snapshot filterPools) on every request; the short TTL bounds how late
-// a newly created pool, or a pair whose probe RPCs all failed transiently,
-// can surface.
+// a newly created pool can surface.
 export const EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS = 60;
+export const DEGRADED_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS = 10;
+export const DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX = ':degraded';
+
+function isDegradedPoolsForTokensCacheEntry<TPool>(
+  value: unknown
+): value is DiscoveryResult<TPool> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'pools' in value &&
+    Array.isArray(value.pools) &&
+    'degradedReasons' in value &&
+    Array.isArray(value.degradedReasons) &&
+    value.degradedReasons.length > 0 &&
+    value.degradedReasons.every(
+      reason =>
+        reason === DiscoveryDegradedReason.PROBE_ERROR ||
+        reason === DiscoveryDegradedReason.PRIMARY_DISCOVERER_ERROR
+    ) &&
+    'failedProbeCount' in value &&
+    typeof value.failedProbeCount === 'number' &&
+    Number.isInteger(value.failedProbeCount) &&
+    value.failedProbeCount >= 0
+  );
+}
 
 // How long a deferred refresh keeps the held snapshot in the cache before the
 // next refresh tries again. Short, because the held snapshot is already past
@@ -951,6 +978,30 @@ export abstract class BaseCachingPoolDiscoverer<
     ctx: Context
   ): Promise<TPool[]>;
 
+  // A malformed cache entry still re-derives via the normal miss path; this
+  // only adds the observability the no-silent-degradation rule requires.
+  // Fire-and-forget: a metrics-backend failure must never affect discovery.
+  private countInvalidPoolsForTokensCacheEntry(
+    chainId: ChainId,
+    protocol: Protocol,
+    reason: PoolsForTokensCacheInvalidEntryReason,
+    ctx: Context
+  ): void {
+    void ctx.metrics
+      .count(
+        buildMetricKey('PoolDiscoverer.getPoolsForTokens.Cache.InvalidEntry'),
+        1,
+        {
+          tags: [
+            ...buildPoolsForTokensCacheTags(chainId, protocol),
+            'status:failure',
+            `reason:${reason}`,
+          ],
+        }
+      )
+      .catch(() => undefined);
+  }
+
   // To be implemented by the sub-classes.
   protected abstract _getPoolsForTokens(
     chainId: ChainId,
@@ -959,7 +1010,7 @@ export abstract class BaseCachingPoolDiscoverer<
     tokenOut: Address,
     ctx: Context,
     hooksOptions?: HooksOptions
-  ): Promise<TPool[]>;
+  ): Promise<{pools: TPool[]; failedProbeCount: number}>;
 
   // Gets pools from the cache if available, otherwise fetches them from the _getPoolsForTokens implementation.
   // Filters the pools based on the given tokens and returns a small number of pools (topPoolSelector logic) before caching them.
@@ -973,7 +1024,7 @@ export abstract class BaseCachingPoolDiscoverer<
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: Context
-  ): Promise<TPool[]> {
+  ): Promise<DiscoveryResult<TPool>> {
     this.assertSupportedProtocol(protocol);
     ctx.logger.debug(
       `[${this.discovererName}] Getting pools for tokens: ${tokenIn.toString()} and ${tokenOut.toString()} on chainId=${chainId}, protocol=${protocol}`
@@ -1016,6 +1067,8 @@ export abstract class BaseCachingPoolDiscoverer<
     }
 
     let retrievedPools: TPool[] | undefined;
+    const degradedReasons: DiscoveryDegradedReason[] = [];
+    let failedProbeCount = 0;
     // An entry stored empty is a short-lived negative entry and is served
     // as-is. A non-empty entry that the filters below empty out is
     // re-derived instead, since those filters reflect state newer than the
@@ -1025,40 +1078,125 @@ export abstract class BaseCachingPoolDiscoverer<
       // Cache READ also honors the directive — CallerOptOut means bypass
       // both the read and the write.
       if (cacheDirective.shouldUseCache) {
-        const retrievedPoolsStr =
-          await this.getPoolsForTokensCache.get(cacheKey);
+        const [retrievedPoolsStr, degradedStr] = await Promise.all([
+          this.getPoolsForTokensCache.get(cacheKey).catch(error => {
+            if (error instanceof ErrorNotFound) return undefined;
+            throw error;
+          }),
+          this.getPoolsForTokensCache
+            .get(cacheKey + DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX)
+            .catch(error => {
+              if (error instanceof ErrorNotFound) return undefined;
+              this.countInvalidPoolsForTokensCacheEntry(
+                chainId,
+                protocol,
+                PoolsForTokensCacheInvalidEntryReason.DegradedReadError,
+                ctx
+              );
+              ctx.logger.warn(
+                `[${this.discovererName}] Failed to read degraded pools-for-tokens cache entry`,
+                {
+                  chainId,
+                  protocol,
+                  errorName:
+                    error instanceof Error ? error.name : 'UnknownError',
+                }
+              );
+              return undefined;
+            }),
+        ]);
+        let cachedPools: TPool[] | undefined;
+        let degradedEntry: DiscoveryResult<TPool> | undefined;
         if (retrievedPoolsStr !== undefined) {
-          const cachedPools: TPool[] = JSON.parse(retrievedPoolsStr);
-          retrievedPools = await this.filterUnsupportedTokenPools(
-            cachedPools,
-            ctx
-          );
-          // The cached list is the selector's output from an earlier
-          // process, so a token blocked on every hop or given a
-          // canonical-pools entry since is re-filtered here like the
-          // deny-set above rather than served for the rest of the TTL.
-          retrievedPools = CanonicalPools.filterAdmittedPools(
-            RoutingBlockList.dropPoolsThroughBlockedRoutingTokens(
-              retrievedPools,
-              chainId,
-              pool => ({
-                poolId: pool.id,
-                token0: pool.token0.id,
-                token1: pool.token1.id,
-              }),
-              ctx,
-              METRIC_CACHED_POOLS_FOR_TOKENS_BLOCKED_ROUTING_TOKEN_POOL
-            ),
-            chainId
-          );
-          cachedEntryUsable =
-            cachedPools.length === 0 || retrievedPools.length > 0;
-          ctx.logger.debug(
-            `[${this.discovererName}] Retrieved ${protocol} pools for tokens from cache`,
-            {
-              cacheKey,
+          try {
+            const parsed: unknown = JSON.parse(retrievedPoolsStr);
+            if (Array.isArray(parsed)) {
+              cachedPools = parsed;
+            } else {
+              this.countInvalidPoolsForTokensCacheEntry(
+                chainId,
+                protocol,
+                PoolsForTokensCacheInvalidEntryReason.InvalidLegacyJson,
+                ctx
+              );
             }
-          );
+          } catch {
+            // Invalid legacy JSON is re-derived below.
+            this.countInvalidPoolsForTokensCacheEntry(
+              chainId,
+              protocol,
+              PoolsForTokensCacheInvalidEntryReason.InvalidLegacyJson,
+              ctx
+            );
+          }
+        } else {
+          if (degradedStr !== undefined) {
+            try {
+              const parsed: unknown = JSON.parse(degradedStr);
+              if (isDegradedPoolsForTokensCacheEntry<TPool>(parsed)) {
+                degradedEntry = parsed;
+                cachedPools = parsed.pools;
+              } else {
+                this.countInvalidPoolsForTokensCacheEntry(
+                  chainId,
+                  protocol,
+                  PoolsForTokensCacheInvalidEntryReason.InvalidDegradedEnvelope,
+                  ctx
+                );
+              }
+            } catch {
+              // Invalid degraded JSON is re-derived below.
+              this.countInvalidPoolsForTokensCacheEntry(
+                chainId,
+                protocol,
+                PoolsForTokensCacheInvalidEntryReason.InvalidDegradedEnvelope,
+                ctx
+              );
+            }
+          }
+        }
+        if (retrievedPoolsStr !== undefined || cachedPools !== undefined) {
+          if (cachedPools === undefined) {
+            ctx.logger.debug(
+              `[${this.discovererName}] Invalid pools-for-tokens cache entry`,
+              {cacheKey}
+            );
+          } else {
+            if (degradedEntry !== undefined) {
+              degradedReasons.push(...degradedEntry.degradedReasons);
+              failedProbeCount = degradedEntry.failedProbeCount;
+            }
+            retrievedPools = await this.filterUnsupportedTokenPools(
+              cachedPools,
+              ctx
+            );
+            // The cached list is the selector's output from an earlier
+            // process, so a token blocked on every hop or given a
+            // canonical-pools entry since is re-filtered here like the
+            // deny-set above rather than served for the rest of the TTL.
+            retrievedPools = CanonicalPools.filterAdmittedPools(
+              RoutingBlockList.dropPoolsThroughBlockedRoutingTokens(
+                retrievedPools,
+                chainId,
+                pool => ({
+                  poolId: pool.id,
+                  token0: pool.token0.id,
+                  token1: pool.token1.id,
+                }),
+                ctx,
+                METRIC_CACHED_POOLS_FOR_TOKENS_BLOCKED_ROUTING_TOKEN_POOL
+              ),
+              chainId
+            );
+            cachedEntryUsable =
+              cachedPools.length === 0 || retrievedPools.length > 0;
+            ctx.logger.debug(
+              `[${this.discovererName}] Retrieved ${protocol} pools for tokens from cache`,
+              {
+                cacheKey,
+              }
+            );
+          }
         }
       }
     } catch (e) {
@@ -1069,7 +1207,9 @@ export abstract class BaseCachingPoolDiscoverer<
 
     if (retrievedPools === undefined || !cachedEntryUsable) {
       status = 'miss';
-      retrievedPools = await this._getPoolsForTokens(
+      degradedReasons.length = 0;
+      failedProbeCount = 0;
+      const probeResult = await this._getPoolsForTokens(
         chainId,
         protocol,
         tokenIn,
@@ -1077,6 +1217,11 @@ export abstract class BaseCachingPoolDiscoverer<
         ctx,
         hooksOptions
       );
+      retrievedPools = probeResult.pools;
+      failedProbeCount = probeResult.failedProbeCount;
+      if (probeResult.failedProbeCount > 0) {
+        degradedReasons.push(DiscoveryDegradedReason.PROBE_ERROR);
+      }
 
       // Filter out pools with unsupported tokens. The memoized variant keys
       // on the array identity _getPoolsForTokens returned — for S3
@@ -1112,7 +1257,11 @@ export abstract class BaseCachingPoolDiscoverer<
         {tags: [`chain:${ChainId[chainId]}`, `protocol:${protocol}`]}
       );
 
-      const retrievedPoolsStr = JSON.stringify(retrievedPools);
+      const retrievedPoolsStr = JSON.stringify(
+        degradedReasons.length > 0
+          ? {pools: retrievedPools, degradedReasons, failedProbeCount}
+          : retrievedPools
+      );
       const cacheValueBytes = Buffer.byteLength(retrievedPoolsStr, 'utf8');
       ctx.logger.debug(
         `[${this.discovererName}] Caching retrieved ${protocol} pools for tokens`,
@@ -1138,7 +1287,8 @@ export abstract class BaseCachingPoolDiscoverer<
 
       // Single skip-emission point — fires after all directive mutations are
       // settled (caller opt-out at init, selector flips during filterPools,
-      // size-limit verdict above). Handles both logging and metrics.
+      // and the size-limit verdict above). Handles both
+      // logging and metrics.
       await trackPoolsForTokensCacheSkip(cacheDirective, ctx, {
         discovererName: this.discovererName,
         cacheKey,
@@ -1154,12 +1304,21 @@ export abstract class BaseCachingPoolDiscoverer<
             chainId
           ] ??
           this.serviceConfig.RedisCache.TokenInOutPoolsCacheEntryTtlSeconds;
-        await this.getPoolsForTokensCache.set(cacheKey, retrievedPoolsStr, {
-          ttl:
-            retrievedPools.length === 0
-              ? Math.min(ttl, EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS)
-              : ttl,
-        });
+        await this.getPoolsForTokensCache.set(
+          cacheKey +
+            (degradedReasons.length > 0
+              ? DEGRADED_POOLS_FOR_TOKENS_CACHE_KEY_SUFFIX
+              : ''),
+          retrievedPoolsStr,
+          {
+            ttl:
+              degradedReasons.length > 0
+                ? Math.min(ttl, DEGRADED_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS)
+                : retrievedPools.length === 0
+                  ? Math.min(ttl, EMPTY_POOLS_FOR_TOKENS_CACHE_TTL_SECONDS)
+                  : ttl,
+          }
+        );
       }
     }
 
@@ -1175,7 +1334,11 @@ export abstract class BaseCachingPoolDiscoverer<
       }
     );
 
-    return retrievedPools;
+    return {
+      pools: retrievedPools,
+      degradedReasons,
+      failedProbeCount,
+    };
   }
 
   public getPoolsCacheKey(chainId: ChainId, protocol: Protocol) {

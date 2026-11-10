@@ -140,8 +140,8 @@ describe('UniRouteBL.quote routing block list', () => {
       _skipPoolsForTokensCache: boolean,
       nsCtx: RouteNamespaceContext,
       ctx: Context
-    ) =>
-      topPoolSelector.filterPools(
+    ) => ({
+      pools: await topPoolSelector.filterPools(
         universeFor(protocol),
         chainId,
         tokenIn,
@@ -151,7 +151,10 @@ describe('UniRouteBL.quote routing block list', () => {
         nsCtx,
         ctx,
         {shouldUseCache: false}
-      )
+      ),
+      degradedReasons: [],
+      failedProbeCount: 0,
+    })
   );
 
   const routesSeenByStrategy: RouteBasic<Pool>[] = [];

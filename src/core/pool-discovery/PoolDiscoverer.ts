@@ -9,6 +9,7 @@ import {
   V4PoolInfo,
 } from './interface';
 import {ChainId} from '../../lib/config';
+import {countDegradedDiscovery, DiscoveryResult} from './discoveryDegraded';
 import {Protocol} from '../../models/pool/Protocol';
 import {Address} from '../../models/address/Address';
 import {HooksOptions} from '../../models/hooks/HooksOptions';
@@ -65,13 +66,13 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: Context
-  ): Promise<UniPoolInfo[]> {
+  ): Promise<DiscoveryResult<UniPoolInfo>> {
     // Start the direct exact-pair probe concurrently with the primary
     // discovery when enabled (see parallelDirectDiscoveryEnabled). The
     // no-op catch prevents an unhandled rejection if the primary path
     // throws before this promise is awaited; the await below still
     // rethrows the original error.
-    let directPoolsPromise: Promise<UniPoolInfo[]> | undefined;
+    let directPoolsPromise: Promise<DiscoveryResult<UniPoolInfo>> | undefined;
     if (this.parallelDirectDiscoveryEnabled) {
       directPoolsPromise = this.fetchDirectPools(
         chainId,
@@ -88,7 +89,11 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     }
 
     // Get protocol-specific pools
-    let protocolPools: UniPoolInfo[] = [];
+    let protocolResult: DiscoveryResult<UniPoolInfo> = {
+      pools: [],
+      degradedReasons: [],
+      failedProbeCount: 0,
+    };
     switch (protocol) {
       case Protocol.V2: {
         const v2Selector: ITopPoolsSelector<V2PoolInfo> = {
@@ -115,7 +120,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               cacheDirective
             )) as V2PoolInfo[],
         };
-        protocolPools = await this.v2PoolDiscoverer.getPoolsForTokens(
+        protocolResult = await this.v2PoolDiscoverer.getPoolsForTokens(
           chainId,
           protocol,
           tokenIn,
@@ -153,7 +158,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               cacheDirective
             )) as V3PoolInfo[],
         };
-        protocolPools = await this.v3PoolDiscoverer.getPoolsForTokens(
+        protocolResult = await this.v3PoolDiscoverer.getPoolsForTokens(
           chainId,
           protocol,
           tokenIn,
@@ -194,7 +199,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
               cacheDirective
             )) as V4PoolInfo[],
         };
-        protocolPools = await this.v4PoolDiscoverer.getPoolsForTokens(
+        protocolResult = await this.v4PoolDiscoverer.getPoolsForTokens(
           chainId,
           protocol,
           tokenIn,
@@ -229,14 +234,33 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
 
     // Combine/Dedup protocol-specific pools with direct pools
     const uniquePools = new Map<string, UniPoolInfo>();
-    for (const pool of protocolPools) {
+    for (const pool of protocolResult.pools) {
       uniquePools.set(pool.id, pool);
     }
-    for (const pool of directPools) {
+    for (const pool of directPools.pools) {
       uniquePools.set(pool.id, pool);
     }
 
-    return Array.from(uniquePools.values());
+    const degradedReasons = [
+      ...new Set([
+        ...protocolResult.degradedReasons,
+        ...directPools.degradedReasons,
+      ]),
+    ];
+    const failedProbeCount =
+      protocolResult.failedProbeCount + directPools.failedProbeCount;
+    countDegradedDiscovery(
+      ctx,
+      chainId,
+      protocol,
+      degradedReasons,
+      failedProbeCount
+    );
+    return {
+      pools: Array.from(uniquePools.values()),
+      degradedReasons,
+      failedProbeCount,
+    };
   }
 
   private async fetchDirectPools(
@@ -249,7 +273,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
     skipPoolsForTokensCache: boolean,
     nsCtx: RouteNamespaceContext,
     ctx: Context
-  ): Promise<UniPoolInfo[]> {
+  ): Promise<DiscoveryResult<UniPoolInfo>> {
     switch (protocol) {
       case Protocol.V2:
         return this.v2DirectPoolDiscoverer.getPoolsForTokens(
@@ -282,7 +306,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
         // keeps aggregator-hook pools only, so under every hooksOptions it
         // would discard everything the probe returns — skip the RPC.
         if (topPoolsSelector.aggHooksOnly === true) {
-          return [];
+          return {pools: [], degradedReasons: [], failedProbeCount: 0};
         }
         return this.v4DirectPoolDiscoverer.getPoolsForTokens(
           chainId,
@@ -296,7 +320,7 @@ export class PoolDiscoverer implements IPoolDiscoverer<UniPoolInfo> {
           ctx
         );
       default:
-        return [];
+        return {pools: [], degradedReasons: [], failedProbeCount: 0};
     }
   }
 }

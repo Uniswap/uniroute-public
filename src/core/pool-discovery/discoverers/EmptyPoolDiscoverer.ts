@@ -50,8 +50,8 @@ export class EmptyPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo>
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
-  ): Promise<V2PoolInfo[]> {
-    return [];
+  ): Promise<{pools: V2PoolInfo[]; failedProbeCount: number}> {
+    return {pools: [], failedProbeCount: 0};
   }
 }
 
@@ -97,8 +97,8 @@ export class EmptyPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo>
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
-  ): Promise<V3PoolInfo[]> {
-    return [];
+  ): Promise<{pools: V3PoolInfo[]; failedProbeCount: number}> {
+    return {pools: [], failedProbeCount: 0};
   }
 }
 
@@ -144,7 +144,7 @@ export class EmptyPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo>
     tokenOut: Address,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     ctx: Context
-  ): Promise<V4PoolInfo[]> {
-    return [];
+  ): Promise<{pools: V4PoolInfo[]; failedProbeCount: number}> {
+    return {pools: [], failedProbeCount: 0};
   }
 }

@@ -62,8 +62,8 @@ export class DirectPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
-  ): Promise<V2PoolInfo[]> {
-    const pools = await this.poolRepository.getPools(
+  ): Promise<{pools: V2PoolInfo[]; failedProbeCount: number}> {
+    const {pools, failedProbeCount} = await this.poolRepository.probePools(
       ctx,
       chainId,
       tokenIn,
@@ -98,7 +98,7 @@ export class DirectPoolDiscovererV2 extends BaseCachingPoolDiscoverer<V2PoolInfo
       .compact()
       .value();
 
-    return poolInfos;
+    return {pools: poolInfos, failedProbeCount};
   }
 }
 
@@ -137,8 +137,8 @@ export class DirectPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
     tokenIn: Address,
     tokenOut: Address,
     ctx: Context
-  ): Promise<V3PoolInfo[]> {
-    const pools = await this.poolRepository.getPools(
+  ): Promise<{pools: V3PoolInfo[]; failedProbeCount: number}> {
+    const {pools, failedProbeCount} = await this.poolRepository.probePools(
       ctx,
       chainId,
       tokenIn,
@@ -175,7 +175,7 @@ export class DirectPoolDiscovererV3 extends BaseCachingPoolDiscoverer<V3PoolInfo
       .compact()
       .value();
 
-    return poolInfos;
+    return {pools: poolInfos, failedProbeCount};
   }
 }
 
@@ -218,7 +218,8 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     tokenOut: Address,
     ctx: Context,
     hooksOptions?: HooksOptions
-  ): Promise<V4PoolInfo[]> {
+  ): Promise<{pools: V4PoolInfo[]; failedProbeCount: number}> {
+    let failedProbeCount = 0;
     // Registry PoolKeys widen the probed (fee, tickSpacing) set beyond the
     // canonical grid for pairs with pools on non-canonical tiers. Strictly
     // additive: the registry lookup and the registry probe are each caught
@@ -235,6 +236,7 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
           ctx
         )) ?? [];
     } catch {
+      failedProbeCount++;
       // The store contract is never-throw; guard other IV4PoolKeyRegistry
       // implementations anyway.
     }
@@ -248,9 +250,9 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
     );
     const registryPoolsPromise =
       filteredRegistryKeys.length === 0
-        ? Promise.resolve([] as V4Pool[])
+        ? Promise.resolve({pools: new Array<V4Pool>(), failedProbeCount: 0})
         : this.poolRepository
-            .getPools(
+            .probePools(
               ctx,
               chainId,
               tokenIn,
@@ -264,17 +266,19 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
                 `V4 PoolKey registry probe failed on chain ${chainId}; keeping canonical results`,
                 {err: err instanceof Error ? err.message : String(err)}
               );
-              return [] as V4Pool[];
+              return {pools: new Array<V4Pool>(), failedProbeCount: 1};
             });
     const [canonicalPools, registryPools] = await Promise.all([
       hooksOptions === HooksOptions.HOOKS_ONLY
-        ? Promise.resolve([] as V4Pool[])
-        : this.poolRepository.getPools(ctx, chainId, tokenIn, tokenOut),
+        ? Promise.resolve({pools: new Array<V4Pool>(), failedProbeCount: 0})
+        : this.poolRepository.probePools(ctx, chainId, tokenIn, tokenOut),
       registryPoolsPromise,
     ]);
     // Registry keys are non-canonical by construction, so the union is
     // disjoint; the poolAddressSet below dedupes defensively regardless.
-    const pools = [...canonicalPools, ...registryPools];
+    failedProbeCount +=
+      canonicalPools.failedProbeCount + registryPools.failedProbeCount;
+    const pools = [...canonicalPools.pools, ...registryPools.pools];
 
     const poolAddressSet = new Set<string>();
     const poolInfos: V4PoolInfo[] = _(pools)
@@ -308,6 +312,6 @@ export class DirectPoolDiscovererV4 extends BaseCachingPoolDiscoverer<V4PoolInfo
       .compact()
       .value();
 
-    return poolInfos;
+    return {pools: poolInfos, failedProbeCount};
   }
 }
