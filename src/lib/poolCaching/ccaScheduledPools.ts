@@ -216,7 +216,7 @@ const FALLBACK_BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.UNICHAIN]: 1,
   [ChainId.ARBITRUM]: 0.25,
   [ChainId.AVAX]: 2,
-  [ChainId.XLAYER]: 3,
+  [ChainId.XLAYER]: 1,
   [ChainId.ROBINHOOD]: 0.1,
   [ChainId.SEPOLIA]: 12,
 };
