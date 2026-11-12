@@ -2,7 +2,11 @@
  * Ported from routing-api/lib/util/v4HooksPoolsFiltering.ts
  */
 
-import {Hook, HookOptions} from '@uniswap/v4-sdk';
+import {Hook} from '@uniswap/v4-sdk';
+import {
+  blocksUnvettedHookAdmission,
+  hasCustomAccountingPermissions,
+} from '@uniswap/lib-v4-hooks';
 import {
   getAdapterHookConfig,
   getPermissionedHookAddresses,
@@ -50,28 +54,6 @@ function isFeeTierWithinSanityCeiling(pool: V4SubgraphPool): boolean {
 
 function convertV4PoolToGroupingKey(pool: V4SubgraphPool): V4PoolGroupingKey {
   return pool.token0.id.concat(pool.token1.id).concat(pool.feeTier);
-}
-
-export function hasCustomAccountingPermissions(hookAddress: string): boolean {
-  return (
-    Hook.hasPermission(hookAddress, HookOptions.BeforeSwapReturnsDelta) ||
-    Hook.hasPermission(hookAddress, HookOptions.AfterSwapReturnsDelta)
-  );
-}
-
-// Permission bits that keep a hook out of routing unless it is vetted
-// (HOOKS_ADDRESSES_ALLOWLIST, the permissioned registry, or a trusted ZLCA
-// factory). Shared by both unvetted admission paths: the snapshot's routable
-// queue (isHooksPoolRoutable) and the CCA scheduled-pools registry. A
-// beforeSwap or afterSwap hook is passed the swap's sender, so it can move
-// pool state (its own pool before the curve is priced, or another pool such
-// as the route's next hop afterwards) or revert for the router and not the
-// quoter; a custom-accounting hook overrides the swap amounts outright.
-export function blocksUnvettedHookAdmission(hookAddress: string): boolean {
-  return (
-    Hook.hasSwapPermissions(hookAddress) ||
-    hasCustomAccountingPermissions(hookAddress)
-  );
 }
 
 // The unvetted admission gate (isHooksPoolRoutable) must reject dynamic-fee

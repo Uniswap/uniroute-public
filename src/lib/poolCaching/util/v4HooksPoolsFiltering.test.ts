@@ -1,10 +1,7 @@
 import {describe, it, expect, vi} from 'vitest';
 import {utils} from 'ethers';
-import {
-  v4HooksPoolsFiltering,
-  blocksUnvettedHookAdmission,
-  hasCustomAccountingPermissions,
-} from './v4HooksPoolsFiltering';
+import {v4HooksPoolsFiltering} from './v4HooksPoolsFiltering';
+import {blocksUnvettedHookAdmission} from '@uniswap/lib-v4-hooks';
 import {ChainId, Token} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {DYNAMIC_FEE_FLAG, Pool} from '@uniswap/v4-sdk';
@@ -75,66 +72,6 @@ function createPool(overrides: Partial<V4SubgraphPool> = {}): V4SubgraphPool {
     ...overrides,
   };
 }
-
-describe('hasCustomAccountingPermissions', () => {
-  it('returns false when no returnsDelta flags are set', () => {
-    expect(hasCustomAccountingPermissions(ADDRESS_ZERO)).toBe(false);
-    // beforeSwap only (0x80)
-    expect(
-      hasCustomAccountingPermissions(
-        '0x0000000000000000000000000000000000000080'
-      )
-    ).toBe(false);
-  });
-
-  it('returns true when beforeSwapReturnsDelta or afterSwapReturnsDelta is set', () => {
-    // beforeSwapReturnsDelta (0x08)
-    expect(
-      hasCustomAccountingPermissions(
-        '0x0000000000000000000000000000000000000008'
-      )
-    ).toBe(true);
-    // afterSwapReturnsDelta (0x04)
-    expect(
-      hasCustomAccountingPermissions(
-        '0x0000000000000000000000000000000000000004'
-      )
-    ).toBe(true);
-    // both (0x0c)
-    expect(
-      hasCustomAccountingPermissions(
-        '0x000000000000000000000000000000000000000c'
-      )
-    ).toBe(true);
-  });
-});
-
-describe('blocksUnvettedHookAdmission', () => {
-  it('blocks swap and custom-accounting bits', () => {
-    // beforeSwap (0x80), afterSwap (0x40), beforeSwapReturnsDelta (0x08),
-    // afterSwapReturnsDelta (0x04), before+afterSwap (0xc0).
-    for (const hook of [
-      '0x0000000000000000000000000000000000000080',
-      '0x0000000000000000000000000000000000000040',
-      '0x0000000000000000000000000000000000000008',
-      '0x0000000000000000000000000000000000000004',
-      '0x00000000000000000000000000000000000000c0',
-    ]) {
-      expect(blocksUnvettedHookAdmission(hook)).toBe(true);
-    }
-  });
-
-  it('does not block hookless or non-swap bits', () => {
-    // beforeAddLiquidity (0x0800), beforeInitialize (0x2000).
-    for (const hook of [
-      ADDRESS_ZERO,
-      '0x0000000000000000000000000000000000000800',
-      '0x0000000000000000000000000000000000002000',
-    ]) {
-      expect(blocksUnvettedHookAdmission(hook)).toBe(false);
-    }
-  });
-});
 
 describe('v4HooksPoolsFiltering', () => {
   describe('major pair hook allowlisting', () => {

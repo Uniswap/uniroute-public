@@ -21,7 +21,7 @@ import {Address} from '../../models/address/Address';
 import {Logger} from './sor-providers/util/log';
 import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {isDenylistedHook} from './util/hooksAddressesDenylist';
-import {blocksUnvettedHookAdmission} from './util/v4HooksPoolsFiltering';
+import {blocksUnvettedHookAdmission} from '@uniswap/lib-v4-hooks';
 import {ChainId} from '../config';
 import {unirouteFetch} from '../unirouteFetch';
 
