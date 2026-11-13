@@ -11,7 +11,7 @@ import {unirouteFetch} from '../unirouteFetch';
 const TOKEN_LISTS = [
   'https://raw.githubusercontent.com/The-Blockchain-Association/sec-notice-list/master/ba-sec-list.json',
   'https://tokens.coingecko.com/uniswap/all.json',
-  'https://gateway.ipfs.io/ipns/tokens.uniswap.org',
+  'https://tokens.uniswap.org/',
 ];
 
 export interface CacheTokenListsConfig {
