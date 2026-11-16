@@ -698,18 +698,14 @@ describe('UniRouteBL', () => {
   // Create a mock fetcher that handles test lambda names
   ctx.fetcher = (
     ctx: Context,
-    // eslint-disable-next-line n/no-unsupported-features/node-builtins
     input: string | URL | Request,
     init?: RequestInit
-    // eslint-disable-next-line n/no-unsupported-features/node-builtins
   ): Promise<Response> => {
     // If the input is a test lambda name (not a valid URL), return a mock response
     if (typeof input === 'string' && input === 'test-lambda-name') {
-      // eslint-disable-next-line n/no-unsupported-features/node-builtins
       return Promise.resolve(new Response('OK', {status: 200}));
     }
     // Otherwise, use the real fetch
-    // eslint-disable-next-line n/no-unsupported-features/node-builtins
     return fetch(input, init);
   };
 
