@@ -4,6 +4,7 @@
 
 import {ChainId} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
+import {ChainId as UniRouteChainId} from '../../config';
 import {
   getDynamicZlcaHooks,
   getDynamicZlcaHooksVersion,
@@ -25,8 +26,6 @@ import {
 } from './aggHooksAddressesAllowlist';
 import {Protocol} from '../../../models/pool/Protocol';
 
-// ARC is not yet in sdk-core — define locally until sdk-core is upgraded
-const CHAIN_ID_ARC = 5042 as ChainId;
 export const FAZE_LAUNCHPAD_HOOK_ON_ARC =
   '0x8bfdf31eb89c13adb2188a3b1445ad90574360cc';
 export const BASEDBID_HOOK_ON_ARC =
@@ -41,8 +40,6 @@ export const DEPEG_FEE_HOOK_ON_ARC =
   '0xa6ca4c17a0a25e33b25242282c1efea1322960cc';
 export const ARCFUN_FEE_HOOK_ON_ARC =
   '0x117c852a9c5de8a56650ba059f2c09a6f6f8a044';
-// INK is not yet in sdk-core — define locally until sdk-core is upgraded
-const CHAIN_ID_INK = 57073 as ChainId;
 // Protocols listed here are excluded from cached-routes retrieval inside
 // CachedRoutesRepository.  All external (agg hook) protocols are included
 // because production metrics show cached routes still containing agg hook
@@ -636,6 +633,9 @@ export const FLETH_HOOK_ON_UNICHAIN =
 export const FLETH_HOOK_ON_ROBINHOOD =
   '0xea22ae03085caf74ac3393f9902539fbe9786888';
 export const FLETH_HOOK_ON_INK = '0x1acf9e1642a3edaf0013f3f1a48adfb7ab54a888';
+export const SATS_HOOK_ON_INK = '0x937270e122eebcb21c9b4833ca7203c67ceceacc';
+export const KALOS_V4_FEE_HOOK_ON_ELYSIUM =
+  '0x0559ef6bc07974bfab2149d7fbc0e898914115cf';
 export const FLETH_HOOK_ON_ARBITRUM =
   '0x2a8d203ebc8e165b4d94b18131365f4d1c19e888';
 
@@ -824,10 +824,10 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.ROBINHOOD]: {
     [FLETH_HOOK_ON_ROBINHOOD]: {gasOverheadPerHop: 500_000n},
   },
-  [CHAIN_ID_INK]: {
+  [ChainId.INK]: {
     [FLETH_HOOK_ON_INK]: {gasOverheadPerHop: 500_000n},
   },
-  [CHAIN_ID_ARC]: {
+  [ChainId.ARC]: {
     // Pool initialized at the exact 1e12 raw ratio (2^96 / 1e6), so slot0 is
     // already right — no sqrtPriceFromQuoter (see the constant's doc).
     [NATIVE_USDC_CONVERTER_HOOK_ON_ARC]: {gasOverheadPerHop: 250_000n},
@@ -1815,6 +1815,13 @@ export const PANGEA_FEE_HOOK_ON_MAINNET =
   '0x5b58765d0b919f485bc36487bada7f9f7fe6e8cc';
 export const PANGEA_FEE_HOOK_2_ON_MAINNET =
   '0x898b9e0a40f30d00be3098a5865ad5d71a93a8cc';
+export const PANGEA_FEE_HOOK_V2_ON_MAINNET =
+  '0x1aef1467b4e4723996c01d31043d146c0cf6e8cc';
+export const PANGEA_FEE_HOOK_V2_ON_BASE = PANGEA_FEE_HOOK_V2_ON_MAINNET;
+export const PANGEA_FEE_HOOK_V2_ON_BNB = PANGEA_FEE_HOOK_V2_ON_MAINNET;
+export const PANGEA_FEE_HOOK_V2_ON_ROBINHOOD = PANGEA_FEE_HOOK_V2_ON_MAINNET;
+export const IMDO_HOOK_ON_MAINNET =
+  '0x5d79a5998cfcb4f17fffcaa0aa603499f73e60cc';
 export const STATICS_SWAP_FEE_HOOK_ON_ROBINHOOD =
   '0x2a8dfc6608dd8cc8dcb385f8876947f181c1d0ec';
 export const BLOCK_HOOK_ON_ROBINHOOD =
@@ -1990,7 +1997,13 @@ export const RAVENHOOD_HOOK_ON_ROBINHOOD =
   '0x7f2c33c3aad9e769b41ff6b8a021357f2092f0cc';
 export const INCOME_MARKET_HOOK_1000_ON_ROBINHOOD =
   '0x4adbfa936020fb330587ee1862478316da5ba0cc';
+export const SOVRN_HOOK_ON_ROBINHOOD =
+  '0x1a035f8043416c4252e068075f5e69e78f8668cc';
+export const UP_ONLY_HOOK_ON_ROBINHOOD =
+  '0xbac8ede8270e762576afdbe6bd8d90c637c420cc';
 export const WFIATHOOK_ON_BASE = '0xb37db659c8e32c3957f75ccd1088d8e9f4ea48c0';
+export const SWAP_TAX_HOOK_ON_BASE =
+  '0x7687056110e94f6302676d5ebc1194250550c0cc';
 export const UNI_HOOKS_SHARED_ON_MAINNET =
   '0x6e67da46312092703a7f79c3093550fb11a42acc';
 export const UNI_HOOKS_SHARED_ON_BASE =
@@ -2023,6 +2036,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   Record<number, Array<string>> = {
   [ChainId.MAINNET]: [
     UNI_HOOKS_SHARED_ON_MAINNET,
+    IMDO_HOOK_ON_MAINNET,
+    PANGEA_FEE_HOOK_V2_ON_MAINNET,
     STANDARD_LAUNCH_HOOK_ON_MAINNET,
     PANGEA_FEE_HOOK_ON_MAINNET,
     PANGEA_FEE_HOOK_2_ON_MAINNET,
@@ -2207,6 +2222,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MOONBEAM]: [ADDRESS_ZERO],
   [ChainId.BNB]: [
     UNI_HOOKS_SHARED_ON_BNB,
+    PANGEA_FEE_HOOK_V2_ON_BNB,
     ADDRESS_ZERO,
     APEFUN_LAUNCH_FEE_HOOK_ON_BNB,
     BASEDBID_HOOK_ON_BNB,
@@ -2237,6 +2253,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.BASE_SEPOLIA]: [ADDRESS_ZERO],
   [ChainId.BASE]: [
     WFIATHOOK_ON_BASE,
+    SWAP_TAX_HOOK_ON_BASE,
+    PANGEA_FEE_HOOK_V2_ON_BASE,
     UNI_HOOKS_SHARED_ON_BASE,
     POOL_AGL_HOOK,
     MEMESTOCK_HOOK_ON_BASE,
@@ -2448,6 +2466,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MEGAETH]: [ADDRESS_ZERO],
   [ChainId.ROBINHOOD]: [
     INCOME_MARKET_HOOK_1000_ON_ROBINHOOD,
+    SOVRN_HOOK_ON_ROBINHOOD,
+    UP_ONLY_HOOK_ON_ROBINHOOD,
+    PANGEA_FEE_HOOK_V2_ON_ROBINHOOD,
     UNI_HOOKS_SHARED_ON_ROBINHOOD,
     RAVENHOOD_HOOK_ON_ROBINHOOD,
     GREENWODE_HOOK_V2_ON_ROBINHOOD,
@@ -2762,8 +2783,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SNOW_LAUNCH_HOOK_ON_ROBINHOOD,
     PLAYR_HOOK_ON_ROBINHOOD,
   ],
-  [CHAIN_ID_INK]: [
+  [ChainId.INK]: [
     ADDRESS_ZERO,
+    SATS_HOOK_ON_INK,
     AEGIS_ENGINE_ON_INK,
     LAUNCHER_RELAY_POOL_HOOK_ON_INK,
     NFTX_V4_HOOK_ON_INK,
@@ -2772,7 +2794,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SENTRY_STOCK_FEE_HOOK_V3_ON_INK,
   ],
   [ChainId.TEMPO]: [ADDRESS_ZERO, ...AGG_HOOKS_ON_TEMPO],
-  [CHAIN_ID_ARC]: [
+  [UniRouteChainId.ELYSIUM]: [ADDRESS_ZERO, KALOS_V4_FEE_HOOK_ON_ELYSIUM],
+  [ChainId.ARC]: [
     APEFUN_LAUNCH_FEE_HOOK_ON_ARC,
     FLOOR_HOOK_CL_ON_ARC,
     PEACH_POOL_RWA_HOOK_ON_ARC,
