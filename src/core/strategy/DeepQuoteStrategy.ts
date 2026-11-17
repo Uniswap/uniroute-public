@@ -161,7 +161,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     testAggHooks?: boolean,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
     priorityFeePerGasWei?: bigint,
-    callerFetchReport?: QuoteFetchReport
+    callerFetchReport?: QuoteFetchReport,
+    abortSignal?: AbortSignal
   ): Promise<QuoteSplit[]> {
     // Generate all possible partial routes per percentage step
     const pctRoutes: RouteBasic[] = [];
@@ -251,7 +252,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
             blockNumber,
             tokensInfo,
             supplementalHookCodeOverrides,
-            standardFetchReport
+            standardFetchReport,
+            abortSignal
           )
         : Promise.resolve([] as QuoteBasic[]);
     const [aggHookQuotes, standardQuotes] = await Promise.all([

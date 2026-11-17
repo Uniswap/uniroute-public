@@ -893,6 +893,8 @@ export enum MetricFailureReason {
   TRANSIENT_RETRY_EXHAUSTED = 'exhausted',
   /** The attempt resending transient quote batches threw before it settled. */
   TRANSIENT_RETRY_FAILED = 'resend_failed',
+  /** The quote's caller stopped waiting (route timeout, disconnect, deadline). */
+  CALLER_ABORTED = 'caller_aborted',
   /** A periodic pass was skipped because the previous one is still running. */
   IN_FLIGHT = 'in_flight',
   REDIS_READ_ERROR = 'redis_read_error',

@@ -53,7 +53,8 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     testAggHooks?: boolean,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
     priorityFeePerGasWei?: bigint,
-    fetchReport?: QuoteFetchReport
+    fetchReport?: QuoteFetchReport,
+    abortSignal?: AbortSignal
   ): Promise<QuoteSplit[]>;
 
   abstract name(): string;

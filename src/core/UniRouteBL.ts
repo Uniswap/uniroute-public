@@ -1035,6 +1035,7 @@ export class UniRouteBL implements IUniRoutedBL {
         droppedRoutes,
         droppedRoutePoolPathKeys,
         quotedRoutePoolPathKeys,
+        searchAbandoned,
       } = quotePipelineResult;
 
       if (pendingRoutesOutcome) {
@@ -1161,6 +1162,7 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes,
         shouldCheckCache,
         incompleteSearch,
+        searchAbandoned,
         degradedDiscovery,
         options,
         metricTags
@@ -2383,6 +2385,7 @@ export class UniRouteBL implements IUniRoutedBL {
     bestQuote: QuoteSplit | undefined;
     unviableRouteStrings: string[];
     incompleteSearch: boolean;
+    searchAbandoned: boolean;
     droppedRoutes: number;
     droppedRoutePoolPathKeys: string[];
     quotedRoutePoolPathKeys: string[];
@@ -2407,23 +2410,31 @@ export class UniRouteBL implements IUniRoutedBL {
         options?.testAggHooks,
         supplementalHookCodeOverrides,
         priorityFeePerGasWei,
-        fetchReport
+        fetchReport,
+        options?.abortSignal
       );
     } catch (error) {
       if (
         !(error instanceof OnChainQuoteFetchError) ||
-        error.kind !== 'incomplete'
+        (error.kind !== 'incomplete' && error.kind !== 'caller_aborted')
       ) {
         throw error;
       }
-      // The quote fetch dropped routes and no split came out of the rest.
-      // Served as no route, since the caller's contract is a 200 no-route
-      // and the dropped routes are gone for this request, but not cached as
-      // one: the next request searches them again.
+      // The quote fetch dropped routes (or the caller stopped waiting before
+      // any came back) and no split came out of the rest. Served as no route,
+      // since the caller's contract is a 200 no-route and the dropped routes
+      // are gone for this request, but not cached as one: the next request
+      // searches them again.
       incompleteSearch = true;
       bestQuoteCandidates = [];
       await ctx.metrics.count(buildMetricKey('IncompleteSearch'), 1, {
-        tags: [...metricTags, TAG_STATUS_FAILURE, 'reason:dropped_routes'],
+        tags: [
+          ...metricTags,
+          TAG_STATUS_FAILURE,
+          error.kind === 'caller_aborted'
+            ? `reason:${MetricFailureReason.CALLER_ABORTED}`
+            : 'reason:dropped_routes',
+        ],
       });
       ctx.logger.warn(
         'Quote search was incomplete, serving no route without caching it',
@@ -2434,6 +2445,10 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       );
     }
+
+    // Only the quote fetch drops routes when the caller stops waiting, and it
+    // has finished by now: a search that completed before an abort is whole.
+    const searchAbandoned = options?.abortSignal?.aborted === true;
 
     ctx.logger.debug(`Best Quote Candidates (${bestQuoteCandidates.length}):`, {
       candidates: bestQuoteCandidates.map(candidate => ({
@@ -2526,6 +2541,7 @@ export class UniRouteBL implements IUniRoutedBL {
       bestQuote,
       unviableRouteStrings,
       incompleteSearch,
+      searchAbandoned,
       droppedRoutes: fetchReport.droppedRoutes,
       droppedRoutePoolPathKeys: fetchReport.droppedRoutePoolPathKeys ?? [],
       quotedRoutePoolPathKeys: fetchReport.quotedRoutePoolPathKeys ?? [],
@@ -2694,11 +2710,25 @@ export class UniRouteBL implements IUniRoutedBL {
     usedCachedRoutes: boolean,
     shouldCheckCache: boolean,
     incompleteSearch: boolean,
+    searchAbandoned: boolean,
     degradedDiscovery: boolean,
     options: QuoteOptions | undefined,
     metricTags: string[]
   ): Promise<void> {
     if (this.serviceConfig.Lambda.Type !== LambdaType.Async) {
+      return;
+    }
+    // A search the caller abandoned skipped routes it never quoted, so its
+    // best quote (or its no-route) is not the answer a full search would
+    // give. Sync requests serve these caches, so neither is written.
+    if (searchAbandoned) {
+      await ctx.metrics.count(buildMetricKey('QuoteCache.WriteSkipped'), 1, {
+        tags: [
+          ...metricTags,
+          TAG_STATUS_FAILURE,
+          `reason:${MetricFailureReason.CALLER_ABORTED}`,
+        ],
+      });
       return;
     }
     if (status === QuoteStatus.NoRoute) {

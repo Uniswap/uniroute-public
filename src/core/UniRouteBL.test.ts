@@ -1217,7 +1217,8 @@ describe('UniRouteBL', () => {
 
     const buildBL = (
       strategy: MockedQuoteStrategy = new MockedQuoteStrategy(),
-      config: IUniRouteServiceConfig = serviceConfig
+      config: IUniRouteServiceConfig = serviceConfig,
+      selector: SimpleQuoteSelector = quoteSelector
     ) =>
       new UniRouteBL(
         config,
@@ -1227,7 +1228,7 @@ describe('UniRouteBL', () => {
         freshPoolDetailsWrapper,
         tokenHandler,
         quoteFetcher,
-        quoteSelector,
+        selector,
         routeQuoteAllocator,
         gasEstimateProvider,
         noGasConverter,
@@ -1400,6 +1401,109 @@ describe('UniRouteBL', () => {
         ).toBe(1);
         expect(
           testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+        ).toBeUndefined();
+      });
+
+      it('async: a search the caller abandoned writes no route cache', async () => {
+        const request = create(QuoteRequestSchema, {
+          ...baseRequest,
+          tradeType: 'EXACT_IN',
+        });
+        const bl = buildBL(new MockedQuoteStrategy(), serviceConfigAsync);
+
+        const abortedCtx = buildTestContext();
+        const controller = new AbortController();
+        controller.abort();
+        const abortedResponse = await bl.quote(abortedCtx, request, {
+          abortSignal: controller.signal,
+        });
+
+        expect(abortedResponse.error).toBeUndefined();
+        expect(
+          abortedCtx.metrics.countStore[
+            buildMetricKey('CachedRoutes.WriteBestQuote')
+          ]
+        ).toBeUndefined();
+        expect(
+          abortedCtx.metrics.countStore[
+            buildMetricKey('QuoteCache.WriteSkipped')
+          ]
+        ).toBe(1);
+
+        // Control: the same request, not abandoned, misses the cache the
+        // abandoned search left empty and writes it.
+        const controlCtx = buildTestContext();
+        const controlResponse = await bl.quote(controlCtx, request);
+        expect(controlResponse.hitsCachedRoutes).toBe(false);
+        expect(
+          controlCtx.metrics.countStore[
+            buildMetricKey('CachedRoutes.WriteBestQuote')
+          ]
+        ).toBe(1);
+      });
+
+      it('async: a fetch the caller abandoned before any quote is served as no route, not as an unhandled error', async () => {
+        class AbandonedQuoteStrategy extends MockedQuoteStrategy {
+          override async findBestQuoteCandidates(): Promise<QuoteSplit[]> {
+            throw new OnChainQuoteFetchError('caller_aborted', [
+              new Error('caller disconnected'),
+            ]);
+          }
+        }
+        const testCtx = buildTestContext();
+        const controller = new AbortController();
+        controller.abort();
+
+        const response = await buildBL(
+          new AbandonedQuoteStrategy(),
+          serviceConfigAsync
+        ).quote(
+          testCtx,
+          create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'}),
+          {abortSignal: controller.signal}
+        );
+
+        expect(response.error?.code).toBe(404);
+        expect(await readCliff(testCtx)).toBeUndefined();
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('IncompleteSearch')]
+        ).toBe(1);
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('UnhandledError')]
+        ).toBeUndefined();
+      });
+
+      it('async: a search that finished before the caller left is still cached', async () => {
+        const controller = new AbortController();
+        class AbortAfterSearchSelector extends SimpleQuoteSelector {
+          override async getBestQuotes(
+            ...args: Parameters<SimpleQuoteSelector['getBestQuotes']>
+          ): Promise<QuoteSplit[]> {
+            controller.abort();
+            return super.getBestQuotes(...args);
+          }
+        }
+        const testCtx = buildTestContext();
+
+        const response = await buildBL(
+          new MockedQuoteStrategy(),
+          serviceConfigAsync,
+          new AbortAfterSearchSelector()
+        ).quote(
+          testCtx,
+          create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'}),
+          {abortSignal: controller.signal}
+        );
+
+        expect(controller.signal.aborted).toBe(true);
+        expect(response.error).toBeUndefined();
+        expect(
+          testCtx.metrics.countStore[
+            buildMetricKey('CachedRoutes.WriteBestQuote')
+          ]
+        ).toBe(1);
+        expect(
+          testCtx.metrics.countStore[buildMetricKey('QuoteCache.WriteSkipped')]
         ).toBeUndefined();
       });
 

@@ -26,6 +26,10 @@ export type QuoteOptions = {
   // attaches `swapSteps` to the response. Trading owns fee math in this
   // mode. Sourced from the `x-universal-router-swapsteps` header.
   universalRouterSwapsteps?: boolean;
+  // Aborts once nobody is waiting for this quote: the route timeout passed,
+  // the caller disconnected, or its deadline passed. Absent off the request
+  // path (async refresh workers), where the search always runs to completion.
+  abortSignal?: AbortSignal;
 };
 
 export interface IUniRoutedBL {
