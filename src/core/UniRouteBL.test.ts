@@ -43,7 +43,8 @@ import {
   QuoteResponseSchema,
 } from '../../gen/uniroute/v1/api_pb';
 
-import {buildTestContext} from '@uniswap/lib-testhelpers';
+import {buildTestContext, TestMetric} from '@uniswap/lib-testhelpers';
+import {IMetrics, MetricOptions} from '@uniswap/lib-uni';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
 import {Chain} from '../models/chain/Chain';
 import {Address} from '../models/address/Address';
@@ -102,7 +103,8 @@ import {TokenProvider} from 'src/stores/token/provider/TokenProvider';
 import {TokenList} from '@uniswap/token-lists';
 import {UsdBucket} from '../stores/route/uniroutes/usdBucketUtils';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
-import {HandlerContext} from '@connectrpc/connect';
+import {HandlerContext, createHandlerContext} from '@connectrpc/connect';
+import {unirouteService} from '../../gen/uniroute/v1/api_pb';
 import {Trade} from '@uniswap/router-sdk';
 import {
   Currency,
@@ -136,6 +138,7 @@ import {
   RouteNamespaceContext,
 } from '../models/hooks/namespaces';
 import {FeatureGatedTokensRepository} from '../stores/compliance/FeatureGatedTokensRepository';
+import {DiscoveryDegradedReason} from './pool-discovery/discoveryDegraded';
 // Stub AGG_HOOKS_PER_CHAIN so the BestQuote leak-detection logic in UniRouteBL
 // has a stable, non-empty allow-list for MAINNET without depending on which hook
 // addresses are actually deployed in production.
@@ -629,8 +632,20 @@ describe('UniRouteBL', () => {
     );
   });
 
-  const serviceConfig = getUniRouteTestConfig(LambdaType.Sync);
-  const serviceConfigAsync = getUniRouteTestConfig(LambdaType.Async);
+  const serviceConfig: IUniRouteServiceConfig = {
+    ...getUniRouteTestConfig(LambdaType.Sync),
+    CachedRoutes: {
+      ...getUniRouteTestConfig(LambdaType.Sync).CachedRoutes,
+      HitDiscoveryEnabled: true,
+    },
+  };
+  const serviceConfigAsync: IUniRouteServiceConfig = {
+    ...getUniRouteTestConfig(LambdaType.Async),
+    CachedRoutes: {
+      ...getUniRouteTestConfig(LambdaType.Async).CachedRoutes,
+      HitDiscoveryEnabled: true,
+    },
+  };
   const chainRepository = new HardcodedChainRepository();
   const tokenProvider = new TokenProvider(
     new InMemoryRedisCache<string, TokenList>()
@@ -1104,7 +1119,7 @@ describe('UniRouteBL', () => {
       expect(secondResponse.hitsCachedRoutes).toBe(false);
     });
 
-    it('should use cached routes for FAST quote type in async mode (start with empty cache)', async () => {
+    it('reads the cache on a second FAST async quote while fresh discovery replaces its path', async () => {
       const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
@@ -1138,7 +1153,7 @@ describe('UniRouteBL', () => {
       const firstResponse = await uniRouteBL.quote(ctx, request);
       expect(firstResponse.hitsCachedRoutes).toBe(false);
 
-      // Second call should use cached routes because async/FAST should update cache
+      // The cache read still counts as a hit when fresh finds the same path.
       const secondResponse = await uniRouteBL.quote(ctx, request);
       expect(secondResponse.hitsCachedRoutes).toBe(true);
     });
@@ -1269,7 +1284,7 @@ describe('UniRouteBL', () => {
       expect(headers.get('x-no-route-cache-hit')).toBe('true');
     });
 
-    it('serves cached routes (not 404) when cliff hits but the positive cache has a route', async () => {
+    it('does not short-circuit when the cliff and a positive route cache hit coexist', async () => {
       // Seed positive route cache for the EXACT_IN / USDC pair / ETH input.
       const dummyRoute = new RouteBasic(Protocol.V2, [
         new V2Pool(
@@ -1328,7 +1343,7 @@ describe('UniRouteBL', () => {
         create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
       );
 
-      // Positive cache wins: no short-circuit, no header, hitsCachedRoutes=true.
+      // The positive cache prevents a short circuit and supplies a candidate.
       expect(response.error?.code).not.toBe(404);
       expect(response.hitsCachedRoutes).toBe(true);
       expect(headers.get('x-no-route-cache-hit')).toBeUndefined();
@@ -1877,9 +1892,13 @@ describe('UniRouteBL', () => {
       }
     }
 
+    const legacyConfig: IUniRouteServiceConfig = {
+      ...serviceConfig,
+      CachedRoutes: {...serviceConfig.CachedRoutes, HitDiscoveryEnabled: false},
+    };
     const buildBL = (routesRepository: IRoutesRepository) =>
       new UniRouteBL(
-        serviceConfig,
+        legacyConfig,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -2062,7 +2081,7 @@ describe('UniRouteBL', () => {
       expect(secondResponse.hitsCachedRoutes).toBe(false);
     });
 
-    it('should cache routes for all-Uniswap protocols in async mode (second call hits cache)', async () => {
+    it('should cache routes for all-Uniswap protocols in async mode (second call reads cache)', async () => {
       const request = create(QuoteRequestSchema, {
         ...baseRequest,
         tradeType: 'EXACT_IN',
@@ -2095,7 +2114,7 @@ describe('UniRouteBL', () => {
       const firstResponse = await uniRouteBL.quote(ctx, request);
       expect(firstResponse.hitsCachedRoutes).toBe(false);
 
-      // Async saves routes after first call → second call hits the cache
+      // Async saves routes after first call; the second read supplies a candidate.
       const secondResponse = await uniRouteBL.quote(ctx, request);
       expect(secondResponse.hitsCachedRoutes).toBe(true);
     });
@@ -2166,7 +2185,7 @@ describe('UniRouteBL', () => {
       protocols: `${Protocol.V2},${Protocol.V3},${Protocol.V4},${Protocol.MIXED},${Protocol.CURVESTABLESWAPNG}`,
     });
 
-    it('uniswap-only protocols hit getCachedRoutes and saveCachedRoutes regardless of AggHooks flags', async () => {
+    it('uniswap-only protocols read and save cached routes regardless of AggHooks flags', async () => {
       // Default config: AggHooksReadEnabled=false, AggHooksWriteEnabled=false
       const uniRouteBL = new UniRouteBL(
         serviceConfigAsync,
@@ -2195,7 +2214,7 @@ describe('UniRouteBL', () => {
       const firstResponse = await uniRouteBL.quote(ctx, uniswapOnlyRequest);
       expect(firstResponse.hitsCachedRoutes).toBe(false);
 
-      // Second call: cache hit from the save above
+      // Second call reads a cached candidate even if fresh finds the same path.
       const secondResponse = await uniRouteBL.quote(ctx, uniswapOnlyRequest);
       expect(secondResponse.hitsCachedRoutes).toBe(true);
     });
@@ -2290,6 +2309,7 @@ describe('UniRouteBL', () => {
           ...getUniRouteTestConfig(LambdaType.Async).CachedRoutes,
           AggHooksReadEnabled: true,
           AggHooksWriteEnabled: true,
+          HitDiscoveryEnabled: false,
         },
       };
 
@@ -8221,9 +8241,15 @@ describe('UniRouteBL', () => {
       // Use the fake repo that returns cached routes (usedCachedRoutes → true)
       // while the strategy still returns the agg-hook quote.
       const fakeRepo = new FakeCachedRoutesRepositoryWithHit();
-
+      const cacheOnlyConfig: IUniRouteServiceConfig = {
+        ...serviceConfig,
+        CachedRoutes: {
+          ...serviceConfig.CachedRoutes,
+          HitDiscoveryEnabled: false,
+        },
+      };
       const uniRouteBL = new UniRouteBL(
-        serviceConfig,
+        cacheOnlyConfig,
         redisCache,
         chainRepository,
         poolDiscoverer,
@@ -9000,6 +9026,1707 @@ describe('UniRouteBL', () => {
           expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
         });
       });
+    });
+  });
+
+  describe('advisory route cache on FAST quotes', () => {
+    class FakeDiscoveryRoutesRepository implements IRoutesRepository {
+      constructor(public getRoutes: IRoutesRepository['getRoutes']) {}
+
+      async fetchRoutesForTokens(): Promise<RouteDiscoveryResult> {
+        return {routes: [], degradedReasons: []};
+      }
+    }
+
+    class FakeRepricingQuoteFetcher implements IQuoteFetcher {
+      constructor(public fetchQuotes: IQuoteFetcher['fetchQuotes']) {}
+    }
+
+    class FakeUnfilteredCachedRoutesRepository
+      extends CachedRoutesRepository
+      implements ICachedRoutesRepository
+    {
+      constructor(
+        private readonly unfilteredRoutes: RouteBasic<Pool>[],
+        private readonly readGate?: Promise<void>,
+        private readonly onRead?: () => void
+      ) {
+        super(
+          redisCache,
+          serviceConfig,
+          new NoOpMessageQueue(),
+          FeatureGatedTokensRepository.empty()
+        );
+      }
+
+      override async readCachedRoutes(): Promise<CachedRoutesReadResult> {
+        this.onRead?.();
+        await this.readGate;
+        return {
+          perKeyReads: [],
+          totalValidRouteCount: this.unfilteredRoutes.length,
+        };
+      }
+
+      override async processCachedRoutesResult(): Promise<RouteBasic<Pool>[]> {
+        return this.unfilteredRoutes;
+      }
+    }
+
+    class FakeGatedNoRouteCacheRepository implements INoRouteCacheRepository {
+      constructor(
+        public getAmountCliff: INoRouteCacheRepository['getAmountCliff'],
+        public setAmountCliff: INoRouteCacheRepository['setAmountCliff']
+      ) {}
+    }
+
+    class FakeTaggedMetrics extends TestMetric {
+      readonly calls: {name: string; tags: string[]}[] = [];
+
+      override async count(
+        name: string,
+        value: number,
+        options?: MetricOptions
+      ): Promise<void> {
+        this.calls.push({name, tags: options?.tags ?? []});
+        await super.count(name, value, options);
+      }
+
+      has(name: string, ...tags: string[]): boolean {
+        return this.calls.some(
+          call =>
+            call.name === buildMetricKey(name) &&
+            tags.every(tag => call.tags.includes(tag))
+        );
+      }
+    }
+
+    class FakeRejectingAdvisoryMetrics
+      extends FakeTaggedMetrics
+      implements IMetrics
+    {
+      constructor(private readonly shouldReject: (name: string) => boolean) {
+        super();
+      }
+
+      override async count(
+        name: string,
+        value: number,
+        options?: MetricOptions
+      ): Promise<void> {
+        if (this.shouldReject(name)) {
+          throw new Error('advisory count unavailable');
+        }
+        await super.count(name, value, options);
+      }
+
+      override async dist(
+        name: string,
+        value: number,
+        options?: MetricOptions
+      ): Promise<void> {
+        if (this.shouldReject(name)) {
+          throw new Error('advisory distribution unavailable');
+        }
+        await super.dist(name, value, options);
+      }
+    }
+
+    const wrappedEth = new Address(
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+    );
+    const usdc = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    const allProtocols = [
+      Protocol.V2,
+      Protocol.V3,
+      Protocol.V4,
+      Protocol.MIXED,
+    ];
+    const amount = BigInt(baseRequest.amount);
+    const makeRoute = (id: number, percentage = 100) =>
+      new RouteBasic(
+        Protocol.V2,
+        [
+          new V2Pool(
+            wrappedEth,
+            usdc,
+            new Address(`0x${id.toString(16).padStart(40, '0')}`),
+            1000000000000n,
+            1000000000000n
+          ),
+        ],
+        percentage
+      );
+
+    const seedRoutes = async (
+      routes: RouteBasic<Pool>[],
+      tokenIn = wrappedEth,
+      tradeType = TradeType.ExactIn
+    ) => {
+      for (const bucket of Object.values(UsdBucket)) {
+        for (const route of routes) {
+          await cachedRoutesRepository.saveCachedRoutes(
+            EMPTY_NAMESPACE_CONTEXT,
+            allProtocols,
+            route,
+            ChainId.MAINNET,
+            tokenIn,
+            usdc,
+            tradeType,
+            amount,
+            bucket
+          );
+        }
+      }
+    };
+
+    const runCase = async (params: {
+      cached: RouteBasic<Pool>[];
+      fresh: RouteBasic<Pool>[];
+      amounts?: Map<string, bigint>;
+      gasCosts?: Map<string, bigint>;
+      degradedReasons?: DiscoveryDegradedReason[];
+      error?: Error;
+      hitDiscoveryEnabled?: boolean;
+      maxRoutes?: number;
+      nativeCached?: RouteBasic<Pool>[];
+      candidates?: (routes: RouteBasic<Pool>[]) => QuoteSplit[];
+      cliff?: boolean;
+      unfilteredCached?: boolean;
+      cacheReadGate?: Promise<void>;
+      cliffReadGate?: Promise<void>;
+      onCacheRead?: () => void;
+      discoveryResult?: Promise<RouteDiscoveryResult>;
+      tradeType?: 'EXACT_IN' | 'EXACT_OUT';
+      rejectAdvisoryMetrics?: boolean;
+      useRealStrategy?: boolean;
+      routeSplitPercentage?: number;
+      droppedRoutes?: number;
+      droppedRoutePoolPathKeys?: string[];
+      fetcherDrop?: (route: RouteBasic<Pool>) => boolean;
+      fetcherQuotes?: (route: RouteBasic<Pool>) => boolean;
+      scaleQuoteByPercentage?: boolean;
+      simulator?: ISimulator;
+      simulate?: boolean;
+      forceMixed?: boolean;
+      asyncMode?: boolean;
+    }) => {
+      const tradeType =
+        params.tradeType === 'EXACT_OUT'
+          ? TradeType.ExactOut
+          : TradeType.ExactIn;
+      await seedRoutes(params.cached, wrappedEth, tradeType);
+      if (params.nativeCached)
+        await seedRoutes(
+          params.nativeCached,
+          new Address(ADDRESS_ZERO),
+          tradeType
+        );
+      const seenRoutes: RouteBasic<Pool>[][] = [];
+      const seenConfigs: IUniRouteServiceConfig[] = [];
+      let discoveryCalls = 0;
+      const discovery = new FakeDiscoveryRoutesRepository(async () => {
+        discoveryCalls++;
+        if (params.error) throw params.error;
+        if (params.discoveryResult) return params.discoveryResult;
+        return {
+          routes: params.fresh,
+          degradedReasons: params.degradedReasons ?? [],
+        };
+      });
+      const strategy = new FakeQuoteStrategy(async (...args) => {
+        const config = args[7];
+        const routes = args[8];
+        const fetchReport = args[15];
+        if (params.droppedRoutes !== undefined && fetchReport) {
+          fetchReport.droppedRoutes = params.droppedRoutes;
+          fetchReport.droppedRoutePoolPathKeys =
+            params.droppedRoutePoolPathKeys;
+          if (params.droppedRoutePoolPathKeys) {
+            fetchReport.quotedRoutePoolPathKeys = routes
+              .filter(
+                route =>
+                  params.droppedRoutePoolPathKeys?.includes(
+                    route.poolPathKey()
+                  ) === false
+              )
+              .map(route => route.poolPathKey());
+          }
+        }
+        seenConfigs.push(config);
+        seenRoutes.push(routes);
+        return (
+          params.candidates?.(routes) ??
+          routes.map(
+            route =>
+              new QuoteSplit([
+                new QuoteBasic(
+                  route,
+                  params.amounts?.get(route.poolPathKey()) ?? 1234567890n,
+                  undefined,
+                  {
+                    gasUse: 150000n,
+                    gasPriceInWei: 30000000000n,
+                    gasCostInWei: 4500000000000000n,
+                    gasCostInEth: 0.0045,
+                    gasCostInQuoteToken:
+                      params.gasCosts?.get(route.poolPathKey()) ?? 0n,
+                  }
+                ),
+              ])
+          )
+        );
+      });
+      const config: IUniRouteServiceConfig = {
+        ...serviceConfig,
+        Lambda: params.asyncMode
+          ? serviceConfigAsync.Lambda
+          : serviceConfig.Lambda,
+        RouteFinder: {
+          ...serviceConfig.RouteFinder,
+          MaxRoutes: params.maxRoutes ?? serviceConfig.RouteFinder.MaxRoutes,
+          MaxSplits: params.simulate ? 7 : serviceConfig.RouteFinder.MaxSplits,
+          RouteSplitPercentage:
+            params.routeSplitPercentage ??
+            (params.useRealStrategy
+              ? 100
+              : serviceConfig.RouteFinder.RouteSplitPercentage),
+        },
+        GasEstimation: {
+          ...serviceConfig.GasEstimation,
+          Enabled: params.useRealStrategy
+            ? false
+            : serviceConfig.GasEstimation.Enabled,
+        },
+        Simulation: {
+          ...serviceConfig.Simulation,
+          Enabled: params.simulate ?? serviceConfig.Simulation.Enabled,
+          TopNQuotes: params.simulate ? 3 : serviceConfig.Simulation.TopNQuotes,
+        },
+        CachedRoutes: {
+          ...serviceConfig.CachedRoutes,
+          HitDiscoveryEnabled: params.hitDiscoveryEnabled ?? true,
+        },
+      };
+      const repricingFetcher = new FakeRepricingQuoteFetcher(
+        async (
+          _chain,
+          _tokenIn,
+          _tokenOut,
+          _amount,
+          routes,
+          _tradeType,
+          _ctx,
+          _metricTags,
+          _blockNumber,
+          _tokensInfo,
+          _supplementalHookCodeOverrides,
+          report
+        ) => {
+          const survivors = routes.filter(
+            route => !(params.fetcherDrop?.(route) ?? false)
+          );
+          const dropped = routes.length - survivors.length;
+          if (report && dropped > 0) {
+            report.droppedRoutes += dropped;
+            report.batchErrors.push(new Error('simulated dropped route'));
+            report.droppedRoutePoolPathKeys = routes
+              .filter(route => params.fetcherDrop?.(route) ?? false)
+              .map(route => route.poolPathKey());
+          }
+          return survivors
+            .filter(route => params.fetcherQuotes?.(route) ?? true)
+            .map(
+              route =>
+                new QuoteBasic(
+                  route,
+                  ((params.amounts?.get(route.poolPathKey()) ?? 1000000000n) *
+                    BigInt(
+                      params.scaleQuoteByPercentage ? route.percentage : 100
+                    )) /
+                    100n
+                )
+            );
+        }
+      );
+      const bl = new UniRouteBL(
+        config,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        discovery,
+        params.unfilteredCached || params.cacheReadGate || params.onCacheRead
+          ? new FakeUnfilteredCachedRoutesRepository(
+              params.cached,
+              params.cacheReadGate,
+              params.onCacheRead
+            )
+          : cachedRoutesRepository,
+        params.cliffReadGate
+          ? new FakeGatedNoRouteCacheRepository(
+              async (...args) => {
+                await params.cliffReadGate;
+                return noRouteCacheRepository.getAmountCliff(...args);
+              },
+              (...args) => noRouteCacheRepository.setAmountCliff(...args)
+            )
+          : noRouteCacheRepository,
+        params.useRealStrategy
+          ? new DeepQuoteStrategy(
+              repricingFetcher,
+              gasEstimateProvider,
+              noGasConverter,
+              routeQuoteAllocator,
+              quoteSelector,
+              tokenHandler,
+              new Map(),
+              freshPoolDetailsWrapper
+            )
+          : strategy,
+        params.simulator ?? dummySimulator,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      );
+      const handlerContext = createHandlerContext({
+        service: unirouteService,
+        method: unirouteService.method.quote,
+        protocolName: 'connect',
+        requestMethod: 'POST',
+        url: 'http://localhost/quote',
+      });
+      const ctx = buildTestContext(handlerContext);
+      if (params.cliff) {
+        await noRouteCacheRepository.setAmountCliff(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          ChainId.MAINNET,
+          wrappedEth,
+          usdc,
+          TradeType.ExactIn,
+          amount,
+          ctx
+        );
+      }
+      const metrics = params.rejectAdvisoryMetrics
+        ? new FakeRejectingAdvisoryMetrics(name =>
+            [
+              buildMetricKey('CachedRoutes.HitDiscovery'),
+              buildMetricKey('CachedRoutes.HitDiscovery.Latency.dist'),
+              buildMetricKey('CachedRoutes.FreshContribution'),
+            ].includes(name)
+          )
+        : new FakeTaggedMetrics();
+      ctx.metrics = metrics;
+      const quote = () =>
+        bl.quote(
+          ctx,
+          create(QuoteRequestSchema, {
+            ...baseRequest,
+            tradeType: params.tradeType ?? 'EXACT_IN',
+            forceMixed: params.forceMixed ?? false,
+            ...(params.simulate
+              ? {
+                  simulateFromAddress:
+                    '0x1234567890123456789012345678901234567890',
+                  recipient: '0x1234567890123456789012345678901234567890',
+                  slippageTolerance: 20,
+                }
+              : {}),
+          }),
+          params.simulate
+            ? {universalRouterVersion: UniversalRouterVersion.V2_0}
+            : undefined
+        );
+      return {
+        quote,
+        seenRoutes,
+        seenConfigs,
+        metrics,
+        logs: ctx.logger.outputs,
+        getDiscoveryCalls: () => discoveryCalls,
+        readCliff: () =>
+          noRouteCacheRepository.getAmountCliff(
+            EMPTY_NAMESPACE_CONTEXT,
+            allProtocols,
+            ChainId.MAINNET,
+            wrappedEth,
+            usdc,
+            tradeType,
+            ctx
+          ),
+      };
+    };
+
+    it('runs discovery on a hit, appends unique cached routes, and keeps the fresh instance on collision', async () => {
+      const cached = makeRoute(1);
+      const freshDuplicate = makeRoute(1, 10);
+      const freshOther = makeRoute(2);
+      const extraCached = makeRoute(3);
+      const run = await runCase({
+        cached: [cached, extraCached],
+        fresh: [freshDuplicate, freshOther],
+      });
+      await run.quote();
+      expect(run.getDiscoveryCalls()).toBe(1);
+      expect(run.seenRoutes[0][0]).toBe(freshDuplicate);
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual(
+        [freshDuplicate, freshOther, extraCached].map(route =>
+          route.poolPathKey()
+        )
+      );
+      expect(run.seenConfigs[0].RouteFinder).toEqual(serviceConfig.RouteFinder);
+      expect(
+        run.metrics.has(
+          'CachedRoutes.HitDiscovery',
+          'status:success',
+          'outcome:routes'
+        )
+      ).toBe(true);
+      expect(
+        run.metrics.distStore.filter(
+          item =>
+            item.metric_name ===
+            buildMetricKey('CachedRoutes.HitDiscovery.Latency.dist')
+        )
+      ).toHaveLength(1);
+    });
+
+    it('chooses a repriced fresh two-hop route and counts a greater than 500 bps contribution', async () => {
+      const cached = makeRoute(4);
+      const fresh = new RouteBasic(Protocol.V2, [
+        new V2Pool(
+          wrappedEth,
+          new Address('0x1111111111111111111111111111111111111111'),
+          new Address('0x0000000000000000000000000000000000000005'),
+          1n,
+          1n
+        ),
+        new V2Pool(
+          new Address('0x1111111111111111111111111111111111111111'),
+          usdc,
+          new Address('0x0000000000000000000000000000000000000006'),
+          1n,
+          1n
+        ),
+      ]);
+      const amounts = new Map([
+        [cached.poolPathKey(), 1000000000n],
+        [fresh.poolPathKey(), 2000000000n],
+      ]);
+      const run = await runCase({cached: [cached], fresh: [fresh], amounts});
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('2000000000');
+      expect(
+        run.metrics.has('CachedRoutes.FreshContribution', 'band:gt500')
+      ).toBe(true);
+    });
+
+    it('chooses one fresh route over a cached two-route split', async () => {
+      const cached = [makeRoute(21, 50), makeRoute(22, 50)];
+      const fresh = makeRoute(23);
+      const run = await runCase({
+        cached,
+        fresh: [fresh],
+        candidates: routes => {
+          const first = routes.find(
+            route => route.poolPathKey() === cached[0].poolPathKey()
+          );
+          const second = routes.find(
+            route => route.poolPathKey() === cached[1].poolPathKey()
+          );
+          const honest = routes.find(
+            route => route.poolPathKey() === fresh.poolPathKey()
+          );
+          if (!first || !second || !honest) return [];
+          return [
+            new QuoteSplit([
+              new QuoteBasic(first, 500000000n),
+              new QuoteBasic(second, 500000000n),
+            ]),
+            new QuoteSplit([new QuoteBasic(honest, 2000000000n)]),
+          ];
+        },
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('2000000000');
+      expect(response.route).toHaveLength(1);
+    });
+
+    it('finds an honest route when the cache contains only one repriced route', async () => {
+      const cached = makeRoute(24);
+      const fresh = makeRoute(25);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        amounts: new Map([
+          [cached.poolPathKey(), 1000000000n],
+          [fresh.poolPathKey(), 2000000000n],
+        ]),
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('2000000000');
+      expect(run.seenRoutes[0]).toHaveLength(2);
+    });
+
+    it('uses gas-adjusted amounts when a cached raw winner loses to fresh', async () => {
+      const cached = makeRoute(26);
+      const fresh = makeRoute(27);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        amounts: new Map([
+          [cached.poolPathKey(), 2000000000n],
+          [fresh.poolPathKey(), 1900000000n],
+        ]),
+        gasCosts: new Map([
+          [cached.poolPathKey(), 200000000n],
+          [fresh.poolPathKey(), 0n],
+        ]),
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('1900000000');
+      expect(
+        run.metrics.has('CachedRoutes.FreshContribution', 'band:gt500')
+      ).toBe(true);
+    });
+
+    it('does not mark a split winner with a cached ten-percent leg as all-cached', async () => {
+      const cached = makeRoute(28, 10);
+      const fresh = makeRoute(29, 90);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        candidates: routes => {
+          const cachedRoute = routes.find(
+            route => route.poolPathKey() === cached.poolPathKey()
+          );
+          const freshRoute = routes.find(
+            route => route.poolPathKey() === fresh.poolPathKey()
+          );
+          if (!cachedRoute || !freshRoute) return [];
+          return [
+            new QuoteSplit([new QuoteBasic(cachedRoute, 1000000000n)]),
+            new QuoteSplit([
+              new QuoteBasic(cachedRoute, 100000000n),
+              new QuoteBasic(freshRoute, 1900000000n),
+            ]),
+          ];
+        },
+      });
+      const response = await run.quote();
+      expect(response.route).toHaveLength(2);
+      expect(
+        run.metrics.has('CachedRoutes.FreshContribution', 'band:none')
+      ).toBe(false);
+      expect(
+        run.metrics.has('CachedRoutes.FreshContribution', 'band:gt500')
+      ).toBe(true);
+    });
+
+    it('d1: propagates discovery error on a cache hit', async () => {
+      const run = await runCase({
+        cached: [makeRoute(7)],
+        fresh: [],
+        error: new Error('probe failed'),
+      });
+      await expect(run.quote()).rejects.toThrow('probe failed');
+      expect(
+        run.metrics.has(
+          'CachedRoutes.HitDiscovery',
+          'status:failure',
+          'reason:discovery_error'
+        )
+      ).toBe(true);
+    });
+
+    it('d2: degraded-empty discovery on a hit answers no-route without caching it', async () => {
+      const run = await runCase({
+        cached: [makeRoute(7)],
+        fresh: [],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        asyncMode: true,
+      });
+      const response = await run.quote();
+      expect(response.error?.code).toBe(404);
+      expect(response.hitsCachedRoutes).toBe(false);
+      expect(await run.readCliff()).toBeUndefined();
+      expect(
+        run.metrics.has(
+          'CachedRoutes.HitDiscovery',
+          'status:failure',
+          'reason:discovery_degraded'
+        )
+      ).toBe(true);
+      expect(
+        run.metrics.has(
+          'NoRouteCache.WriteSkipped',
+          'reason:degraded_discovery'
+        )
+      ).toBe(true);
+    });
+
+    it('a degraded-empty discovery on a miss does not write the negative cache', async () => {
+      const run = await runCase({
+        cached: [],
+        fresh: [],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        asyncMode: true,
+      });
+      const response = await run.quote();
+      expect(response.error?.code).toBe(404);
+      expect(await run.readCliff()).toBeUndefined();
+      expect(
+        run.metrics.has(
+          'NoRouteCache.WriteSkipped',
+          'reason:degraded_discovery'
+        )
+      ).toBe(true);
+    });
+
+    it('w1: skips the negative cache after degraded routes quote to nothing on a miss', async () => {
+      const run = await runCase({
+        cached: [],
+        fresh: [makeRoute(989)],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+        candidates: () => [],
+        asyncMode: true,
+      });
+      const response = await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(1);
+      expect(response.error?.code).toBe(404);
+      expect(await run.readCliff()).toBeUndefined();
+      expect(
+        run.metrics.has(
+          'NoRouteCache.WriteSkipped',
+          'reason:degraded_discovery'
+        )
+      ).toBe(true);
+    });
+
+    it('w2: writes the negative cache after clean empty discovery', async () => {
+      const run = await runCase({cached: [], fresh: [], asyncMode: true});
+      const response = await run.quote();
+      expect(response.error?.code).toBe(404);
+      expect(await run.readCliff()).toBe(amount);
+      expect(run.metrics.has('NoRouteCache.WriteSkipped')).toBe(false);
+    });
+
+    it.each([
+      DiscoveryDegradedReason.PROBE_ERROR,
+      DiscoveryDegradedReason.PRIMARY_DISCOVERER_ERROR,
+    ])('serves a degraded non-empty fresh arm with %s', async reason => {
+      const fresh = makeRoute(990);
+      const cached = makeRoute(991);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        degradedReasons: [reason],
+      });
+      const response = await run.quote();
+      expect(response.error).toBeUndefined();
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual(
+        [fresh, cached].map(route => route.poolPathKey())
+      );
+      expect(
+        run.metrics.calls.filter(
+          call => call.name === buildMetricKey('CachedRoutes.HitDiscovery')
+        )
+      ).toHaveLength(1);
+      expect(
+        run.metrics.has(
+          'CachedRoutes.HitDiscovery',
+          'status:success',
+          'outcome:routes_degraded'
+        )
+      ).toBe(true);
+      expect(
+        run.metrics.has('CachedRoutes.HitDiscovery', 'status:failure')
+      ).toBe(false);
+    });
+
+    describe('quote fetch drops routes on a cache hit', () => {
+      // These run through the real DeepQuoteStrategy and report quote-fetch
+      // provenance independently of which splits survive stitching.
+      const routeA = makeRoute(980);
+      const routeB = makeRoute(981);
+
+      it('q1: answers no-route when quoting drops the only fresh route and the cached route wins', async () => {
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeB.poolPathKey(),
+          asyncMode: true,
+        });
+        const response = await run.quote();
+        expect(response.error?.code).toBe(404);
+        expect(response.hitsCachedRoutes).toBe(false);
+        expect(await run.readCliff()).toBeUndefined();
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery',
+            'status:failure',
+            'reason:quote_degraded'
+          )
+        ).toBe(true);
+        expect(
+          run.metrics.calls.filter(
+            call => call.name === buildMetricKey('CachedRoutes.HitDiscovery')
+          )
+        ).toHaveLength(1);
+        expect(
+          run.metrics.calls.some(
+            call =>
+              call.name === buildMetricKey('CachedRoutes.FreshContribution')
+          )
+        ).toBe(false);
+      });
+
+      it('q2: serves the surviving fresh route when it wins, counting outcome:routes', async () => {
+        const routeC = makeRoute(982);
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB, routeC],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeB.poolPathKey(),
+          amounts: new Map([
+            [routeA.poolPathKey(), 1000000000n],
+            [routeC.poolPathKey(), 2000000000n],
+          ]),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(response.quoteAmount).toBe('2000000000');
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery',
+            'status:success',
+            'outcome:routes'
+          )
+        ).toBe(true);
+        expect(
+          run.metrics.calls.some(
+            call =>
+              call.name === buildMetricKey('CachedRoutes.FreshContribution')
+          )
+        ).toBe(true);
+      });
+
+      it('q3: no drops, the cached route legitimately wins', async () => {
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB],
+          useRealStrategy: true,
+          amounts: new Map([
+            [routeA.poolPathKey(), 2000000000n],
+            [routeB.poolPathKey(), 1000000000n],
+          ]),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(response.quoteAmount).toBe('2000000000');
+        expect(
+          run.metrics.has('CachedRoutes.FreshContribution', 'band:none')
+        ).toBe(true);
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery',
+            'status:failure',
+            'reason:quote_degraded'
+          )
+        ).toBe(false);
+      });
+
+      it('q4: a miss with dropped routes is unaffected (no HitDiscovery count)', async () => {
+        const run = await runCase({
+          cached: [],
+          fresh: [routeA, routeB],
+          droppedRoutes: 1,
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(
+          run.metrics.calls.some(
+            call => call.name === buildMetricKey('CachedRoutes.HitDiscovery')
+          )
+        ).toBe(false);
+      });
+
+      it('q5: a fresh-verified winner on a full-overlap hit counts a partial drop', async () => {
+        const routeAFresh = makeRoute(980);
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeAFresh, routeB],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeB.poolPathKey(),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery',
+            'status:success',
+            'outcome:routes'
+          )
+        ).toBe(true);
+        const partialDrops = run.metrics.calls.filter(
+          call =>
+            call.name ===
+            buildMetricKey('CachedRoutes.HitDiscovery.PartialDrop')
+        );
+        expect(partialDrops).toHaveLength(1);
+        expect(partialDrops[0].tags).toContain('winner:fresh');
+      });
+
+      it('q6: a drop on a clean-empty cached batch stays outcome:empty, no quote_degraded', async () => {
+        const routeC = makeRoute(983);
+        const run = await runCase({
+          cached: [routeA, routeC],
+          fresh: [],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeC.poolPathKey(),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery',
+            'status:success',
+            'outcome:empty'
+          )
+        ).toBe(true);
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery',
+            'status:failure',
+            'reason:quote_degraded'
+          )
+        ).toBe(false);
+      });
+
+      it('q7: fresh quotes lose fairly while another fresh batch drops', async () => {
+        const routeC = makeRoute(984);
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB, routeC],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeC.poolPathKey(),
+          amounts: new Map([
+            [routeA.poolPathKey(), 2000000000n],
+            [routeB.poolPathKey(), 1000000000n],
+          ]),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(response.quoteAmount).toBe('2000000000');
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'outcome:routes')
+        ).toBe(true);
+        expect(
+          run.metrics.calls.filter(
+            call => call.name === buildMetricKey('CachedRoutes.HitDiscovery')
+          )
+        ).toHaveLength(1);
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'reason:quote_degraded')
+        ).toBe(false);
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery.PartialDrop',
+            'winner:cached'
+          )
+        ).toBe(true);
+        expect(
+          run.metrics.calls.filter(
+            call =>
+              call.name ===
+              buildMetricKey('CachedRoutes.HitDiscovery.PartialDrop')
+          )
+        ).toHaveLength(1);
+      });
+
+      it('q8: every fresh route drops while cached wins', async () => {
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeB.poolPathKey(),
+          asyncMode: true,
+        });
+        const response = await run.quote();
+        expect(response.error?.code).toBe(404);
+        expect(await run.readCliff()).toBeUndefined();
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'reason:quote_degraded')
+        ).toBe(true);
+      });
+
+      it('q9: cached batch drops while fresh receives no quote', async () => {
+        const routeC = makeRoute(985);
+        const run = await runCase({
+          cached: [routeA, routeC],
+          fresh: [routeB],
+          useRealStrategy: true,
+          fetcherDrop: route => route.poolPathKey() === routeC.poolPathKey(),
+          fetcherQuotes: route => route.poolPathKey() !== routeB.poolPathKey(),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'reason:quote_degraded')
+        ).toBe(false);
+        expect(run.metrics.has('CachedRoutes.HitDiscovery.PartialDrop')).toBe(
+          false
+        );
+        expect(
+          run.metrics.calls.some(
+            call =>
+              call.name === buildMetricKey('CachedRoutes.FreshContribution')
+          )
+        ).toBe(true);
+      });
+
+      it('t1: partial fresh quotes without a retained split do not fail the hit', async () => {
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB],
+          useRealStrategy: true,
+          routeSplitPercentage:
+            serviceConfigAsync.RouteFinder.RouteSplitPercentage,
+          fetcherQuotes: route =>
+            route.poolPathKey() === routeA.poolPathKey()
+              ? route.percentage === 100
+              : route.percentage ===
+                serviceConfigAsync.RouteFinder.RouteSplitPercentage,
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(
+          run.metrics.has('CachedRoutes.FreshContribution', 'band:none')
+        ).toBe(true);
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'status:failure')
+        ).toBe(false);
+      });
+
+      it('t2: simulation falls through from a fresh candidate to cached', async () => {
+        class SelectiveSimulator implements ISimulator {
+          async simulate(
+            _chainId: ChainId,
+            _swapOptions: unknown,
+            quoteSplit: QuoteSplit
+          ): Promise<QuoteSplit> {
+            const hasFresh = quoteSplit.quotes.some(
+              quote => quote.route.poolPathKey() === routeB.poolPathKey()
+            );
+            return {
+              ...quoteSplit,
+              simulationResult: {
+                estimatedGasUsed: 0n,
+                estimatedGasUsedInQuoteToken: 0n,
+                estimatedGasUsedInUSD: 0,
+                status: hasFresh
+                  ? SimulationStatus.FAILED
+                  : SimulationStatus.SUCCESS,
+              },
+            };
+          }
+        }
+        const buildTradeSpy = vi
+          .spyOn(await import('../lib/methodParameters'), 'buildTrade')
+          .mockImplementation(mockBuildTrade);
+        const buildSwapMethodParametersSpy = vi
+          .spyOn(
+            await import('../lib/methodParameters'),
+            'buildSwapMethodParameters'
+          )
+          .mockImplementation(mockBuildSwapMethodParameters);
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB],
+          useRealStrategy: true,
+          routeSplitPercentage:
+            serviceConfigAsync.RouteFinder.RouteSplitPercentage,
+          scaleQuoteByPercentage: true,
+          fetcherQuotes: route => route.percentage === 100,
+          amounts: new Map([
+            [routeA.poolPathKey(), 1000000000n],
+            [routeB.poolPathKey(), 2000000000n],
+          ]),
+          simulator: new SelectiveSimulator(),
+          simulate: true,
+        });
+        const response = await run.quote();
+        buildTradeSpy.mockRestore();
+        buildSwapMethodParametersSpy.mockRestore();
+        expect(response.error).toBeUndefined();
+        expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+        expect(response.quoteAmount).toBe('1000000000');
+        expect(
+          run.metrics.has('CachedRoutes.FreshContribution', 'band:none')
+        ).toBe(true);
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'status:failure')
+        ).toBe(false);
+      });
+
+      it('t3: a dropped fresh route and a quoted fresh loser count a cached-winner partial drop', async () => {
+        const routeC = makeRoute(986);
+        const run = await runCase({
+          cached: [routeA],
+          fresh: [routeB, routeC],
+          useRealStrategy: true,
+          routeSplitPercentage:
+            serviceConfigAsync.RouteFinder.RouteSplitPercentage,
+          scaleQuoteByPercentage: true,
+          fetcherDrop: route => route.poolPathKey() === routeC.poolPathKey(),
+          amounts: new Map([
+            [routeA.poolPathKey(), 2000000000n],
+            [routeB.poolPathKey(), 1000000000n],
+          ]),
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(response.quoteAmount).toBe('2000000000');
+        expect(
+          run.metrics.has(
+            'CachedRoutes.HitDiscovery.PartialDrop',
+            'winner:cached'
+          )
+        ).toBe(true);
+        expect(
+          run.metrics.has('CachedRoutes.HitDiscovery', 'reason:quote_degraded')
+        ).toBe(false);
+      });
+    });
+
+    it('serves cached routes on a clean-empty discovery', async () => {
+      const run = await runCase({cached: [makeRoute(8)], fresh: []});
+      const response = await run.quote();
+      expect(response.hitsCachedRoutes).toBe(true);
+      expect(
+        run.metrics.has(
+          'CachedRoutes.HitDiscovery',
+          'status:success',
+          'outcome:empty'
+        )
+      ).toBe(true);
+      expect(
+        run.metrics.has('Call', 'cachedRoutesStatus:hitWithDiscovery')
+      ).toBe(true);
+    });
+
+    it('does not append a cached route containing an aggregator-hook pool', async () => {
+      const cached = new RouteBasic(Protocol.V4, [
+        new V4Pool(
+          wrappedEth,
+          usdc,
+          3000,
+          60,
+          '0xaaaa000000000000000000000000000000000001',
+          1n,
+          `0x${'a'.repeat(64)}`,
+          1n,
+          0n
+        ),
+      ]);
+      const fresh = makeRoute(33);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        unfilteredCached: true,
+      });
+      await run.quote();
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+        fresh.poolPathKey(),
+      ]);
+      expect(
+        run.metrics.has('CachedRoutes.HitDiscovery', 'outcome:routes')
+      ).toBe(true);
+    });
+
+    it('collapses a cached V4 route with the same pool id but a different fee', async () => {
+      const poolId = `0x${'b'.repeat(64)}`;
+      const cached = new RouteBasic(Protocol.V4, [
+        new V4Pool(
+          wrappedEth,
+          usdc,
+          3000,
+          60,
+          ADDRESS_ZERO,
+          1n,
+          poolId,
+          1n,
+          0n
+        ),
+      ]);
+      const fresh = new RouteBasic(Protocol.V4, [
+        new V4Pool(wrappedEth, usdc, 500, 10, ADDRESS_ZERO, 1n, poolId, 1n, 0n),
+      ]);
+      const run = await runCase({cached: [cached], fresh: [fresh]});
+      await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(1);
+      expect(run.seenRoutes[0][0]).toBe(fresh);
+      expect(
+        run.metrics.distStore.some(
+          item =>
+            item.metric_name ===
+            buildMetricKey('CachedRoutes.HitDiscovery.Latency.dist')
+        )
+      ).toBe(true);
+    });
+
+    it('signals when validity filters remove every fresh route on a hit', async () => {
+      const cached = makeRoute(970);
+      // Invalid for a native-ETH input (baseRequest's tokenIn): first pool
+      // is ETH/WETH and the second touches ETH directly, the ROUTE-1695
+      // shape `isValidRoute` rejects.
+      const freshInvalidForNativeInput = new RouteBasic(Protocol.V2, [
+        new V2Pool(
+          new Address(ADDRESS_ZERO),
+          wrappedEth,
+          new Address('0x3333333333333333333333333333333333333333'),
+          1000000000000n,
+          1000000000000n
+        ),
+        new V2Pool(
+          new Address(ADDRESS_ZERO),
+          usdc,
+          new Address('0x4444444444444444444444444444444444444444'),
+          1000000000000n,
+          1000000000000n
+        ),
+      ]);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [freshInvalidForNativeInput],
+      });
+      const response = await run.quote();
+      expect(response.error).toBeUndefined();
+      expect(
+        run.metrics.has(
+          'CachedRoutes.FreshFilteredOut',
+          'status:failure',
+          'reason:validity_filters'
+        )
+      ).toBe(true);
+      expect(
+        run.metrics.calls.filter(
+          call => call.name === buildMetricKey('CachedRoutes.FreshFilteredOut')
+        )
+      ).toHaveLength(1);
+    });
+
+    it('counts outcome:routes once on a union hit that force-mixed 404s', async () => {
+      const cached = makeRoute(971);
+      const fresh = makeRoute(972);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        forceMixed: true,
+      });
+      const response = await run.quote();
+      expect(response.error?.code).toBe(404);
+      expect(
+        run.metrics.calls.filter(
+          call =>
+            call.name === buildMetricKey('CachedRoutes.HitDiscovery') &&
+            call.tags.includes('outcome:routes')
+        )
+      ).toHaveLength(1);
+    });
+
+    it('does not start discovery when the no-route cliff short-circuits', async () => {
+      const run = await runCase({cached: [], fresh: [], cliff: true});
+      const response = await run.quote();
+      expect(response.error?.code).toBe(404);
+      expect(run.getDiscoveryCalls()).toBe(0);
+      expect(run.metrics.has('CachedRoutes.HitDiscovery')).toBe(false);
+      expect(
+        run.metrics.has('Call', 'cachedRoutesStatus:noRouteCacheHit')
+      ).toBe(true);
+    });
+
+    it('c1: discovers and serves the union when a cliff hit has cached routes', async () => {
+      const cached = makeRoute(973);
+      const fresh = makeRoute(974);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        cliff: true,
+      });
+      const response = await run.quote();
+      expect(response.error).toBeUndefined();
+      expect(run.getDiscoveryCalls()).toBe(1);
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual(
+        [fresh, cached].map(route => route.poolPathKey())
+      );
+      expect(
+        run.metrics.has('Call', 'cachedRoutesStatus:hitWithDiscovery')
+      ).toBe(true);
+    });
+
+    it('p1: starts both cache reads before the cliff resolves', async () => {
+      let releaseCliff: () => void = () => undefined;
+      const cliffReadGate = new Promise<void>(resolve => {
+        releaseCliff = resolve;
+      });
+      let routesReadRequested = false;
+      const run = await runCase({
+        cached: [],
+        fresh: [],
+        cliff: true,
+        cliffReadGate,
+        onCacheRead: () => {
+          routesReadRequested = true;
+          releaseCliff();
+        },
+      });
+      const response = await run.quote();
+      expect(routesReadRequested).toBe(true);
+      expect(response.error?.code).toBe(404);
+      expect(run.getDiscoveryCalls()).toBe(0);
+    });
+
+    it('keeps all eight cached routes after 100 fresh routes', async () => {
+      const cached = Array.from({length: 8}, (_, index) =>
+        makeRoute(index + 11)
+      );
+      const fresh = Array.from({length: 100}, (_, index) =>
+        makeRoute(index + 101)
+      );
+      const run = await runCase({cached, fresh});
+      await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(108);
+      // The cache repository scores and sorts routes; equal scores retain
+      // the Redis read order, which is not fixed across runs.
+      expect(
+        run.seenRoutes[0]
+          .slice(-8)
+          .map(route => route.poolPathKey())
+          .sort()
+      ).toEqual(cached.map(route => route.poolPathKey()).sort());
+    });
+
+    it('appends a cached match beyond the fresh cap and lets it win', async () => {
+      const fresh = Array.from({length: 101}, (_, index) =>
+        makeRoute(index + 1300)
+      );
+      const cached = makeRoute(1400);
+      const run = await runCase({
+        cached: [cached],
+        fresh,
+        maxRoutes: 100,
+        unfilteredCached: true,
+        droppedRoutes: 1,
+        droppedRoutePoolPathKeys: [fresh[0].poolPathKey()],
+        amounts: new Map([[cached.poolPathKey(), 2000000000n]]),
+      });
+      const response = await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(101);
+      expect(run.seenRoutes[0][100]).toBe(cached);
+      expect(response.quoteAmount).toBe('2000000000');
+      expect(
+        run.metrics.has(
+          'CachedRoutes.HitDiscovery.PartialDrop',
+          'winner:cached'
+        )
+      ).toBe(true);
+    });
+
+    it('quotes one fresh instance when a cached match survives the cap', async () => {
+      const cached = makeRoute(1401);
+      const freshMatch = makeRoute(1401);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [freshMatch, makeRoute(1402)],
+        unfilteredCached: true,
+        amounts: new Map([[cached.poolPathKey(), 2000000000n]]),
+      });
+      const response = await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(2);
+      expect(run.seenRoutes[0][0]).toBe(freshMatch);
+      expect(response.quoteAmount).toBe('2000000000');
+      expect(response.hitsCachedRoutes).toBe(true);
+      expect(
+        run.metrics.has('CachedRoutes.FreshContribution', 'band:none')
+      ).toBe(true);
+    });
+
+    it('passes one overlapping route into the real quote strategy', async () => {
+      const cached = makeRoute(1403);
+      const freshMatch = makeRoute(1403);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [freshMatch],
+        unfilteredCached: true,
+        useRealStrategy: true,
+      });
+      const response = await run.quote();
+      expect(response.error).toBeUndefined();
+      expect(
+        run.logs.some(
+          log =>
+            log.msg === 'Starting fetchQuotes' && log.extra.totalPctRoutes === 1
+        )
+      ).toBe(true);
+      expect(
+        run.logs.some(
+          log => log.msg === 'DeepQuoteStrategy deduped duplicate quotes'
+        )
+      ).toBe(false);
+    });
+
+    it('bounds appended routes when a cache read returns more than both keys allow', async () => {
+      const bound =
+        serviceConfig.CachedRoutes.CachedRoutesToKeepAfterScoring * 2;
+      const cached = Array.from({length: bound + 3}, (_, index) =>
+        makeRoute(index + 1100)
+      );
+      const run = await runCase({
+        cached,
+        fresh: [makeRoute(1200)],
+        unfilteredCached: true,
+      });
+      await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(bound + 1);
+      expect(
+        run.seenRoutes[0].slice(1).map(route => route.poolPathKey())
+      ).toEqual(cached.slice(0, bound).map(route => route.poolPathKey()));
+    });
+
+    it('caps 100 fresh aggregator-hook routes before appending an ordinary cached route', async () => {
+      const cached = makeRoute(501);
+      const fresh = Array.from(
+        {length: 100},
+        (_, index) =>
+          new RouteBasic(Protocol.V4, [
+            new V4Pool(
+              wrappedEth,
+              usdc,
+              3000,
+              60,
+              '0xaaaa000000000000000000000000000000000001',
+              1n,
+              `0x${(index + 1).toString(16).padStart(64, '0')}`,
+              1n,
+              0n
+            ),
+          ])
+      );
+      const run = await runCase({cached: [cached], fresh});
+      await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(101);
+      expect(
+        run.seenRoutes[0].slice(0, 100).map(route => route.poolPathKey())
+      ).toEqual(fresh.map(route => route.poolPathKey()));
+      expect(run.seenRoutes[0][100].poolPathKey()).toBe(cached.poolPathKey());
+    });
+
+    it('caps a flag-on miss with 120 fresh routes at 100', async () => {
+      const fresh = Array.from({length: 120}, (_, index) =>
+        makeRoute(index + 601)
+      );
+      const run = await runCase({cached: [], fresh, maxRoutes: 100});
+      await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(100);
+    });
+
+    it('still caps a flag-off hit with 12 cached routes at eight', async () => {
+      const cached = Array.from({length: 12}, (_, index) =>
+        makeRoute(index + 801)
+      );
+      const run = await runCase({
+        cached,
+        fresh: [],
+        hitDiscoveryEnabled: false,
+        maxRoutes: 8,
+      });
+      await run.quote();
+      expect(run.seenRoutes[0]).toHaveLength(8);
+    });
+
+    it('starts discovery while the cache read is pending', async () => {
+      let releaseCache: () => void = () => undefined;
+      const cacheReadGate = new Promise<void>(resolve => {
+        releaseCache = resolve;
+      });
+      const run = await runCase({
+        cached: [makeRoute(901)],
+        fresh: [makeRoute(902)],
+        cacheReadGate,
+      });
+      const responsePromise = run.quote();
+      await vi.waitFor(() => expect(run.getDiscoveryCalls()).toBe(1));
+      expect(run.seenRoutes).toHaveLength(0);
+      releaseCache();
+      await responsePromise;
+    });
+
+    it('does not start rejected discovery when a pending cache read short-circuits', async () => {
+      let releaseCache: () => void = () => undefined;
+      const cacheReadGate = new Promise<void>(resolve => {
+        releaseCache = resolve;
+      });
+      const run = await runCase({
+        cached: [],
+        fresh: [],
+        error: new Error('discovery failed'),
+        cliff: true,
+        cacheReadGate,
+      });
+      const responsePromise = run.quote();
+      await Promise.resolve();
+      releaseCache();
+      const response = await responsePromise;
+      expect(response.error?.code).toBe(404);
+      expect(run.getDiscoveryCalls()).toBe(0);
+    });
+
+    it('returns a negative-cache short circuit without calling discovery', async () => {
+      const run = await runCase({
+        cached: [],
+        fresh: [],
+        cliff: true,
+      });
+      const response = await run.quote();
+      expect(response.error?.code).toBe(404);
+      expect(run.getDiscoveryCalls()).toBe(0);
+      expect(run.metrics.has('CachedRoutes.HitDiscovery')).toBe(false);
+    });
+
+    it('propagates a rejected fresh arm on a flag-on miss', async () => {
+      const run = await runCase({
+        cached: [],
+        fresh: [],
+        error: new Error('miss discovery failed'),
+      });
+      await expect(run.quote()).rejects.toThrow('miss discovery failed');
+    });
+
+    it('serves degraded fresh routes on a flag-on miss without a hit counter', async () => {
+      const run = await runCase({
+        cached: [],
+        fresh: [makeRoute(903)],
+        degradedReasons: [DiscoveryDegradedReason.PROBE_ERROR],
+      });
+      const response = await run.quote();
+      expect(response.error).toBeUndefined();
+      expect(run.seenRoutes[0]).toHaveLength(1);
+      expect(
+        run.metrics.calls.filter(
+          call => call.name === buildMetricKey('CachedRoutes.HitDiscovery')
+        )
+      ).toHaveLength(0);
+    });
+
+    it.each([
+      {improvementBps: 49, band: 'lt50'},
+      {improvementBps: 50, band: '50_500'},
+      {improvementBps: 500, band: '50_500'},
+      {improvementBps: 501, band: 'gt500'},
+    ])(
+      'counts the $band contribution at $improvementBps bps once',
+      async ({improvementBps, band}) => {
+        const cached = makeRoute(910);
+        const fresh = makeRoute(911);
+        const run = await runCase({
+          cached: [cached],
+          fresh: [fresh],
+          amounts: new Map([
+            [cached.poolPathKey(), 1000000000n],
+            [
+              fresh.poolPathKey(),
+              1000000000n + BigInt(improvementBps) * 100000n,
+            ],
+          ]),
+        });
+        await run.quote();
+        const counts = run.metrics.calls.filter(
+          call => call.name === buildMetricKey('CachedRoutes.FreshContribution')
+        );
+        expect(counts).toHaveLength(1);
+        expect(counts[0].tags).toContain(`band:${band}`);
+      }
+    );
+
+    it('counts none once when the cached candidate wins', async () => {
+      const cached = makeRoute(912);
+      const fresh = makeRoute(913);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        amounts: new Map([
+          [cached.poolPathKey(), 1000000000n],
+          [fresh.poolPathKey(), 900000000n],
+        ]),
+      });
+      await run.quote();
+      const counts = run.metrics.calls.filter(
+        call => call.name === buildMetricKey('CachedRoutes.FreshContribution')
+      );
+      expect(counts).toHaveLength(1);
+      expect(counts[0].tags).toContain('band:none');
+    });
+
+    it('counts a route that is both cached and fresh as cached for FreshContribution', async () => {
+      // The capped fresh instance covers the cached key, while provenance
+      // still records the cache read for FreshContribution.
+      const cachedDuplicate = makeRoute(950);
+      const extraCached = makeRoute(951);
+      const freshDuplicate = makeRoute(950, 10);
+      const run = await runCase({
+        cached: [cachedDuplicate, extraCached],
+        fresh: [freshDuplicate],
+        amounts: new Map([
+          [cachedDuplicate.poolPathKey(), 2000000000n],
+          [extraCached.poolPathKey(), 1000000000n],
+        ]),
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('2000000000');
+      expect(
+        run.metrics.has('CachedRoutes.FreshContribution', 'band:none')
+      ).toBe(true);
+    });
+
+    it('counts a band on a full-overlap hit', async () => {
+      // The cached candidate marks the call as a hit even though the capped
+      // fresh instance covers it. Provenance still measures fresh uplift.
+      const cachedAndFresh = makeRoute(952);
+      const freshOverlap = makeRoute(952);
+      const freshOnly = makeRoute(953);
+      const run = await runCase({
+        cached: [cachedAndFresh],
+        fresh: [freshOverlap, freshOnly],
+        amounts: new Map([
+          [cachedAndFresh.poolPathKey(), 1000000000n],
+          [freshOnly.poolPathKey(), 1600000000n],
+        ]),
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('1600000000');
+      expect(
+        run.metrics.has('Call', 'cachedRoutesStatus:hitWithDiscovery')
+      ).toBe(true);
+      const counts = run.metrics.calls.filter(
+        call => call.name === buildMetricKey('CachedRoutes.FreshContribution')
+      );
+      expect(counts).toHaveLength(1);
+      expect(counts[0].tags).toContain('band:gt500');
+    });
+
+    it('counts unavailable once without an all-cached quote candidate', async () => {
+      const cached = makeRoute(914);
+      const fresh = makeRoute(915);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        candidates: () => [
+          new QuoteSplit([new QuoteBasic(fresh, 1000000000n)]),
+        ],
+      });
+      await run.quote();
+      const counts = run.metrics.calls.filter(
+        call => call.name === buildMetricKey('CachedRoutes.FreshContribution')
+      );
+      expect(counts).toHaveLength(1);
+      expect(counts[0].tags).toContain('band:unavailable');
+      // `unavailable` is a failure to observe a comparison, not a successful
+      // measurement of "no uplift" — it must not carry status:success.
+      expect(counts[0].tags).toContain('status:failure');
+      expect(counts[0].tags).toContain('reason:unavailable');
+      expect(counts[0].tags).not.toContain('status:success');
+    });
+
+    it('uses the lower input for EXACT_OUT contribution', async () => {
+      const cached = makeRoute(916);
+      const fresh = makeRoute(917);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        tradeType: 'EXACT_OUT',
+        amounts: new Map([
+          [cached.poolPathKey(), 1000000000n],
+          [fresh.poolPathKey(), 950000000n],
+        ]),
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('950000000');
+      const counts = run.metrics.calls.filter(
+        call => call.name === buildMetricKey('CachedRoutes.FreshContribution')
+      );
+      expect(counts).toHaveLength(1);
+      expect(counts[0].tags).toContain('band:50_500');
+    });
+
+    it('contains rejected advisory telemetry writes', async () => {
+      const cached = makeRoute(918);
+      const fresh = makeRoute(919);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        rejectAdvisoryMetrics: true,
+      });
+      const response = await run.quote();
+      expect(response.error).toBeUndefined();
+    });
+
+    it('reprices cached and fresh pools through the real quote strategy', async () => {
+      const cached = makeRoute(920);
+      const fresh = makeRoute(921);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        useRealStrategy: true,
+        amounts: new Map([
+          [cached.poolPathKey(), 900000000n],
+          [fresh.poolPathKey(), 1100000000n],
+        ]),
+      });
+      const response = await run.quote();
+      expect(response.quoteAmount).toBe('1100000000');
+      expect(response.route[0].pools[0].address).toBe(
+        fresh.path[0].address.toString()
+      );
+    });
+
+    it('appends routes read from both native-token cache keys', async () => {
+      const wrapped = makeRoute(30);
+      const native = makeRoute(31);
+      const fresh = makeRoute(32);
+      const run = await runCase({
+        cached: [wrapped],
+        nativeCached: [native],
+        fresh: [fresh],
+      });
+      await run.quote();
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual(
+        [fresh, wrapped, native].map(route => route.poolPathKey())
+      );
+    });
+
+    it('keeps the cached-only path when hit discovery is disabled', async () => {
+      const cached = makeRoute(19);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [makeRoute(20)],
+        hitDiscoveryEnabled: false,
+      });
+      await run.quote();
+      expect(run.getDiscoveryCalls()).toBe(0);
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+        cached.poolPathKey(),
+      ]);
     });
   });
 });

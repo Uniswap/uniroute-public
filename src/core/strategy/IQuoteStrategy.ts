@@ -8,6 +8,7 @@ import {RouteBasic} from '../../models/route/RouteBasic';
 import {Pool} from '../../models/pool/Pool';
 import {Erc20Token} from '../../models/token/Erc20Token';
 import {CurrencyInfo} from '../../models/currency/CurrencyInfo';
+import {QuoteFetchReport} from '../../stores/quote/IQuoteFetcher';
 
 export interface IQuoteStrategy {
   findBestQuoteCandidates(
@@ -25,7 +26,8 @@ export interface IQuoteStrategy {
     blockNumber?: number,
     testAggHooks?: boolean,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
-    priorityFeePerGasWei?: bigint
+    priorityFeePerGasWei?: bigint,
+    fetchReport?: QuoteFetchReport
   ): Promise<QuoteSplit[]>;
 
   name(): string;

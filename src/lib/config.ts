@@ -1,6 +1,7 @@
 import {getEnv} from './otherUtils';
 import {
   parseBooleanEnvOrDefault,
+  parseBooleanEnvStrict,
   parseBoundedIntEnvOrDefault,
   parseBoundedIntEnvOrThrow,
   parsePositiveIntEnvOrDefault,
@@ -342,6 +343,8 @@ export interface IUniRouteServiceConfig {
   CachedRoutes: {
     // Whether to enable cached routes.
     Enabled: boolean;
+    // Run fresh discovery on every FAST request and treat cached routes as extra candidates. false restores the cached-only path, which is vulnerable to ROUTE-__PLACEHOLDER__.
+    HitDiscoveryEnabled: boolean;
     // Whether to enable getting agg-hook (external protocol) cached routes.
     AggHooksReadEnabled: boolean;
     // Whether to enable writing agg-hook (external protocol) cached routes.
@@ -546,7 +549,11 @@ export const getUniRouteSyncConfig = (
         getPoolDiscoverySnapshotParseWorkerMaxOldGenerationSizeMb(),
     },
     CachedRoutes: {
-      Enabled: true,
+      Enabled: parseBooleanEnvStrict('ROUTE_CACHE_ENABLED', true),
+      HitDiscoveryEnabled: parseBooleanEnvStrict(
+        'ROUTE_CACHE_HIT_DISCOVERY_ENABLED',
+        true
+      ),
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: true,
       Erc4626WrapperHooksReadEnabled: true,
@@ -689,7 +696,11 @@ export const getQuickRouteSyncConfig = (
         getPoolDiscoverySnapshotParseWorkerMaxOldGenerationSizeMb(),
     },
     CachedRoutes: {
-      Enabled: true,
+      Enabled: parseBooleanEnvStrict('ROUTE_CACHE_ENABLED', true),
+      HitDiscoveryEnabled: parseBooleanEnvStrict(
+        'ROUTE_CACHE_HIT_DISCOVERY_ENABLED',
+        true
+      ),
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: false,
       Erc4626WrapperHooksReadEnabled: true,

@@ -160,7 +160,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     blockNumber?: number,
     testAggHooks?: boolean,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
-    priorityFeePerGasWei?: bigint
+    priorityFeePerGasWei?: bigint,
+    callerFetchReport?: QuoteFetchReport
   ): Promise<QuoteSplit[]> {
     // Generate all possible partial routes per percentage step
     const pctRoutes: RouteBasic[] = [];
@@ -278,7 +279,23 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
         ...standardFetchReport.batchErrors,
         ...aggHookFetchReport.batchErrors,
       ],
+      droppedRoutePoolPathKeys: [
+        ...(standardFetchReport.droppedRoutePoolPathKeys ?? []),
+        ...(aggHookFetchReport.droppedRoutePoolPathKeys ?? []),
+      ],
+      quotedRoutePoolPathKeys: quotes.map(quote => quote.route.poolPathKey()),
     };
+    // Mirror the combined report back to the caller's object (if handed
+    // one), so UniRouteBL can judge whether a cache hit's fresh routes
+    // survived quoting without this strategy exposing its internals.
+    if (callerFetchReport) {
+      callerFetchReport.droppedRoutes = fetchReport.droppedRoutes;
+      callerFetchReport.batchErrors = fetchReport.batchErrors;
+      callerFetchReport.droppedRoutePoolPathKeys =
+        fetchReport.droppedRoutePoolPathKeys;
+      callerFetchReport.quotedRoutePoolPathKeys =
+        fetchReport.quotedRoutePoolPathKeys;
+    }
     await logElapsedTime('FetchQuotes', fetchQuotesStartTime, ctx, metricTags);
 
     // Update quotes with gas estimation details

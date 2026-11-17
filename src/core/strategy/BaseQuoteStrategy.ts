@@ -18,6 +18,7 @@ import {ITokenHandler} from '../../stores/token/ITokenHandler';
 import {ArbitrumGasDataProvider} from '../gas/gas-data-provider';
 import {ChainId} from '../../lib/config';
 import {IFreshPoolDetailsWrapper} from '../../stores/pool/FreshPoolDetailsWrapper';
+import {QuoteFetchReport} from '../../stores/quote/IQuoteFetcher';
 
 export abstract class BaseQuoteStrategy implements IQuoteStrategy {
   constructor(
@@ -51,7 +52,8 @@ export abstract class BaseQuoteStrategy implements IQuoteStrategy {
     blockNumber?: number,
     testAggHooks?: boolean,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
-    priorityFeePerGasWei?: bigint
+    priorityFeePerGasWei?: bigint,
+    fetchReport?: QuoteFetchReport
   ): Promise<QuoteSplit[]>;
 
   abstract name(): string;

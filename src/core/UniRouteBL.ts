@@ -52,7 +52,7 @@ import {Address} from '../models/address/Address';
 import {BlockNumberCache} from '../lib/blockNumberCache';
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {TradeType} from '../models/quote/TradeType';
-import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
+import {IQuoteFetcher, QuoteFetchReport} from '../stores/quote/IQuoteFetcher';
 import {OnChainQuoteFetchError} from '../stores/quote/OnChainQuoteFetchError';
 import {Chain} from '../models/chain/Chain';
 import {Pool} from '../models/pool/Pool';
@@ -175,6 +175,7 @@ import {
   summarizeRouteForLogging,
   summarizeRoutesForLogging,
   routeUsesHook,
+  routeUsesAggHook,
 } from '../lib/observability';
 import {capRoutesByAggHookClass} from '../lib/routeCap';
 import {
@@ -260,6 +261,10 @@ function totalQuoteAmountForQuoteSplit(quoteSplit: QuoteSplit): bigint {
 
 /** Split cap for quotes into a transfer-locked token (`applySingleRouteForLockedOutput`). */
 const LOCKED_OUTPUT_MAX_SPLITS = 1;
+const FRESH_CONTRIBUTION_LOW_BPS = 50n;
+const FRESH_CONTRIBUTION_HIGH_BPS = 500n;
+
+type CachedRoutesStatus = 'hit' | 'hitWithDiscovery' | 'miss';
 
 export class UniRouteBL implements IUniRoutedBL {
   // Config-derived internal state (same pattern as QuoteBestSplitFinder's
@@ -636,6 +641,63 @@ export class UniRouteBL implements IUniRoutedBL {
 
       let routes: RouteBasic<Pool>[] = [];
       let usedCachedRoutes = false;
+      const hitDiscoveryEnabled =
+        quoteType === QuoteType.Fast &&
+        shouldCheckCache &&
+        this.serviceConfig.CachedRoutes.HitDiscoveryEnabled;
+      // Keep cached instances separate until fresh routes have been capped.
+      const cachedRouteInstances = new Set<RouteBasic<Pool>>();
+      let appendedCachedPoolPathKeys = new Set<string>();
+      // Provenance: every cached route read on this request, including ones
+      // dropped for the agg-hook rule or re-found by fresh. Used to judge
+      // whether a winner's contribution actually came from fresh discovery.
+      const allCachedPoolPathKeys = new Set<string>();
+      // Tracks whether the cache read itself returned routes, independent of
+      // whether any of them ended up appended, so FreshContribution still
+      // gets a comparison on a full-overlap hit.
+      let cacheReadReturnedRoutes = false;
+      // Owed exactly once when fresh discovery produced the union 'routes'
+      // sub-outcome, regardless of whether the hit ultimately counts as a
+      // cache hit. Consumed at the
+      // forceMixed no-route early return or after the quote pipeline runs.
+      let pendingRoutesOutcome: string | undefined;
+      const fetchFresh = () =>
+        this.fetchFreshRoutes(
+          ctx,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          protocols,
+          tradeType,
+          fotInDirectSwap,
+          hooksOptions,
+          nsCtx,
+          options?.testAggHooks,
+          metricTags
+        );
+      const chainTag = `chain:${ChainId[chain.chainId]}`;
+      const countHitDiscovery = (resultTag: string, status: string) => {
+        void ctx.metrics
+          .count(buildMetricKey('CachedRoutes.HitDiscovery'), 1, {
+            tags: [chainTag, status, resultTag],
+          })
+          .catch(() => undefined);
+      };
+      let freshStartTime = 0;
+      let freshSettlement:
+        | Promise<
+            PromiseSettledResult<Awaited<ReturnType<typeof fetchFresh>>>[]
+          >
+        | undefined;
+      let freshLatencyMs: number | undefined;
+      const startFresh = () => {
+        freshStartTime = Date.now();
+        freshSettlement = Promise.allSettled([fetchFresh()]);
+        void freshSettlement.then(() => {
+          freshLatencyMs = Date.now() - freshStartTime;
+        });
+      };
+      let degradedDiscovery = false;
       if (quoteType === QuoteType.Fast && shouldCheckCache) {
         const cacheResult = await this.tryReadAndShortCircuitCache(
           ctx,
@@ -650,41 +712,103 @@ export class UniRouteBL implements IUniRoutedBL {
           quoteType,
           protocols,
           nsCtx,
-          metricTags
+          metricTags,
+          hitDiscoveryEnabled ? startFresh : undefined
         );
         if ('shortCircuit' in cacheResult) {
           await emitCallMetrics(metricTags);
           return cacheResult.shortCircuit;
         }
-        routes = cacheResult.routes;
-        usedCachedRoutes = cacheResult.usedCachedRoutes;
+        if (hitDiscoveryEnabled && !freshSettlement) {
+          // The cliff path starts fresh before returning routes.
+          // Guard a future caller that returns routes without starting it.
+          startFresh();
+        }
+        if (hitDiscoveryEnabled && freshSettlement) {
+          const [freshResult] = await freshSettlement;
+          const cached = cacheResult.routes;
+          if (cached.length === 0) {
+            if (freshResult.status === 'rejected') throw freshResult.reason;
+            routes = freshResult.value.routes;
+            degradedDiscovery = freshResult.value.degradedReasons.length > 0;
+          } else {
+            cacheReadReturnedRoutes = true;
+            // Filled before any de-dupe or agg-hook exclusion below, so a
+            // winner that fresh also found is still provenance-cached.
+            for (const route of cached) {
+              allCachedPoolPathKeys.add(route.poolPathKey());
+            }
+            if (freshResult.status === 'rejected') {
+              countHitDiscovery('reason:discovery_error', 'status:failure');
+              const error = freshResult.reason;
+              ctx.logger.warn('Fresh discovery failed on cache hit', {
+                chainId: chain.chainId,
+                errorName: error instanceof Error ? error.name : 'Unknown',
+              });
+              throw error;
+            }
+            const fresh = freshResult.value;
+            degradedDiscovery = fresh.degradedReasons.length > 0;
+            if (fresh.degradedReasons.length > 0 && fresh.routes.length === 0) {
+              countHitDiscovery('reason:discovery_degraded', 'status:failure');
+              routes = fresh.routes;
+              usedCachedRoutes = false;
+            } else if (fresh.routes.length === 0) {
+              routes = cached;
+              usedCachedRoutes = true;
+              for (const route of cached) {
+                cachedRouteInstances.add(route);
+              }
+              countHitDiscovery('outcome:empty', 'status:success');
+            } else {
+              pendingRoutesOutcome =
+                fresh.degradedReasons.length > 0
+                  ? 'outcome:routes_degraded'
+                  : 'outcome:routes';
+              // Aggregator-hook cached paths are excluded from the append so
+              // they never ride the cap's agg-hook budget; the clean-empty
+              // branch above has no fresh set to partition against and keeps
+              // them. Both branches are bounded in capRoutesAndObserve.
+              const cachedCandidates = cached.filter(
+                route => routeUsesAggHook(route, chain.chainId) === false
+              );
+              for (const route of cachedCandidates) {
+                cachedRouteInstances.add(route);
+              }
+              routes = [...fresh.routes, ...cachedCandidates];
+              usedCachedRoutes = cachedCandidates.length > 0;
+            }
+            if (usedCachedRoutes) {
+              // Kept as its own statement: chaining `.catch` makes the
+              // formatter wrap `ctx.metrics` and `.dist(` onto separate lines,
+              // which the `verify-dist-metric-coverage` matcher cannot see.
+              const hitDiscoveryLatencyDist = ctx.metrics.dist(
+                buildMetricKey('CachedRoutes.HitDiscovery.Latency.dist'),
+                freshLatencyMs ?? Date.now() - freshStartTime,
+                {tags: [chainTag]}
+              );
+              void hitDiscoveryLatencyDist.catch(() => undefined);
+            }
+          }
+        } else {
+          routes = cacheResult.routes;
+          usedCachedRoutes = cacheResult.usedCachedRoutes;
+        }
       }
-      if (routes.length === 0) {
-        // TODO(ROUTE-2624): consume fresh.degradedReasons in the cache-hit decision.
-        const fresh = await this.fetchFreshRoutes(
-          ctx,
-          chain,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          protocols,
-          tradeType,
-          fotInDirectSwap,
-          hooksOptions,
-          nsCtx,
-          options?.testAggHooks,
-          metricTags
-        );
+      if (!hitDiscoveryEnabled && routes.length === 0) {
+        const fresh = await fetchFresh();
         routes = fresh.routes;
+        degradedDiscovery = fresh.degradedReasons.length > 0;
       }
 
-      metricTags.push(
-        `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`
-      );
+      const cachedRoutesStatus: CachedRoutesStatus = usedCachedRoutes
+        ? hitDiscoveryEnabled
+          ? 'hitWithDiscovery'
+          : 'hit'
+        : 'miss';
+      metricTags.push(`cachedRoutesStatus:${cachedRoutesStatus}`);
 
-      const baseEffectiveConfig = this.selectEffectiveConfig(
-        usedCachedRoutes,
-        protocols
-      );
+      const baseEffectiveConfig = this.selectEffectiveConfig(protocols);
       const effectiveConfig = this.applySingleRouteForLockedOutput(
         this.applyRequestRoutingTimeBudget(
           baseEffectiveConfig,
@@ -702,6 +826,13 @@ export class UniRouteBL implements IUniRoutedBL {
             ? 'reduced'
             : 'original';
 
+      const routesBeforeValidityFilters = routes.length;
+      // True only when the union 'routes' outcome handed at least one fresh
+      // route to the filters below — a clean-empty hit is all-cached by
+      // construction and must never trip the FreshFilteredOut signal.
+      const hadFreshRouteBeforeValidityFilters = routes.some(
+        route => cachedRouteInstances.has(route) === false
+      );
       routes = await this.filterInvalidRoutes(
         ctx,
         routes,
@@ -710,6 +841,7 @@ export class UniRouteBL implements IUniRoutedBL {
         tokenOutCurrencyInfo,
         metricTags
       );
+      const routesAfterValidityFilters = routes.length;
 
       // The fresh-discovery fallback above keys on the pre-filter route
       // count, so a cached read whose routes are all invalid for this
@@ -720,14 +852,13 @@ export class UniRouteBL implements IUniRoutedBL {
       // and treat the request as a cache miss downstream — the routes in
       // play are fresh, and (in async mode) the cache-write path must not
       // skip persisting them as a double-write.
-      if (routes.length === 0 && usedCachedRoutes) {
+      if (!hitDiscoveryEnabled && routes.length === 0 && usedCachedRoutes) {
         usedCachedRoutes = false;
         await ctx.metrics.count(
           buildMetricKey('CachedRoutes.AllInvalidFreshFallback'),
           1,
           {tags: metricTags}
         );
-        // TODO(ROUTE-2624): consume fresh.degradedReasons in the cache-hit decision.
         const fresh = await this.fetchFreshRoutes(
           ctx,
           chain,
@@ -741,6 +872,7 @@ export class UniRouteBL implements IUniRoutedBL {
           options?.testAggHooks,
           metricTags
         );
+        degradedDiscovery = fresh.degradedReasons.length > 0;
         routes = await this.filterInvalidRoutes(
           ctx,
           fresh.routes,
@@ -764,6 +896,7 @@ export class UniRouteBL implements IUniRoutedBL {
           );
         }
       }
+      const routesAfterErc4626Filter = routes.length;
 
       if (routes.length > 0) {
         routes = await this.filterFotIntermediaryRoutes(
@@ -776,6 +909,7 @@ export class UniRouteBL implements IUniRoutedBL {
           tokensInfo
         );
       }
+      const routesAfterFotIntermediaryFilter = routes.length;
 
       if (tradeType === TradeType.ExactOut && routes.length > 0) {
         routes = routes.filter(
@@ -787,6 +921,7 @@ export class UniRouteBL implements IUniRoutedBL {
             )
         );
       }
+      const routesAfterExactOutWrapperHookFilter = routes.length;
 
       if (forceMixed) {
         const forceMixedResult = this.enforceForceMixed(
@@ -798,6 +933,9 @@ export class UniRouteBL implements IUniRoutedBL {
           usdBucket
         );
         if (forceMixedResult.forceMixedNoRouteResponse) {
+          if (pendingRoutesOutcome) {
+            countHitDiscovery(pendingRoutesOutcome, 'status:success');
+          }
           metricTags.push(`status:${QuoteStatus.NoRoute}`);
           metricTags.push('reason:force_mixed_no_route');
           await emitCallMetrics(metricTags);
@@ -805,20 +943,54 @@ export class UniRouteBL implements IUniRoutedBL {
         }
         routes = forceMixedResult.routes;
       }
+      const routesAfterForceMixed = routes.length;
 
-      routes = await this.capRoutesAndObserve(
+      // Signal (without failing the request — the filters are request-shape
+      // rules a miss applies too) when the request-shape filters above
+      // stripped every fresh route from a union hit, leaving only cached
+      // routes with no indication that fresh discovery's contribution was
+      // silently discarded rather than genuinely absent.
+      if (
+        cachedRoutesStatus === 'hitWithDiscovery' &&
+        hadFreshRouteBeforeValidityFilters &&
+        routes.length > 0 &&
+        routes.every(route => cachedRouteInstances.has(route))
+      ) {
+        void ctx.metrics
+          .count(buildMetricKey('CachedRoutes.FreshFilteredOut'), 1, {
+            tags: [chainTag, TAG_STATUS_FAILURE, 'reason:validity_filters'],
+          })
+          .catch(() => undefined);
+        ctx.logger.warn(
+          'Validity filters removed every fresh route on cache hit',
+          {
+            chainId: chain.chainId,
+            routesBeforeValidityFilters,
+            routesAfterValidityFilters,
+            routesAfterErc4626Filter,
+            routesAfterFotIntermediaryFilter,
+            routesAfterExactOutWrapperHookFilter,
+            routesAfterForceMixed,
+          }
+        );
+      }
+
+      const cappedRoutes = await this.capRoutesAndObserve(
         ctx,
         chain,
         tradeType,
         quoteType,
         hooksOptions,
         protocols,
-        usedCachedRoutes,
         options?.testAggHooks,
         routes,
         effectiveConfig,
-        routeFinderConfigTag
+        routeFinderConfigTag,
+        cachedRouteInstances,
+        cachedRoutesStatus
       );
+      routes = cappedRoutes.routes;
+      appendedCachedPoolPathKeys = cappedRoutes.appendedCachedPoolPathKeys;
 
       // Do some logging
       ctx.logger.debug(`Routes (${routes.length})`, {
@@ -836,12 +1008,7 @@ export class UniRouteBL implements IUniRoutedBL {
           .map(r => r.toString()),
       });
 
-      const {
-        bestQuoteCandidates,
-        bestQuote,
-        unviableRouteStrings,
-        incompleteSearch,
-      } = await this.runQuotePipeline(
+      const quotePipelineResult = await this.runQuotePipeline(
         ctx,
         chain,
         tokenInCurrencyInfo,
@@ -861,6 +1028,74 @@ export class UniRouteBL implements IUniRoutedBL {
         priorityFeePerGasWei,
         erc4626Snapshot?.hookCodeOverrides
       );
+      let {bestQuoteCandidates, bestQuote, incompleteSearch} =
+        quotePipelineResult;
+      const {
+        unviableRouteStrings,
+        droppedRoutes,
+        droppedRoutePoolPathKeys,
+        quotedRoutePoolPathKeys,
+      } = quotePipelineResult;
+
+      if (pendingRoutesOutcome) {
+        const winnerIsAppendedOnly =
+          bestQuote !== undefined &&
+          this.isAllCachedQuoteSplit(bestQuote, appendedCachedPoolPathKeys);
+        const freshRouteKeys = new Set(
+          routes
+            .filter(
+              route => !appendedCachedPoolPathKeys.has(route.poolPathKey())
+            )
+            .map(route => route.poolPathKey())
+        );
+        const freshRouteDropped = droppedRoutePoolPathKeys.some(key =>
+          freshRouteKeys.has(key)
+        );
+        const freshRouteQuoted = quotedRoutePoolPathKeys.some(key =>
+          freshRouteKeys.has(key)
+        );
+        if (winnerIsAppendedOnly && freshRouteDropped && !freshRouteQuoted) {
+          countHitDiscovery('reason:quote_degraded', 'status:failure');
+          ctx.logger.warn(
+            'Quote fetch dropped every fresh route that could have quoted on cache hit',
+            {chainId: chain.chainId, droppedRoutes}
+          );
+          incompleteSearch = true;
+          bestQuote = undefined;
+          bestQuoteCandidates = [];
+          usedCachedRoutes = false;
+          pendingRoutesOutcome = undefined;
+        }
+        if (freshRouteDropped && freshRouteQuoted) {
+          void ctx.metrics
+            .count(buildMetricKey('CachedRoutes.HitDiscovery.PartialDrop'), 1, {
+              // `winner:cached` is the residual a dashboard watches: a weak
+              // fresh survivor kept the request alive while better fresh
+              // routes dropped and a cached route won.
+              tags: [
+                chainTag,
+                TAG_STATUS_FAILURE,
+                'reason:dropped_routes',
+                `winner:${winnerIsAppendedOnly ? 'cached' : 'fresh'}`,
+              ],
+            })
+            .catch(() => undefined);
+        }
+        if (pendingRoutesOutcome) {
+          countHitDiscovery(pendingRoutesOutcome, 'status:success');
+        }
+      }
+
+      if (hitDiscoveryEnabled && cacheReadReturnedRoutes && !incompleteSearch) {
+        this.countFreshContribution(
+          ctx,
+          chain.chainId,
+          tradeType,
+          bestQuoteCandidates,
+          bestQuote,
+          allCachedPoolPathKeys
+        );
+      }
 
       let status = QuoteStatus.Pending;
       if (bestQuote) {
@@ -926,6 +1161,7 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes,
         shouldCheckCache,
         incompleteSearch,
+        degradedDiscovery,
         options,
         metricTags
       );
@@ -1224,8 +1460,11 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * Reads the no-route negative cache and the positive route cache in
-   * parallel, then resolves the interaction:
+   * Starts the no-route and positive cache reads together. With hit discovery
+   * enabled, awaits the cliff first and starts fresh discovery if it does not
+   * match, then awaits the positive routes. A matching cliff with positive
+   * routes also starts fresh discovery before returning those routes.
+   * When discovery is disabled, awaits both reads in parallel.
    *
    *   - If the negative cache says "no route at this amount" AND the
    *     positive cache returned nothing, short-circuit `quote()` with a
@@ -1235,10 +1474,7 @@ export class UniRouteBL implements IUniRoutedBL {
    *     read result (refresh trigger, score/slice, summary log/metrics)
    *     and return its output for the caller to use as the route list.
    *
-   * The parallel light read trades one extra Redis `ZRANGE` per
-   * no-route-cache-hit request (an empty key, typically) for ~5ms p50
-   * removed from the serial cache-check path. The positive cache wins
-   * on conflicts because cached routes are per-USD-bucket positive
+   * The positive cache wins on conflicts because cached routes are per-USD-bucket positive
    * evidence, whereas no-route is per-amount-cliff negative evidence.
    */
   private async tryReadAndShortCircuitCache(
@@ -1254,27 +1490,25 @@ export class UniRouteBL implements IUniRoutedBL {
     quoteType: QuoteType,
     protocols: Protocol[],
     nsCtx: RouteNamespaceContext,
-    metricTags: string[]
+    metricTags: string[],
+    startFresh?: () => void
   ): Promise<
     | {shortCircuit: QuoteResponse}
     | {routes: RouteBasic<Pool>[]; usedCachedRoutes: boolean}
   > {
-    // Transient Redis read failures are isolated inside readCachedRoutes
-    // (per-key allSettled emits CachedRoutes.PerKeyReadFailed and degrades
-    // to an empty per-key result). Any rejection that bubbles out here is
-    // a configuration error (e.g. assertCacheableProtocols) and should
-    // propagate — Promise.all matches that.
+    // A matching cliff still reads the positive cache before deciding, so
+    // bucket-specific positive evidence can override the amount cliff.
     const cacheReadStartTime = Date.now();
-    const [amountCliff, readResult] = await Promise.all([
-      this.noRouteCacheRepository.getAmountCliff(
-        nsCtx,
-        protocols,
-        chain.chainId,
-        tokenInCurrencyInfo.wrappedAddress,
-        tokenOutCurrencyInfo.wrappedAddress,
-        tradeType,
-        ctx
-      ),
+    const amountCliffPromise = this.noRouteCacheRepository.getAmountCliff(
+      nsCtx,
+      protocols,
+      chain.chainId,
+      tokenInCurrencyInfo.wrappedAddress,
+      tokenOutCurrencyInfo.wrappedAddress,
+      tradeType,
+      ctx
+    );
+    const readCachedRoutes = () =>
       this.cachedRoutesRepository.readCachedRoutes(
         nsCtx,
         chain.chainId,
@@ -1285,9 +1519,27 @@ export class UniRouteBL implements IUniRoutedBL {
         usdBucket,
         protocols,
         ctx
-      ),
-    ]);
-
+      );
+    let amountCliff: bigint | undefined;
+    let readResult: Awaited<ReturnType<typeof readCachedRoutes>>;
+    if (startFresh) {
+      const readResultPromise = readCachedRoutes();
+      amountCliff = await amountCliffPromise;
+      if (amountCliff === undefined || amountIn < amountCliff) startFresh();
+      readResult = await readResultPromise;
+      if (
+        amountCliff !== undefined &&
+        amountIn >= amountCliff &&
+        readResult.totalValidRouteCount > 0
+      ) {
+        startFresh();
+      }
+    } else {
+      [amountCliff, readResult] = await Promise.all([
+        amountCliffPromise,
+        readCachedRoutes(),
+      ]);
+    }
     const noRouteCliffHit =
       amountCliff !== undefined && amountIn >= amountCliff;
     const hasCachedRoutes = readResult.totalValidRouteCount > 0;
@@ -1396,11 +1648,12 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * Caps the route list to `effectiveConfig.RouteFinder.MaxRoutes` (which
-   * may be reduced on sync cache miss) and emits route-cap observability:
+   * Caps fresh routes to `effectiveConfig.RouteFinder.MaxRoutes` (which may
+   * be reduced on sync cache miss), then appends cached routes the capped
+   * fresh set does not already cover. On a miss, all routes are fresh. Emits:
    * a debug log with before/after counts + dropped-route summaries, plus
    * `RouteCap.*` count metrics by total / protocol / hop count. Returns
-   * the (possibly truncated) route list.
+   * the (possibly truncated) route list and appended cached keys.
    */
   private async capRoutesAndObserve(
     ctx: Context,
@@ -1409,19 +1662,41 @@ export class UniRouteBL implements IUniRoutedBL {
     quoteType: QuoteType,
     hooksOptions: HooksOptions,
     protocols: Protocol[],
-    usedCachedRoutes: boolean,
     testAggHooks: boolean | undefined,
     routes: RouteBasic<Pool>[],
     effectiveConfig: IUniRouteServiceConfig,
-    routeFinderConfigTag: string
-  ): Promise<RouteBasic<Pool>[]> {
+    routeFinderConfigTag: string,
+    cachedRouteInstances: ReadonlySet<RouteBasic<Pool>>,
+    cachedRoutesStatus: CachedRoutesStatus
+  ): Promise<{
+    routes: RouteBasic<Pool>[];
+    appendedCachedPoolPathKeys: Set<string>;
+  }> {
     const routesBeforeEffectiveSlice = routes;
+    const freshRoutes: RouteBasic<Pool>[] = [];
+    const cachedRoutes: RouteBasic<Pool>[] = [];
+    for (const route of routes) {
+      if (cachedRouteInstances.has(route)) {
+        cachedRoutes.push(route);
+      } else {
+        freshRoutes.push(route);
+      }
+    }
     const routeCapResult = capRoutesByAggHookClass(
-      routes,
+      freshRoutes,
       effectiveConfig.RouteFinder.MaxRoutes,
       chain.chainId
     );
-    const cappedRoutes = routeCapResult.routes;
+    const cappedFreshKeys = new Set(
+      routeCapResult.routes.map(route => route.poolPathKey())
+    );
+    const appendedCached = cachedRoutes
+      .filter(route => cappedFreshKeys.has(route.poolPathKey()) === false)
+      .slice(0, this.maxAppendedCachedRoutesPerHit());
+    const appendedCachedPoolPathKeys = new Set(
+      appendedCached.map(route => route.poolPathKey())
+    );
+    const cappedRoutes = [...routeCapResult.routes, ...appendedCached];
     const beforeRouteCounts = routeSetCountsForLogging(
       routesBeforeEffectiveSlice,
       chain.chainId
@@ -1437,7 +1712,7 @@ export class UniRouteBL implements IUniRoutedBL {
       quoteType,
       hooksOptions,
       protocols: protocols.join(',').toLowerCase(),
-      cachedRoutesStatus: usedCachedRoutes ? 'hit' : 'miss',
+      cachedRoutesStatus,
       maxRoutes: effectiveConfig.RouteFinder.MaxRoutes,
       capMode: routeCapResult.usedAggHookPartition
         ? 'per_agg_hook_class'
@@ -1463,7 +1738,7 @@ export class UniRouteBL implements IUniRoutedBL {
       `chain:${ChainId[chain.chainId]}`,
       `tradeType:${tradeType}`,
       `hooksOptions:${hooksOptions}`,
-      `cachedRoutesStatus:${usedCachedRoutes ? 'hit' : 'miss'}`,
+      `cachedRoutesStatus:${cachedRoutesStatus}`,
       `testAggHooks:${testAggHooks}`,
     ];
     const routeCapChainTag = `chain:${ChainId[chain.chainId]}`;
@@ -1563,13 +1838,14 @@ export class UniRouteBL implements IUniRoutedBL {
           )
       ),
     ]);
-    return cappedRoutes;
+    return {routes: cappedRoutes, appendedCachedPoolPathKeys};
   }
 
   /**
-   * Fetches fresh routes from the route repository when no cached routes are
-   * available. Hook-filtered requests retain the old bypass until variant
-   * cache keys are enabled, so a rollout can be reversed without stale data.
+   * Fetches fresh routes beside every FAST cache read when hit discovery is
+   * enabled, and on a miss or when the flag is off. Hook-filtered requests
+   * retain the old bypass until variant cache keys are enabled, so a rollout
+   * can be reversed without stale data.
    */
   private async fetchFreshRoutes(
     ctx: Context,
@@ -1616,18 +1892,131 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
-   * On sync cache miss, returns a config with reduced RouteFinder search
-   * space for lower latency when the protocol set is incomplete (missing
-   * one of v2/v3/v4/mixed, or external-only). Requests that include the
-   * full Uniswap-native set fall through to the unmodified service config
-   * regardless of whether external protocols are also present.
+   * Upper bound on cached routes appended to a hit's candidate set: each of
+   * the two cache keys serves at most the configured count, so the cache can
+   * never widen the candidate set past it. The one place the bound lives.
    */
-  private selectEffectiveConfig(
-    usedCachedRoutes: boolean,
-    protocols: Protocol[]
-  ): IUniRouteServiceConfig {
+  private maxAppendedCachedRoutesPerHit(): number {
+    return this.serviceConfig.CachedRoutes.CachedRoutesToKeepAfterScoring * 2;
+  }
+
+  /**
+   * True when every route in a quote split resolves to a pool-path key
+   * present in the given cached-route key set. Shared by the quote-degraded
+   * fail-closed check (against `appendedCachedPoolPathKeys`) and
+   * `countFreshContribution`'s provenance measurement (against
+   * `allCachedPoolPathKeys`) so the two never drift apart.
+   */
+  private isAllCachedQuoteSplit(
+    candidate: QuoteSplit,
+    cachedPoolPathKeys: ReadonlySet<string>
+  ): boolean {
+    return (
+      candidate.quotes.length > 0 &&
+      candidate.quotes.every(quote =>
+        cachedPoolPathKeys.has(quote.route.poolPathKey())
+      )
+    );
+  }
+
+  private countFreshContribution(
+    ctx: Context,
+    chainId: ChainId,
+    tradeType: TradeType,
+    candidates: QuoteSplit[],
+    winner: QuoteSplit | undefined,
+    allCachedPoolPathKeys: ReadonlySet<string>
+  ): void {
+    const metric = buildMetricKey('CachedRoutes.FreshContribution');
+    const chainTag = `chain:${ChainId[chainId]}`;
+    const countBand = (band: string) => {
+      // `unavailable` means the comparison itself could not be made (no
+      // winner, or no all-cached contender to measure against) — that is a
+      // failure to observe, not a successful measurement of "no uplift".
+      const tags =
+        band === 'unavailable'
+          ? [chainTag, TAG_STATUS_FAILURE, 'reason:unavailable', `band:${band}`]
+          : [chainTag, 'status:success', `band:${band}`];
+      try {
+        void ctx.metrics.count(metric, 1, {tags}).catch(() => undefined);
+      } catch {
+        // A synchronous metrics failure must not change the quote response.
+      }
+    };
+    try {
+      if (!winner) {
+        countBand('unavailable');
+        return;
+      }
+      const cachedOnly = candidates.filter(candidate =>
+        this.isAllCachedQuoteSplit(candidate, allCachedPoolPathKeys)
+      );
+      if (cachedOnly.length === 0) {
+        countBand('unavailable');
+        return;
+      }
+      if (this.isAllCachedQuoteSplit(winner, allCachedPoolPathKeys)) {
+        countBand('none');
+        return;
+      }
+      const useGasAdjusted = candidates.every(candidate =>
+        candidate.quotes.every(
+          quote => quote.gasDetails?.gasCostInQuoteToken !== undefined
+        )
+      );
+      const amount = (candidate: QuoteSplit): bigint => {
+        const raw = totalQuoteAmountForQuoteSplit(candidate);
+        if (!useGasAdjusted) return raw;
+        const gas = candidate.quotes.reduce(
+          (sum, quote) => sum + (quote.gasDetails?.gasCostInQuoteToken ?? 0n),
+          0n
+        );
+        return tradeType === TradeType.ExactIn ? raw - gas : raw + gas;
+      };
+      const bestCachedAmount = cachedOnly
+        .map(amount)
+        .reduce((best, current) =>
+          tradeType === TradeType.ExactIn
+            ? current > best
+              ? current
+              : best
+            : current < best
+              ? current
+              : best
+        );
+      if (bestCachedAmount <= 0n) {
+        countBand('unavailable');
+        return;
+      }
+      const winnerAmount = amount(winner);
+      const improvementBps =
+        ((tradeType === TradeType.ExactIn
+          ? winnerAmount - bestCachedAmount
+          : bestCachedAmount - winnerAmount) *
+          10000n) /
+        bestCachedAmount;
+      countBand(
+        improvementBps < FRESH_CONTRIBUTION_LOW_BPS
+          ? 'lt50'
+          : improvementBps <= FRESH_CONTRIBUTION_HIGH_BPS
+            ? '50_500'
+            : 'gt500'
+      );
+    } catch (error) {
+      countBand('unavailable');
+      ctx.logger.debug('Fresh contribution unavailable', {
+        errorName: error instanceof Error ? error.name : 'Unknown',
+      });
+    }
+  }
+
+  /**
+   * Returns the reduced RouteFinder config for a sync request whose protocol
+   * set is incomplete (missing one of v2/v3/v4/mixed, or external-only); such
+   * a request never reads the route cache, so this applies to misses only.
+   */
+  private selectEffectiveConfig(protocols: Protocol[]): IUniRouteServiceConfig {
     if (
-      !usedCachedRoutes &&
       this.serviceConfig.Lambda.Type === LambdaType.Sync &&
       this.serviceConfig.QuoteService === QuoteService.UniRoute &&
       !allUniswapNativeProtocolsIncludedAndMixed(protocols)
@@ -1994,9 +2383,13 @@ export class UniRouteBL implements IUniRoutedBL {
     bestQuote: QuoteSplit | undefined;
     unviableRouteStrings: string[];
     incompleteSearch: boolean;
+    droppedRoutes: number;
+    droppedRoutePoolPathKeys: string[];
+    quotedRoutePoolPathKeys: string[];
   }> {
     let bestQuoteCandidates: QuoteSplit[];
     let incompleteSearch = false;
+    const fetchReport: QuoteFetchReport = {droppedRoutes: 0, batchErrors: []};
     try {
       bestQuoteCandidates = await this.quoteStrategy.findBestQuoteCandidates(
         ctx,
@@ -2013,7 +2406,8 @@ export class UniRouteBL implements IUniRoutedBL {
         requestBlockNumber,
         options?.testAggHooks,
         supplementalHookCodeOverrides,
-        priorityFeePerGasWei
+        priorityFeePerGasWei,
+        fetchReport
       );
     } catch (error) {
       if (
@@ -2132,6 +2526,9 @@ export class UniRouteBL implements IUniRoutedBL {
       bestQuote,
       unviableRouteStrings,
       incompleteSearch,
+      droppedRoutes: fetchReport.droppedRoutes,
+      droppedRoutePoolPathKeys: fetchReport.droppedRoutePoolPathKeys ?? [],
+      quotedRoutePoolPathKeys: fetchReport.quotedRoutePoolPathKeys ?? [],
     };
   }
 
@@ -2297,6 +2694,7 @@ export class UniRouteBL implements IUniRoutedBL {
     usedCachedRoutes: boolean,
     shouldCheckCache: boolean,
     incompleteSearch: boolean,
+    degradedDiscovery: boolean,
     options: QuoteOptions | undefined,
     metricTags: string[]
   ): Promise<void> {
@@ -2317,6 +2715,7 @@ export class UniRouteBL implements IUniRoutedBL {
         usedCachedRoutes,
         shouldCheckCache,
         incompleteSearch,
+        degradedDiscovery,
         metricTags
       );
     } else {
@@ -2348,9 +2747,9 @@ export class UniRouteBL implements IUniRoutedBL {
    * so future sync requests at this amount or higher can short-circuit
    * without re-running the search. Also clears the pending refresh marker
    * so the next sync request at a *lower* amount can trigger a fresh
-   * refresh and ratchet the cliff down. An incomplete search (the quote
-   * fetch dropped routes) says nothing about whether a route exists, so it
-   * writes nothing and leaves the pending refresh marker to expire.
+   * refresh and ratchet the cliff down. An incomplete search or degraded
+   * discovery says nothing about whether a route exists, so it writes
+   * nothing and leaves the pending refresh marker to expire.
    */
   private async maybeWriteNoRouteCache(
     ctx: Context,
@@ -2365,14 +2764,20 @@ export class UniRouteBL implements IUniRoutedBL {
     usedCachedRoutes: boolean,
     shouldCheckCache: boolean,
     incompleteSearch: boolean,
+    degradedDiscovery: boolean,
     metricTags: string[]
   ): Promise<void> {
     if (usedCachedRoutes || !shouldCheckCache) {
       return;
     }
-    if (incompleteSearch) {
+    if (incompleteSearch || degradedDiscovery) {
       await ctx.metrics.count(buildMetricKey('NoRouteCache.WriteSkipped'), 1, {
-        tags: [...metricTags, 'reason:incomplete_search'],
+        tags: [
+          ...metricTags,
+          degradedDiscovery
+            ? 'reason:degraded_discovery'
+            : 'reason:incomplete_search',
+        ],
       });
       return;
     }

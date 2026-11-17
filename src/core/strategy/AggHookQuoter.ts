@@ -181,6 +181,7 @@ export async function fetchAggHookQuotes(
   // answer for that route (quoted, no quote). Any other failure leaves the
   // route unquoted: a dropped route, as a failed multicall batch is.
   const droppedRouteErrors: unknown[] = [];
+  const droppedRoutePoolPathKeys: string[] = [];
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i]!;
@@ -190,6 +191,10 @@ export async function fetchAggHookQuotes(
       failures++;
       if (classifyBatchFailure(result.reason) !== 'deterministic') {
         droppedRouteErrors.push(result.reason);
+        const droppedRoute = routes[i];
+        if (droppedRoute) {
+          droppedRoutePoolPathKeys.push(droppedRoute.poolPathKey());
+        }
       }
       const pool = routes[i]!.path[0] as V4Pool;
       ctx.logger.warn(
@@ -202,6 +207,7 @@ export async function fetchAggHookQuotes(
   if (report) {
     report.droppedRoutes = droppedRouteErrors.length;
     report.batchErrors = droppedRouteErrors;
+    report.droppedRoutePoolPathKeys = droppedRoutePoolPathKeys;
   }
 
   const latencyMs = Date.now() - startTime;

@@ -447,7 +447,10 @@ describe('fetchAggHookQuotes', () => {
     );
 
     expect(quotes).toHaveLength(1);
-    expect(report).toEqual({droppedRoutes: 1, batchErrors: [timeout]});
+    expect(report).toMatchObject({droppedRoutes: 1, batchErrors: [timeout]});
+    expect(report.droppedRoutePoolPathKeys).toEqual([
+      quotes[0].route.poolPathKey(),
+    ]);
   });
 
   it('reports a quote call the node answered with header not found as a dropped route', async () => {
@@ -471,7 +474,10 @@ describe('fetchAggHookQuotes', () => {
     );
 
     expect(quotes).toHaveLength(0);
-    expect(report).toEqual({droppedRoutes: 1, batchErrors: [headerNotFound]});
+    expect(report).toMatchObject({
+      droppedRoutes: 1,
+      batchErrors: [headerNotFound],
+    });
   });
 
   it('reports a quote call the ABI coder rejected as a dropped route, leaving its siblings quoted', async () => {
@@ -502,7 +508,10 @@ describe('fetchAggHookQuotes', () => {
 
     expect(quotes).toHaveLength(1);
     expect(quotes[0].amount).toBe(499950n);
-    expect(report).toEqual({droppedRoutes: 1, batchErrors: [coderRejection]});
+    expect(report).toMatchObject({
+      droppedRoutes: 1,
+      batchErrors: [coderRejection],
+    });
   });
 
   it('does not report a reverted quote call as a dropped route', async () => {
@@ -528,7 +537,7 @@ describe('fetchAggHookQuotes', () => {
     );
 
     expect(quotes).toHaveLength(0);
-    expect(report).toEqual({droppedRoutes: 0, batchErrors: []});
+    expect(report).toMatchObject({droppedRoutes: 0, batchErrors: []});
   });
 
   it('returns empty array when no provider available for chain', async () => {
