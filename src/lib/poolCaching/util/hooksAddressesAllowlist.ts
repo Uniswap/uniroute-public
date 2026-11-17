@@ -577,6 +577,24 @@ export const FEW_V2_SHELL_HOOK_ON_MAINNET =
   '0xbebc5239e446bc78b46654ad943b0fc19a31e088';
 export const FEW_V2_SHELL_HOOK_ON_MAINNET_2 =
   '0xb39aa0fea3d8940c1106059460934ccfb0212088';
+// STUUS min-buy hook
+export const STUUS_MIN_BUY_HOOK_ON_MAINNET =
+  '0x0e14d8ec45656ee16ad3cafcb9dfc6709fd68040';
+
+// USDD PSM aggregator
+export const USDD_PSM_HOOK_ON_MAINNET =
+  '0x013850fac166377480d148471f6243078c482888';
+export const USDD_PSM_HOOK_ON_BNB =
+  '0x88e77a3662954d369bfbb4560d72ae006224a888';
+// BinHook V2
+export const BIN_HOOK_V2_ON_ROBINHOOD =
+  '0x974215f4c6ce01dd2c52bcbb32e144d8e6722888';
+// Sinjoh launchpad hook
+export const SINJOH_PREFERRED_HOOK_ON_ROBINHOOD =
+  '0x4932a271bfb08c1a97f07d8bb85b876a378b6fec';
+// cETH LP-fee hook
+export const CETH_FEE_HOOK_ON_ROBINHOOD =
+  '0x051f8b642f1eb154bd39cc3fe11440bbada38000';
 
 // Origin-currency `balanceOf` storage slots (lowercased currency -> slot) for
 // the FewV2 Shell hooks on mainnet. Declared above ZLCA_HOOKS_PER_CHAIN, which
@@ -617,6 +635,12 @@ export const DUALPOOL_HOOK_ON_MAINNET =
 // wired to the Slipstream factory 0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef.
 export const SLIPSTREAM_AGG_HOOK_ON_BASE =
   '0xa1dfe862f1111f5e9d466fd4d7297d7d4fa76888';
+// Aerodrome Classic aggregator
+export const AERODROME_CLASSIC_AGGREGATOR_ON_BASE =
+  '0xa27c837fff49db0089f639a5ae2362c17f7b2888';
+// FountainUrm ERC-4626 wrapper
+export const FOUNTAIN_URM_HOOK_ON_BASE =
+  '0xe55a5e3d35ad2b0bbe3a0bf9ad13de2599d2e888';
 
 // Zero-liquidity external-fill adapters. Declared above ZLCA_HOOKS_PER_CHAIN,
 // which references them at module load.
@@ -760,6 +784,10 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.MAINNET]: {
     [LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
     [LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET]: {gasOverheadPerHop: 500_000n},
+    [USDD_PSM_HOOK_ON_MAINNET]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
     [DUALPOOL_HOOK_ON_MAINNET]: {gasOverheadPerHop: 3_000_000n},
     [ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET]: {gasOverheadPerHop: 250_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_MAINNET]: {gasOverheadPerHop: 50_000n},
@@ -799,6 +827,14 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   },
   [ChainId.BASE]: {
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    [AERODROME_CLASSIC_AGGREGATOR_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    [FOUNTAIN_URM_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
     },
@@ -849,11 +885,21 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
       },
     },
   },
+  [ChainId.BNB]: {
+    [USDD_PSM_HOOK_ON_BNB]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+  },
   [ChainId.XLAYER]: {
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_XLAYER]: {gasOverheadPerHop: 50_000n},
   },
   [ChainId.ROBINHOOD]: {
     [FLETH_HOOK_ON_ROBINHOOD]: {gasOverheadPerHop: 500_000n},
+    [BIN_HOOK_V2_ON_ROBINHOOD]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
   },
   [ChainId.INK]: {
     [FLETH_HOOK_ON_INK]: {gasOverheadPerHop: 500_000n},
@@ -2146,6 +2192,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     DIAMONDHANDSHOOK_ON_MAINNET,
     LITEPSM_AGGREGATOR_HOOK_USDS_ON_MAINNET,
     LITEPSM_AGGREGATOR_HOOK_DAI_ON_MAINNET,
+    USDD_PSM_HOOK_ON_MAINNET,
     DUALPOOL_HOOK_ON_MAINNET,
     LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
     FWATOKENHOOK_ON_MAINNET,
@@ -2196,6 +2243,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ASYMMETRIC_FEE_100BP_300BP_ON_MAINNET,
     ASTRA_HOOK_ON_MAINNET,
     VOLATILITY_GUARD_HOOK_V8_ON_MAINNET,
+    STUUS_MIN_BUY_HOOK_ON_MAINNET,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -2252,6 +2300,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.GNOSIS]: [ADDRESS_ZERO],
   [ChainId.MOONBEAM]: [ADDRESS_ZERO],
   [ChainId.BNB]: [
+    USDD_PSM_HOOK_ON_BNB,
     UNI_HOOKS_SHARED_ON_BNB,
     PANGEA_FEE_HOOK_V2_ON_BNB,
     ADDRESS_ZERO,
@@ -2428,6 +2477,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     REVERT_STABLE_SWAP_HOOK_ON_BASE,
     STONK_HOOK_ON_BASE,
     SLIPSTREAM_AGG_HOOK_ON_BASE,
+    AERODROME_CLASSIC_AGGREGATOR_ON_BASE,
+    FOUNTAIN_URM_HOOK_ON_BASE,
     B20_HOOK_ON_BASE,
     LAUNCH_HOOK_4_ON_BASE,
     LEVERAGED_LIQUIDITY_HOOK_ON_BASE,
@@ -2496,6 +2547,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.LINEA]: [ADDRESS_ZERO],
   [ChainId.MEGAETH]: [ADDRESS_ZERO],
   [ChainId.ROBINHOOD]: [
+    BIN_HOOK_V2_ON_ROBINHOOD,
+    SINJOH_PREFERRED_HOOK_ON_ROBINHOOD,
+    CETH_FEE_HOOK_ON_ROBINHOOD,
     INCOME_MARKET_HOOK_1000_ON_ROBINHOOD,
     SOVRN_HOOK_ON_ROBINHOOD,
     UP_ONLY_HOOK_ON_ROBINHOOD,
