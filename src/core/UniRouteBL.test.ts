@@ -64,6 +64,10 @@ import {V2Pool} from '../models/pool/V2Pool';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V4Pool} from '../models/pool/V4Pool';
 import {XSTOCK_WRAP_HOOKS_ON_MONAD} from '../lib/poolCaching/util/xStockWrapHooks';
+import {
+  isZlcaHookSettleBeforeSwap,
+  LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
+} from '../lib/poolCaching/util/hooksAddressesAllowlist';
 import {GasEstimateProvider} from './gas/estimator/GasEstimateProvider';
 import {NoGasEstimator} from './gas/estimator/IGasEstimator';
 import {ChainId} from '../lib/config';
@@ -151,6 +155,8 @@ vi.mock(
       >();
     return {
       isZlcaHookSettleBeforeSwap: actual.isZlcaHookSettleBeforeSwap,
+      LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET:
+        actual.LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
       getHookMinQuoteGasPerCall: actual.getHookMinQuoteGasPerCall,
       getHookMinSwapGasLimit: actual.getHookMinSwapGasLimit,
       MAX_HOOK_MIN_SWAP_GAS_LIMIT: actual.MAX_HOOK_MIN_SWAP_GAS_LIMIT,
@@ -10257,6 +10263,166 @@ describe('UniRouteBL', () => {
       expect(
         run.metrics.has('CachedRoutes.HitDiscovery', 'outcome:routes')
       ).toBe(true);
+    });
+
+    describe('EXACT_OUT routes through a settle-before-swap hook', () => {
+      const settleBeforeSwapRoute = () =>
+        new RouteBasic(Protocol.V4, [
+          new V4Pool(
+            wrappedEth,
+            usdc,
+            3000,
+            60,
+            LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
+            1n,
+            V4Pool.computePoolId(
+              wrappedEth,
+              usdc,
+              3000,
+              60,
+              LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET
+            ),
+            BigInt('79228162514264337593543950336'),
+            0n
+          ),
+        ]);
+      const droppedMetric = 'SettleBeforeSwapHooks.exactOutRouteDropped';
+
+      it('uses a hook flagged settle-before-swap on mainnet', () => {
+        expect(
+          isZlcaHookSettleBeforeSwap(
+            ChainId.MAINNET,
+            LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET
+          )
+        ).toBe(true);
+      });
+
+      it('drops a fresh route through the hook for EXACT_OUT and counts it', async () => {
+        const hooked = settleBeforeSwapRoute();
+        const plain = makeRoute(41);
+        const run = await runCase({
+          cached: [],
+          fresh: [hooked, plain],
+          tradeType: 'EXACT_OUT',
+        });
+        await run.quote();
+        expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+          plain.poolPathKey(),
+        ]);
+        expect(
+          run.metrics.has(droppedMetric, 'status:success', 'chain:MAINNET')
+        ).toBe(true);
+      });
+
+      it('drops a cached route through the hook for EXACT_OUT', async () => {
+        const hooked = settleBeforeSwapRoute();
+        const plain = makeRoute(42);
+        const run = await runCase({
+          cached: [hooked],
+          fresh: [plain],
+          tradeType: 'EXACT_OUT',
+          unfilteredCached: true,
+        });
+        await run.quote();
+        expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+          plain.poolPathKey(),
+        ]);
+        expect(run.metrics.has(droppedMetric, 'status:success')).toBe(true);
+      });
+
+      it('falls back to fresh discovery when hit discovery is off and every cached route uses the hook', async () => {
+        const hooked = settleBeforeSwapRoute();
+        const hookless = makeRoute(44);
+        const run = await runCase({
+          cached: [hooked],
+          fresh: [hookless],
+          tradeType: 'EXACT_OUT',
+          hitDiscoveryEnabled: false,
+        });
+        const response = await run.quote();
+        expect(response.error).toBeUndefined();
+        expect(response.hitsCachedRoutes).toBe(false);
+        expect(run.getDiscoveryCalls()).toBe(1);
+        expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+          hookless.poolPathKey(),
+        ]);
+        expect(run.metrics.has(droppedMetric, 'status:success')).toBe(true);
+        expect(run.metrics.has('CachedRoutes.AllInvalidFreshFallback')).toBe(
+          true
+        );
+        expect(
+          run.logs.some(
+            log =>
+              log.msg ===
+              'ExactOut settle-before-swap hook filter left no routes'
+          )
+        ).toBe(false);
+      });
+
+      it('warns when the hook filter leaves no route to quote', async () => {
+        const run = await runCase({
+          cached: [],
+          fresh: [settleBeforeSwapRoute()],
+          tradeType: 'EXACT_OUT',
+        });
+        await run.quote();
+        expect(run.seenRoutes.flat()).toEqual([]);
+        expect(
+          run.logs.find(
+            log =>
+              log.msg ===
+              'ExactOut settle-before-swap hook filter left no routes'
+          )
+        ).toMatchObject({
+          prefix: 'WARN:',
+          extra: {
+            chainId: ChainId.MAINNET,
+            tradeType: TradeType.ExactOut,
+            routesDropped: 1,
+          },
+        });
+      });
+
+      it('keeps the route for EXACT_IN and counts nothing', async () => {
+        const hooked = settleBeforeSwapRoute();
+        const plain = makeRoute(43);
+        const run = await runCase({
+          cached: [],
+          fresh: [hooked, plain],
+          tradeType: 'EXACT_IN',
+        });
+        await run.quote();
+        expect(
+          run.seenRoutes[0].map(route => route.poolPathKey()).sort()
+        ).toEqual([hooked.poolPathKey(), plain.poolPathKey()].sort());
+        expect(run.metrics.has(droppedMetric)).toBe(false);
+      });
+
+      it('keeps a hookless V4 route for EXACT_OUT and counts nothing', async () => {
+        const hookless = new RouteBasic(Protocol.V4, [
+          new V4Pool(
+            wrappedEth,
+            usdc,
+            3000,
+            60,
+            ADDRESS_ZERO,
+            1n,
+            V4Pool.computePoolId(wrappedEth, usdc, 3000, 60, ADDRESS_ZERO),
+            BigInt('79228162514264337593543950336'),
+            0n
+          ),
+        ]);
+        const run = await runCase({
+          cached: [],
+          fresh: [hookless],
+          tradeType: 'EXACT_OUT',
+        });
+        await run.quote();
+        expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+          hookless.poolPathKey(),
+        ]);
+        expect(run.metrics.has(droppedMetric)).toBe(false);
+      });
     });
 
     it('collapses a cached V4 route with the same pool id but a different fee', async () => {

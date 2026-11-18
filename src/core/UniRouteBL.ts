@@ -245,6 +245,16 @@ function computeUsdBucket(
 // Cap on RouteCandidate entries returned when includeRouteCandidates is set.
 export const MAX_ROUTE_CANDIDATES = 5;
 
+function routeUsesSettleBeforeSwapHook(
+  route: RouteBasic<Pool>,
+  chainId: number
+): boolean {
+  return route.path.some(
+    pool =>
+      pool instanceof V4Pool && isZlcaHookSettleBeforeSwap(chainId, pool.hooks)
+  );
+}
+
 // Canonical whole-split route key. Also the identity used to match a split
 // against simulation-failure records and the served quote — keep the three
 // in sync by always going through this helper.
@@ -833,14 +843,17 @@ export class UniRouteBL implements IUniRoutedBL {
       const hadFreshRouteBeforeValidityFilters = routes.some(
         route => cachedRouteInstances.has(route) === false
       );
-      routes = await this.filterInvalidRoutes(
+      const validRoutes = await this.filterInvalidRoutes(
         ctx,
         routes,
         chain,
         tokenInCurrencyInfo,
         tokenOutCurrencyInfo,
+        tradeType,
         metricTags
       );
+      routes = validRoutes.routes;
+      let settleBeforeSwapRoutesDropped = validRoutes.settleBeforeSwapDropped;
       const routesAfterValidityFilters = routes.length;
 
       // The fresh-discovery fallback above keys on the pre-filter route
@@ -873,13 +886,28 @@ export class UniRouteBL implements IUniRoutedBL {
           metricTags
         );
         degradedDiscovery = fresh.degradedReasons.length > 0;
-        routes = await this.filterInvalidRoutes(
+        const validFreshRoutes = await this.filterInvalidRoutes(
           ctx,
           fresh.routes,
           chain,
           tokenInCurrencyInfo,
           tokenOutCurrencyInfo,
+          tradeType,
           metricTags
+        );
+        routes = validFreshRoutes.routes;
+        settleBeforeSwapRoutesDropped +=
+          validFreshRoutes.settleBeforeSwapDropped;
+      }
+
+      if (routes.length === 0 && settleBeforeSwapRoutesDropped > 0) {
+        ctx.logger.warn(
+          'ExactOut settle-before-swap hook filter left no routes',
+          {
+            chainId: chain.chainId,
+            tradeType,
+            routesDropped: settleBeforeSwapRoutesDropped,
+          }
         );
       }
 
@@ -2097,8 +2125,11 @@ export class UniRouteBL implements IUniRoutedBL {
 
   /**
    * Drops routes that fail structural validity (wrong chain, native-token
-   * misuse, etc.). Always emits the `InvalidRoutesFiltered` count metric;
-   * also emits a debug log when any routes were dropped.
+   * misuse, etc.) and, for EXACT_OUT, routes through a settle-before-swap
+   * hook. Always emits the `InvalidRoutesFiltered` count metric; also emits a
+   * debug log when any routes were dropped. Runs before the cached-route
+   * fresh-discovery fallback, so a cache whose routes are all dropped here
+   * falls back to fresh discovery.
    */
   private async filterInvalidRoutes(
     ctx: Context,
@@ -2106,8 +2137,12 @@ export class UniRouteBL implements IUniRoutedBL {
     chain: Chain,
     tokenInCurrencyInfo: CurrencyInfo,
     tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
     metricTags: string[]
-  ): Promise<RouteBasic<Pool>[]> {
+  ): Promise<{
+    routes: RouteBasic<Pool>[];
+    settleBeforeSwapDropped: number;
+  }> {
     const unfilteredRoutesLength = routes.length;
     const invalidRoutes: string[] = [];
     const filteredRoutes = routes.filter(r => {
@@ -2135,7 +2170,25 @@ export class UniRouteBL implements IUniRoutedBL {
         invalidRoutes,
       });
     }
-    return filteredRoutes;
+
+    if (tradeType !== TradeType.ExactOut) {
+      return {routes: filteredRoutes, settleBeforeSwapDropped: 0};
+    }
+    // universal-router-sdk only encodes settle-before-swap hooks for
+    // EXACT_INPUT, so these routes cannot get calldata for EXACT_OUT.
+    const exactOutRoutes = filteredRoutes.filter(
+      route => !routeUsesSettleBeforeSwapHook(route, chain.chainId)
+    );
+    const settleBeforeSwapDropped =
+      filteredRoutes.length - exactOutRoutes.length;
+    if (settleBeforeSwapDropped > 0) {
+      await ctx.metrics.count(
+        buildMetricKey('SettleBeforeSwapHooks.exactOutRouteDropped'),
+        settleBeforeSwapDropped,
+        {tags: ['status:success', `chain:${ChainId[chain.chainId]}`]}
+      );
+    }
+    return {routes: exactOutRoutes, settleBeforeSwapDropped};
   }
 
   /**
