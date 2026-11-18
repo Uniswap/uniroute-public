@@ -29,12 +29,12 @@ describe('cacheConfig', () => {
   describe('createChainProtocols', () => {
     it('returns the V2/V3/V4 cron matrix', () => {
       const protocols = createChainProtocols();
-      expect(protocols).toHaveLength(59);
+      expect(protocols).toHaveLength(62);
       const byProtocol = (protocol: Protocol) =>
         protocols.filter(p => p.protocol === protocol).length;
-      expect(byProtocol(Protocol.V3)).toBe(20);
-      expect(byProtocol(Protocol.V2)).toBe(18);
-      expect(byProtocol(Protocol.V4)).toBe(21);
+      expect(byProtocol(Protocol.V3)).toBe(21);
+      expect(byProtocol(Protocol.V2)).toBe(19);
+      expect(byProtocol(Protocol.V4)).toBe(22);
     });
 
     it('lists every combo once', () => {

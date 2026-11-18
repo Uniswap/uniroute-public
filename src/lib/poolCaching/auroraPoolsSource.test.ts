@@ -5058,6 +5058,9 @@ describe('AURORA_SUPPORTED_TARGETS', () => {
       '57073:V2',
       '57073:V3',
       '57073:V4',
+      '99901:V2',
+      '99901:V3',
+      '99901:V4',
     ]) {
       expect(AURORA_SUPPORTED_TARGETS.has(key)).toBe(true);
     }
@@ -5077,6 +5080,9 @@ describe('Aurora registry lookups', () => {
     );
     expect(WRAPPED_NATIVE_BY_CHAIN.get(57073)).toBe(
       '0x4200000000000000000000000000000000000006'
+    );
+    expect(WRAPPED_NATIVE_BY_CHAIN.get(99901)).toBe(
+      '0xba876237b0f021a6c6d852d6c26e107997cc5e81'
     );
   });
 

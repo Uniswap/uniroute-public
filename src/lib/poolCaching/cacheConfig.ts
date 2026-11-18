@@ -136,6 +136,7 @@ const V3_CHAIN_IDS: readonly ChainId[] = [
   CHAIN_ID_ROBINHOOD,
   CHAIN_ID_ARC,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 const V2_CHAIN_IDS: readonly ChainId[] = [
@@ -157,6 +158,7 @@ const V2_CHAIN_IDS: readonly ChainId[] = [
   CHAIN_ID_ROBINHOOD,
   CHAIN_ID_ARC,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 const V4_CHAIN_IDS: readonly ChainId[] = [
@@ -181,6 +183,7 @@ const V4_CHAIN_IDS: readonly ChainId[] = [
   CHAIN_ID_ROBINHOOD,
   CHAIN_ID_ARC,
   ChainId.INK,
+  ChainId.ELYSIUM,
 ];
 
 // The chains with an aggregator-hook allowlist. A chain whose list is empty

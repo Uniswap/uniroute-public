@@ -184,6 +184,11 @@ const MAJOR_TOKENS_BY_CHAIN: MajorTokensByChain = {
     '0xf1815bd50389c46847f0bda824ec8da914045d14', // USDC.e
     '0x0000000000000000000000000000000000000000', // Native ETH
   ],
+  [ChainId.ELYSIUM]: [
+    '0xba876237b0f021a6c6d852d6c26e107997cc5e81', // WHYPE
+    '0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65', // USDC
+    '0x0000000000000000000000000000000000000000', // Native HYPE
+  ],
 };
 
 function parseAddressList(value: unknown): string[] {
