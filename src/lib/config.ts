@@ -898,6 +898,7 @@ export enum MetricFailureReason {
   /** A periodic pass was skipped because the previous one is still running. */
   IN_FLIGHT = 'in_flight',
   REDIS_READ_ERROR = 'redis_read_error',
+  REDIS_WRITE_ERROR = 'redis_write_error',
   SQS_SEND_ERROR = 'sqs_send_error',
   ZLCA_QUOTER_PRICE_UNAVAILABLE = 'zlca_quoter_price_unavailable',
   /** The larger ZLCA price probe reverted; the first answer was kept. */

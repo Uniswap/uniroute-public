@@ -8195,6 +8195,7 @@ describe('UniRouteBL', () => {
               aggHookExcludedCount: 0,
               staticFeeCapExcludedCount: 0,
               denylistedHookExcludedCount: 0,
+              unadmittedHookExcludedCount: 0,
               validRoutes: [{route, expiresAtMs: Date.now() + 60_000}],
             },
           ],

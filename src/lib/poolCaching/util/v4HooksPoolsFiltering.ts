@@ -13,11 +13,13 @@ import {
   getPermissionedHookDeployments,
   PermissionedHookDeployment,
 } from '@uniswap/lib-sharedconfig/permissionedTokens';
-import {HOOKS_ADDRESSES_ALLOWLIST} from './hooksAddressesAllowlist';
 import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
+import {
+  getLowercasedAllowlistedHooks,
+  passesUnvettedHookGate,
+} from './hookAdmission';
 import {ChainId} from '@uniswap/sdk-core';
 import {PriorityQueue} from '@datastructures-js/priority-queue';
-import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
 import {Logger} from '../sor-providers/util/log';
 import {IMetric} from '../sor-providers/util/metric';
@@ -109,9 +111,11 @@ function isHooksPoolRoutable(
 
   return (
     isFeeTierWithinSanityCeiling(pool) &&
-    (pool.hooks === ADDRESS_ZERO ||
-      (!hookPermissions(pool.hooks).unvettedAdmissionBlocked &&
-        !isDynamicFeePool(pool, chainId, logger)))
+    passesUnvettedHookGate(
+      pool.hooks,
+      () => isDynamicFeePool(pool, chainId, logger),
+      hook => hookPermissions(hook).unvettedAdmissionBlocked
+    )
   );
 }
 
@@ -138,7 +142,7 @@ export function v4HooksPoolsFiltering(
     PriorityQueue<V4SubgraphPool>
   > = {};
   const allowlistedHooksAddresses = new Set(
-    (HOOKS_ADDRESSES_ALLOWLIST[chainId] ?? []).map(hook => hook.toLowerCase())
+    getLowercasedAllowlistedHooks(chainId)
   );
   // Hooks admitted ONLY via factory discovery (not also statically listed).
   // Their pools get a per-hook cap below: static entries are vetted per-hook

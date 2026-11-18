@@ -1,14 +1,15 @@
-import {describe, it, expect, vi} from 'vitest';
+import {afterEach, describe, it, expect, vi} from 'vitest';
 import {utils} from 'ethers';
 import {v4HooksPoolsFiltering} from './v4HooksPoolsFiltering';
 import {blocksUnvettedHookAdmission} from '@uniswap/lib-v4-hooks';
-import {ChainId, Token} from '@uniswap/sdk-core';
+import {ChainId, Token, WETH9} from '@uniswap/sdk-core';
 import {ADDRESS_ZERO} from '@uniswap/router-sdk';
 import {DYNAMIC_FEE_FLAG, Pool} from '@uniswap/v4-sdk';
 import {V4SubgraphPool} from '../sor-providers/v4/subgraphProvider';
 import type {Logger} from '../sor-providers/util/log';
 import {IMetric} from '../sor-providers/util/metric';
 import {
+  ACCUMULATION_HOOK_ON_MAINNET,
   ZORA_CREATOR_HOOK_ON_BASE_v1,
   ZORA_POST_HOOK_ON_BASE_v1,
   ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1 as _ZORA_CREATOR_HOOK_ON_BASE_v1_0_0_1,
@@ -18,9 +19,18 @@ import {
   CLANKER_DYNAMIC_FEE_HOOKS_ADDRESS_ON_UNICHAIN,
   HOOKS_ADDRESSES_ALLOWLIST,
 } from './hooksAddressesAllowlist';
-import {HOOKS_ADDRESSES_DENYLIST} from './hooksAddressesDenylist';
+import {
+  HOOKS_ADDRESSES_DENYLIST,
+  QUOTER_EXEMPT_HOOKS_ON_MAINNET,
+} from './hooksAddressesDenylist';
+import {isHookAdmissible} from './hookAdmission';
+import {
+  resetDynamicZlcaHooksForTest,
+  setDynamicZlcaHooks,
+} from './dynamicZlcaHooks';
 import {computeV4PoolId} from './v4PoolIdFast';
 import {
+  getPermissionedHookDeployments,
   PermissionedHookDeployment,
   PERMISSIONED_HOOK_STUB_BYTECODE,
   PERMISSIONED_HOOKS_BY_CHAIN,
@@ -2342,5 +2352,79 @@ describe('dynamic fee hooks excluded from unvetted admission', () => {
     }).not.toThrow();
     // The malformed pool is dropped; the rest of the batch survives.
     expect(result.map(p => p.id)).toEqual([healthyPool.id]);
+  });
+});
+
+describe('v4HooksPoolsFiltering hook-level admission matches isHookAdmissible', () => {
+  const chainId = ChainId.MAINNET;
+  const tickSpacing = 60;
+  const [permissionedDeployment] = getPermissionedHookDeployments(chainId);
+  const [adapter] = permissionedDeployment.adapters;
+  const adapterToken = new Token(chainId, adapter.address, adapter.decimals);
+  const weth = WETH9[chainId];
+  // Custom-accounting bit only: admitted solely through the dynamic ZLCA set.
+  const zlcaHook = '0x0000000000000000000000000000000000000008';
+
+  // An owned adapter against a major token on a canonical fee tier, so the
+  // pool-level rules (permissioned ownership, PoolKey bounds, fee ceiling)
+  // pass and only the hook decides.
+  const buildPool = (hooks: string, fee: number): V4SubgraphPool =>
+    createPool({
+      id: Pool.getPoolId(adapterToken, weth, fee, tickSpacing, hooks),
+      hooks,
+      feeTier: String(fee),
+      tickSpacing: String(tickSpacing),
+      token0: {
+        id: adapter.address,
+        symbol: 'PA',
+        name: 'Permissioned Adapter',
+        decimals: String(adapter.decimals),
+      },
+      token1: {
+        id: weth.address.toLowerCase(),
+        symbol: 'WETH',
+        name: 'Wrapped Ether',
+        decimals: '18',
+      },
+    });
+
+  afterEach(() => {
+    resetDynamicZlcaHooksForTest();
+  });
+
+  it.each([
+    ['hookless', ADDRESS_ZERO, 3000],
+    ['hookless, dynamic fee', ADDRESS_ZERO, DYNAMIC_FEE_FLAG],
+    ['allowlisted swap hook', ACCUMULATION_HOOK_ON_MAINNET, 3000],
+    [
+      'allowlisted swap hook, dynamic fee',
+      ACCUMULATION_HOOK_ON_MAINNET,
+      DYNAMIC_FEE_FLAG,
+    ],
+    ['denylisted hook', QUOTER_EXEMPT_HOOKS_ON_MAINNET[0], 3000],
+    ['permissioned hook', permissionedDeployment.hookAddress, 3000],
+    ['dynamic ZLCA hook', zlcaHook, 3000],
+    ['unlisted swap hook', '0x0000000000000000000000000000000000000080', 3000],
+    ['unlisted inert hook', '0x0000000000000000000000000000000000000100', 3000],
+    [
+      'unlisted inert hook, dynamic fee',
+      '0x0000000000000000000000000000000000000100',
+      DYNAMIC_FEE_FLAG,
+    ],
+  ])('%s', (_name, hook, fee) => {
+    setDynamicZlcaHooks(chainId, new Map([[zlcaHook, 500_000n]]));
+    const pool = buildPool(hook, fee);
+
+    const kept = v4HooksPoolsFiltering(
+      chainId,
+      [pool],
+      mockLogger,
+      mockMetric,
+      new Set([zlcaHook])
+    ).some(keptPool => keptPool.id === pool.id);
+
+    expect(kept).toBe(
+      isHookAdmissible(chainId, hook, () => fee === DYNAMIC_FEE_FLAG)
+    );
   });
 });
