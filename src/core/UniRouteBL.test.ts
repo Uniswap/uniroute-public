@@ -20,6 +20,7 @@ import {constants} from 'ethers';
 import {IQuoteSelector} from './quote/selector/IQuoteSelector';
 import {describe, expect, it, beforeEach, vi} from 'vitest';
 import {UniRouteBL} from './UniRouteBL';
+import {TokenMetadataChainSelection} from '../stores/token/storage/tokenMetadataChainSelection';
 import {
   buildMetricKey,
   getUniRouteTestConfig,
@@ -9299,6 +9300,7 @@ describe('UniRouteBL', () => {
       degradedReasons?: DiscoveryDegradedReason[];
       error?: Error;
       hitDiscoveryEnabled?: boolean;
+      hitDiscoveryChains?: TokenMetadataChainSelection;
       maxRoutes?: number;
       nativeCached?: RouteBasic<Pool>[];
       candidates?: (routes: RouteBasic<Pool>[]) => QuoteSplit[];
@@ -9417,6 +9419,7 @@ describe('UniRouteBL', () => {
         CachedRoutes: {
           ...serviceConfig.CachedRoutes,
           HitDiscoveryEnabled: params.hitDiscoveryEnabled ?? true,
+          HitDiscoveryChains: params.hitDiscoveryChains ?? 'all',
         },
       };
       const repricingFetcher = new FakeRepricingQuoteFetcher(
@@ -10998,6 +11001,57 @@ describe('UniRouteBL', () => {
       expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
         cached.poolPathKey(),
       ]);
+    });
+
+    it('runs discovery on a hit when the chain is in the allowlist', async () => {
+      const cached = makeRoute(21);
+      const fresh = makeRoute(22);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [fresh],
+        hitDiscoveryChains: new Set([ChainId.MAINNET, ChainId.ROBINHOOD]),
+      });
+      await run.quote();
+      expect(run.getDiscoveryCalls()).toBe(1);
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+        fresh.poolPathKey(),
+        cached.poolPathKey(),
+      ]);
+      expect(
+        run.metrics.has('Call', 'cachedRoutesStatus:hitWithDiscovery')
+      ).toBe(true);
+      expect(
+        run.metrics.has('CachedRoutes.HitDiscovery', 'outcome:routes')
+      ).toBe(true);
+    });
+
+    it('keeps the cached-only hit path when the chain is outside the allowlist', async () => {
+      const cached = makeRoute(23);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [makeRoute(24)],
+        hitDiscoveryChains: new Set([ChainId.ROBINHOOD]),
+      });
+      await run.quote();
+      expect(run.getDiscoveryCalls()).toBe(0);
+      expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+        cached.poolPathKey(),
+      ]);
+      expect(run.metrics.has('Call', 'cachedRoutesStatus:hit')).toBe(true);
+      expect(run.metrics.has('CachedRoutes.HitDiscovery')).toBe(false);
+    });
+
+    it('keeps the cached-only hit path when the boolean is off even on a listed chain', async () => {
+      const cached = makeRoute(25);
+      const run = await runCase({
+        cached: [cached],
+        fresh: [makeRoute(26)],
+        hitDiscoveryEnabled: false,
+        hitDiscoveryChains: new Set([ChainId.MAINNET]),
+      });
+      await run.quote();
+      expect(run.getDiscoveryCalls()).toBe(0);
+      expect(run.metrics.has('CachedRoutes.HitDiscovery')).toBe(false);
     });
   });
 });

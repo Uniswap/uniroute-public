@@ -77,6 +77,7 @@ import {Protocol} from '../models/pool/Protocol';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V2Pool} from '../models/pool/V2Pool';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
+import {isChainSelected} from '../stores/token/storage/tokenMetadataChainSelection';
 import {
   IRoutesRepository,
   RouteDiscoveryResult,
@@ -654,7 +655,7 @@ export class UniRouteBL implements IUniRoutedBL {
       const hitDiscoveryEnabled =
         quoteType === QuoteType.Fast &&
         shouldCheckCache &&
-        this.serviceConfig.CachedRoutes.HitDiscoveryEnabled;
+        this.isHitDiscoveryEnabledForChain(chain.chainId);
       // Keep cached instances separate until fresh routes have been capped.
       const cachedRouteInstances = new Set<RouteBasic<Pool>>();
       let appendedCachedPoolPathKeys = new Set<string>();
@@ -1869,6 +1870,22 @@ export class UniRouteBL implements IUniRoutedBL {
       ),
     ]);
     return {routes: cappedRoutes, appendedCachedPoolPathKeys};
+  }
+
+  /**
+   * Whether a FAST cache hit on `chainId` runs fresh discovery alongside the
+   * cached routes. Both the deployment-wide boolean and the per-chain
+   * allowlist must admit the chain; otherwise the hit takes the cached-only
+   * path.
+   */
+  private isHitDiscoveryEnabledForChain(chainId: ChainId): boolean {
+    return (
+      this.serviceConfig.CachedRoutes.HitDiscoveryEnabled &&
+      isChainSelected(
+        this.serviceConfig.CachedRoutes.HitDiscoveryChains,
+        chainId
+      )
+    );
   }
 
   /**

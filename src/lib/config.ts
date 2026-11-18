@@ -9,6 +9,10 @@ import {
   parseStringArrayRecordEnvOrEmpty,
 } from './envParsing';
 import {MAX_REFRESH_JITTER_PERCENT} from './refreshJitter';
+import {
+  parseChainListStrictOrAll,
+  TokenMetadataChainSelection,
+} from '../stores/token/storage/tokenMetadataChainSelection';
 
 // Only the S3-backed protocols have a BaseCachingPoolDiscoverer instance to
 // prewarm (external-protocol agg-hook pools aren't served from this cache).
@@ -345,6 +349,8 @@ export interface IUniRouteServiceConfig {
     Enabled: boolean;
     // Run fresh discovery on every FAST request and treat cached routes as extra candidates. false restores the cached-only path, which is vulnerable to ROUTE-__PLACEHOLDER__.
     HitDiscoveryEnabled: boolean;
+    // Chains hit discovery runs on when HitDiscoveryEnabled is true ('all' or an explicit set). A chain outside the set takes the cached-only hit path.
+    HitDiscoveryChains: TokenMetadataChainSelection;
     // Whether to enable getting agg-hook (external protocol) cached routes.
     AggHooksReadEnabled: boolean;
     // Whether to enable writing agg-hook (external protocol) cached routes.
@@ -554,6 +560,11 @@ export const getUniRouteSyncConfig = (
         'ROUTE_CACHE_HIT_DISCOVERY_ENABLED',
         true
       ),
+      HitDiscoveryChains: parseChainListStrictOrAll(
+        'ROUTE_CACHE_HIT_DISCOVERY_CHAINS',
+        process.env.ROUTE_CACHE_HIT_DISCOVERY_CHAINS,
+        SUPPORTED_CHAIN_IDS
+      ),
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: true,
       Erc4626WrapperHooksReadEnabled: true,
@@ -700,6 +711,11 @@ export const getQuickRouteSyncConfig = (
       HitDiscoveryEnabled: parseBooleanEnvStrict(
         'ROUTE_CACHE_HIT_DISCOVERY_ENABLED',
         true
+      ),
+      HitDiscoveryChains: parseChainListStrictOrAll(
+        'ROUTE_CACHE_HIT_DISCOVERY_CHAINS',
+        process.env.ROUTE_CACHE_HIT_DISCOVERY_CHAINS,
+        SUPPORTED_CHAIN_IDS
       ),
       AggHooksReadEnabled: true,
       AggHooksWriteEnabled: false,
@@ -969,6 +985,11 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.INK,
   ChainId.ELYSIUM,
 ];
+
+/** `SUPPORTED_CHAINS` as a set, for validating chain-list env vars. */
+export const SUPPORTED_CHAIN_IDS: ReadonlySet<number> = new Set<number>(
+  SUPPORTED_CHAINS
+);
 
 export const V2_SUPPORTED = [
   ChainId.MAINNET,
