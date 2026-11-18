@@ -596,24 +596,6 @@ export const SINJOH_PREFERRED_HOOK_ON_ROBINHOOD =
 export const CETH_FEE_HOOK_ON_ROBINHOOD =
   '0x051f8b642f1eb154bd39cc3fe11440bbada38000';
 
-// Origin-currency `balanceOf` storage slots (lowercased currency -> slot) for
-// the FewV2 Shell hooks on mainnet. Declared above ZLCA_HOOKS_PER_CHAIN, which
-// references it at module load. The hooks flash-`take` the swap input out of
-// the PoolManager inside beforeSwap (`settleBeforeSwap`), so a V4Quoter run —
-// which never settles the input — must have it funded via an eth_call state
-// override on these slots. Supplied by the hook team and re-verified on-chain
-// (the PoolManager's stored balance at keccak256(poolManager, slot) equals its
-// balanceOf): COINon(51), USDC(9), WAVAX(5), WETH(3). COINon/USDC/WAVAX are the
-// ERC-20 legs shared by both deployments; the WETH-mode hook (…2088) also
-// trades WETH, while the native-ETH-mode hook (…e088) uses native ETH
-// (address(0)) for that leg — a native balance a storage override can't fund,
-// so its native-ETH-input quotes stay uncovered (unchanged from today).
-const FEW_V2_SHELL_ERC20_BALANCE_SLOTS_ON_MAINNET: Record<string, bigint> = {
-  '0xf042cfa86cf1d598a75bdb55c3507a1f39f9493b': 51n, // COINon
-  '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 9n, // USDC
-  '0x85f138bfee4ef8e540890cfb48f620571d67eda3': 5n, // WAVAX
-};
-
 // Declared above ZLCA_HOOKS_PER_CHAIN, which references it at module load.
 export const ETORO_TOKENIZED_EQUITIES_RFQ_ON_MAINNET =
   '0x2494d3d872a99b7b055304692454a226879de888';
@@ -795,23 +777,10 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [FEW_V2_SHELL_HOOK_ON_MAINNET]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
-      // Native-ETH mode (useNativeCurrencyForWeth=true): the WETH leg is native
-      // ETH (address(0)), which the quote override can't fund, so only the
-      // ERC-20 legs are listed. settleBeforeSwap still fixes exact-input
-      // execution ordering (SETTLE then SWAP) for the ERC-20 input legs.
-      settleBeforeSwap: true,
-      poolManagerBalanceSlots: FEW_V2_SHELL_ERC20_BALANCE_SLOTS_ON_MAINNET,
     },
     [FEW_V2_SHELL_HOOK_ON_MAINNET_2]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
-      // WETH mode (useNativeCurrencyForWeth=false): all four origin currencies
-      // are ERC-20s, so every leg can be funded for quoting.
-      settleBeforeSwap: true,
-      poolManagerBalanceSlots: {
-        ...FEW_V2_SHELL_ERC20_BALANCE_SLOTS_ON_MAINNET,
-        '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 3n, // WETH
-      },
     },
     // Pool is 1:1 with equal decimals, so slot0's 2^96 placeholder is already
     // correct — no sqrtPriceFromQuoter needed.
