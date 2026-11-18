@@ -10341,6 +10341,7 @@ describe('UniRouteBL', () => {
           fresh: [hookless],
           tradeType: 'EXACT_OUT',
           hitDiscoveryEnabled: false,
+          unfilteredCached: true,
         });
         const response = await run.quote();
         expect(response.error).toBeUndefined();
