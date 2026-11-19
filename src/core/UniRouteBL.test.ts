@@ -122,6 +122,7 @@ import {BigNumber} from '@ethersproject/bignumber';
 import {Protocol} from '../models/pool/Protocol';
 import {Pool} from '../models/pool/Pool';
 import {
+  SWAP_PROXY_ADDRESS,
   TokenTransferMode,
   UniversalRouterVersion,
 } from '@uniswap/universal-router-sdk';
@@ -156,6 +157,7 @@ vi.mock(
       >();
     return {
       isZlcaHookSettleBeforeSwap: actual.isZlcaHookSettleBeforeSwap,
+      getSettleBeforeSwapHooks: actual.getSettleBeforeSwapHooks,
       LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET:
         actual.LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
       getHookMinQuoteGasPerCall: actual.getHookMinQuoteGasPerCall,
@@ -4955,6 +4957,196 @@ describe('UniRouteBL', () => {
 
       buildTradeSpy.mockRestore();
       legacySpy.mockRestore();
+    });
+  });
+
+  describe('permit2-disabled route-cache refresh through the real encoder', () => {
+    const usdc = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    const wrappedEth = new Address(
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+    );
+    const simulateFromAddress = '0x1234567890123456789012345678901234567890';
+    const allProtocols = [
+      Protocol.V2,
+      Protocol.V3,
+      Protocol.V4,
+      Protocol.MIXED,
+    ];
+    const amountIn = BigInt('1000000000000000000');
+    const simConfig = {
+      ...serviceConfigAsync,
+      Simulation: {...serviceConfigAsync.Simulation, Enabled: true},
+    };
+
+    class RefreshEnqueuingRepository extends CachedRoutesRepository {
+      enqueueRefresh(
+        request: QuoteRequest,
+        ctx: Context,
+        quoteOptions: QuoteOptions
+      ): void {
+        this.sendFreshQuoteUniRouteEvent(
+          allProtocols,
+          ChainId.MAINNET,
+          usdc,
+          wrappedEth,
+          TradeType.ExactIn,
+          amountIn,
+          request,
+          ctx,
+          quoteOptions
+        );
+      }
+    }
+
+    // The SQS message a sync FAST request enqueues, as JSON, so a test can
+    // tamper with it before the refresh worker reads it.
+    const enqueuedRefreshMessage = (universalRouterSwapsteps: boolean) => {
+      const messageQueue = new NoOpMessageQueue();
+      new RefreshEnqueuingRepository(
+        new InMemoryRedisCache(),
+        serviceConfig,
+        messageQueue,
+        FeatureGatedTokensRepository.empty()
+      ).enqueueRefresh(
+        create(QuoteRequestSchema, {
+          tokenInAddress: usdc.toString(),
+          tokenInChainId: 1,
+          tokenOutAddress: wrappedEth.toString(),
+          tokenOutChainId: 1,
+          amount: amountIn.toString(),
+          tradeType: 'EXACT_IN',
+          quoteType: 'FAST',
+          protocols: 'v2,v3,v4,mixed',
+          simulateFromAddress,
+          recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+        }),
+        buildTestContext(),
+        {permit2Disabled: true, universalRouterSwapsteps}
+      );
+      expect(messageQueue.messages).toHaveLength(1);
+      return JSON.parse(messageQueue.messages[0]);
+    };
+
+    // Decodes the message the way freshRequestsQueue.processMessage does and
+    // runs the async BL with the real trade builder and calldata encoders.
+    const runRefreshWorker = async (message: {
+      payload: Record<string, unknown>;
+      headers: Record<string, string | undefined>;
+    }) => {
+      const testCtx = buildTestContext();
+      const metricsSpy = vi.spyOn(testCtx.metrics, 'count');
+      const capturing = new CapturingSimulator();
+      const response = await new UniRouteBL(
+        simConfig,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        routeRepository,
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        new MockedQuoteStrategy(
+          new QuoteSplit([
+            new QuoteBasic(
+              new RouteBasic(Protocol.V3, [
+                new V3Pool(
+                  usdc,
+                  wrappedEth,
+                  500,
+                  new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+                  1_000_000_000_000n,
+                  79228162514264337593543950336n,
+                  0n
+                ),
+              ]),
+              BigInt('990000000000000000'),
+              undefined,
+              {
+                gasUse: BigInt('150000'),
+                gasPriceInWei: BigInt('30000000000'),
+                gasCostInWei: BigInt('4500000000000000'),
+                gasCostInEth: 0.0045,
+                gasCostInQuoteToken: BigInt('1000000'),
+              }
+            ),
+          ])
+        ),
+        capturing,
+        quoteRequestValidator,
+        tokenProvider,
+        mockedRpcProviderMap,
+        stateOverrideResolver
+      ).quote(testCtx, create(QuoteRequestSchema, message.payload), {
+        permit2Disabled: message.headers['x-permit2-disabled'] === 'true',
+        universalRouterSwapsteps:
+          message.headers['x-universal-router-swapsteps'] === 'true',
+      });
+      const counted = (metric: string) =>
+        metricsSpy.mock.calls.some(([key]) => key.endsWith(`.${metric}`));
+      const cliff = await noRouteCacheRepository.getAmountCliff(
+        EMPTY_NAMESPACE_CONTEXT,
+        allProtocols,
+        ChainId.MAINNET,
+        usdc,
+        wrappedEth,
+        TradeType.ExactIn,
+        testCtx
+      );
+      return {response, counted, cliff, capturing};
+    };
+
+    it('builds SwapProxy calldata and caches no cliff', async () => {
+      const run = await runRefreshWorker(enqueuedRefreshMessage(false));
+
+      expect(run.response.error).toBeUndefined();
+      expect(run.counted('buildSwapMethodParametersFailed')).toBe(false);
+      expect(run.capturing.captured?.swapInfo?.methodParameters?.to).toBe(
+        SWAP_PROXY_ADDRESS(ChainId.MAINNET)
+      );
+      expect(run.cliff).toBeUndefined();
+    });
+
+    it('builds swapsteps calldata and caches no cliff', async () => {
+      const legacy = await runRefreshWorker(enqueuedRefreshMessage(false));
+      const legacyBuilderSpy = vi.spyOn(
+        await import('../lib/methodParameters'),
+        'buildSwapMethodParameters'
+      );
+
+      const run = await runRefreshWorker(enqueuedRefreshMessage(true));
+
+      expect(run.response.error).toBeUndefined();
+      expect(run.counted('buildSwapStepsCalldataFailed')).toBe(false);
+      expect(legacyBuilderSpy).not.toHaveBeenCalled();
+      const swapInfo = run.capturing.captured?.swapInfo;
+      expect(swapInfo?.methodParameters?.to).toBe(
+        SWAP_PROXY_ADDRESS(ChainId.MAINNET)
+      );
+      // The encodeSwaps calldata differs from the legacy calldata for the
+      // same route, so this fails if the swapsteps flag were ignored.
+      expect(swapInfo?.methodParameters?.calldata).toMatch(/^0x[0-9a-f]+$/);
+      expect(swapInfo?.methodParameters?.calldata).not.toBe(
+        legacy.capturing.captured?.swapInfo?.methodParameters?.calldata
+      );
+      expect(run.cliff).toBeUndefined();
+      legacyBuilderSpy.mockRestore();
+    });
+
+    it('answers no-route and writes a cliff when the refresh carries no recipient', async () => {
+      const message = enqueuedRefreshMessage(false);
+      delete message.payload.recipient;
+
+      const run = await runRefreshWorker(message);
+
+      expect(run.response.error).toBeDefined();
+      expect(run.counted('buildSwapMethodParametersFailed')).toBe(true);
+      expect(run.cliff).toBe(amountIn);
     });
   });
 

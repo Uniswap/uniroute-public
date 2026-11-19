@@ -390,6 +390,77 @@ describe('SwapOptionsFactory', () => {
       expect(result!.tokenTransferMode).toBe(TokenTransferMode.Permit2);
     });
 
+    // Expected modes are written out per case, not derived from
+    // usesApproveProxy, so a change to that predicate fails here.
+    const noSwapProxyChain = 999999 as ChainId;
+    const transferModeCases = [
+      {
+        permit2Disabled: true,
+        tokenInIsNative: false,
+        chainId: ChainId.MAINNET,
+        mode: TokenTransferMode.ApproveProxy,
+      },
+      {
+        permit2Disabled: true,
+        tokenInIsNative: true,
+        chainId: ChainId.MAINNET,
+        mode: TokenTransferMode.Permit2,
+      },
+      {
+        permit2Disabled: true,
+        tokenInIsNative: false,
+        chainId: noSwapProxyChain,
+        mode: TokenTransferMode.Permit2,
+      },
+      {
+        permit2Disabled: true,
+        tokenInIsNative: true,
+        chainId: noSwapProxyChain,
+        mode: TokenTransferMode.Permit2,
+      },
+      {
+        permit2Disabled: false,
+        tokenInIsNative: false,
+        chainId: ChainId.MAINNET,
+        mode: TokenTransferMode.Permit2,
+      },
+      {
+        permit2Disabled: false,
+        tokenInIsNative: true,
+        chainId: ChainId.MAINNET,
+        mode: TokenTransferMode.Permit2,
+      },
+      {
+        permit2Disabled: false,
+        tokenInIsNative: false,
+        chainId: noSwapProxyChain,
+        mode: TokenTransferMode.Permit2,
+      },
+      {
+        permit2Disabled: false,
+        tokenInIsNative: true,
+        chainId: noSwapProxyChain,
+        mode: TokenTransferMode.Permit2,
+      },
+    ];
+    for (const {
+      permit2Disabled,
+      tokenInIsNative,
+      chainId,
+      mode,
+    } of transferModeCases) {
+      it(`selects ${mode} for permit2Disabled=${permit2Disabled} native=${tokenInIsNative} chain=${chainId}`, () => {
+        const result = SwapOptionsFactory.createUniversalRouterOptions_2_0({
+          ...baseInput,
+          chainId,
+          permit2Disabled,
+          tokenInIsNative,
+        });
+
+        expect(result?.tokenTransferMode).toBe(mode);
+      });
+    }
+
     it('should set Permit2 tokenTransferMode when permit2Disabled is false', () => {
       const input: SwapOptionsUniversalRouterInput = {
         ...baseInput,

@@ -2,7 +2,6 @@ import {ChainId} from '../../lib/config';
 import {parseDeadline, parseSlippageTolerance} from './shared';
 import {PermitSingle} from '@uniswap/permit2-sdk';
 import {
-  SWAP_PROXY_ADDRESS,
   TokenTransferMode,
   UniversalRouterVersion,
 } from '@uniswap/universal-router-sdk';
@@ -14,6 +13,7 @@ import {
 import {computePortionAmount, populateFeeOptions} from '../../lib/portionUtils';
 import {TradeType} from '../../models/quote/TradeType';
 import {getUnderlyingPermissionedTokenOrSelf} from '@uniswap/lib-sharedconfig/permissionedTokens';
+import {usesApproveProxy} from '../../lib/tokenTransferMode';
 
 export type SwapOptionsUniversalRouterInput = {
   chainId: ChainId;
@@ -39,15 +39,6 @@ export type SwapOptionsUniversalRouterInput = {
   // `SwapRouter.encodeSwaps` separately.
   universalRouterSwapsteps?: boolean;
 };
-
-function isSwapProxyDeployed(chainId: ChainId): boolean {
-  try {
-    SWAP_PROXY_ADDRESS(chainId);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export class SwapOptionsFactory {
   static createUniversalRouterOptions_2_0(
@@ -125,9 +116,11 @@ export class SwapOptionsFactory {
           computePortionAmount(amountIn, portionBips)
         );
 
-    // Permit2 fallback: native input (ETH can't be approved) and chains without SwapProxy.
-    const useApproveProxy =
-      permit2Disabled && !tokenInIsNative && isSwapProxyDeployed(chainId);
+    const useApproveProxy = usesApproveProxy(
+      chainId,
+      permit2Disabled,
+      tokenInIsNative === true
+    );
 
     const swapParams: SwapOptionsUniversalRouter = {
       type: SwapType.UNIVERSAL_ROUTER,
