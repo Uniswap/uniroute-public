@@ -641,6 +641,41 @@ describe('UniRouteBL', () => {
     );
   });
 
+  // `tokenIn>tokenOut:bucket` for every route-cache key of these legs that
+  // holds a no-route refresh cooldown.
+  const noRouteCooldownKeys = async (
+    legs: {tokenIn: Address; tokenOut: Address}[],
+    protocols: Protocol[]
+  ): Promise<string[]> => {
+    const keyBuilder = new CachedRoutesRepository(
+      redisCache,
+      serviceConfig,
+      new NoOpMessageQueue(),
+      FeatureGatedTokensRepository.empty()
+    );
+    const present: string[] = [];
+    for (const {tokenIn, tokenOut} of legs) {
+      for (const usdBucket of Object.values(UsdBucket)) {
+        const key = keyBuilder.constructNoRouteCooldownKey(
+          EMPTY_NAMESPACE_CONTEXT,
+          protocols,
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          TradeType.ExactIn,
+          0n,
+          usdBucket
+        );
+        if (await redisCache.contains(key)) {
+          present.push(
+            `${tokenIn.toString()}>${tokenOut.toString()}:${usdBucket}`
+          );
+        }
+      }
+    }
+    return present;
+  };
+
   const serviceConfig: IUniRouteServiceConfig = {
     ...getUniRouteTestConfig(LambdaType.Sync),
     CachedRoutes: {
@@ -1357,6 +1392,253 @@ describe('UniRouteBL', () => {
       expect(response.error?.code).not.toBe(404);
       expect(response.hitsCachedRoutes).toBe(true);
       expect(headers.get('x-no-route-cache-hit')).toBeUndefined();
+    });
+
+    describe('no-route refresh cooldown', () => {
+      const nativeEth = new Address(ADDRESS_ZERO);
+      type Leg = {tokenIn: Address; tokenOut: Address};
+      // An ETH-input and an ETH-output request: each reads (and refreshes) a
+      // wrapped leg and a native V4 leg, the native side keyed under
+      // ADDRESS_ZERO on whichever side of the pair the ETH is.
+      const cases: {
+        name: string;
+        request: typeof baseRequest & {tradeType: string};
+        legs: Leg[];
+      }[] = [
+        {
+          name: 'native input',
+          request: {...baseRequest, tradeType: 'EXACT_IN'},
+          legs: [
+            {tokenIn: wrappedEth, tokenOut: usdc},
+            {tokenIn: nativeEth, tokenOut: usdc},
+          ],
+        },
+        {
+          name: 'native output',
+          request: {
+            ...baseRequest,
+            tokenInAddress: usdc.toString(),
+            tokenOutAddress: 'ETH',
+            tradeType: 'EXACT_IN',
+          },
+          legs: [
+            {tokenIn: usdc, tokenOut: wrappedEth},
+            {tokenIn: usdc, tokenOut: nativeEth},
+          ],
+        },
+      ];
+      const [nativeInput] = cases;
+      const legKey = ({tokenIn, tokenOut}: Leg) =>
+        `${tokenIn.toString()}>${tokenOut.toString()}`;
+      let queue: NoOpMessageQueue;
+      let repository: CachedRoutesRepository;
+
+      beforeEach(() => {
+        queue = new NoOpMessageQueue();
+        repository = new CachedRoutesRepository(
+          redisCache,
+          serviceConfig,
+          queue,
+          FeatureGatedTokensRepository.empty()
+        );
+        cachedRoutesRepository = repository;
+      });
+
+      const legKeysPerBucket = (
+        legs: Leg[],
+        keyOf: (leg: Leg, usdBucket: UsdBucket) => string
+      ) =>
+        legs.flatMap(leg =>
+          Object.values(UsdBucket).map(usdBucket => ({
+            leg,
+            usdBucket,
+            key: keyOf(leg, usdBucket),
+          }))
+        );
+
+      const cachedRouteKey = ({tokenIn, tokenOut}: Leg, usdBucket: UsdBucket) =>
+        repository.constructCachedRouteKey(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          TradeType.ExactIn,
+          amount,
+          usdBucket
+        );
+      const pendingKey = ({tokenIn, tokenOut}: Leg, usdBucket: UsdBucket) =>
+        repository.constructPendingCachedRouteKey(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          TradeType.ExactIn,
+          amount,
+          usdBucket
+        );
+      const cooldownKey = ({tokenIn, tokenOut}: Leg, usdBucket: UsdBucket) =>
+        repository.constructNoRouteCooldownKey(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          ChainId.MAINNET,
+          tokenIn,
+          tokenOut,
+          TradeType.ExactIn,
+          amount,
+          usdBucket
+        );
+
+      // Every bucket of every leg holds a route whose refresh is overdue.
+      const seedStaleRoutes = async (legs: Leg[]) => {
+        const overdueMs =
+          (serviceConfig.CachedRoutes.RouteCacheEntryRefreshSeconds + 60) *
+          1000;
+        for (const {leg, usdBucket, key} of legKeysPerBucket(
+          legs,
+          cachedRouteKey
+        )) {
+          await repository.saveCachedRoutes(
+            EMPTY_NAMESPACE_CONTEXT,
+            allProtocols,
+            new RouteBasic(Protocol.V2, [
+              new V2Pool(
+                leg.tokenIn,
+                leg.tokenOut,
+                new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+            ]),
+            ChainId.MAINNET,
+            leg.tokenIn,
+            leg.tokenOut,
+            TradeType.ExactIn,
+            amount,
+            usdBucket
+          );
+          for (const [member, expiresAtMs] of await redisCache.zrange(
+            key,
+            0,
+            -1
+          )) {
+            await redisCache.zadd(key, expiresAtMs - overdueMs, member);
+          }
+        }
+      };
+
+      const pendingMarkerLegs = async (legs: Leg[]): Promise<string[]> => {
+        const present: string[] = [];
+        for (const {leg, key} of legKeysPerBucket(legs, pendingKey)) {
+          if (await redisCache.contains(key)) {
+            present.push(legKey(leg));
+          }
+        }
+        return present;
+      };
+
+      const fastQuote = async (
+        request: typeof baseRequest & {tradeType: string}
+      ) => {
+        const testCtx = buildTestContext(
+          buildHandlerContextWithHeaders().handlerContext
+        );
+        const response = await buildBL().quote(
+          testCtx,
+          create(QuoteRequestSchema, request)
+        );
+        return {response, testCtx};
+      };
+
+      it.each(cases)(
+        '$name: stops a FAST cliff-override hit re-enqueueing the refresh that just found no route',
+        async ({request, legs}) => {
+          await seedStaleRoutes(legs);
+
+          // A stale hit with no cliff yet refreshes both legs.
+          await fastQuote(request);
+          const refreshes: {payload: Record<string, unknown>}[] =
+            queue.messages.map(message => JSON.parse(message));
+          expect(
+            refreshes
+              .map(
+                ({payload}) =>
+                  `${payload.tokenInAddress}>${payload.tokenOutAddress}`
+              )
+              .sort()
+          ).toEqual(legs.map(legKey).sort());
+          expect((await pendingMarkerLegs(legs)).sort()).toEqual(
+            legs.map(legKey).sort()
+          );
+          queue.clearMessages();
+
+          // The worker runs each refresh and finds no route.
+          for (const refresh of refreshes) {
+            const response = await buildBL(
+              new MockedQuoteStrategy(null),
+              serviceConfigAsync
+            ).quote(
+              buildTestContext(),
+              create(QuoteRequestSchema, refresh.payload)
+            );
+            expect(response.error?.code).toBe(404);
+          }
+          expect(await pendingMarkerLegs(legs)).toEqual([]);
+          expect(await noRouteCooldownKeys(legs, allProtocols)).toHaveLength(2);
+
+          // The next FAST request overrides the cliff with the cached routes.
+          const overrideHit = await fastQuote(request);
+          expect(overrideHit.response.hitsCachedRoutes).toBe(true);
+          expect(queue.messages).toHaveLength(0);
+          expect(
+            overrideHit.testCtx.metrics.countStore[
+              buildMetricKey('CachedRoutes.RefreshEnqueueSkipped')
+            ]
+          ).toBe(2);
+
+          // Without the cooldown the same hit re-enqueues both refreshes.
+          for (const {key} of legKeysPerBucket(legs, cooldownKey)) {
+            await redisCache.delete(key);
+          }
+          await fastQuote(request);
+          expect(queue.messages).toHaveLength(2);
+        }
+      );
+
+      it('keys the cooldown to the leg the refresh ran for', async () => {
+        await buildBL(new MockedQuoteStrategy(null), serviceConfigAsync).quote(
+          buildTestContext(),
+          create(QuoteRequestSchema, nativeInput.request)
+        );
+
+        const cooldowns = await noRouteCooldownKeys(
+          nativeInput.legs,
+          allProtocols
+        );
+        expect(cooldowns).toHaveLength(1);
+        expect(
+          cooldowns[0].startsWith(`${nativeEth.toString()}>${usdc.toString()}:`)
+        ).toBe(true);
+      });
+
+      it('sets no cooldown after an incomplete search or a found route', async () => {
+        for (const strategy of [
+          new IncompleteQuoteStrategy(
+            new Error('missing revert data in call exception')
+          ),
+          new MockedQuoteStrategy(),
+        ]) {
+          await buildBL(strategy, serviceConfigAsync).quote(
+            buildTestContext(),
+            create(QuoteRequestSchema, nativeInput.request)
+          );
+        }
+
+        expect(
+          await noRouteCooldownKeys(nativeInput.legs, allProtocols)
+        ).toEqual([]);
+      });
     });
 
     describe('incomplete search', () => {
@@ -8438,6 +8720,8 @@ describe('UniRouteBL', () => {
 
       async saveCachedRoutes(): Promise<void> {}
 
+      async setNoRouteRefreshCooldown(): Promise<void> {}
+
       async deletePendingRefresh(): Promise<void> {}
 
       async deleteCachedRoutes(): Promise<boolean> {
@@ -9991,6 +10275,15 @@ describe('UniRouteBL', () => {
       expect(response.error?.code).toBe(404);
       expect(await run.readCliff()).toBeUndefined();
       expect(
+        await noRouteCooldownKeys(
+          [
+            {tokenIn: wrappedEth, tokenOut: usdc},
+            {tokenIn: new Address(ADDRESS_ZERO), tokenOut: usdc},
+          ],
+          allProtocols
+        )
+      ).toEqual([]);
+      expect(
         run.metrics.has(
           'NoRouteCache.WriteSkipped',
           'reason:degraded_discovery'
@@ -10023,6 +10316,15 @@ describe('UniRouteBL', () => {
       const response = await run.quote();
       expect(response.error?.code).toBe(404);
       expect(await run.readCliff()).toBe(amount);
+      expect(
+        await noRouteCooldownKeys(
+          [
+            {tokenIn: wrappedEth, tokenOut: usdc},
+            {tokenIn: new Address(ADDRESS_ZERO), tokenOut: usdc},
+          ],
+          allProtocols
+        )
+      ).toHaveLength(1);
       expect(run.metrics.has('NoRouteCache.WriteSkipped')).toBe(false);
     });
 

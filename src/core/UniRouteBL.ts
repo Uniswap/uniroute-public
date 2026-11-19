@@ -215,6 +215,15 @@ function detectFotInDirectSwap(
   };
 }
 
+// The address a route-cache key (and its pending / no-route cooldown
+// markers) carries for a token: the native token keys under ADDRESS_ZERO,
+// matching the native-input V4 leg `readCachedRoutes` reads.
+function routeCacheKeyAddress(currencyInfo: CurrencyInfo): Address {
+  return currencyInfo.isNative
+    ? new Address(ADDRESS_ZERO)
+    : currencyInfo.wrappedAddress;
+}
+
 /**
  * Computes the USD value of the input amount and its bucket.
  */
@@ -1611,7 +1620,8 @@ export class UniRouteBL implements IUniRoutedBL {
     // on-chain quoter validates at the requested amount and drops routes
     // that can't actually serve it, so this trades latency (not
     // correctness) on genuinely-no-route requests.
-    if (noRouteCliffHit && hasCachedRoutes) {
+    const noRouteCacheOverride = noRouteCliffHit && hasCachedRoutes;
+    if (noRouteCacheOverride) {
       metricTags.push('noRouteCacheOverride:true');
     }
 
@@ -1634,6 +1644,7 @@ export class UniRouteBL implements IUniRoutedBL {
               amountIn,
               usdBucket,
               quoteType,
+              noRouteCacheOverride,
               request,
               ctx,
               options
@@ -2847,9 +2858,11 @@ export class UniRouteBL implements IUniRoutedBL {
    * so future sync requests at this amount or higher can short-circuit
    * without re-running the search. Also clears the pending refresh marker
    * so the next sync request at a *lower* amount can trigger a fresh
-   * refresh and ratchet the cliff down. An incomplete search or degraded
-   * discovery says nothing about whether a route exists, so it writes
-   * nothing and leaves the pending refresh marker to expire.
+   * refresh and ratchet the cliff down, and sets the key's no-route
+   * cooldown so a request overriding the cliff with the key's still-cached
+   * routes does not re-enqueue the same refresh. An incomplete search or
+   * degraded discovery says nothing about whether a route exists, so it
+   * writes nothing and leaves the pending refresh marker to expire.
    */
   private async maybeWriteNoRouteCache(
     ctx: Context,
@@ -2896,14 +2909,31 @@ export class UniRouteBL implements IUniRoutedBL {
         tags: metricTags,
       });
     }
+    const tokenIn = routeCacheKeyAddress(tokenInCurrencyInfo);
+    const tokenOut = routeCacheKeyAddress(tokenOutCurrencyInfo);
+    // The cooldown goes in before the marker is cleared. The gate reads both
+    // keys in parallel, so a read racing these two writes can still see
+    // neither and enqueue: at most one duplicate refresh per no-route, not a
+    // loop.
+    await this.cachedRoutesRepository.setNoRouteRefreshCooldown(
+      nsCtx,
+      protocols,
+      chain.chainId,
+      tokenIn,
+      tokenOut,
+      tradeType,
+      amountIn,
+      usdBucket,
+      ctx
+    );
     // Clear pending refresh so the next sync request at a lower amount
     // can trigger a new async refresh to ratchet down the amountCliff.
     await this.cachedRoutesRepository.deletePendingRefresh(
       nsCtx,
       protocols,
       chain.chainId,
-      tokenInCurrencyInfo.wrappedAddress,
-      tokenOutCurrencyInfo.wrappedAddress,
+      tokenIn,
+      tokenOut,
       tradeType,
       amountIn,
       usdBucket
@@ -3021,12 +3051,8 @@ export class UniRouteBL implements IUniRoutedBL {
           protocols,
           quote.route,
           chain.chainId,
-          tokenInCurrencyInfo.isNative
-            ? new Address(ADDRESS_ZERO)
-            : tokenInCurrencyInfo.wrappedAddress,
-          tokenOutCurrencyInfo.isNative
-            ? new Address(ADDRESS_ZERO)
-            : tokenOutCurrencyInfo.wrappedAddress,
+          routeCacheKeyAddress(tokenInCurrencyInfo),
+          routeCacheKeyAddress(tokenOutCurrencyInfo),
           tradeType,
           amountIn,
           usdBucket,
@@ -3040,12 +3066,8 @@ export class UniRouteBL implements IUniRoutedBL {
       nsCtx,
       protocols,
       chain.chainId,
-      tokenInCurrencyInfo.isNative
-        ? new Address(ADDRESS_ZERO)
-        : tokenInCurrencyInfo.wrappedAddress,
-      tokenOutCurrencyInfo.isNative
-        ? new Address(ADDRESS_ZERO)
-        : tokenOutCurrencyInfo.wrappedAddress,
+      routeCacheKeyAddress(tokenInCurrencyInfo),
+      routeCacheKeyAddress(tokenOutCurrencyInfo),
       tradeType,
       amountIn,
       usdBucket
@@ -3189,12 +3211,8 @@ export class UniRouteBL implements IUniRoutedBL {
         // TODO: https://linear.app/uniswap/issue/ROUTE-1102/tech-debt-deletecachedroutes-admin-endpoint-request-payload-needs-to
         [Protocol.V2, Protocol.V3, Protocol.V4, Protocol.MIXED],
         chain.chainId,
-        tokenInCurrencyInfo.isNative
-          ? new Address(ADDRESS_ZERO)
-          : tokenInCurrencyInfo.wrappedAddress,
-        tokenOutCurrencyInfo.isNative
-          ? new Address(ADDRESS_ZERO)
-          : tokenOutCurrencyInfo.wrappedAddress,
+        routeCacheKeyAddress(tokenInCurrencyInfo),
+        routeCacheKeyAddress(tokenOutCurrencyInfo),
         tradeType,
         amountIn,
         usdBucket
