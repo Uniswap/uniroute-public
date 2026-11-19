@@ -1632,6 +1632,21 @@ describe('buildCcaScheduledPools', () => {
     // Robinhood's published 100 ms blocks, not the 2 s default.
     expect(writtenEntries(4663)[0].activateAtMs).toBe(NOW + 1_000 * 100);
   });
+
+  it('falls back to the published 1 s cadence on Ink', async () => {
+    config = {...config, chainIds: [57073]};
+    pendingAuctions = [{...pendingAuctions[0]!, chainId: 57073}];
+    deps.getBlockTimestampSecs = async () => undefined;
+
+    await buildCcaScheduledPools(testLogger, metric, config, deps);
+
+    expect(writtenEntries(57073)[0].activateAtMs).toBe(NOW + 1_000 * 1_000);
+    expect(
+      metric.metrics
+        .filter(m => m.key === 'CcaScheduledPools.blockTimeMeasurement')
+        .map(m => m.tags?.reason)
+    ).not.toContain('unlisted_chain');
+  });
 });
 
 describe('makePendingLbpAuctionsFetcher', () => {

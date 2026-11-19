@@ -175,6 +175,7 @@ const DEFAULT_CCA_CHAIN_IDS = [
   ChainId.AVAX,
   ChainId.XLAYER,
   ChainId.ROBINHOOD,
+  ChainId.INK,
   ChainId.SEPOLIA,
 ];
 
@@ -218,6 +219,7 @@ const FALLBACK_BLOCK_TIME_SECONDS_BY_CHAIN: Record<number, number> = {
   [ChainId.AVAX]: 2,
   [ChainId.XLAYER]: 3,
   [ChainId.ROBINHOOD]: 0.1,
+  [ChainId.INK]: 1,
   [ChainId.SEPOLIA]: 12,
 };
 const DEFAULT_FALLBACK_BLOCK_TIME_SECONDS = 2;
