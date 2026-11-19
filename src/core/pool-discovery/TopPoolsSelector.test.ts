@@ -2476,6 +2476,125 @@ describe('BasicTopPoolsSelector', () => {
       });
     });
   });
+
+  // Exercises the shipped mainnet list, not injected data. BASE is Base
+  // Protocol's token, not the chain.
+  describe.each([
+    ['AMPL', '0xD46bA6D942050d489DBd938a2C909A5d5039A161'],
+    ['BASE', '0x07150e919B4De5fD6a63DE1F9384828396f25fDC'],
+  ])('direct-swap block list (mainnet %s)', (symbol, LISTED) => {
+    const eth = new Address(ADDRESS_ZERO);
+    const listed = new Address(LISTED);
+
+    const directPairsOf = (
+      pools: UniPoolInfo[],
+      protocol: Protocol,
+      tokenIn: Address,
+      tokenOut: Address
+    ) =>
+      BasicTopPoolsSelector['getDirectPairs'](
+        pools,
+        ChainId.MAINNET,
+        protocol,
+        tokenIn,
+        tokenOut,
+        new Set<string>(),
+        buildTokenPoolIndex(pools),
+        poolSelectionConfig
+      );
+
+    it(`drops a V4 ETH/${symbol} direct pair`, () => {
+      const pool = {
+        ...mockV4Pool,
+        id: '0xlistedpool',
+        token0: {id: ADDRESS_ZERO},
+        token1: {id: LISTED.toLowerCase()},
+      } as V4PoolInfo;
+
+      expect(directPairsOf([pool], Protocol.V4, eth, listed)).toEqual([]);
+    });
+
+    it(`drops a V3 ${symbol} direct pair`, () => {
+      const pool = {
+        ...mockV3Pool,
+        token0: {id: LISTED},
+        token1: {id: '0x0000000000000000000000000000000000000002'},
+      } as V3PoolInfo;
+
+      expect(
+        directPairsOf(
+          [pool],
+          Protocol.V3,
+          listed,
+          new Address('0x0000000000000000000000000000000000000002')
+        )
+      ).toEqual([]);
+    });
+
+    it(`keeps a V2 ${symbol} direct pair`, () => {
+      const pool = {
+        ...mockV2Pool,
+        token0: {id: LISTED.toLowerCase()},
+        token1: {id: '0x0000000000000000000000000000000000000002'},
+      } as V2PoolInfo;
+
+      expect(
+        directPairsOf(
+          [pool],
+          Protocol.V2,
+          listed,
+          new Address('0x0000000000000000000000000000000000000002')
+        ).map(p => p.id)
+      ).toEqual(['0x123']);
+    });
+
+    it(`keeps a V4 direct pair without ${symbol}`, () => {
+      expect(
+        directPairsOf(
+          [mockV4Pool],
+          Protocol.V4,
+          new Address('0x0000000000000000000000000000000000000001'),
+          new Address('0x0000000000000000000000000000000000000002')
+        ).map(p => p.id)
+      ).toEqual(['0x789']);
+    });
+
+    it(`generates no V4 ETH/${symbol} pool in the manual direct-pair fallback`, async () => {
+      const result = await selector['manuallyGenerateDirectPairs'](
+        Protocol.V4,
+        ChainId.MAINNET,
+        ADDRESS_ZERO,
+        LISTED,
+        new Set<string>()
+      );
+
+      expect(result).toEqual([]);
+    });
+
+    it(`still generates the V4 grid for a pair without ${symbol}`, async () => {
+      const result = await selector['manuallyGenerateDirectPairs'](
+        Protocol.V4,
+        ChainId.MAINNET,
+        ADDRESS_ZERO,
+        '0x0000000000000000000000000000000000000002',
+        new Set<string>()
+      );
+
+      expect(result).toHaveLength(8);
+    });
+
+    it(`still generates the V2 ${symbol} pair in the manual direct-pair fallback`, async () => {
+      const result = await selector['manuallyGenerateDirectPairs'](
+        Protocol.V2,
+        ChainId.MAINNET,
+        ADDRESS_ZERO,
+        LISTED,
+        new Set<string>()
+      );
+
+      expect(result).toHaveLength(1);
+    });
+  });
 });
 
 // Pick one address from each family so tests are readable and deterministic

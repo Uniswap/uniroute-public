@@ -32,6 +32,7 @@ import {
   extraSourceKey,
 } from './extraPoolSources';
 import {ExtraPoolSourceMemory} from './extraPoolSourceMemory';
+import {RoutingBlockList} from '../RoutingBlockList';
 import {materializeV4PoolKeyRegistries} from './v4PoolKeyRegistry';
 
 // Bounds the registry step (per run, all chains): Aurora reads take single-
@@ -475,22 +476,6 @@ async function cachePoolsForChainProtocol(
         );
         manualPools?.forEach(pool => pools.push(pool));
       }
-
-      pools = (pools as Array<V3SubgraphPool>).filter(
-        (pool: V3SubgraphPool) => {
-          const shouldFilterOut =
-            pool.token0.id.toLowerCase() ===
-              '0xd46ba6d942050d489dbd938a2c909a5d5039a161' ||
-            pool.token1.id.toLowerCase() ===
-              '0xd46ba6d942050d489dbd938a2c909a5d5039a161' ||
-            pool.id.toLowerCase() ===
-              '0x0f681f10ab1aa1cde04232a199fe3c6f2652a80c';
-          if (shouldFilterOut) {
-            logger.info(`Filtering out pool ${pool.id}`);
-          }
-          return !shouldFilterOut;
-        }
-      );
     }
 
     if (protocol === Protocol.V4) {
@@ -790,6 +775,20 @@ async function cachePoolsForChainProtocol(
         dynamicZlcaHookMap ? new Set(dynamicZlcaHookMap.keys()) : undefined
       );
     }
+
+    // Serving re-applies the same check to direct pairs it generates or
+    // probes outside the snapshot.
+    pools = pools.filter(pool => {
+      const shouldFilterOut = RoutingBlockList.isBlockedDirectSwap(
+        pool,
+        chainId,
+        protocol
+      );
+      if (shouldFilterOut) {
+        logger.info(`Filtering out pool ${pool.id}`);
+      }
+      return !shouldFilterOut;
+    });
 
     metricInstance.putMetric(
       'CachePools.getPools.latency',

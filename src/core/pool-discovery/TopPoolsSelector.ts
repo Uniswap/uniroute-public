@@ -1332,20 +1332,12 @@ export class BasicTopPoolsSelector
       chainId
     );
 
-    if (protocol === Protocol.V3) {
-      return directPairs.filter(pool => {
-        if (
-          RoutingBlockList.isBlockedDirectSwapPool(pool.id, chainId) ||
-          RoutingBlockList.isBlockedDirectSwapToken(pool.token0.id, chainId) ||
-          RoutingBlockList.isBlockedDirectSwapToken(pool.token1.id, chainId)
-        ) {
-          return false;
-        }
-        return true;
-      });
-    }
-
-    return directPairs;
+    // Filter after filterAndAddPools on purpose: blocked pools stay in
+    // selectedPoolIds, so later stages can't select them again. The cost is
+    // that they still use topNDirectPairs slots (matters for pool-id blocks).
+    return directPairs.filter(
+      pool => !RoutingBlockList.isBlockedDirectSwap(pool, chainId, protocol)
+    );
   }
 
   public static getTokenInOnlyPairs(
@@ -1719,18 +1711,9 @@ export class BasicTopPoolsSelector
       selectedPoolIds
     );
 
-    if (protocol === Protocol.V3) {
-      directPairs = directPairs.filter(pool => {
-        if (
-          RoutingBlockList.isBlockedDirectSwapPool(pool.id, chainId) ||
-          RoutingBlockList.isBlockedDirectSwapToken(pool.token0.id, chainId) ||
-          RoutingBlockList.isBlockedDirectSwapToken(pool.token1.id, chainId)
-        ) {
-          return false;
-        }
-        return true;
-      });
-    }
+    directPairs = directPairs.filter(
+      pool => !RoutingBlockList.isBlockedDirectSwap(pool, chainId, protocol)
+    );
 
     // The generated grid never went through filterUnsupportedPools, so a
     // token's non-canonical (fee, tickSpacing, hooks) combos would otherwise

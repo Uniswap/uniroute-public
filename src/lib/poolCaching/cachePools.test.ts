@@ -319,6 +319,115 @@ describe('cacheAllPools', () => {
     });
   });
 
+  describe('mainnet rebasing-token pools', () => {
+    const AMPL = '0xD46bA6D942050d489DBd938a2C909A5d5039A161';
+    const BASE = '0x07150e919B4De5fD6a63DE1F9384828396f25fDC';
+    const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
+
+    it('drops V4 pools carrying AMPL or BASE and keeps the other V4 pools', async () => {
+      const amplPoolIds = [
+        '0xcd49489364242e854d9118eaa430f02d13156f2fc3cd78402d5efb150579b5d1',
+        '0x392e75beb7db52ba0c29215d96b3de73a956eab004244a1f1726113a75df20ca',
+      ];
+      const basePoolId =
+        '0x3e030d857c9db1fb0792cc8b18f6ce4e41388362178fdfeacb8fdabefdcd0036';
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V4,
+          chainId: ChainId.MAINNET,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([
+                makeV4Pool(
+                  amplPoolIds[0],
+                  '0x0000000000000000000000000000000000000000',
+                  '0x0000000000000000000000000000000000000000',
+                  AMPL.toLowerCase()
+                ),
+                makeV4Pool(
+                  amplPoolIds[1],
+                  '0x0000000000000000000000000000000000000000',
+                  AMPL,
+                  '0x1111'
+                ),
+                makeV4Pool(
+                  basePoolId,
+                  '0x0000000000000000000000000000000000000000',
+                  USDT,
+                  BASE
+                ),
+                makeV4Pool(
+                  '0xkeptpool',
+                  '0x0000000000000000000000000000000000000000',
+                  '0x0000000000000000000000000000000000000000',
+                  '0x2222'
+                ),
+              ]),
+          },
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const written = writtenPoolIds(putObjectCalls()[0].input.Body);
+      expect(written).toContain('0xkeptpool');
+      expect(written).not.toContain(amplPoolIds[0]);
+      expect(written).not.toContain(amplPoolIds[1]);
+      expect(written).not.toContain(basePoolId);
+    });
+
+    it('keeps V2 pairs carrying AMPL or BASE', async () => {
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V2,
+          chainId: ChainId.MAINNET,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([
+                makePool('0xamplpair', AMPL, '0x2222'),
+                makePool('0xbasepair', '0x2222', BASE),
+              ]),
+          },
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      const written = writtenPoolIds(putObjectCalls()[0].input.Body);
+      expect(written).toContain('0xamplpair');
+      expect(written).toContain('0xbasepair');
+    });
+
+    it('keeps V4 pools carrying the same address on another chain', async () => {
+      mockChainProtocols = [
+        {
+          protocol: Protocol.V4,
+          chainId: ChainId.POLYGON,
+          provider: {
+            getPools: vi
+              .fn()
+              .mockResolvedValue([
+                makeV4Pool(
+                  '0xpolygonpool',
+                  '0x0000000000000000000000000000000000000000',
+                  AMPL,
+                  '0x2222'
+                ),
+              ]),
+          },
+        },
+      ];
+
+      await cacheAllPools(mockLogger, mockMetric, config);
+
+      expect(writtenPoolIds(putObjectCalls()[0].input.Body)).toEqual([
+        '0xpolygonpool',
+      ]);
+    });
+  });
+
   // --- V3 MAINNET special case ---
   describe('V3 mainnet special case', () => {
     it('processes V3 mainnet pools, filters by token and pool id', async () => {
@@ -356,6 +465,9 @@ describe('cacheAllPools', () => {
           typeof c[0] === 'string' && c[0].includes('Filtering out pool')
       );
       expect(filterCalls.length).toBe(2);
+      expect(writtenPoolIds(putObjectCalls()[0].input.Body)).toEqual([
+        '0xgoodpool',
+      ]);
     });
   });
 
