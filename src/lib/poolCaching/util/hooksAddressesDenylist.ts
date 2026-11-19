@@ -1,4 +1,6 @@
 import {ChainId} from '@uniswap/sdk-core';
+import {Context} from '@uniswap/lib-uni/context';
+import {ChainId as UniRouteChainId, TAG_STATUS_SUCCESS} from '../../config';
 
 // TEMPO is not yet in sdk-core 7.11.0 — define locally until sdk-core is upgraded
 const CHAIN_ID_TEMPO = 4217 as ChainId;
@@ -80,4 +82,26 @@ export function isDenylistedHook(chainId: number, hook: string): boolean {
   }
   const lowered = hook.toLowerCase();
   return denylist.some(address => address.toLowerCase() === lowered);
+}
+
+/**
+ * Emits the drop counter for pools excluded because `isDenylistedHook` holds
+ * for their hook.
+ */
+export function countDroppedDenylistedHookPools(
+  chainId: UniRouteChainId,
+  droppedCount: number,
+  ctx: Context | undefined,
+  metricKey: string
+): void {
+  if (droppedCount > 0 && ctx !== undefined) {
+    void ctx.metrics
+      .count(metricKey, droppedCount, {
+        tags: [
+          `chain:${UniRouteChainId[chainId] ?? chainId}`,
+          TAG_STATUS_SUCCESS,
+        ],
+      })
+      .catch(() => undefined);
+  }
 }
