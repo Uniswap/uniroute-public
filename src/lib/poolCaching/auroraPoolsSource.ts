@@ -66,6 +66,18 @@ import {
   type AuroraExtraSourceDeps,
   type ExtraSourceChainProtocol,
 } from './auroraExtraPoolSources';
+import {
+  IIncumbentSnapshotReader,
+  NO_INCUMBENT_SNAPSHOTS,
+} from './incumbentSnapshots';
+import {
+  advanceEmptyRead,
+  clearEmptyReadStreak,
+  EmptyReadDecision,
+  EmptyReadHoldReason,
+  EmptyReadOutcome,
+  siblingConfirmsIngestion,
+} from './util/emptyLaneSettle';
 import {ARBITRUM} from '../../stores/chain/hardcoded/chains/Arbitrum';
 import {ARC} from '../../stores/chain/hardcoded/chains/Arc';
 import {AVALANCHE} from '../../stores/chain/hardcoded/chains/Avalanche';
@@ -2167,6 +2179,16 @@ export type AuroraRejectionReason =
   | 'low_count'
   | 'error';
 
+// The chain's other combos in the cron matrix, whose snapshots confirm the
+// chain is still ingested when this combo reads empty.
+function siblingProtocols(chainId: number, protocol: Protocol): Protocol[] {
+  return [Protocol.V2, Protocol.V3, Protocol.V4].filter(
+    sibling =>
+      sibling !== protocol &&
+      AURORA_SUPPORTED_TARGETS.has(targetKey(chainId, sibling))
+  );
+}
+
 export class AuroraPoolsRejectedError extends Error {
   constructor(
     target: string,
@@ -2180,7 +2202,10 @@ export class AuroraPoolsRejectedError extends Error {
 
 // Guards an Aurora read with the collapse checks above. There is no second
 // source: a rejected read throws, cacheAllPools skips the S3 write, and
-// routing keeps serving the previous snapshot.
+// routing keeps serving the previous snapshot. An empty read is served only
+// on a combo whose snapshot in S3 holds at most a few pools, once it has
+// settled (util/emptyLaneSettle.ts); cacheAllPools then writes the empty
+// snapshot (servedSettledEmpty).
 export class AuroraSourcedProvider<
   TPool extends AnySubgraphPool,
 > implements ISubgraphProvider<TPool> {
@@ -2192,8 +2217,17 @@ export class AuroraSourcedProvider<
     // 0 = no absolute floor for this target (ratio guard only).
     private readonly minPoolCount: number,
     private readonly logger: Logger,
-    private readonly metric: IMetric
+    private readonly metric: IMetric,
+    private readonly incumbents: IIncumbentSnapshotReader
   ) {}
+
+  private settledEmptyServed = false;
+
+  // True when the last getPools served a settled empty read, which the
+  // caller writes as an empty snapshot instead of skipping the write.
+  get servedSettledEmpty(): boolean {
+    return this.settledEmptyServed;
+  }
 
   private get tags(): Record<string, string> {
     return {chainId: String(this.chainId), protocol: String(this.protocol)};
@@ -2201,6 +2235,7 @@ export class AuroraSourcedProvider<
 
   async getPools(): Promise<TPool[]> {
     const baselineKey = targetKey(this.chainId, this.protocol);
+    this.settledEmptyServed = false;
     let pools: TPool[];
     try {
       pools = await this.aurora.getPools();
@@ -2215,8 +2250,16 @@ export class AuroraSourcedProvider<
     }
     const baseline = lastAuroraPoolCountByTarget.get(baselineKey);
     if (pools.length === 0) {
-      throw this.reject('empty');
+      // Decided before the absolute floor: a settled empty read is served
+      // even under a floor of 1, which only guards against mass inadmission
+      // on a combo that is not tiny.
+      if (!(await this.acceptsEmptyRead(baselineKey))) {
+        throw this.reject('empty');
+      }
+      this.settledEmptyServed = true;
+      return this.serve(baselineKey, pools);
     }
+    clearEmptyReadStreak(baselineKey);
     if (this.minPoolCount > 0 && pools.length < this.minPoolCount) {
       // Absolute floor: unlike the ratio guard it holds on the FIRST tick
       // after a process start (in-memory baseline is empty then), so a
@@ -2237,6 +2280,10 @@ export class AuroraSourcedProvider<
         throw this.reject('low_count');
       }
     }
+    return this.serve(baselineKey, pools);
+  }
+
+  private serve(baselineKey: string, pools: TPool[]): TPool[] {
     lowCountStreakByTarget.delete(baselineKey);
     lastAuroraPoolCountByTarget.set(baselineKey, pools.length);
     this.metric.putMetric(
@@ -2246,6 +2293,66 @@ export class AuroraSourcedProvider<
       this.tags
     );
     return pools;
+  }
+
+  // Whether an empty read is the combo's real state: its snapshot in S3 is
+  // tiny, it has read empty for the whole settle window, and a sibling combo
+  // on the chain was served since, so ingestion and pricing are up.
+  private async acceptsEmptyRead(baselineKey: string): Promise<boolean> {
+    const incumbent = await this.incumbents.read(this.chainId, this.protocol, {
+      retainHead: true,
+    });
+    const step = advanceEmptyRead(
+      baselineKey,
+      incumbent?.poolCount,
+      Date.now()
+    );
+    let decision: EmptyReadDecision;
+    if (step.action === 'confirm_chain') {
+      const siblings = await Promise.all(
+        siblingProtocols(this.chainId, this.protocol).map(protocol =>
+          this.incumbents.read(this.chainId, protocol)
+        )
+      );
+      if (
+        siblings.some(sibling =>
+          siblingConfirmsIngestion(sibling, step.firstEmptyAtMs)
+        )
+      ) {
+        clearEmptyReadStreak(baselineKey);
+        decision = {action: 'accept', outcome: EmptyReadOutcome.SETTLED};
+      } else {
+        decision = {
+          action: 'hold',
+          reason: EmptyReadHoldReason.CHAIN_UNCONFIRMED,
+        };
+      }
+    } else {
+      decision = step;
+    }
+
+    if (decision.action === 'hold') {
+      this.metric.putMetric(
+        'CachePools.aurora.empty_read',
+        1,
+        MetricLoggerUnit.Count,
+        {...this.tags, status: 'failure', reason: decision.reason}
+      );
+      return false;
+    }
+    this.metric.putMetric(
+      'CachePools.aurora.empty_read',
+      1,
+      MetricLoggerUnit.Count,
+      {...this.tags, status: 'success', outcome: decision.outcome}
+    );
+    const message = `Serving an empty Aurora read: ${decision.outcome}, incumbent snapshot held ${incumbent?.poolCount} pools`;
+    if (decision.outcome === EmptyReadOutcome.SETTLED) {
+      this.logger.warn(message);
+    } else {
+      this.logger.info(message);
+    }
+    return true;
   }
 
   // The baseline only moves on a served read, so a real, lasting drop of more
@@ -2288,6 +2395,9 @@ export class AuroraSourcedProvider<
   ): AuroraPoolsRejectedError {
     if (reason !== 'low_count') {
       lowCountStreakByTarget.delete(targetKey(this.chainId, this.protocol));
+    }
+    if (reason !== 'empty') {
+      clearEmptyReadStreak(targetKey(this.chainId, this.protocol));
     }
     this.metric.putMetric(
       'CachePools.aurora.rejected',
@@ -2340,6 +2450,9 @@ export function applyAuroraPoolSources<
     extraSourceRoutablePools?: AuroraExtraSourceDeps['routablePools'];
     // targetKeys whose pools carry lastStateChangeAtMs for the activity filter.
     recordPoolActivityTargets?: ReadonlySet<string>;
+    // The pool snapshots in S3, read when a combo's Aurora read is empty.
+    // Unset, every empty read is rejected.
+    incumbentSnapshots?: IIncumbentSnapshotReader;
   }
 ): void {
   const config = auroraPoolsSourceConfigFromEnv();
@@ -2455,6 +2568,8 @@ export function applyAuroraPoolSources<
     }
     const minPoolCount =
       resolveMinPoolCount(config, chainId, protocol, logger, metric) ?? 0;
+    const incumbentSnapshots =
+      options?.incumbentSnapshots ?? NO_INCUMBENT_SNAPSHOTS;
     reportPrefilteredV3WithoutUnpriced(
       config,
       chainId,
@@ -2490,7 +2605,8 @@ export function applyAuroraPoolSources<
         config.minPoolCountRatio,
         minPoolCount,
         logger,
-        metric
+        metric,
+        incumbentSnapshots
       );
     } else if (protocol === Protocol.V3) {
       chainProtocol.provider = new AuroraSourcedProvider(
@@ -2512,7 +2628,8 @@ export function applyAuroraPoolSources<
         config.minPoolCountRatio,
         minPoolCount,
         logger,
-        metric
+        metric,
+        incumbentSnapshots
       );
     } else if (protocol === Protocol.V2) {
       chainProtocol.provider = new AuroraSourcedProvider(
@@ -2534,7 +2651,8 @@ export function applyAuroraPoolSources<
         config.minPoolCountRatio,
         minPoolCount,
         logger,
-        metric
+        metric,
+        incumbentSnapshots
       );
     } else {
       logger.warn(

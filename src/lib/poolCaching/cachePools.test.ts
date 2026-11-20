@@ -7,7 +7,16 @@ import {
   withExtraPoolSource,
 } from './cachePools';
 import {AuroraSourcedExtraPoolsProvider} from './auroraExtraPoolSources';
-import {AuroraSourcedProvider} from './auroraPoolsSource';
+import {
+  AuroraSourcedProvider,
+  resetAuroraPoolCountBaselinesForTesting,
+} from './auroraPoolsSource';
+import {NO_INCUMBENT_SNAPSHOTS} from './incumbentSnapshots';
+import {resetEmptyReadStreaksForTesting} from './util/emptyLaneSettle';
+import {
+  FakeIncumbentSnapshotReader,
+  snapshotHead,
+} from '../../../tests/test-utils/FakeIncumbentSnapshots';
 import {
   POOL_ACTIVITY_SIGNAL_MAX_STALENESS_MS,
   POOL_ACTIVITY_WINDOW_MS,
@@ -731,7 +740,8 @@ describe('cacheAllPools', () => {
             0.5,
             0,
             mockLogger,
-            mockMetric
+            mockMetric,
+            NO_INCUMBENT_SNAPSHOTS
           ),
         },
       ];
@@ -2076,5 +2086,204 @@ describe('cacheAllPools pool activity filter', () => {
         tags: {status: 'failure', reason: 'unsupported_target'},
       }),
     ]);
+  });
+});
+
+describe('cacheAllPools settled empty reads', () => {
+  const CHAIN_ID_MEGAETH = 4326 as ChainId;
+  const S3_KEY = 'poolCacheGzip.json-4326-V3';
+  let mockLogger: Logger;
+  let mockMetric: MockMetric;
+
+  // The real guard over an Aurora read that is always empty.
+  const emptyMegaethV3 = (incumbents: FakeIncumbentSnapshotReader) => [
+    {
+      protocol: Protocol.V3,
+      chainId: CHAIN_ID_MEGAETH,
+      provider: new AuroraSourcedProvider<V3SubgraphPool>(
+        {getPools: async () => []},
+        CHAIN_ID_MEGAETH,
+        Protocol.V3,
+        0.5,
+        1,
+        createMockLogger(),
+        new MockMetric(),
+        incumbents
+      ),
+    },
+  ];
+
+  const configWith = (
+    incumbents: FakeIncumbentSnapshotReader
+  ): CachePoolsConfig => ({
+    s3Bucket: 'test-bucket',
+    s3CacheKey: 'poolCacheGzip.json',
+    incumbentSnapshots: incumbents,
+  });
+
+  const s3KeyFor = (chainId: number, protocol: Protocol) =>
+    `poolCacheGzip.json-${chainId}-${String(protocol).toUpperCase()}`;
+
+  beforeEach(() => {
+    mockLogger = createMockLogger();
+    mockMetric = new MockMetric();
+    resetEmptyReadStreaksForTesting();
+    resetAuroraPoolCountBaselinesForTesting();
+    sendMock.mockReset();
+    sendMock.mockResolvedValue({});
+  });
+
+  it('writes an empty, labelled snapshot on the run the combo settles, conditioned on the HEAD it already read', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader(
+      [
+        ['4326:V3', {poolCount: 1, fetchStartMs: Date.now() - 60_000}],
+        ['4326:V4', () => ({poolCount: 8, fetchStartMs: Date.now() + 1})],
+      ],
+      new Map([
+        [
+          S3_KEY,
+          snapshotHead({eTag: '"v1"', metadata: {'source-pool-count': '1'}}),
+        ],
+      ]),
+      s3KeyFor
+    );
+    mockChainProtocols = emptyMegaethV3(incumbents);
+
+    for (let run = 0; run < 2; run++) {
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, configWith(incumbents))
+      ).resolves.toMatchObject({succeeded: 0, failed: 1});
+    }
+    expect(putObjectCalls()).toEqual([]);
+
+    await expect(
+      cacheAllPools(mockLogger, mockMetric, configWith(incumbents))
+    ).resolves.toMatchObject({succeeded: 1, failed: 0});
+
+    const puts = putObjectCalls();
+    expect(puts).toHaveLength(1);
+    expect(writtenPoolIds(puts[0].input.Body)).toEqual([]);
+    expect(puts[0].input.Metadata['source-pool-count']).toBe('0');
+    expect(puts[0].input.IfMatch).toBe('"v1"');
+    // The write reused the guard's HEAD instead of issuing its own.
+    expect(
+      sendMock.mock.calls.filter(call => call[0].commandType === 'HeadObject')
+    ).toEqual([]);
+    expect(
+      mockMetric.calls.filter(call => call.key === 'CachePools.getPools.error')
+    ).toHaveLength(2);
+  });
+
+  it('keeps the previous snapshot while the combo is not settled', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader(
+      [['4326:V3', {poolCount: 500, fetchStartMs: Date.now()}]],
+      new Map(),
+      s3KeyFor
+    );
+    mockChainProtocols = emptyMegaethV3(incumbents);
+
+    for (let run = 0; run < 4; run++) {
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, configWith(incumbents))
+      ).resolves.toMatchObject({failed: 1});
+    }
+    expect(putObjectCalls()).toEqual([]);
+  });
+
+  it('heads the key itself when no HEAD was retained', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader(
+      [['4326:V3', {poolCount: 0, fetchStartMs: Date.now() - 60_000}]],
+      new Map(),
+      s3KeyFor
+    );
+    sendMock.mockImplementation(async cmd =>
+      cmd.commandType === 'HeadObject' ? {ETag: '"v7"'} : {}
+    );
+    mockChainProtocols = emptyMegaethV3(incumbents);
+
+    await expect(
+      cacheAllPools(mockLogger, mockMetric, configWith(incumbents))
+    ).resolves.toMatchObject({succeeded: 1, failed: 0});
+    expect(putObjectCalls()[0].input.IfMatch).toBe('"v7"');
+  });
+
+  it('labels a snapshot with the source count, not the count left after filtering', async () => {
+    // AMPL is on mainnet's V3/V4 direct-swap block list, so the cron drops
+    // its pool after the source returned it.
+    const AMPL = '0xd46ba6d942050d489dbd938a2c909a5d5039a161';
+    mockChainProtocols = [
+      {
+        protocol: Protocol.V3,
+        chainId: ChainId.MAINNET,
+        provider: {
+          getPools: async () => [
+            makeV3Pool('0xaaa', AMPL, '0x2222'),
+            makeV3Pool('0xbbb', '0x1111', '0x3333'),
+            makeV3Pool('0xccc', '0x1111', '0x4444'),
+            makeV3Pool('0xddd', '0x1111', '0x5555'),
+          ],
+        },
+      },
+    ];
+
+    await cacheAllPools(mockLogger, mockMetric, {
+      s3Bucket: 'test-bucket',
+      s3CacheKey: 'poolCacheGzip.json',
+    });
+
+    const put = putObjectCalls()[0];
+    expect(writtenPoolIds(put.input.Body)).toEqual(['0xbbb', '0xccc', '0xddd']);
+    // Four source pools: not tiny, even though three were written.
+    expect(put.input.Metadata['source-pool-count']).toBe('4');
+  });
+
+  it('does not run the activity filter over a settled empty read', async () => {
+    const savedTargets = process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS;
+    process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = '4326:V3';
+    try {
+      const incumbents = new FakeIncumbentSnapshotReader(
+        [['4326:V3', {poolCount: 0, fetchStartMs: Date.now() - 60_000}]],
+        new Map(),
+        s3KeyFor
+      );
+      mockChainProtocols = emptyMegaethV3(incumbents);
+
+      await expect(
+        cacheAllPools(mockLogger, mockMetric, configWith(incumbents))
+      ).resolves.toMatchObject({succeeded: 1, failed: 0});
+      expect(
+        mockMetric.calls.filter(call =>
+          call.key.startsWith('CachePools.activityFilter')
+        )
+      ).toEqual([]);
+    } finally {
+      if (savedTargets === undefined) {
+        delete process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS;
+      } else {
+        process.env.POOL_CACHING_ACTIVITY_FILTER_TARGETS = savedTargets;
+      }
+    }
+  });
+
+  it('labels every written snapshot with its pool count', async () => {
+    mockChainProtocols = [
+      {
+        protocol: Protocol.V2,
+        chainId: ChainId.POLYGON,
+        provider: {
+          getPools: async () => [
+            makePool('0xaaa', '0x1111', '0x2222'),
+            makePool('0xbbb', '0x1111', '0x3333'),
+          ],
+        },
+      },
+    ];
+
+    await cacheAllPools(mockLogger, mockMetric, {
+      s3Bucket: 'test-bucket',
+      s3CacheKey: 'poolCacheGzip.json',
+    });
+
+    expect(putObjectCalls()[0].input.Metadata['source-pool-count']).toBe('2');
   });
 });

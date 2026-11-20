@@ -5,11 +5,7 @@
 
 import {Protocol} from '@uniswap/router-sdk';
 import {ChainId} from '@uniswap/sdk-core';
-import {
-  S3Client,
-  PutObjectCommand,
-  HeadObjectCommand,
-} from '@aws-sdk/client-s3';
+import {S3Client, PutObjectCommand} from '@aws-sdk/client-s3';
 import * as zlib from 'zlib';
 
 import {V2SubgraphPool, V3SubgraphPool, V4SubgraphPool} from './sor-providers';
@@ -20,7 +16,19 @@ import {
   untrackedUsdThresholdFor,
   ChainProtocol,
 } from './cacheConfig';
-import {applyAuroraPoolSources, targetKey} from './auroraPoolsSource';
+import {
+  applyAuroraPoolSources,
+  AuroraSourcedProvider,
+  targetKey,
+} from './auroraPoolsSource';
+import {
+  IIncumbentSnapshotReader,
+  IncumbentSnapshotReader,
+  ISnapshotObjectStore,
+  S3SnapshotObjectStore,
+  SNAPSHOT_SOURCE_POOL_COUNT_METADATA_KEY,
+  SnapshotObjectHead,
+} from './incumbentSnapshots';
 import {
   FETCH_START_METADATA_KEY,
   parseSnapshotFetchStart,
@@ -76,6 +84,12 @@ export interface CachePoolsConfig {
    * value (defer every read), so this is resolved with `??`, never `||`.
    */
   v4LpFeeCorrectionMaxReadsPerTick?: number;
+  /**
+   * Reader for the pool snapshots already in S3, consulted when a combo's
+   * Aurora read is empty. Unset in production, where the run reads
+   * `s3Bucket`; tests inject a fake.
+   */
+  incumbentSnapshots?: IIncumbentSnapshotReader;
 }
 
 function prefixedLogger(logger: Logger, prefix: string): Logger {
@@ -323,6 +337,8 @@ function applyPoolActivityFilter<T extends ActivityFilterPool>(
 async function cachePoolsForChainProtocol(
   chainProtocol: SourcedChainProtocol,
   s3: S3Client,
+  snapshotStore: ISnapshotObjectStore,
+  incumbentSnapshots: IIncumbentSnapshotReader,
   config: CachePoolsConfig,
   logger: Logger,
   metricInstance: IMetric,
@@ -343,13 +359,19 @@ async function cachePoolsForChainProtocol(
   );
 
   let pools: Array<V2SubgraphPool | V3SubgraphPool | V4SubgraphPool> = [];
+  // What the pool source returned, before this function's filters and extra
+  // sources: the size an empty read is judged against (incumbentSnapshots).
+  let sourcePoolCount = 0;
   try {
     const beforeGetPool = Date.now();
     pools = (await provider.getPools()) as Array<
       V2SubgraphPool | V3SubgraphPool | V4SubgraphPool
     >;
+    sourcePoolCount = pools.length;
     const target = targetKey(chainId, protocol);
-    if (activityFilter.targets.has(target)) {
+    // An empty list has no activity signal to filter on, and would only
+    // report the filter as skipped.
+    if (activityFilter.targets.has(target) && pools.length > 0) {
       pools = applyPoolActivityFilter(
         chainId,
         pools,
@@ -810,7 +832,11 @@ async function cachePoolsForChainProtocol(
     throw err;
   }
 
-  if (!pools || pools.length === 0) {
+  // A settled empty read is the combo's real state and is written like any
+  // other snapshot; any other empty list keeps the previous snapshot.
+  const writesEmptySnapshot =
+    provider instanceof AuroraSourcedProvider && provider.servedSettledEmpty;
+  if (pools.length === 0 && !writesEmptySnapshot) {
     metricInstance.putMetric(
       'CachePools.getPools.empty',
       1,
@@ -864,48 +890,49 @@ async function cachePoolsForChainProtocol(
   const MAX_WRITE_ATTEMPTS = 3;
   for (let attempt = 1; ; attempt++) {
     let putCondition: {IfMatch?: string; IfNoneMatch?: string} = {};
+    let head: SnapshotObjectHead | undefined;
     try {
-      const head = await s3.send(
-        new HeadObjectCommand({Bucket: config.s3Bucket, Key: compressedKey})
-      );
+      // An empty read already read this HEAD to decide on the combo; reuse
+      // it once. The put is conditioned on its ETag, so a write that landed
+      // since fails the condition and the retry re-reads.
+      head =
+        (attempt === 1
+          ? incumbentSnapshots.takeRetainedHead(compressedKey)
+          : undefined) ?? (await snapshotStore.head(compressedKey));
+    } catch (err) {
+      // Fail CLOSED: without seeing the incumbent we cannot arbitrate, and an
+      // unconditional write could clobber fresher data with a stale orphan
+      // snapshot. Retry, then surface as a task failure — a missed write ages
+      // the snapshot by one cadence and is visible; a stale clobber is silent.
+      if (attempt < MAX_WRITE_ATTEMPTS) {
+        logger.info(
+          `HeadObject failed for ${compressedKey} (attempt ${attempt}); retrying freshness check`
+        );
+        continue;
+      }
+      throw err;
+    }
+    if (head === undefined) {
+      // First write for this key — reject if another writer creates it first.
+      putCondition = {IfNoneMatch: '*'};
+    } else {
       const existingFetchStart = parseSnapshotFetchStart(
-        head.Metadata?.[FETCH_START_METADATA_KEY],
+        head.metadata?.[FETCH_START_METADATA_KEY],
         Date.now()
       );
       const existingIsFresher =
         existingFetchStart !== undefined
           ? existingFetchStart >= fetchStartTime
-          : head.LastModified !== undefined &&
-            head.LastModified > fetchStartTime;
+          : head.lastModified !== undefined &&
+            head.lastModified > fetchStartTime;
       if (existingIsFresher) {
         skipStaleWrite(
-          `already holds data fetched at ${existingFetchStart?.toISOString() ?? `<=${head.LastModified?.toISOString()}`}, at least as fresh as this run's ${fetchStartTime.toISOString()}`
+          `already holds data fetched at ${existingFetchStart?.toISOString() ?? `<=${head.lastModified?.toISOString()}`}, at least as fresh as this run's ${fetchStartTime.toISOString()}`
         );
         return;
       }
-      if (head.ETag) {
-        putCondition = {IfMatch: head.ETag};
-      }
-    } catch (err) {
-      const name = (err as {name?: string})?.name;
-      const status = (err as {$metadata?: {httpStatusCode?: number}})?.$metadata
-        ?.httpStatusCode;
-      if (name === 'NotFound' || status === 404) {
-        // First write for this key — reject if another writer creates it first.
-        putCondition = {IfNoneMatch: '*'};
-      } else {
-        // Fail CLOSED: without seeing the incumbent we cannot arbitrate,
-        // and an unconditional write could clobber fresher data with a
-        // stale orphan snapshot. Retry, then surface as a task failure —
-        // a missed write ages the snapshot by one cadence and is visible;
-        // a stale clobber is silent.
-        if (attempt < MAX_WRITE_ATTEMPTS) {
-          logger.info(
-            `HeadObject failed for ${compressedKey} (attempt ${attempt}); retrying freshness check`
-          );
-          continue;
-        }
-        throw err;
+      if (head.eTag) {
+        putCondition = {IfMatch: head.eTag};
       }
     }
 
@@ -915,7 +942,10 @@ async function cachePoolsForChainProtocol(
           Bucket: config.s3Bucket,
           Key: compressedKey,
           Body: compressedPools,
-          Metadata: {[FETCH_START_METADATA_KEY]: fetchStartTime.toISOString()},
+          Metadata: {
+            [FETCH_START_METADATA_KEY]: fetchStartTime.toISOString(),
+            [SNAPSHOT_SOURCE_POOL_COUNT_METADATA_KEY]: String(sourcePoolCount),
+          },
           ...putCondition,
         })
       );
@@ -1044,6 +1074,15 @@ export async function cacheAllPools(
 ): Promise<CacheAllPoolsResult> {
   const s3 = new S3Client({region: process.env.AWS_REGION || 'us-east-2'});
   const cronLogger = prefixedLogger(logger, '[PoolCachingCron]');
+  const snapshotStore = new S3SnapshotObjectStore(s3, config.s3Bucket);
+  const incumbentSnapshots =
+    config.incumbentSnapshots ??
+    new IncumbentSnapshotReader(
+      snapshotStore,
+      (chainId, protocol) =>
+        S3_POOL_CACHE_KEY(config.s3CacheKey, chainId, protocol),
+      cronLogger
+    );
   // Refresh factory-discovered ZLCA hooks before fetching so this run's
   // Aurora V4 admission and V4 filtering see them (fail-open).
   await refreshDynamicZlcaHooks(cronLogger, metricInstance);
@@ -1101,6 +1140,7 @@ export async function cacheAllPools(
       // fetch semaphore so they never queue behind the all-chains batch.
       scopedRun: only !== undefined && only.length > 0,
       recordPoolActivityTargets: activityFilter.targets,
+      incumbentSnapshots,
     }
   );
   // A combo applyAuroraPoolSources left without a provider was reported
@@ -1130,6 +1170,8 @@ export async function cacheAllPools(
       cachePoolsForChainProtocol(
         cp,
         s3,
+        snapshotStore,
+        incumbentSnapshots,
         config,
         cronLogger,
         metricInstance,

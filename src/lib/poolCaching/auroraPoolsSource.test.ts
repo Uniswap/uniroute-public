@@ -28,6 +28,12 @@ import {
   type AuroraPoolsSourceConfig,
   type TvlGuardWildcardRejection,
 } from './auroraPoolsSource';
+import {NO_INCUMBENT_SNAPSHOTS} from './incumbentSnapshots';
+import {
+  EMPTY_READ_SETTLE_TICKS,
+  resetEmptyReadStreaksForTesting,
+} from './util/emptyLaneSettle';
+import {FakeIncumbentSnapshotReader} from '../../../tests/test-utils/FakeIncumbentSnapshots';
 import {Context} from '@uniswap/lib-uni/context';
 import {getTvlBypassHookAddresses} from './util/hooksAddressesAllowlist';
 import {getPermissionedHookAddresses} from '@uniswap/lib-sharedconfig/permissionedTokens';
@@ -1448,6 +1454,231 @@ describe('tvlGuardAnchorTokens', () => {
   });
 });
 
+describe('AuroraSourcedProvider empty reads', () => {
+  const MEGAETH = 4326;
+  const V3_KEY = '4326:V3';
+  const V4_KEY = '4326:V4';
+
+  beforeEach(() => {
+    resetAuroraPoolCountBaselinesForTesting();
+    resetEmptyReadStreaksForTesting();
+  });
+
+  // megaeth V3 as configured in prod: a floor of 1, so an empty read can
+  // only be served by the settle path.
+  const megaethV3 = (
+    aurora: ISubgraphProvider<V3SubgraphPool>,
+    metric: FakeMetric,
+    incumbents: FakeIncumbentSnapshotReader
+  ) =>
+    new AuroraSourcedProvider(
+      aurora,
+      MEGAETH,
+      Protocol.V3,
+      0.5,
+      1,
+      noopLogger,
+      metric,
+      incumbents
+    );
+
+  // A sibling combo that keeps writing a non-empty snapshot: each read sees a
+  // fetch start of "just now".
+  const liveSibling = () => ({poolCount: 8, fetchStartMs: Date.now() + 1});
+
+  const emptyReadTags = (metric: FakeMetric) =>
+    metric.byKey('CachePools.aurora.empty_read').map(m => m.tags);
+
+  it('serves a tiny combo empty once it has settled and a sibling is still served', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 1, fetchStartMs: Date.now() - 60_000}],
+      [V4_KEY, liveSibling],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(fakeProvider([[]]), metric, incumbents);
+
+    for (let tick = 1; tick < EMPTY_READ_SETTLE_TICKS; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'empty',
+      });
+      expect(provider.servedSettledEmpty).toBe(false);
+    }
+    expect(await provider.getPools()).toEqual([]);
+    expect(provider.servedSettledEmpty).toBe(true);
+
+    // Served, so the rejection-rate monitor sees it as a served tick.
+    expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+    expect(metric.byKey('CachePools.aurora.rejected')).toHaveLength(
+      EMPTY_READ_SETTLE_TICKS - 1
+    );
+    expect(emptyReadTags(metric)).toEqual([
+      ...Array.from({length: EMPTY_READ_SETTLE_TICKS - 1}, () => ({
+        chainId: '4326',
+        protocol: 'V3',
+        status: 'failure',
+        reason: 'settling',
+      })),
+      {chainId: '4326', protocol: 'V3', status: 'success', outcome: 'settled'},
+    ]);
+    // The combo's own read keeps its HEAD for the write; siblings' do not.
+    expect(incumbents.reads.filter(r => r.retainHead).map(r => r.key)).toEqual(
+      Array.from({length: EMPTY_READ_SETTLE_TICKS}, () => V3_KEY)
+    );
+  });
+
+  it('holds a full window while no sibling has been served since the first empty read', async () => {
+    // A chain-wide ingestion or price outage: V4 last wrote before V3 went
+    // empty and has not written since.
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 1, fetchStartMs: Date.now() - 60_000}],
+      [V4_KEY, {poolCount: 35, fetchStartMs: Date.now() - 60_000}],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(fakeProvider([[]]), metric, incumbents);
+
+    for (let tick = 0; tick < EMPTY_READ_SETTLE_TICKS + 2; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'empty',
+      });
+    }
+    expect(metric.byKey('CachePools.aurora.served')).toEqual([]);
+    expect(emptyReadTags(metric).slice(EMPTY_READ_SETTLE_TICKS - 1)).toEqual(
+      Array.from({length: 3}, () => ({
+        chainId: '4326',
+        protocol: 'V3',
+        status: 'failure',
+        reason: 'chain_unconfirmed',
+      }))
+    );
+
+    // V4 recovers and writes again while V3 stays empty: V3 settles at once.
+    incumbents.set(V4_KEY, liveSibling());
+    expect(await provider.getPools()).toEqual([]);
+    expect(provider.servedSettledEmpty).toBe(true);
+  });
+
+  it('does not count an empty sibling as confirmation', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 1, fetchStartMs: Date.now() - 60_000}],
+      ['4326:V2', () => ({poolCount: 0, fetchStartMs: Date.now() + 1})],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(fakeProvider([[]]), metric, incumbents);
+
+    for (let tick = 0; tick < EMPTY_READ_SETTLE_TICKS; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'empty',
+      });
+    }
+    expect(emptyReadTags(metric).at(-1)?.reason).toBe('chain_unconfirmed');
+  });
+
+  it('serves an already-empty combo on its first empty read', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 0, fetchStartMs: Date.now() - 60_000}],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(fakeProvider([[]]), metric, incumbents);
+
+    expect(await provider.getPools()).toEqual([]);
+    expect(provider.servedSettledEmpty).toBe(true);
+    expect(emptyReadTags(metric)).toEqual([
+      {
+        chainId: '4326',
+        protocol: 'V3',
+        status: 'success',
+        outcome: 'already_empty',
+      },
+    ]);
+  });
+
+  it('keeps rejecting an empty read on a combo that is not tiny', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 500, fetchStartMs: Date.now() - 60_000}],
+      [V4_KEY, liveSibling],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(fakeProvider([[]]), metric, incumbents);
+
+    for (let tick = 0; tick < EMPTY_READ_SETTLE_TICKS + 1; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'empty',
+      });
+    }
+    expect(
+      emptyReadTags(metric).every(tags => tags?.reason === 'incumbent_not_tiny')
+    ).toBe(true);
+    // A big combo never pays for the sibling reads.
+    expect(incumbents.reads.every(r => r.key === V3_KEY)).toBe(true);
+  });
+
+  it('keeps rejecting when the incumbent is unknown', async () => {
+    const metric = new FakeMetric();
+    const provider = megaethV3(
+      fakeProvider([[]]),
+      metric,
+      new FakeIncumbentSnapshotReader()
+    );
+
+    for (let tick = 0; tick < EMPTY_READ_SETTLE_TICKS + 1; tick++) {
+      await expect(provider.getPools()).rejects.toMatchObject({
+        reason: 'empty',
+      });
+    }
+    expect(emptyReadTags(metric).at(-1)?.reason).toBe('incumbent_unknown');
+  });
+
+  it('restarts the window after a non-empty read or an Aurora error', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 1, fetchStartMs: Date.now() - 60_000}],
+      [V4_KEY, liveSibling],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(
+      fakeProvider<V3SubgraphPool>([
+        [],
+        [],
+        [v3Pool('0x1', 2000)],
+        [],
+        new Error('statement timeout'),
+        [],
+        [],
+      ]),
+      metric,
+      incumbents
+    );
+
+    await expect(provider.getPools()).rejects.toThrow();
+    await expect(provider.getPools()).rejects.toThrow();
+    expect(await provider.getPools()).toHaveLength(1);
+    await expect(provider.getPools()).rejects.toThrow();
+    await expect(provider.getPools()).rejects.toMatchObject({reason: 'error'});
+    await expect(provider.getPools()).rejects.toThrow();
+    await expect(provider.getPools()).rejects.toThrow();
+    // Each restart left the window short of full.
+    expect(metric.byKey('CachePools.aurora.served')).toHaveLength(1);
+    expect(
+      emptyReadTags(metric).every(tags => tags?.reason === 'settling')
+    ).toBe(true);
+  });
+
+  it('serves pools again after a settled empty read, under the same floor', async () => {
+    const incumbents = new FakeIncumbentSnapshotReader([
+      [V3_KEY, {poolCount: 0, fetchStartMs: Date.now() - 60_000}],
+    ]);
+    const metric = new FakeMetric();
+    const provider = megaethV3(
+      fakeProvider<V3SubgraphPool>([[], [v3Pool('0x1', 2000)]]),
+      metric,
+      incumbents
+    );
+
+    expect(await provider.getPools()).toEqual([]);
+    expect(await provider.getPools()).toHaveLength(1);
+    expect(provider.servedSettledEmpty).toBe(false);
+  });
+});
+
 describe('AuroraSourcedProvider', () => {
   beforeEach(() => {
     resetAuroraPoolCountBaselinesForTesting();
@@ -1465,7 +1696,8 @@ describe('AuroraSourcedProvider', () => {
       0.5,
       minPoolCount,
       noopLogger,
-      metric
+      metric,
+      NO_INCUMBENT_SNAPSHOTS
     );
 
   it('serves Aurora pools and counts the served read', async () => {
