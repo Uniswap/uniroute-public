@@ -66,6 +66,7 @@ import {V3Pool} from '../models/pool/V3Pool';
 import {V4Pool} from '../models/pool/V4Pool';
 import {XSTOCK_WRAP_HOOKS_ON_MONAD} from '../lib/poolCaching/util/xStockWrapHooks';
 import {
+  FEW_V2_SHELL_HOOK_ON_MAINNET_2,
   isZlcaHookSettleBeforeSwap,
   LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
 } from '../lib/poolCaching/util/hooksAddressesAllowlist';
@@ -160,6 +161,7 @@ vi.mock(
       getSettleBeforeSwapHooks: actual.getSettleBeforeSwapHooks,
       LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET:
         actual.LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
+      FEW_V2_SHELL_HOOK_ON_MAINNET_2: actual.FEW_V2_SHELL_HOOK_ON_MAINNET_2,
       getHookMinQuoteGasPerCall: actual.getHookMinQuoteGasPerCall,
       getHookMinSwapGasLimit: actual.getHookMinSwapGasLimit,
       MAX_HOOK_MIN_SWAP_GAS_LIMIT: actual.MAX_HOOK_MIN_SWAP_GAS_LIMIT,
@@ -10763,22 +10765,18 @@ describe('UniRouteBL', () => {
     });
 
     describe('EXACT_OUT routes through a settle-before-swap hook', () => {
-      const settleBeforeSwapRoute = () =>
+      const settleBeforeSwapRoute = (
+        hooks: string = LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET
+      ) =>
         new RouteBasic(Protocol.V4, [
           new V4Pool(
             wrappedEth,
             usdc,
             3000,
             60,
-            LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET,
+            hooks,
             1n,
-            V4Pool.computePoolId(
-              wrappedEth,
-              usdc,
-              3000,
-              60,
-              LOOPER_ORIGIN_ARM_HOOK_ON_MAINNET
-            ),
+            V4Pool.computePoolId(wrappedEth, usdc, 3000, 60, hooks),
             BigInt('79228162514264337593543950336'),
             0n
           ),
@@ -10893,6 +10891,38 @@ describe('UniRouteBL', () => {
         expect(
           run.seenRoutes[0].map(route => route.poolPathKey()).sort()
         ).toEqual([hooked.poolPathKey(), plain.poolPathKey()].sort());
+        expect(run.metrics.has(droppedMetric)).toBe(false);
+      });
+
+      it('drops a FewV2 Shell (WETH mode) route for EXACT_OUT and counts it', async () => {
+        const fewV2 = settleBeforeSwapRoute(FEW_V2_SHELL_HOOK_ON_MAINNET_2);
+        const plain = makeRoute(45);
+        const run = await runCase({
+          cached: [],
+          fresh: [fewV2, plain],
+          tradeType: 'EXACT_OUT',
+        });
+        await run.quote();
+        expect(run.seenRoutes[0].map(route => route.poolPathKey())).toEqual([
+          plain.poolPathKey(),
+        ]);
+        expect(
+          run.metrics.has(droppedMetric, 'status:success', 'chain:MAINNET')
+        ).toBe(true);
+      });
+
+      it('keeps a FewV2 Shell (WETH mode) route for EXACT_IN', async () => {
+        const fewV2 = settleBeforeSwapRoute(FEW_V2_SHELL_HOOK_ON_MAINNET_2);
+        const plain = makeRoute(46);
+        const run = await runCase({
+          cached: [],
+          fresh: [fewV2, plain],
+          tradeType: 'EXACT_IN',
+        });
+        await run.quote();
+        expect(
+          run.seenRoutes[0].map(route => route.poolPathKey()).sort()
+        ).toEqual([fewV2.poolPathKey(), plain.poolPathKey()].sort());
         expect(run.metrics.has(droppedMetric)).toBe(false);
       });
 
