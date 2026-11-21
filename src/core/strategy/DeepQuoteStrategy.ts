@@ -162,7 +162,8 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
     priorityFeePerGasWei?: bigint,
     callerFetchReport?: QuoteFetchReport,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    gasPriceBlockNumber?: number
   ): Promise<QuoteSplit[]> {
     // Generate all possible partial routes per percentage step
     const pctRoutes: RouteBasic[] = [];
@@ -307,7 +308,7 @@ export class DeepQuoteStrategy extends BaseQuoteStrategy {
       ? await this.gasEstimateProvider.getCurrentGasPrice(
           ctx,
           chain.chainId,
-          blockNumber,
+          gasPriceBlockNumber,
           priorityFeePerGasWei
         )
       : 0;

@@ -17,6 +17,7 @@ import {
 import {IChainRepository} from '../stores/chain/IChainRepository';
 import {MAINNET} from '../stores/chain/hardcoded/chains/Mainnet';
 import {constants} from 'ethers';
+import {withUnderDeliveryRefreshSender} from './underDeliveryRefreshSender';
 import {IQuoteSelector} from './quote/selector/IQuoteSelector';
 import {describe, expect, it, beforeEach, vi} from 'vitest';
 import {UniRouteBL} from './UniRouteBL';
@@ -52,7 +53,7 @@ import {Address} from '../models/address/Address';
 import {Erc20Token} from '../models/token/Erc20Token';
 import {FeeOnTransfer} from '../models/token/FeeOnTransfer';
 import {Context as UniContext} from '@uniswap/lib-uni/context';
-import {IQuoteFetcher} from '../stores/quote/IQuoteFetcher';
+import {IQuoteFetcher, QuoteFetchReport} from '../stores/quote/IQuoteFetcher';
 import {QuoteBasic} from '../models/quote/QuoteBasic';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {TradeType} from '../models/quote/TradeType';
@@ -62,7 +63,7 @@ import {
   RouteDiscoveryResult,
 } from '../stores/route/IRoutesRepository';
 import {V2Pool} from '../models/pool/V2Pool';
-import {V3Pool} from '../models/pool/V3Pool';
+import {V3Fee, V3Pool} from '../models/pool/V3Pool';
 import {V4Pool} from '../models/pool/V4Pool';
 import {XSTOCK_WRAP_HOOKS_ON_MONAD} from '../lib/poolCaching/util/xStockWrapHooks';
 import {
@@ -92,7 +93,12 @@ import {QuoteSplit} from '../models/quote/QuoteSplit';
 import {SwapInfo} from '../models/quote/SwapInfo';
 import {BaseQuoteStrategy} from './strategy/BaseQuoteStrategy';
 import {DummySimulator} from './simulator/DummySimulator';
-import {ISimulator, SimulationStatus} from './simulator/ISimulator';
+import {
+  DeliveryUnmeasuredReason,
+  ISimulator,
+  SimulatedDelivery,
+  SimulationStatus,
+} from './simulator/ISimulator';
 import {StateOverrideResolver} from './simulator/StateOverrideResolver';
 import {CurrencyInfo} from '../models/currency/CurrencyInfo';
 import {
@@ -5434,6 +5440,1511 @@ describe('UniRouteBL', () => {
     });
   });
 
+  describe('under-delivery check', () => {
+    const usdc = new Address('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48');
+    const wrappedEth = new Address(
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+    );
+    const allProtocols = [
+      Protocol.V2,
+      Protocol.V3,
+      Protocol.V4,
+      Protocol.MIXED,
+    ];
+    const amountIn = BigInt('1000000000000000000');
+    // The block PinnedBlockRpcProvider answers eth_blockNumber with.
+    const resolvedBlock = 12345678;
+    const v3Route = (fee: V3Fee, poolAddress: string) =>
+      new RouteBasic(Protocol.V3, [
+        new V3Pool(
+          usdc,
+          wrappedEth,
+          fee,
+          new Address(poolAddress),
+          1_000_000_000_000n,
+          79228162514264337593543950336n,
+          0n
+        ),
+      ]);
+    // Quotes above the direct pool, as the wrapper-trap intermediates do.
+    const trapRoute = v3Route(
+      500,
+      '0x1111111111111111111111111111111111111111'
+    );
+    const directRoute = v3Route(
+      3000,
+      '0x2222222222222222222222222222222222222222'
+    );
+    const otherRoute = v3Route(
+      10000,
+      '0x3333333333333333333333333333333333333333'
+    );
+    // Fee tiers apart from the routes above, so a split can pair them: the
+    // SDK rejects a trade whose legs share token pair and fee.
+    const lowFeeRoute = v3Route(
+      100,
+      '0x6666666666666666666666666666666666666666'
+    );
+    const altDirectRoute = v3Route(
+      3000,
+      '0x7777777777777777777777777777777777777777'
+    );
+    // Trap-priced routes, each quoting below the one before: ten, more than
+    // three searches of three candidates can reach.
+    const shortlistRoutes = Array.from({length: 10}, (_, index) =>
+      v3Route(500, `0x${'a'.repeat(38)}${String(index + 1).padStart(2, '0')}`)
+    );
+    const quoteAmounts = new Map([
+      [trapRoute.poolPathKey(), BigInt('1010000000000000000')],
+      [directRoute.poolPathKey(), BigInt('990000000000000000')],
+      [otherRoute.poolPathKey(), BigInt('980000000000000000')],
+      [lowFeeRoute.poolPathKey(), BigInt('1000000000000000000')],
+      [altDirectRoute.poolPathKey(), BigInt('995000000000000000')],
+      ...shortlistRoutes.map((route, index): [string, bigint] => [
+        route.poolPathKey(),
+        BigInt('1009000000000000000') - BigInt(index) * 1_000_000_000_000_000n,
+      ]),
+    ]);
+    // The cache stores pools without their price state, which the quote
+    // path refreshes on chain; candidates carry the full pools instead.
+    const routesByPoolPathKey = new Map(
+      [
+        trapRoute,
+        directRoute,
+        otherRoute,
+        lowFeeRoute,
+        altDirectRoute,
+        ...shortlistRoutes,
+      ].map(route => [route.poolPathKey(), route])
+    );
+    const request = create(QuoteRequestSchema, {
+      tokenInAddress: usdc.toString(),
+      tokenInChainId: 1,
+      tokenOutAddress: wrappedEth.toString(),
+      tokenOutChainId: 1,
+      amount: amountIn.toString(),
+      tradeType: 'EXACT_IN',
+      quoteType: 'FAST',
+      protocols: 'v2,v3,v4,mixed',
+      simulateFromAddress: '0x1234567890123456789012345678901234567890',
+      recipient: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+      slippageTolerance: 20,
+    });
+
+    type SimulateCall = {
+      poolPathKeys: string[];
+      calldata: string | undefined;
+      blockNumber: number | undefined;
+      measureDelivery: boolean | undefined;
+    };
+
+    // Answers each candidate by its pool path, SUCCESS unless scripted.
+    type ScriptedOutcome = {
+      status: SimulationStatus;
+      routerBalanceFloorReverted?: boolean;
+      seeded?: boolean;
+      delivery?: SimulatedDelivery;
+    };
+    class ScriptedSimulator implements ISimulator {
+      readonly calls: SimulateCall[] = [];
+      constructor(
+        private readonly outcomes: Map<string, ScriptedOutcome>,
+        // Overrides the pool-path outcome for calldata it matches.
+        private readonly calldataOutcome: (
+          calldata: string | undefined
+        ) => ScriptedOutcome | undefined = () => undefined,
+        // Outcomes a pool path answers in turn, ahead of its fixed outcome.
+        private readonly outcomeSequences = new Map<string, ScriptedOutcome[]>()
+      ) {}
+
+      async simulate(
+        _chainId: ChainId,
+        swapOptions: SwapOptionsUniversalRouter,
+        quoteSplit: QuoteSplit,
+        _tokenInCurrencyInfo: CurrencyInfo,
+        _tokenOutCurrencyInfo: CurrencyInfo,
+        _inputAmount: bigint,
+        _quoteAmount: bigint,
+        _ctx: Context,
+        _gasPrice?: bigint,
+        blockNumber?: number
+      ): Promise<QuoteSplit> {
+        const poolPathKeys = quoteSplit.quotes.map(quote =>
+          quote.route.poolPathKey()
+        );
+        this.calls.push({
+          poolPathKeys,
+          calldata: quoteSplit.swapInfo?.methodParameters?.calldata,
+          blockNumber,
+          measureDelivery: swapOptions.measureDelivery,
+        });
+        const outcome = this.calldataOutcome(
+          quoteSplit.swapInfo?.methodParameters?.calldata
+        ) ??
+          this.outcomeSequences.get(poolPathKeys.join(','))?.shift() ??
+          this.outcomes.get(poolPathKeys.join(',')) ?? {
+            status: SimulationStatus.SUCCESS,
+          };
+        return {
+          ...quoteSplit,
+          simulationResult: {
+            estimatedGasUsed:
+              outcome.status === SimulationStatus.SUCCESS ? 150000n : 0n,
+            estimatedGasUsedInQuoteToken: 0n,
+            estimatedGasUsedInUSD: 0,
+            ...outcome,
+          },
+        };
+      }
+    }
+
+    type SplitVariant = {legs: [RouteBasic, number][]; amount: bigint};
+    const gasDetails = {
+      gasUse: BigInt('150000'),
+      gasPriceInWei: BigInt('30000000000'),
+      gasCostInWei: BigInt('4500000000000000'),
+      gasCostInEth: 0.0045,
+      gasCostInQuoteToken: BigInt('1000000'),
+    };
+    // One single-route candidate per handed route it has a quote for, plus
+    // each split variant whose legs were all handed, recording the blocks
+    // each search read.
+    class FakeCandidateStrategy extends MockedQuoteStrategy {
+      readonly quoteBlocks: (number | undefined)[] = [];
+      readonly gasPriceBlocks: (number | undefined)[] = [];
+      constructor(private readonly splits: SplitVariant[] = []) {
+        super(null);
+      }
+
+      override async findBestQuoteCandidates(
+        _ctx: Context,
+        _chain: Chain,
+        _tokenInCurrencyInfo: CurrencyInfo,
+        _tokenOutCurrencyInfo: CurrencyInfo,
+        _amount: bigint,
+        _tradeType: TradeType,
+        _protocols: Protocol[],
+        _serviceConfig: IUniRouteServiceConfig,
+        routes: RouteBasic<Pool>[],
+        _tokensInfo: Map<string, Erc20Token | null>,
+        _metricTags: string[],
+        blockNumber?: number,
+        _testAggHooks?: boolean,
+        _supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
+        _priorityFeePerGasWei?: bigint,
+        _fetchReport?: QuoteFetchReport,
+        _abortSignal?: AbortSignal,
+        gasPriceBlockNumber?: number
+      ): Promise<QuoteSplit[]> {
+        this.quoteBlocks.push(blockNumber);
+        this.gasPriceBlocks.push(gasPriceBlockNumber);
+        const handedKeys = new Set(routes.map(route => route.poolPathKey()));
+        const singles = routes.flatMap(handedRoute => {
+          const amount = quoteAmounts.get(handedRoute.poolPathKey());
+          const route = routesByPoolPathKey.get(handedRoute.poolPathKey());
+          return amount === undefined || route === undefined
+            ? []
+            : [
+                new QuoteSplit([
+                  new QuoteBasic(route, amount, undefined, gasDetails),
+                ]),
+              ];
+        });
+        const splits = this.splits
+          .filter(({legs}) =>
+            legs.every(([route]) => handedKeys.has(route.poolPathKey()))
+          )
+          .map(
+            ({legs, amount}) =>
+              new QuoteSplit(
+                legs.map(
+                  ([route, percentage]) =>
+                    new QuoteBasic(
+                      new RouteBasic(route.protocol, route.path, percentage),
+                      (amount * BigInt(percentage)) / 100n,
+                      undefined,
+                      gasDetails
+                    )
+                )
+              )
+          );
+        return [...singles, ...splits];
+      }
+    }
+
+    class RecordingCountMetrics extends TestMetric {
+      readonly countCalls: {name: string; value: number; tags: string[]}[] = [];
+      override async count(
+        name: string,
+        value: number,
+        options?: MetricOptions
+      ): Promise<void> {
+        this.countCalls.push({name, value, tags: options?.tags ?? []});
+        await super.count(name, value, options);
+      }
+
+      tagsFor(name: string): string[][] {
+        return this.countCalls
+          .filter(call => call.name === buildMetricKey(name))
+          .map(call => call.tags);
+      }
+
+      readonly distNames: string[] = [];
+      override async dist(
+        name: string,
+        value: number,
+        options?: MetricOptions
+      ): Promise<void> {
+        this.distNames.push(name);
+        await super.dist(name, value, options);
+      }
+
+      valuesFor(name: string): number[] {
+        return this.countCalls
+          .filter(call => call.name === buildMetricKey(name))
+          .map(call => call.value);
+      }
+    }
+
+    const checkedConfig = (
+      base: IUniRouteServiceConfig,
+      underDeliveryChains: IUniRouteServiceConfig['Simulation']['UnderDeliveryChains']
+    ): IUniRouteServiceConfig => ({
+      ...base,
+      Simulation: {
+        ...base.Simulation,
+        Enabled: true,
+        TopNQuotes: 3,
+        UnderDeliveryChains: underDeliveryChains,
+        UnderDeliveryToleranceBps: 150,
+      },
+    });
+
+    const quoteWith = async (params: {
+      config: IUniRouteServiceConfig;
+      simulator: ScriptedSimulator;
+      strategy: FakeCandidateStrategy;
+      routes?: RouteBasic[];
+      routesRepository?: IRoutesRepository;
+      request?: QuoteRequest;
+      tokenHandler?: ITokenHandler;
+      abortSignal?: AbortSignal;
+    }) => {
+      const rpcProviderMap = new Map<ChainId, JsonRpcProvider>([
+        [ChainId.MAINNET, new PinnedBlockRpcProvider()],
+      ]);
+      const testCtx = buildTestContext();
+      const metrics = new RecordingCountMetrics();
+      testCtx.metrics = metrics;
+      const response = await new UniRouteBL(
+        params.config,
+        redisCache,
+        chainRepository,
+        poolDiscoverer,
+        freshPoolDetailsWrapper,
+        params.tokenHandler ?? tokenHandler,
+        quoteFetcher,
+        quoteSelector,
+        routeQuoteAllocator,
+        gasEstimateProvider,
+        noGasConverter,
+        params.routesRepository ??
+          new FixedRoutesRepository(params.routes ?? []),
+        cachedRoutesRepository,
+        noRouteCacheRepository,
+        params.strategy,
+        params.simulator,
+        quoteRequestValidator,
+        tokenProvider,
+        rpcProviderMap,
+        stateOverrideResolver
+      ).quote(testCtx, params.request ?? request, {
+        universalRouterVersion: UniversalRouterVersion.V2_0,
+        abortSignal: params.abortSignal,
+      });
+      return {response, metrics};
+    };
+
+    const slippageTooLow = {status: SimulationStatus.SLIPPAGE_TOO_LOW};
+
+    it('rejects a candidate that reverts on the tolerance floor and serves the next one', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+      );
+      const strategy = new FakeCandidateStrategy();
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        [trapRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+      ]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    it('treats a SWEEP or UNWRAP_WETH minimum revert as under-delivery', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [
+            trapRoute.poolPathKey(),
+            {status: SimulationStatus.FAILED, routerBalanceFloorReverted: true},
+          ],
+          [directRoute.poolPathKey(), {status: SimulationStatus.FAILED}],
+        ])
+      );
+
+      const {response} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [trapRoute, directRoute],
+      });
+
+      // The all-failed fallback skips the under-delivering trap candidate
+      // and serves the best-priced one that only failed.
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.FAILED);
+      expect(response.simulationDescription).toBe(
+        'All simulation attempts failed'
+      );
+    });
+
+    it('answers no-route rather than serving a candidate when every one under-delivers', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [trapRoute.poolPathKey(), slippageTooLow],
+          [directRoute.poolPathKey(), slippageTooLow],
+        ])
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.error?.code).toBe(404);
+      expect(simulator.calls).toHaveLength(2);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+      ]);
+    });
+
+    it('serves a candidate that clears the tolerance floor', async () => {
+      const simulator = new ScriptedSimulator(new Map());
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.quoteAmount).toBe('1010000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+      expect(simulator.calls).toHaveLength(1);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    it('reports how far a passing candidate delivered under its quote', async () => {
+      // trapRoute quotes 1.01e18; this delivers 70 bps under it.
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [
+            trapRoute.poolPathKey(),
+            {
+              status: SimulationStatus.SUCCESS,
+              delivery: {kind: 'measured', amount: 1_002_930_000_000_000_000n},
+            },
+          ],
+        ])
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.quoteAmount).toBe('1010000000000000000');
+      expect(metrics.tagsFor('Simulation.UnderDeliveryHeadroom')).toEqual([
+        ['chain:MAINNET', 'status:success', 'band:50_to_100bps'],
+      ]);
+    });
+
+    it('reports a passing candidate whose delivery was not measured', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [
+            directRoute.poolPathKey(),
+            {
+              status: SimulationStatus.SUCCESS,
+              delivery: {
+                kind: 'unmeasured',
+                reason: DeliveryUnmeasuredReason.BALANCE_READ_FAILED,
+              },
+            },
+          ],
+        ])
+      );
+
+      const {metrics: unmeasuredMetrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [directRoute],
+      });
+      // No delivery at all: the eth_estimateGas fast path.
+      const {metrics: fastPathMetrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator: new ScriptedSimulator(new Map()),
+        strategy: new FakeCandidateStrategy(),
+        routes: [directRoute],
+      });
+
+      expect(
+        unmeasuredMetrics.tagsFor('Simulation.UnderDeliveryHeadroom')
+      ).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:balance_read_failed'],
+      ]);
+      expect(
+        fastPathMetrics.tagsFor('Simulation.UnderDeliveryHeadroom')
+      ).toEqual([['chain:MAINNET', 'status:failure', 'reason:not_measured']]);
+    });
+
+    it('neither measures nor reports delivery off the checked chains', async () => {
+      const simulator = new ScriptedSimulator(new Map());
+      const {metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set()),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [directRoute],
+      });
+
+      expect(simulator.calls.map(call => call.measureDelivery)).toEqual([
+        false,
+      ]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryHeadroom')).toEqual([]);
+    });
+
+    it('quotes and simulates at the resolved block, and simulates the floor at the tolerance while serving the caller slippage', async () => {
+      const simulator = new ScriptedSimulator(new Map());
+      const strategy = new FakeCandidateStrategy();
+
+      const {response} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy,
+        routes: [directRoute],
+      });
+
+      expect(strategy.quoteBlocks).toEqual([resolvedBlock]);
+      expect(strategy.gasPriceBlocks).toEqual([undefined]);
+      expect(simulator.calls.map(call => call.blockNumber)).toEqual([
+        resolvedBlock,
+      ]);
+      // Hand-computed minimum outputs for the 0.99 WETH quote, deliberately
+      // not derived from the encoder: 150 bps → 0.99e18 × 0.985, the
+      // caller's 20% → 0.99e18 × 0.8.
+      const toleranceFloor = 975150000000000000n.toString(16);
+      const callerFloor = 792000000000000000n.toString(16);
+      expect(simulator.calls[0].calldata).toContain(toleranceFloor);
+      expect(simulator.calls[0].calldata).not.toContain(callerFloor);
+      // The probe is the only simulation, so it measures delivery.
+      expect(simulator.calls[0].measureDelivery).toBe(true);
+      expect(response.methodParameters?.calldata).toContain(callerFloor);
+      expect(response.methodParameters?.calldata).not.toContain(toleranceFloor);
+    });
+
+    it('adds an exact-in portion fee to the simulated floor', async () => {
+      const simulator = new ScriptedSimulator(new Map());
+
+      const {response} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [directRoute],
+        request: create(QuoteRequestSchema, {
+          ...request,
+          portionBips: 25,
+          portionRecipient: '0x7FFC3DBF3B2b50Ff3A1D5523bc24Bb5043837B14',
+        }),
+      });
+
+      // Hand-computed, not derived from the encoder: 0.99e18 × (1 − 150 bps
+      // − 25 bps). The SWEEP checks it after PAY_PORTION, so without the fee
+      // the 25 bps portion alone would use up that share of the tolerance.
+      expect(simulator.calls).toHaveLength(1);
+      expect(simulator.calls[0].calldata).toContain(
+        972675000000000000n.toString(16)
+      );
+      expect(response.methodParameters?.calldata).toContain(
+        792000000000000000n.toString(16)
+      );
+    });
+
+    it('reports the served calldata when the caller slippage is below the tolerance', async () => {
+      // 0.5% slippage: 0.99e18 × 0.995, hand-computed.
+      const callerFloor = 985050000000000000n.toString(16);
+      const simulator = new ScriptedSimulator(new Map(), calldata =>
+        calldata?.includes(callerFloor) === true
+          ? {status: SimulationStatus.SLIPPAGE_TOO_LOW}
+          : undefined
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [directRoute],
+        request: create(QuoteRequestSchema, {
+          ...request,
+          slippageTolerance: 0.5,
+        }),
+      });
+
+      expect(simulator.calls).toHaveLength(2);
+      expect(
+        simulator.calls.filter(call => call.calldata?.includes(callerFloor))
+      ).toHaveLength(1);
+      // Only the served calldata, whose result is reported, measures delivery.
+      expect(
+        simulator.calls.map(call => ({
+          served: call.calldata?.includes(callerFloor) === true,
+          measureDelivery: call.measureDelivery,
+        }))
+      ).toEqual(
+        expect.arrayContaining([
+          {served: true, measureDelivery: true},
+          {served: false, measureDelivery: false},
+        ])
+      );
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.SLIPPAGE_TOO_LOW);
+      expect(response.methodParameters?.calldata).toContain(callerFloor);
+      // The probe cleared the tolerance floor, so the check passed.
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    // Split variants of the trap route that out-quote the direct pool, so
+    // the top three all carry the trap path, the shape seen on dev for
+    // 0xC4B4EF7C → 0x45dE4AE9 beside the direct pool 0xA9d49CAa.
+    const trapSplits: SplitVariant[] = [
+      {
+        legs: [
+          [trapRoute, 95],
+          [directRoute, 5],
+        ],
+        amount: BigInt('1009000000000000000'),
+      },
+      {
+        legs: [
+          [trapRoute, 90],
+          [directRoute, 10],
+        ],
+        amount: BigInt('1008000000000000000'),
+      },
+    ];
+
+    it('searches splits again without the failing path when every top candidate carries it', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+      );
+      const strategy = new FakeCandidateStrategy(trapSplits);
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).toBe('990000000000000000');
+      // The two splits holding the trap leg are never simulated, and the
+      // second search is handed the direct route alone, at the same block.
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        [trapRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+      ]);
+      expect(strategy.quoteBlocks).toEqual([resolvedBlock, resolvedBlock]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([
+        ['chain:MAINNET', 'status:success'],
+      ]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:failure', 'reason:blamed_path'],
+        ['chain:MAINNET', 'status:failure', 'reason:blamed_path'],
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    // A caller waiting under a route timeout of `timeoutSeconds`
+    const waitedConfig = (timeoutSeconds: number) => {
+      const config = checkedConfig(
+        serviceConfigAsync,
+        new Set([ChainId.MAINNET])
+      );
+      return {
+        ...config,
+        Lambda: {...config.Lambda, TimeoutSeconds: timeoutSeconds},
+      };
+    };
+
+    it('skips a re-search when less than one search is left before the route timeout', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+      );
+      const strategy = new FakeCandidateStrategy(trapSplits);
+
+      const {response, metrics} = await quoteWith({
+        config: waitedConfig(0),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute],
+        abortSignal: new AbortController().signal,
+      });
+
+      expect(response.error?.code).toBe(404);
+      expect(strategy.quoteBlocks).toHaveLength(1);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:insufficient_time'],
+      ]);
+    });
+
+    it('searches again for a waiting caller with time left', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+      );
+      const strategy = new FakeCandidateStrategy(trapSplits);
+
+      const {response, metrics} = await quoteWith({
+        config: waitedConfig(60),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute],
+        abortSignal: new AbortController().signal,
+      });
+
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(strategy.quoteBlocks).toHaveLength(2);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    it('serves the healthy majority leg of a rejected split once its trap leg fails alone', async () => {
+      const healthyMajoritySplit: SplitVariant = {
+        legs: [
+          [directRoute, 80],
+          [trapRoute, 20],
+        ],
+        amount: BigInt('1020000000000000000'),
+      };
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [
+            [directRoute.poolPathKey(), trapRoute.poolPathKey()].join(','),
+            slippageTooLow,
+          ],
+          [trapRoute.poolPathKey(), slippageTooLow],
+        ])
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy([healthyMajoritySplit]),
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        [directRoute.poolPathKey(), trapRoute.poolPathKey()],
+        [trapRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+      ]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    it('never falls back to a split that under-delivered', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [
+            [directRoute.poolPathKey(), trapRoute.poolPathKey()].join(','),
+            slippageTooLow,
+          ],
+          [trapRoute.poolPathKey(), {status: SimulationStatus.FAILED}],
+          [directRoute.poolPathKey(), {status: SimulationStatus.FAILED}],
+        ])
+      );
+
+      const {response} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy([
+          {
+            legs: [
+              [directRoute, 80],
+              [trapRoute, 20],
+            ],
+            amount: BigInt('1020000000000000000'),
+          },
+        ]),
+        routes: [trapRoute, directRoute],
+      });
+
+      // The best-priced split is skipped for the best-priced candidate that
+      // only failed, and no path is excluded, so both singles still run.
+      expect(response.quoteAmount).toBe('1010000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.FAILED);
+      expect(simulator.calls).toHaveLength(3);
+    });
+
+    it('answers no-route without a no-route cliff when only splits under-deliver', async () => {
+      // No single-path quotes for these pools, so every candidate is a split.
+      const splitOnlyRoutes = [
+        v3Route(500, '0x4444444444444444444444444444444444444444'),
+        v3Route(3000, '0x5555555555555555555555555555555555555555'),
+      ];
+      const [firstLeg, secondLeg] = splitOnlyRoutes;
+      const splitKey = splitOnlyRoutes
+        .map(route => route.poolPathKey())
+        .join(',');
+      const simulator = new ScriptedSimulator(
+        new Map([[splitKey, slippageTooLow]])
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy([
+          {
+            legs: [
+              [firstLeg, 60],
+              [secondLeg, 40],
+            ],
+            amount: BigInt('1000000000000000000'),
+          },
+        ]),
+        routes: splitOnlyRoutes,
+      });
+
+      expect(response.error?.code).toBe(404);
+      expect(simulator.calls).toHaveLength(1);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([]);
+      // Neither leg has a single-path quote to simulate on its own.
+      expect(metrics.tagsFor('Simulation.UnderDeliveryLegProbe')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:no_single_path'],
+      ]);
+      expect(metrics.tagsFor('NoRouteCache.WriteSkipped')).toEqual([
+        expect.arrayContaining(['reason:under_delivery']),
+      ]);
+    });
+
+    it('serves a healthy single path when three trap splits fill the shortlist', async () => {
+      const directTrapKey = [
+        directRoute.poolPathKey(),
+        trapRoute.poolPathKey(),
+      ].join(',');
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [directTrapKey, slippageTooLow],
+          [trapRoute.poolPathKey(), slippageTooLow],
+        ])
+      );
+      const trapMinoritySplits: SplitVariant[] = [80, 70, 60].map(
+        (directPercent, index) => ({
+          legs: [
+            [directRoute, directPercent],
+            [trapRoute, 100 - directPercent],
+          ],
+          amount:
+            BigInt('1030000000000000000') - BigInt(index) * 5n * 10n ** 15n,
+        })
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(trapMinoritySplits),
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+      // The legs run best-ranked first: the trap leg is blamed alone, and the
+      // direct leg is served without another quote fetch.
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        [directRoute.poolPathKey(), trapRoute.poolPathKey()],
+        [directRoute.poolPathKey(), trapRoute.poolPathKey()],
+        [directRoute.poolPathKey(), trapRoute.poolPathKey()],
+        [trapRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+      ]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryLegProbe')).toEqual([
+        ['chain:MAINNET', 'status:success'],
+      ]);
+      expect(
+        metrics.valuesFor('Simulation.UnderDeliveryLegProbe.Sims')
+      ).toEqual([2]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([]);
+    });
+
+    // Fifty-fifty splits over route pairs, best-priced first from `topAmount`.
+    const evenSplits = (
+      pairs: [RouteBasic, RouteBasic][],
+      topAmount: bigint
+    ): SplitVariant[] =>
+      pairs.map(([first, second], index) => ({
+        legs: [
+          [first, 50],
+          [second, 50],
+        ],
+        amount: topAmount - BigInt(index) * 10n ** 16n,
+      }));
+    const splitPoolPathKey = ({legs}: SplitVariant) =>
+      legs.map(([route]) => route.poolPathKey()).join(',');
+
+    it('spends at most three leg simulations per request', async () => {
+      const splits = evenSplits(
+        [
+          [lowFeeRoute, trapRoute],
+          [directRoute, otherRoute],
+          [lowFeeRoute, directRoute],
+        ],
+        BigInt('1050000000000000000')
+      );
+      const simulator = new ScriptedSimulator(
+        new Map(
+          [
+            ...splits.map(splitPoolPathKey),
+            ...[trapRoute, lowFeeRoute, directRoute].map(route =>
+              route.poolPathKey()
+            ),
+          ].map(key => [key, slippageTooLow])
+        )
+      );
+      const strategy = new FakeCandidateStrategy(splits);
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute, otherRoute, lowFeeRoute],
+      });
+
+      expect(response.error).toBeUndefined();
+      expect(response.quoteAmount).toBe('980000000000000000');
+      // Four legs qualify and the three best-ranked are probed; the fourth is
+      // reached by the re-search their blame starts.
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        ...splits.map(({legs}) => legs.map(([route]) => route.poolPathKey())),
+        [trapRoute.poolPathKey()],
+        [lowFeeRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+        [otherRoute.poolPathKey()],
+      ]);
+      expect(strategy.quoteBlocks).toHaveLength(2);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryLegProbe')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:no_passing_leg'],
+      ]);
+      expect(
+        metrics.valuesFor('Simulation.UnderDeliveryLegProbe.Sims')
+      ).toEqual([3]);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    it('stops probing legs once the request has spent its leg simulations', async () => {
+      const [shortlistRoute] = shortlistRoutes;
+      // The first probe spends the budget on three trap legs; the re-search's
+      // shortlist is all trap splits again, and its probe has none left.
+      const firstSplits = evenSplits(
+        [
+          [trapRoute, directRoute],
+          [trapRoute, otherRoute],
+          [directRoute, otherRoute],
+        ],
+        BigInt('1080000000000000000')
+      );
+      const laterSplits = evenSplits(
+        [
+          [shortlistRoute, altDirectRoute],
+          [shortlistRoute, lowFeeRoute],
+          [altDirectRoute, lowFeeRoute],
+        ],
+        BigInt('1050000000000000000')
+      );
+      const simulator = new ScriptedSimulator(
+        new Map(
+          [
+            ...[...firstSplits, ...laterSplits].map(splitPoolPathKey),
+            ...[trapRoute, directRoute, otherRoute].map(route =>
+              route.poolPathKey()
+            ),
+          ].map(key => [key, slippageTooLow])
+        )
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy([...firstSplits, ...laterSplits]),
+        routes: [
+          trapRoute,
+          directRoute,
+          otherRoute,
+          shortlistRoute,
+          altDirectRoute,
+          lowFeeRoute,
+        ],
+      });
+
+      expect(response.error?.code).toBe(404);
+      expect(simulator.calls).toHaveLength(9);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryLegProbe')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:no_passing_leg'],
+        ['chain:MAINNET', 'status:failure', 'reason:budget_exhausted'],
+      ]);
+      expect(
+        metrics.valuesFor('Simulation.UnderDeliveryLegProbe.Sims')
+      ).toEqual([3]);
+    });
+
+    it('skips a split an earlier search rejected', async () => {
+      // The first search rejects both splits and blames the trap path, so it
+      // searches again; the re-search finds the direct split again and goes
+      // straight to the direct route.
+      const splits = evenSplits(
+        [
+          [directRoute, otherRoute],
+          [trapRoute, otherRoute],
+        ],
+        BigInt('1050000000000000000')
+      );
+      const simulator = new ScriptedSimulator(
+        new Map(
+          [...splits.map(splitPoolPathKey), trapRoute.poolPathKey()].map(
+            key => [key, slippageTooLow]
+          )
+        )
+      );
+      const strategy = new FakeCandidateStrategy(splits);
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute, otherRoute],
+      });
+
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        [directRoute.poolPathKey(), otherRoute.poolPathKey()],
+        [trapRoute.poolPathKey(), otherRoute.poolPathKey()],
+        [trapRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+      ]);
+      expect(strategy.quoteBlocks).toHaveLength(2);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+        ['chain:MAINNET', 'status:failure', 'reason:rejected_candidate'],
+        ['chain:MAINNET', 'status:success'],
+      ]);
+    });
+
+    it('drops a fallback kept from an earlier search once a later search rejects it', async () => {
+      const directOtherKey = [
+        directRoute.poolPathKey(),
+        otherRoute.poolPathKey(),
+      ].join(',');
+      // The split only fails in the first search, as a fallback; the second
+      // search rejects it for under-delivery.
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [trapRoute.poolPathKey(), slippageTooLow],
+          [directRoute.poolPathKey(), {status: SimulationStatus.FAILED}],
+          [otherRoute.poolPathKey(), {status: SimulationStatus.FAILED}],
+        ]),
+        () => undefined,
+        new Map([
+          [directOtherKey, [{status: SimulationStatus.FAILED}, slippageTooLow]],
+        ])
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy([
+          {
+            legs: [
+              [directRoute, 50],
+              [otherRoute, 50],
+            ],
+            amount: BigInt('1005000000000000000'),
+          },
+        ]),
+        routes: [trapRoute, directRoute, otherRoute],
+      });
+
+      expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+        [trapRoute.poolPathKey()],
+        [directRoute.poolPathKey(), otherRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+        [directRoute.poolPathKey(), otherRoute.poolPathKey()],
+        [directRoute.poolPathKey()],
+        [otherRoute.poolPathKey()],
+      ]);
+      expect(response.quoteAmount).not.toBe('1005000000000000000');
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.FAILED);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryLegProbe')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:no_single_path'],
+      ]);
+    });
+
+    it('stops after two searches without a delivering route and writes no no-route cliff', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map(
+          shortlistRoutes.map(route => [route.poolPathKey(), slippageTooLow])
+        )
+      );
+      const strategy = new FakeCandidateStrategy();
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy,
+        routes: shortlistRoutes,
+      });
+
+      expect(response.error?.code).toBe(404);
+      // Three searches (the first and two more), three candidates each.
+      expect(strategy.quoteBlocks).toHaveLength(3);
+      expect(simulator.calls).toHaveLength(9);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([
+        ['chain:MAINNET', 'status:failure', 'reason:no_passing_candidate'],
+        ['chain:MAINNET', 'status:failure', 'reason:no_passing_candidate'],
+      ]);
+      expect(
+        await noRouteCacheRepository.getAmountCliff(
+          EMPTY_NAMESPACE_CONTEXT,
+          allProtocols,
+          ChainId.MAINNET,
+          usdc,
+          wrappedEth,
+          TradeType.ExactIn,
+          buildTestContext()
+        )
+      ).toBeUndefined();
+      expect(metrics.tagsFor('NoRouteCache.WriteSkipped')).toEqual([
+        expect.arrayContaining(['reason:under_delivery']),
+      ]);
+    });
+
+    it('does not count under-delivering seeded runs against the seeded cap', async () => {
+      const seededSlippageTooLow = {
+        status: SimulationStatus.SLIPPAGE_TOO_LOW,
+        seeded: true,
+      };
+      const [secondTrap] = shortlistRoutes;
+      const simulator = new ScriptedSimulator(
+        new Map([
+          [trapRoute.poolPathKey(), seededSlippageTooLow],
+          [secondTrap.poolPathKey(), seededSlippageTooLow],
+        ])
+      );
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [trapRoute, secondTrap, directRoute],
+      });
+
+      // Two seeded rejections would have hit MaxSeededAttempts (2) and left
+      // the direct route to a second search.
+      expect(response.quoteAmount).toBe('990000000000000000');
+      expect(simulator.calls).toHaveLength(3);
+      expect(metrics.tagsFor('Simulation.UnderDeliveryResearch')).toEqual([]);
+    });
+
+    it('adds the output token buy tax to the floor beside a portion fee', async () => {
+      const simulator = new ScriptedSimulator(new Map());
+
+      await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+        simulator,
+        strategy: new FakeCandidateStrategy(),
+        routes: [directRoute],
+        tokenHandler: new FotTokenHandler(
+          new Set([wrappedEth.toString().toLowerCase()])
+        ),
+        request: create(QuoteRequestSchema, {
+          ...request,
+          portionBips: 25,
+          portionRecipient: '0x7FFC3DBF3B2b50Ff3A1D5523bc24Bb5043837B14',
+        }),
+      });
+
+      // Hand-computed: 0.99e18 × (1 − 150 bps − 25 bps − 100 bps buy tax).
+      expect(simulator.calls).toHaveLength(1);
+      expect(simulator.calls[0].calldata).toContain(
+        962775000000000000n.toString(16)
+      );
+    });
+
+    it('leaves a chain outside the list on latest and serves a slippage revert as before', async () => {
+      const simulator = new ScriptedSimulator(
+        new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+      );
+      const strategy = new FakeCandidateStrategy();
+
+      const {response, metrics} = await quoteWith({
+        config: checkedConfig(serviceConfigAsync, new Set([ChainId.ROBINHOOD])),
+        simulator,
+        strategy,
+        routes: [trapRoute, directRoute],
+      });
+
+      expect(strategy.quoteBlocks).toEqual([undefined]);
+      expect(simulator.calls.map(call => call.blockNumber)).toEqual([
+        undefined,
+      ]);
+      expect(response.quoteAmount).toBe('1010000000000000000');
+      expect(response.simulationStatus).toBe(SimulationStatus.SLIPPAGE_TOO_LOW);
+      expect(simulator.calls[0].calldata).toBe(
+        response.methodParameters?.calldata
+      );
+      expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([]);
+    });
+
+    describe('on a cached-route hit', () => {
+      const seedCachedRoute = async (route: RouteBasic) => {
+        for (const usdBucket of Object.values(UsdBucket)) {
+          await cachedRoutesRepository.saveCachedRoutes(
+            EMPTY_NAMESPACE_CONTEXT,
+            allProtocols,
+            route,
+            ChainId.MAINNET,
+            usdc,
+            wrappedEth,
+            TradeType.ExactIn,
+            amountIn,
+            usdBucket
+          );
+        }
+      };
+      const cachedPoolPathKeys = async () => {
+        const read = await cachedRoutesRepository.readCachedRoutes(
+          EMPTY_NAMESPACE_CONTEXT,
+          ChainId.MAINNET,
+          new CurrencyInfo(false, usdc),
+          new CurrencyInfo(false, wrappedEth),
+          TradeType.ExactIn,
+          amountIn,
+          UsdBucket.USD_1_000,
+          allProtocols,
+          buildTestContext()
+        );
+        return read.perKeyReads.flatMap(perKeyRead =>
+          perKeyRead.validRoutes.map(({route}) => route.poolPathKey())
+        );
+      };
+      const cachedOnlyConfig = (base: IUniRouteServiceConfig) =>
+        checkedConfig(
+          {
+            ...base,
+            CachedRoutes: {...base.CachedRoutes, HitDiscoveryEnabled: false},
+          },
+          'all'
+        );
+
+      it('evicts the under-delivering cached route and serves a fresh search', async () => {
+        await seedCachedRoute(trapRoute);
+        const simulator = new ScriptedSimulator(
+          new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+        );
+        const strategy = new FakeCandidateStrategy();
+
+        // Fresh discovery finds the trap route again beside the direct one.
+        const {response, metrics} = await quoteWith({
+          config: cachedOnlyConfig(serviceConfig),
+          simulator,
+          strategy,
+          routesRepository: new FixedRoutesRepository([trapRoute, directRoute]),
+        });
+
+        expect(response.error).toEqual(undefined);
+        expect(response.quoteAmount).toBe('990000000000000000');
+        expect(response.hitsCachedRoutes).toBe(false);
+        expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+          [trapRoute.poolPathKey()],
+          [directRoute.poolPathKey()],
+        ]);
+        expect(strategy.quoteBlocks).toEqual([resolvedBlock, resolvedBlock]);
+        expect(await cachedPoolPathKeys()).toEqual([]);
+        expect(
+          metrics.tagsFor('CachedRoutes.UnderDeliveryFreshSearch')
+        ).toEqual([['chain:MAINNET', 'status:success']]);
+        // The fresh search runs inside the caller's request, which is parsed,
+        // counted and timed once.
+        expect(metrics.tagsFor('QuoteRequest.Experiment')).toHaveLength(1);
+        expect(metrics.tagsFor('Call')).toHaveLength(1);
+        expect(
+          metrics.distNames.filter(
+            name => name === buildMetricKey('Latency.dist')
+          )
+        ).toHaveLength(1);
+        expect(
+          metrics.tagsFor('CachedRoutes.UnderDeliveredRouteEvict')
+        ).toEqual([['chain:MAINNET', 'status:success', 'outcome:evicted']]);
+      });
+
+      it('evicts only the failing path when a rejected split shares a leg with the served route', async () => {
+        await seedCachedRoute(trapRoute);
+        await seedCachedRoute(directRoute);
+        const simulator = new ScriptedSimulator(
+          new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+        );
+
+        const {response, metrics} = await quoteWith({
+          config: cachedOnlyConfig(serviceConfig),
+          simulator,
+          strategy: new FakeCandidateStrategy([
+            {
+              legs: [
+                [trapRoute, 85],
+                [directRoute, 15],
+              ],
+              amount: BigInt('1009000000000000000'),
+            },
+          ]),
+          routesRepository: new FixedRoutesRepository([]),
+        });
+
+        expect(response.error).toEqual(undefined);
+        expect(response.quoteAmount).toBe('990000000000000000');
+        expect(response.hitsCachedRoutes).toBe(true);
+        expect(await cachedPoolPathKeys()).toEqual([directRoute.poolPathKey()]);
+        expect(
+          metrics.tagsFor('CachedRoutes.UnderDeliveredRouteEvict')
+        ).toEqual([['chain:MAINNET', 'status:success', 'outcome:evicted']]);
+      });
+
+      it('drops a kept fallback once a later search rejects its leg, and evicts that leg', async () => {
+        const [rejectedEarly] = shortlistRoutes;
+        for (const route of [
+          trapRoute,
+          rejectedEarly,
+          directRoute,
+          otherRoute,
+        ]) {
+          await seedCachedRoute(route);
+        }
+        // The first search keeps the plain-failed split as its fallback;
+        // the second rejects its direct leg as a single path.
+        const simulator = new ScriptedSimulator(
+          new Map([
+            [trapRoute.poolPathKey(), slippageTooLow],
+            [rejectedEarly.poolPathKey(), slippageTooLow],
+            [
+              [directRoute.poolPathKey(), otherRoute.poolPathKey()].join(','),
+              {status: SimulationStatus.FAILED},
+            ],
+            [directRoute.poolPathKey(), slippageTooLow],
+            [otherRoute.poolPathKey(), slippageTooLow],
+          ])
+        );
+
+        const {response, metrics} = await quoteWith({
+          config: cachedOnlyConfig(serviceConfig),
+          simulator,
+          strategy: new FakeCandidateStrategy([
+            {
+              legs: [
+                [directRoute, 50],
+                [otherRoute, 50],
+              ],
+              amount: BigInt('1005000000000000000'),
+            },
+          ]),
+          routesRepository: new FixedRoutesRepository([]),
+        });
+
+        expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+          [trapRoute.poolPathKey()],
+          [rejectedEarly.poolPathKey()],
+          [directRoute.poolPathKey(), otherRoute.poolPathKey()],
+          [directRoute.poolPathKey(), otherRoute.poolPathKey()],
+          [directRoute.poolPathKey()],
+          [otherRoute.poolPathKey()],
+        ]);
+        expect(response.error?.code).toBe(404);
+        expect(response.quoteAmount).not.toBe('1005000000000000000');
+        expect(await cachedPoolPathKeys()).toEqual([]);
+        expect(
+          metrics.tagsFor('CachedRoutes.UnderDeliveryFreshSearch')
+        ).toEqual([['chain:MAINNET', 'status:failure', 'reason:no_route']]);
+      });
+
+      // The payload a route-cache refresh carries for a caller that named no
+      // sender, after the refresh worker hands it to the BL.
+      const uncheckedRefresh = (underDeliveryChains: ReadonlySet<number>) =>
+        withUnderDeliveryRefreshSender(
+          create(QuoteRequestSchema, {
+            ...request,
+            quoteType: 'FRESH',
+            simulateFromAddress: undefined,
+            recipient: undefined,
+          }),
+          underDeliveryChains
+        );
+      const refreshedPoolPathKeys = async () => {
+        const read = await cachedRoutesRepository.readCachedRoutes(
+          EMPTY_NAMESPACE_CONTEXT,
+          ChainId.MAINNET,
+          new CurrencyInfo(false, usdc),
+          new CurrencyInfo(false, wrappedEth),
+          TradeType.ExactIn,
+          amountIn,
+          UsdBucket.USD_1,
+          allProtocols,
+          buildTestContext()
+        );
+        return read.perKeyReads.flatMap(perKeyRead =>
+          perKeyRead.validRoutes.map(({route}) => route.poolPathKey())
+        );
+      };
+
+      it('runs the check on a refresh an unchecked caller triggered and caches only the route that passes', async () => {
+        const simulator = new ScriptedSimulator(
+          new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+        );
+
+        const {response, metrics} = await quoteWith({
+          config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+          simulator,
+          strategy: new FakeCandidateStrategy(),
+          routes: [trapRoute, directRoute],
+          request: uncheckedRefresh(new Set([ChainId.MAINNET])),
+        });
+
+        expect(response.quoteAmount).toBe('990000000000000000');
+        expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+          [trapRoute.poolPathKey()],
+          [directRoute.poolPathKey()],
+        ]);
+        expect(await refreshedPoolPathKeys()).toEqual([
+          directRoute.poolPathKey(),
+        ]);
+        expect(metrics.tagsFor('CachedRoutes.WriteSkipped')).toEqual([]);
+      });
+
+      it('does not cache the winner of a checked refresh whose simulation did not run the swap', async () => {
+        for (const status of [
+          SimulationStatus.NOT_SUPPORTED,
+          SimulationStatus.INSUFFICIENT_BALANCE,
+          SimulationStatus.SYSTEM_DOWN,
+        ]) {
+          // The refresh sender's seed is refused, or it runs unfunded, or the
+          // backend is down: the candidate is served without the check.
+          const simulator = new ScriptedSimulator(
+            new Map([[directRoute.poolPathKey(), {status}]])
+          );
+
+          const {response, metrics} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directRoute],
+            request: uncheckedRefresh(new Set([ChainId.MAINNET])),
+          });
+
+          expect(response.simulationStatus, String(status)).toBe(status);
+          expect(await refreshedPoolPathKeys(), String(status)).toEqual([]);
+          expect(
+            metrics.tagsFor('CachedRoutes.WriteSkipped'),
+            String(status)
+          ).toEqual([
+            ['chain:MAINNET', 'status:failure', 'reason:unchecked_winner'],
+          ]);
+        }
+      });
+
+      it('caches the trap from an unchecked refresh on a chain off the list', async () => {
+        const simulator = new ScriptedSimulator(
+          new Map([[trapRoute.poolPathKey(), slippageTooLow]])
+        );
+
+        await quoteWith({
+          config: checkedConfig(serviceConfigAsync, new Set([ChainId.MAINNET])),
+          simulator,
+          strategy: new FakeCandidateStrategy(),
+          routes: [trapRoute, directRoute],
+          request: uncheckedRefresh(new Set([ChainId.ARBITRUM])),
+        });
+
+        expect(simulator.calls).toEqual([]);
+        expect(await refreshedPoolPathKeys()).toEqual([
+          trapRoute.poolPathKey(),
+        ]);
+      });
+
+      it('keeps a cached route that delivers and does not search fresh routes', async () => {
+        await seedCachedRoute(directRoute);
+        const simulator = new ScriptedSimulator(new Map());
+
+        const {response, metrics} = await quoteWith({
+          config: cachedOnlyConfig(serviceConfig),
+          simulator,
+          strategy: new FakeCandidateStrategy(),
+          routesRepository: new FixedRoutesRepository([trapRoute]),
+        });
+
+        expect(response.quoteAmount).toBe('990000000000000000');
+        expect(response.hitsCachedRoutes).toBe(true);
+        expect(await cachedPoolPathKeys()).toEqual([directRoute.poolPathKey()]);
+        expect(
+          metrics.tagsFor('CachedRoutes.UnderDeliveryFreshSearch')
+        ).toEqual([]);
+      });
+    });
+  });
+
   describe('simulation fallback behavior', () => {
     const quoteWithSimulator = async (
       simulator: ISimulator,
@@ -5498,6 +7009,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       // Use the custom config that enables simulation
@@ -5640,6 +7152,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       // Use the custom config that enables simulation
@@ -5823,6 +7336,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
@@ -5936,6 +7450,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
@@ -6170,6 +7685,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
@@ -6275,6 +7791,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: request.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const uniRouteBL = new UniRouteBL(
@@ -6323,6 +7840,7 @@ describe('UniRouteBL', () => {
     const simulationEnabledConfig = {
       ...getUniRouteTestConfig(LambdaType.Async),
       Simulation: {
+        ...getUniRouteTestConfig(LambdaType.Async).Simulation,
         TopNQuotes: 3,
         Enabled: true,
         MaxSeededAttempts: 2,
@@ -6405,6 +7923,7 @@ describe('UniRouteBL', () => {
         .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_0')
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any);
 
@@ -6461,6 +7980,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
@@ -6517,6 +8037,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
@@ -6573,6 +8094,7 @@ describe('UniRouteBL', () => {
 
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
@@ -6634,6 +8156,7 @@ describe('UniRouteBL', () => {
         .spyOn(SwapOptionsFactory, 'createUniversalRouterOptions_2_1_2')
         .mockReturnValue({
           simulate: {fromAddress: simulationRequest.simulateFromAddress},
+          slippageTolerance: new Percent(20, 100),
         } as unknown as SwapOptionsUniversalRouter);
 
       const mockedQuoteStrategy = new MockedQuoteStrategy();
@@ -8729,6 +10252,8 @@ describe('UniRouteBL', () => {
       async deleteCachedRoutes(): Promise<boolean> {
         return false;
       }
+
+      async evictCachedRoutes(): Promise<void> {}
 
       async scoreFetchedRoutes(
         routes: {route: RouteBasic; expiresAtMs: number}[]

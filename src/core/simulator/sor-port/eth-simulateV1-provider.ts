@@ -40,7 +40,8 @@ import {BEACON_CHAIN_DEPOSIT_ADDRESS, MAX_UINT160} from '../../../lib/helpers';
 import {QuoteSplit} from '../../../models/quote/QuoteSplit';
 import {TradeType} from '../../../models/quote/TradeType';
 import {GasConverter} from '../../gas/converter/GasConverter';
-import {SimulationStatus} from '../ISimulator';
+import {SimulatedDelivery, SimulationStatus} from '../ISimulator';
+import {DeliveryProbe} from './deliveryProbe';
 import {ResolvedStateOverride} from '../ResolvedStateOverride';
 import {
   encodeGethStateOverrides,
@@ -49,6 +50,8 @@ import {
 import {
   breakDownSimulationError,
   describeSimulationException,
+  extractRevertData,
+  isRouterBalanceFloorRevert,
 } from './simulationErrorBreakDown';
 import {SeededProviderFactory} from './balanceOverride';
 import {permit2Address} from '@uniswap/permit2-sdk';
@@ -109,6 +112,20 @@ interface JsonRpcError {
 
 interface ResultCall {
   calls: Array<ReturnData | JsonRpcError>;
+  baseFeePerGas?: string;
+}
+
+function returnDataOf(call: ReturnData | JsonRpcError | undefined) {
+  return call === undefined || 'error' in call ? undefined : call.returnData;
+}
+
+// The SDK takes one fee or several; each pays its own recipient.
+function portionRecipientsOf(
+  swapOptions: SwapOptionsUniversalRouter
+): string[] {
+  const {fee} = swapOptions;
+  if (fee === undefined) return [];
+  return (Array.isArray(fee) ? fee : [fee]).map(option => option.recipient);
 }
 
 /**
@@ -163,6 +180,7 @@ export class EthSimulateV1Simulator extends Simulator {
     fundSenderAsset?: string
   ): Promise<QuoteSplit> {
     let estimatedGasUsed: bigint;
+    let delivery: SimulatedDelivery | undefined;
 
     if (swapOptions.type === SwapType.UNIVERSAL_ROUTER) {
       // Tag swapsteps-mode simulations so their success rate is sliceable.
@@ -251,9 +269,31 @@ export class EthSimulateV1Simulator extends Simulator {
           : '0x0',
       };
 
-      const allCalls = [...approvalCalls, swap];
+      // The eth_estimateGas fast path reads no balances, so only the bundle
+      // measures delivery.
+      const {swapInfo} = quoteSplit;
+      const deliveryProbe =
+        swapOptions.measureDelivery === true && swapInfo !== undefined
+          ? DeliveryProbe.for({
+              tradeType: swapInfo.tradeType,
+              sender: fromAddress,
+              recipient: swapOptions.recipient,
+              portionRecipients: portionRecipientsOf(swapOptions),
+              tokenInWrappedAddress: swapInfo.tokenInWrappedAddress,
+              tokenInIsNative: swapInfo.tokenInIsNative,
+              tokenOutWrappedAddress: swapInfo.tokenOutWrappedAddress,
+              tokenOutIsNative: swapInfo.tokenOutIsNative,
+            })
+          : undefined;
+      const balanceReads = deliveryProbe?.calls(fromAddress) ?? [];
+      const allCalls = [
+        ...approvalCalls,
+        ...balanceReads,
+        swap,
+        ...balanceReads,
+      ];
       const expectedCallCount = allCalls.length;
-      const swapCallIndex = expectedCallCount - 1;
+      const swapCallIndex = approvalCalls.length + balanceReads.length;
 
       ctx.logger.debug(`${this.rpcMethod} call params`, {
         useProxy: useUniversalRouterProxy,
@@ -367,6 +407,9 @@ export class EthSimulateV1Simulator extends Simulator {
                 swapCallError?.data
               ),
               description: `Error simulating transaction via ${this.rpcMethod}`,
+              ...(isRouterBalanceFloorRevert(swapCallError?.data) && {
+                routerBalanceFloorReverted: true,
+              }),
             },
           };
         }
@@ -380,6 +423,16 @@ export class EthSimulateV1Simulator extends Simulator {
         estimatedGasUsed = BigInt(
           (result[0].calls[swapCallIndex] as ReturnData).gasUsed
         );
+        if (deliveryProbe) {
+          const calls = result[0].calls;
+          const baseFee = result[0].baseFeePerGas;
+          delivery = deliveryProbe.measure(
+            calls.slice(approvalCalls.length, swapCallIndex).map(returnDataOf),
+            calls.slice(swapCallIndex + 1, expectedCallCount).map(returnDataOf),
+            baseFee !== undefined && BigInt(baseFee) > 0n,
+            fromAddress
+          );
+        }
 
         await ctx.metrics.dist(
           METRIC_UNIRPC_SIMULATION_LATENCY,
@@ -411,7 +464,8 @@ export class EthSimulateV1Simulator extends Simulator {
               approvePermit2GasUsed: (result[0].calls[0] as ReturnData).gasUsed,
               approveUniversalRouterGasUsed: (result[0].calls[1] as ReturnData)
                 .gasUsed,
-              swapGasUsed: (result[0].calls[2] as ReturnData).gasUsed,
+              swapGasUsed: (result[0].calls[swapCallIndex] as ReturnData)
+                .gasUsed,
               estimatedGasUsed: estimatedGasUsed.toString(),
             }
           );
@@ -421,7 +475,8 @@ export class EthSimulateV1Simulator extends Simulator {
             {
               approveProxyContractGasUsed: (result[0].calls[0] as ReturnData)
                 .gasUsed,
-              swapGasUsed: (result[0].calls[1] as ReturnData).gasUsed,
+              swapGasUsed: (result[0].calls[swapCallIndex] as ReturnData)
+                .gasUsed,
               estimatedGasUsed: estimatedGasUsed.toString(),
             }
           );
@@ -459,7 +514,8 @@ export class EthSimulateV1Simulator extends Simulator {
           status,
           status === SimulationStatus.SYSTEM_DOWN
             ? `Simulation backend unavailable via ${this.rpcMethod}`
-            : `Error simulating transaction via ${this.rpcMethod}`
+            : `Error simulating transaction via ${this.rpcMethod}`,
+          extractRevertData(e)
         );
       }
     } else {
@@ -497,6 +553,7 @@ export class EthSimulateV1Simulator extends Simulator {
         estimatedGasUsedInUSD: gasCostInUSD,
         status: SimulationStatus.SUCCESS,
         description: `Simulation succeeded via ${this.rpcMethod}`,
+        ...(delivery === undefined ? {} : {delivery}),
       },
     };
   }

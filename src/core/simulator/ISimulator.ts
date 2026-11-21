@@ -31,6 +31,25 @@ export function isSimulationError(status?: SimulationStatus): boolean {
   );
 }
 
+/** Why a simulation that executed the swap could not say what it delivered */
+export enum DeliveryUnmeasuredReason {
+  /** A bracketing balance read reverted or returned something other than a uint256 */
+  BALANCE_READ_FAILED = 'balance_read_failed',
+  /** The balance moved the wrong way, or an exact-out swap spent nothing */
+  NO_BALANCE_CHANGE = 'no_balance_change',
+  /** The simulated block charged gas, so the sender's native balance moved by more than the swap */
+  GAS_CHARGED = 'gas_charged',
+}
+
+/**
+ * What the simulated swap actually moved: for exact-in the output received
+ * (recipient plus portion recipients), for exact-out the input spent net of
+ * the refund to the recipient.
+ */
+export type SimulatedDelivery =
+  | {kind: 'measured'; amount: bigint}
+  | {kind: 'unmeasured'; reason: DeliveryUnmeasuredReason};
+
 export interface SimulationResult {
   estimatedGasUsed: bigint;
   estimatedGasUsedInQuoteToken: bigint;
@@ -39,6 +58,13 @@ export interface SimulationResult {
   description?: string;
   /** Set when the run seeded the sender balance through unirpc */
   seeded?: boolean;
+  /**
+   * Set when the swap reverted on a SWEEP or UNWRAP_WETH minimum, which the
+   * status reports as FAILED
+   */
+  routerBalanceFloorReverted?: boolean;
+  /** Set when the swap executed on a chain whose simulator measures delivery */
+  delivery?: SimulatedDelivery;
 }
 
 /** True when the swap executed and measured gas, which includes INSUFFICIENT_BALANCE from a seeded run */
@@ -50,6 +76,18 @@ export function hasSimulatedGasEstimate(
     (result.status === SimulationStatus.SUCCESS ||
       result.status === SimulationStatus.INSUFFICIENT_BALANCE) &&
     result.estimatedGasUsedInQuoteToken !== 0n
+  );
+}
+
+/**
+ * True when the swap reverted on an amount limit: a slippage check
+ * (SLIPPAGE_TOO_LOW) or a SWEEP / UNWRAP_WETH minimum
+ */
+export function revertedOnAmountLimit(result?: SimulationResult): boolean {
+  return (
+    result !== undefined &&
+    (result.status === SimulationStatus.SLIPPAGE_TOO_LOW ||
+      result.routerBalanceFloorReverted === true)
   );
 }
 

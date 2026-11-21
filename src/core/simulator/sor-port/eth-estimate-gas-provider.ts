@@ -65,18 +65,30 @@ export class EthEstimateGasSimulator extends Simulator {
         addr: fromAddress,
         methodParameters: quoteSplit.swapInfo!.methodParameters,
       });
+      const transaction = {
+        data: quoteSplit.swapInfo!.methodParameters!.calldata,
+        to: quoteSplit.swapInfo!.methodParameters!.to,
+        from: fromAddress,
+        value: BigInt(
+          quoteSplit.swapInfo!.tokenInIsNative
+            ? quoteSplit.swapInfo!.methodParameters!.value
+            : '0'
+        ),
+      };
       try {
-        estimatedGasUsed = await this.provider.estimateGas({
-          data: quoteSplit.swapInfo!.methodParameters!.calldata,
-          to: quoteSplit.swapInfo!.methodParameters!.to,
-          from: fromAddress,
-          value: BigInt(
-            quoteSplit.swapInfo!.tokenInIsNative
-              ? quoteSplit.swapInfo!.methodParameters!.value
-              : '0'
-          ),
-          ...(blockNumber !== undefined ? {blockTag: blockNumber} : {}),
-        });
+        // ethers v5 estimateGas sends the transaction alone and drops any
+        // blockTag, so a pinned estimate goes out as the RPC's block param.
+        estimatedGasUsed =
+          blockNumber === undefined
+            ? await this.provider.estimateGas(transaction)
+            : BigNumber.from(
+                await this.provider.send('eth_estimateGas', [
+                  JsonRpcProvider.hexlifyTransaction(transaction, {
+                    from: true,
+                  }),
+                  '0x' + blockNumber.toString(16),
+                ])
+              );
       } catch (e) {
         const revertData = extractRevertData(e);
         const {status, logFields} = describeSimulationException(
@@ -92,7 +104,8 @@ export class EthEstimateGasSimulator extends Simulator {
             ? 'Simulation backend unavailable during eth_estimateGas'
             : revertData
               ? 'Transaction reverted during eth_estimateGas'
-              : 'Error estimating gas'
+              : 'Error estimating gas',
+          revertData
         );
       }
     } else {

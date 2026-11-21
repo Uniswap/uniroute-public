@@ -24,6 +24,7 @@ import {
   classifySimulationException,
   describeSimulationException,
   extractRevertData,
+  isRouterBalanceFloorRevert,
   isSimulationBackendUnavailable,
   simulationExceptionLogFields,
 } from './simulationErrorBreakDown';
@@ -103,11 +104,12 @@ export enum UserBalanceCheck {
   Unknown = 'unknown',
 }
 
-/** The quote split with a simulation that produced no gas estimate. */
+/** The quote split with a simulation that produced no gas estimate, flagged when its revert data is a router balance floor */
 export function withZeroGasSimulationResult(
   quoteSplit: QuoteSplit,
   status: SimulationStatus,
-  description: string
+  description: string,
+  revertData?: string
 ): QuoteSplit {
   return {
     ...quoteSplit,
@@ -117,6 +119,9 @@ export function withZeroGasSimulationResult(
       estimatedGasUsedInUSD: 0,
       status,
       description,
+      ...(isRouterBalanceFloorRevert(revertData) && {
+        routerBalanceFloorReverted: true,
+      }),
     },
   };
 }
@@ -146,6 +151,9 @@ export type SwapOptionsUniversalRouter = UniversalRouterSwapOptions & {
   simulate?: {fromAddress: string};
   // Carried so the simulator providers can tag metrics for swapsteps mode.
   universalRouterSwapsteps?: boolean;
+  // Brackets the bundle's swap with balance reads so the result carries what
+  // it delivered. Set per simulation, only where the delivery is reported.
+  measureDelivery?: boolean;
 };
 
 export type SimulationResult = {
@@ -389,14 +397,16 @@ export abstract class Simulator {
         'Simulation backend unavailable'
       );
     }
-    if (extractRevertData(error) !== undefined) {
+    const revertData = extractRevertData(error);
+    if (revertData !== undefined) {
       // The swap executed and reverted, which is the answer the caller needs
       ctx.logger.warn('Seeded simulation reverted', {simulationStatus: status});
       return this.reportSeededRun(
         withZeroGasSimulationResult(
           quoteSplit,
           status,
-          'Error simulating transaction'
+          'Error simulating transaction',
+          revertData
         ),
         ctx
       );
@@ -488,7 +498,8 @@ export abstract class Simulator {
       status,
       status === SimulationStatus.SYSTEM_DOWN
         ? 'Simulation backend unavailable'
-        : 'Error simulating transaction'
+        : 'Error simulating transaction',
+      extractRevertData(error)
     );
   }
 

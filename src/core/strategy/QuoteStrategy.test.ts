@@ -100,10 +100,15 @@ class TestGasEstimateProvider extends GasEstimateProvider {
   async getCurrentGasPrice(
     _ctx: Context,
     _chainId: ChainId,
-    _blockNumber?: number,
+    blockNumber?: number,
     priorityFeePerGasWei?: bigint
   ): Promise<number> {
-    return 30000000000 + Number(priorityFeePerGasWei ?? 0n); // 30 gwei + tip
+    // 30 gwei + tip, and 1 gwei more when read at a pinned block
+    return (
+      30000000000 +
+      Number(priorityFeePerGasWei ?? 0n) +
+      (blockNumber === undefined ? 0 : 1000000000)
+    );
   }
 
   async estimateGas(
@@ -339,6 +344,51 @@ function runStrategyTests(
         30_000_000_000n + priorityFeePerGasWei
       );
     });
+
+    it.each([
+      [undefined, 30_000_000_000n],
+      [12345678, 31_000_000_000n],
+    ])(
+      'reads the gas price at gasPriceBlockNumber %s, not at the quote block',
+      async (gasPriceBlockNumber, expectedGasPriceWei) => {
+        const strategy = createStrategy(strategyClass);
+
+        const bestQuoteCandidates = await strategy.findBestQuoteCandidates(
+          ctx,
+          chain,
+          new CurrencyInfo(false, tokenInAddress),
+          new CurrencyInfo(false, tokenOutAddress),
+          amount,
+          TradeType.ExactIn,
+          [Protocol.V2],
+          serviceConfig,
+          [
+            new RouteBasic(Protocol.V2, [
+              new V2Pool(
+                tokenInAddress,
+                tokenOutAddress,
+                new Address('0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640'),
+                BigInt('1000000000000'),
+                BigInt('1000000000000')
+              ),
+            ]),
+          ],
+          new Map(),
+          ['chain:MAINNET', 'tradeType:EXACT_IN'],
+          12345678,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          gasPriceBlockNumber
+        );
+
+        expect(bestQuoteCandidates[0].quotes[0].gasDetails?.gasPriceInWei).toBe(
+          expectedGasPriceWei
+        );
+      }
+    );
 
     it('should return quotes sorted by gas-adjusted amount (EXACT_IN: raw - gasCostInQuoteToken)', async () => {
       const quotes = [

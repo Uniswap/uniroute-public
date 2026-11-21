@@ -4,6 +4,10 @@ import {BigNumber} from '@ethersproject/bignumber';
 import {utils} from 'ethers';
 import {EthEstimateGasSimulator} from './eth-estimate-gas-provider';
 import {extractRevertData} from './simulationErrorBreakDown';
+import {
+  captureEthersRpcError,
+  providerAnsweringSend,
+} from '../../../../tests/test-utils/ethersRpcErrors';
 import {SwapOptionsUniversalRouter, SwapType} from './simulation-provider';
 import {ChainId} from '../../../lib/config';
 import {Context} from '@uniswap/lib-uni/context';
@@ -54,6 +58,12 @@ const makeEthersEstimateGasError = (data?: string): Error => {
     }
   );
 };
+
+const UNIVERSAL_ROUTER_ERRORS = new utils.Interface([
+  'error InsufficientToken()',
+  'error InsufficientETH()',
+  'error V3TooLittleReceived()',
+]);
 
 describe('extractRevertData', () => {
   it('finds data directly on the error', () => {
@@ -253,6 +263,108 @@ describe('EthEstimateGasSimulator', () => {
         SimulationStatus.SLIPPAGE_TOO_LOW
       );
     });
+
+    // The pinned estimate hex-encodes the transaction, so it needs hex calldata.
+    const createHexCalldataQuoteSplit = (): QuoteSplit => {
+      const quoteSplit = createQuoteSplit();
+      return {
+        ...quoteSplit,
+        swapInfo: {
+          ...quoteSplit.swapInfo!,
+          methodParameters: {
+            ...quoteSplit.swapInfo!.methodParameters!,
+            calldata: '0x3593564c',
+          },
+        },
+      };
+    };
+
+    it('sends a pinned estimate with the block as the RPC block param', async () => {
+      const sent: {method: string; params: unknown[]}[] = [];
+      const answering = providerAnsweringSend(async (method, params) => {
+        sent.push({method, params});
+        return '0x249f0';
+      });
+      const quoteSplit = createHexCalldataQuoteSplit();
+
+      const result = await new EthEstimateGasSimulator(
+        ChainId.MAINNET,
+        answering,
+        gasConverter
+      ).ethEstimateGas(USER_ADDRESS, swapOptions, quoteSplit, ctx, 12345678);
+
+      expect(sent).toEqual([
+        {
+          method: 'eth_estimateGas',
+          params: [
+            {
+              from: USER_ADDRESS.toLowerCase(),
+              to: quoteSplit.swapInfo!.methodParameters!.to.toLowerCase(),
+              data: quoteSplit.swapInfo!.methodParameters!.calldata,
+              value: '0x0',
+            },
+            '0xbc614e',
+          ],
+        },
+      ]);
+      expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+      expect(result.simulationResult?.estimatedGasUsed).toBe(150000n);
+    });
+
+    it('classifies a revert from a pinned estimate thrown by ethers', async () => {
+      const thrown = await captureEthersRpcError(
+        {
+          httpStatus: 200,
+          code: 3,
+          message: 'execution reverted',
+          data: '0x39d35496',
+        },
+        rpc => rpc.send('eth_estimateGas', [{}, '0xbc614e'])
+      );
+      const answering = providerAnsweringSend(() => Promise.reject(thrown));
+
+      const result = await new EthEstimateGasSimulator(
+        ChainId.MAINNET,
+        answering,
+        gasConverter
+      ).ethEstimateGas(
+        USER_ADDRESS,
+        swapOptions,
+        createHexCalldataQuoteSplit(),
+        ctx,
+        12345678
+      );
+
+      expect(result.simulationResult?.status).toBe(
+        SimulationStatus.SLIPPAGE_TOO_LOW
+      );
+    });
+
+    it.each([
+      ['InsufficientToken', true],
+      ['InsufficientETH', true],
+      ['V3TooLittleReceived', false],
+    ])(
+      'flags a %s revert as a router balance floor: %s',
+      async (errorName, flagged) => {
+        vi.mocked(provider.estimateGas).mockRejectedValue(
+          makeEthersEstimateGasError(
+            UNIVERSAL_ROUTER_ERRORS.encodeErrorResult(errorName)
+          )
+        );
+
+        const result = await simulator.ethEstimateGas(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(result.simulationResult?.routerBalanceFloorReverted).toBe(
+          flagged ? true : undefined
+        );
+      }
+    );
 
     it('returns FAILED when the revert data is unrecognized', async () => {
       vi.mocked(provider.estimateGas).mockRejectedValue(

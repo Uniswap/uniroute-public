@@ -1,6 +1,12 @@
 import {isGasConversionTrustworthy} from './quote/selector/gasConversionTrust';
 import {Context} from '@uniswap/lib-uni/context';
-import {CurrencyAmount, TradeType as SdkTradeType} from '@uniswap/sdk-core';
+import {Trade} from '@uniswap/router-sdk';
+import {
+  Currency,
+  CurrencyAmount,
+  Percent,
+  TradeType as SdkTradeType,
+} from '@uniswap/sdk-core';
 import {CanonicalPools} from '../lib/CanonicalPools';
 import {
   DebugInfo,
@@ -47,6 +53,7 @@ import {
   getUniRouteSyncCacheMissRouteFinderOverrides,
   MIN_REQUEST_ROUTING_TIME_BUDGET_MS,
   TAG_STATUS_FAILURE,
+  TAG_STATUS_SUCCESS,
 } from '../lib/config';
 import {Address} from '../models/address/Address';
 import {BlockNumberCache} from '../lib/blockNumberCache';
@@ -77,6 +84,7 @@ import {Protocol} from '../models/pool/Protocol';
 import {V3Pool} from '../models/pool/V3Pool';
 import {V2Pool} from '../models/pool/V2Pool';
 import {ITokenHandler} from '../stores/token/ITokenHandler';
+import {deliveryHeadroomBand, deliveryShortfallBps} from './simulatedDelivery';
 import {isChainSelected} from '../stores/token/storage/tokenMetadataChainSelection';
 import {
   IRoutesRepository,
@@ -106,6 +114,8 @@ import {
   hasSimulatedGasEstimate,
   isSimulationError,
   ISimulator,
+  revertedOnAmountLimit,
+  SimulationResult,
   SimulationStatus,
 } from './simulator/ISimulator';
 import {ResolvedStateOverride} from './simulator/ResolvedStateOverride';
@@ -145,6 +155,7 @@ import {ITokenProvider} from '../stores/token/provider/TokenProvider';
 import {
   containsExternalTransferFailedTokens,
   containsFOT,
+  isFeeOnTransferToken,
   FAKE_TICK_SPACING,
   filterRoutesWithFotIntermediaryTokens,
   isValidRoute,
@@ -186,7 +197,10 @@ import {
   isNamespaceActive,
 } from '../models/hooks/namespaces';
 import {RouteNamespaceContext} from '../models/hooks/namespaces/CacheNamespace';
-import {Erc4626WrapperRegistrySource} from './registry/Erc4626WrapperRegistry';
+import {
+  Erc4626RegistrySnapshot,
+  Erc4626WrapperRegistrySource,
+} from './registry/Erc4626WrapperRegistry';
 import {routeViolatesErc4626Invariants} from '../models/hooks/Erc4626WrapperHooks';
 import {V4Pool} from '../models/pool/V4Pool';
 
@@ -278,6 +292,40 @@ function routeStringForQuoteSplit(quoteSplit: QuoteSplit): string {
 function totalQuoteAmountForQuoteSplit(quoteSplit: QuoteSplit): bigint {
   return quoteSplit.quotes.reduce((sum, quote) => sum + quote.amount, 0n);
 }
+
+/** Whether the simulation ran the swap through, a seeded run included */
+function swapExecuted(result?: SimulationResult): boolean {
+  return (
+    result?.status === SimulationStatus.SUCCESS ||
+    (result?.status === SimulationStatus.INSUFFICIENT_BALANCE &&
+      result.seeded === true)
+  );
+}
+
+const BPS_PER_UNIT = 10_000;
+// Split searches re-run without the paths that under-delivered, before the
+// request answers no-route.
+const UNDER_DELIVERY_RESEARCH_ROUNDS = 2;
+// Simulations a request may spend on the 100% single-path candidates of the
+// legs of splits that under-delivered when no single path was blamed. Each
+// one runs in sequence on the request path, so this is a hard per-request
+// bound rather than a tunable.
+const UNDER_DELIVERY_LEG_PROBE_MAX_SIMS = 3;
+const MS_PER_SECOND = 1_000;
+
+/** What one pass of candidate simulations found */
+type SimulatedCandidates = {
+  bestQuote: QuoteSplit | undefined;
+  // False when bestQuote is the all-failed fallback or there is none
+  simulationPassed: boolean;
+  unviableRouteStrings: string[];
+  // Pool paths of single-path candidates rejected for under-delivery
+  underDeliveredPoolPathKeys: string[];
+  // `routeStringForQuoteSplit` ids of every candidate rejected for it
+  underDeliveredCandidateIds: string[];
+  underDeliveryRejected: boolean;
+  simulationAttempts: number;
+};
 
 /** Split cap for quotes into a transfer-locked token (`applySingleRouteForLockedOutput`). */
 const LOCKED_OUTPUT_MAX_SPLITS = 1;
@@ -422,6 +470,14 @@ export class UniRouteBL implements IUniRoutedBL {
 
     const quoteCallStartTime = Date.now();
 
+    // When a caller waits, the route timeout bounds the request; off the
+    // request path (refresh workers) the search runs to completion.
+    const routingDeadlineMs =
+      options?.abortSignal === undefined
+        ? undefined
+        : quoteCallStartTime +
+          this.serviceConfig.Lambda.TimeoutSeconds * MS_PER_SECOND;
+
     const emitCallMetrics = async (tags: string[]) => {
       await ctx.metrics.count(buildMetricKey('Call'), 1, {tags});
       await ctx.metrics.dist(
@@ -504,6 +560,13 @@ export class UniRouteBL implements IUniRoutedBL {
         request,
         requestBlockNumber,
         metricTags
+      );
+      const underDeliveryCheckBlock = this.underDeliveryCheckBlock(
+        ctx,
+        chain.chainId,
+        request,
+        requestBlockNumber,
+        blockNumber
       );
 
       const {fotInDirectSwap, externalTransferFailedInDirectSwap} =
@@ -921,44 +984,19 @@ export class UniRouteBL implements IUniRoutedBL {
         );
       }
 
-      if (erc4626Snapshot?.assets.length) {
-        const before = routes.length;
-        routes = routes.filter(
-          route => !routeViolatesErc4626Invariants(route, erc4626Snapshot)
-        );
-        if (before !== routes.length) {
-          await ctx.metrics.count(
-            buildMetricKey('Erc4626WrapperHooks.routeInvariantDropped'),
-            before - routes.length,
-            {tags: ['status:success']}
-          );
-        }
-      }
-      const routesAfterErc4626Filter = routes.length;
-
-      if (routes.length > 0) {
-        routes = await this.filterFotIntermediaryRoutes(
-          ctx,
-          chain,
-          routes,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          tradeType,
-          tokensInfo
-        );
-      }
-      const routesAfterFotIntermediaryFilter = routes.length;
-
-      if (tradeType === TradeType.ExactOut && routes.length > 0) {
-        routes = routes.filter(
-          route =>
-            !route.path.some(
-              pool =>
-                pool instanceof V4Pool &&
-                erc4626Snapshot?.isWrapperHook(pool.hooks)
-            )
-        );
-      }
+      const shapeFiltered = await this.applyRequestShapeRouteFilters(
+        ctx,
+        chain,
+        routes,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        tokensInfo,
+        erc4626Snapshot
+      );
+      routes = shapeFiltered.routes;
+      const {routesAfterErc4626Filter, routesAfterFotIntermediaryFilter} =
+        shapeFiltered;
       const routesAfterExactOutWrapperHookFilter = routes.length;
 
       if (forceMixed) {
@@ -1064,16 +1102,19 @@ export class UniRouteBL implements IUniRoutedBL {
         gasPrice,
         resolvedStateOverrides,
         priorityFeePerGasWei,
+        underDeliveryCheckBlock,
+        routingDeadlineMs,
         erc4626Snapshot?.hookCodeOverrides
       );
       let {bestQuoteCandidates, bestQuote, incompleteSearch} =
         quotePipelineResult;
+      let {unviableRouteStrings, searchAbandoned} = quotePipelineResult;
       const {
-        unviableRouteStrings,
+        underDeliveredRoutePoolPathKeys,
+        underDeliveryRejected,
         droppedRoutes,
         droppedRoutePoolPathKeys,
         quotedRoutePoolPathKeys,
-        searchAbandoned,
       } = quotePipelineResult;
 
       if (pendingRoutesOutcome) {
@@ -1133,6 +1174,156 @@ export class UniRouteBL implements IUniRoutedBL {
           bestQuoteCandidates,
           bestQuote,
           allCachedPoolPathKeys
+        );
+      }
+
+      if (underDeliveredRoutePoolPathKeys.length > 0 && shouldCheckCache) {
+        await this.cachedRoutesRepository.evictCachedRoutes(
+          nsCtx,
+          chain.chainId,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          tradeType,
+          amountIn,
+          usdBucket,
+          protocols,
+          new Set(underDeliveredRoutePoolPathKeys),
+          ctx
+        );
+      }
+      // A cached route set whose every candidate under-delivered says
+      // nothing about the pair's fresh routes, so search them instead of
+      // answering no-route.
+      if (
+        bestQuote === undefined &&
+        underDeliveryRejected &&
+        usedCachedRoutes &&
+        (cachedRoutesStatus === 'hit' ||
+          routes.every(route => cachedRouteInstances.has(route)))
+      ) {
+        ctx.logger.warn(
+          'Every cached candidate under-delivered; searching fresh routes',
+          {chainId: chain.chainId, underDeliveredRoutePoolPathKeys}
+        );
+        const countFreshSearch = (statusTags: string[]) => {
+          void ctx.metrics
+            .count(buildMetricKey('CachedRoutes.UnderDeliveryFreshSearch'), 1, {
+              tags: [chainTag, ...statusTags],
+            })
+            .catch(() => undefined);
+        };
+        try {
+          const excludedPoolPathKeys = new Set(underDeliveredRoutePoolPathKeys);
+          const fresh = await fetchFresh();
+          degradedDiscovery = fresh.degradedReasons.length > 0;
+          const validFreshRoutes = await this.filterInvalidRoutes(
+            ctx,
+            fresh.routes.filter(
+              route => !excludedPoolPathKeys.has(route.poolPathKey())
+            ),
+            chain,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            tradeType,
+            metricTags
+          );
+          let freshRoutes = (
+            await this.applyRequestShapeRouteFilters(
+              ctx,
+              chain,
+              validFreshRoutes.routes,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
+              tradeType,
+              tokensInfo,
+              erc4626Snapshot
+            )
+          ).routes;
+          if (forceMixed) {
+            const forceMixedResult = this.enforceForceMixed(
+              ctx,
+              request,
+              freshRoutes,
+              debugLogs,
+              false,
+              usdBucket
+            );
+            freshRoutes = forceMixedResult.forceMixedNoRouteResponse
+              ? []
+              : forceMixedResult.routes;
+          }
+          routes = (
+            await this.capRoutesAndObserve(
+              ctx,
+              chain,
+              tradeType,
+              quoteType,
+              hooksOptions,
+              protocols,
+              options?.testAggHooks,
+              freshRoutes,
+              effectiveConfig,
+              routeFinderConfigTag,
+              new Set(),
+              'miss'
+            )
+          ).routes;
+          usedCachedRoutes = false;
+          const freshPipelineResult = await this.runQuotePipeline(
+            ctx,
+            chain,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            amountIn,
+            tradeType,
+            protocols,
+            effectiveConfig,
+            routes,
+            tokensInfo,
+            request,
+            options,
+            metricTags,
+            requestBlockNumber,
+            gasPrice,
+            resolvedStateOverrides,
+            priorityFeePerGasWei,
+            underDeliveryCheckBlock,
+            routingDeadlineMs,
+            erc4626Snapshot?.hookCodeOverrides
+          );
+          ({bestQuoteCandidates, bestQuote, incompleteSearch, searchAbandoned} =
+            freshPipelineResult);
+          unviableRouteStrings = [
+            ...unviableRouteStrings,
+            ...freshPipelineResult.unviableRouteStrings,
+          ];
+          if (freshPipelineResult.underDeliveredRoutePoolPathKeys.length > 0) {
+            await this.cachedRoutesRepository.evictCachedRoutes(
+              nsCtx,
+              chain.chainId,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
+              tradeType,
+              amountIn,
+              usdBucket,
+              protocols,
+              new Set(freshPipelineResult.underDeliveredRoutePoolPathKeys),
+              ctx
+            );
+          }
+        } catch (error) {
+          countFreshSearch([TAG_STATUS_FAILURE, 'reason:quote_error']);
+          throw error;
+        }
+        countFreshSearch(
+          bestQuote !== undefined
+            ? [TAG_STATUS_SUCCESS]
+            : [
+                TAG_STATUS_FAILURE,
+                incompleteSearch
+                  ? 'reason:incomplete_search'
+                  : 'reason:no_route',
+              ]
         );
       }
 
@@ -1202,6 +1393,8 @@ export class UniRouteBL implements IUniRoutedBL {
         incompleteSearch,
         searchAbandoned,
         degradedDiscovery,
+        underDeliveryRejected,
+        underDeliveryCheckBlock !== undefined,
         options,
         metricTags
       );
@@ -1884,6 +2077,163 @@ export class UniRouteBL implements IUniRoutedBL {
   }
 
   /**
+   * The block a request whose candidates are checked for under-delivery
+   * quotes and simulates at, undefined when the check does not apply. A
+   * request's own block wins; otherwise the resolved block is pinned, since
+   * an unpinned quote and simulation each read 'latest' and price movement
+   * between them would read as under-delivery.
+   */
+  private underDeliveryCheckBlock(
+    ctx: Context,
+    chainId: ChainId,
+    request: QuoteRequest,
+    requestBlockNumber: number | undefined,
+    resolvedBlockNumber: number
+  ): number | undefined {
+    if (
+      !this.serviceConfig.Simulation.Enabled ||
+      !request.simulateFromAddress ||
+      !isChainSelected(
+        this.serviceConfig.Simulation.UnderDeliveryChains,
+        chainId
+      )
+    ) {
+      return undefined;
+    }
+    if (requestBlockNumber !== undefined) {
+      return requestBlockNumber;
+    }
+    if (resolvedBlockNumber > 0) {
+      return resolvedBlockNumber;
+    }
+    this.countUnderDeliveryCheck(
+      ctx,
+      chainId,
+      TAG_STATUS_FAILURE,
+      'reason:no_quote_block'
+    );
+    return undefined;
+  }
+
+  private countUnderDeliveryResearch(
+    ctx: Context,
+    chainId: ChainId,
+    ...statusTags: string[]
+  ): void {
+    void ctx.metrics
+      .count(buildMetricKey('Simulation.UnderDeliveryResearch'), 1, {
+        tags: [`chain:${ChainId[chainId]}`, ...statusTags],
+      })
+      .catch(() => undefined);
+  }
+
+  /**
+   * Reports what a candidate that passed the under-delivery check actually
+   * delivered against its quote: a bounded headroom band on
+   * `Simulation.UnderDeliveryHeadroom` and the exact amounts in a log. A
+   * rejected candidate reverts on the probe's limit and delivers nothing to
+   * measure.
+   */
+  private reportSimulatedDelivery(
+    ctx: Context,
+    chainId: ChainId,
+    tradeType: TradeType,
+    simulatedQuote: QuoteSplit,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tokensInfo: Map<string, Erc20Token | null>,
+    quoteBlock: number | undefined
+  ): void {
+    const chainTag = `chain:${ChainId[chainId]}`;
+    const count = (tags: string[]) =>
+      void ctx.metrics
+        .count(buildMetricKey('Simulation.UnderDeliveryHeadroom'), 1, {
+          tags: [chainTag, ...tags],
+        })
+        .catch(() => undefined);
+    const delivery = simulatedQuote.simulationResult?.delivery;
+    // eth_estimateGas (the approved-ERC20 fast path) reads no balances.
+    if (delivery === undefined) {
+      count([TAG_STATUS_FAILURE, 'reason:not_measured']);
+      return;
+    }
+    if (delivery.kind === 'unmeasured') {
+      count([TAG_STATUS_FAILURE, `reason:${delivery.reason}`]);
+      return;
+    }
+    // A taxed endpoint delivers less than an untaxed quote by design.
+    if (
+      isFeeOnTransferToken(
+        tokensInfo.get(tokenInCurrencyInfo.wrappedAddress.toString())
+      ) ||
+      isFeeOnTransferToken(
+        tokensInfo.get(tokenOutCurrencyInfo.wrappedAddress.toString())
+      )
+    ) {
+      count([TAG_STATUS_FAILURE, 'reason:fee_on_transfer_endpoint']);
+      return;
+    }
+    const quotedAmount = totalQuoteAmountForQuoteSplit(simulatedQuote);
+    const shortfallBps = deliveryShortfallBps(
+      tradeType,
+      quotedAmount,
+      delivery.amount
+    );
+    if (shortfallBps === undefined) {
+      count([TAG_STATUS_FAILURE, 'reason:no_quoted_amount']);
+      return;
+    }
+    count([TAG_STATUS_SUCCESS, `band:${deliveryHeadroomBand(shortfallBps)}`]);
+    ctx.logger.info('Simulated delivery against quote', {
+      chainId,
+      tradeType,
+      quoteBlock,
+      quoteSplit: simulatedQuote.quotes.map(q => q.route.toString()),
+      quotedAmount: quotedAmount.toString(),
+      deliveredAmount: delivery.amount.toString(),
+      shortfallBps: shortfallBps.toString(),
+    });
+  }
+
+  /**
+   * One leg probe, and the simulations it ran (`.Sims`, same tags), so the
+   * probe's share of a request's simulations is visible apart from the
+   * candidate search's.
+   */
+  private countUnderDeliveryLegProbe(
+    ctx: Context,
+    chainId: ChainId,
+    simulations: number,
+    ...statusTags: string[]
+  ): void {
+    const tags = [`chain:${ChainId[chainId]}`, ...statusTags];
+    void ctx.metrics
+      .count(buildMetricKey('Simulation.UnderDeliveryLegProbe'), 1, {tags})
+      .catch(() => undefined);
+    if (simulations > 0) {
+      void ctx.metrics
+        .count(
+          buildMetricKey('Simulation.UnderDeliveryLegProbe.Sims'),
+          simulations,
+          {tags}
+        )
+        .catch(() => undefined);
+    }
+  }
+
+  private countUnderDeliveryCheck(
+    ctx: Context,
+    chainId: ChainId,
+    ...statusTags: string[]
+  ): void {
+    void ctx.metrics
+      .count(buildMetricKey('Simulation.UnderDeliveryCheck'), 1, {
+        tags: [`chain:${ChainId[chainId]}`, ...statusTags],
+      })
+      .catch(() => undefined);
+  }
+
+  /**
    * Whether a FAST cache hit on `chainId` runs fresh discovery alongside the
    * cached routes. Both the deployment-wide boolean and the per-chain
    * allowlist must admit the chain; otherwise the hit takes the cached-only
@@ -2347,6 +2697,72 @@ export class UniRouteBL implements IUniRoutedBL {
    * no mixed routes survive, returns a 404 response for the caller to
    * propagate (after emitting call metrics).
    */
+  /**
+   * The route filters a request's shape applies after the validity filter:
+   * ERC-4626 wrapper invariants, fee-on-transfer intermediaries, and (exact
+   * out) wrapper hooks. Shared by the first search and the fresh search that
+   * replaces an all-cached route set that under-delivered.
+   */
+  private async applyRequestShapeRouteFilters(
+    ctx: Context,
+    chain: Chain,
+    routes: RouteBasic<Pool>[],
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    tokensInfo: Map<string, Erc20Token | null>,
+    erc4626Snapshot: Erc4626RegistrySnapshot | undefined
+  ): Promise<{
+    routes: RouteBasic<Pool>[];
+    routesAfterErc4626Filter: number;
+    routesAfterFotIntermediaryFilter: number;
+  }> {
+    let filteredRoutes = routes;
+    if (erc4626Snapshot?.assets.length) {
+      const before = filteredRoutes.length;
+      filteredRoutes = filteredRoutes.filter(
+        route => !routeViolatesErc4626Invariants(route, erc4626Snapshot)
+      );
+      if (before !== filteredRoutes.length) {
+        await ctx.metrics.count(
+          buildMetricKey('Erc4626WrapperHooks.routeInvariantDropped'),
+          before - filteredRoutes.length,
+          {tags: ['status:success']}
+        );
+      }
+    }
+    const routesAfterErc4626Filter = filteredRoutes.length;
+
+    if (filteredRoutes.length > 0) {
+      filteredRoutes = await this.filterFotIntermediaryRoutes(
+        ctx,
+        chain,
+        filteredRoutes,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        tokensInfo
+      );
+    }
+    const routesAfterFotIntermediaryFilter = filteredRoutes.length;
+
+    if (tradeType === TradeType.ExactOut && filteredRoutes.length > 0) {
+      filteredRoutes = filteredRoutes.filter(
+        route =>
+          !route.path.some(
+            pool =>
+              pool instanceof V4Pool &&
+              erc4626Snapshot?.isWrapperHook(pool.hooks)
+          )
+      );
+    }
+    return {
+      routes: filteredRoutes,
+      routesAfterErc4626Filter,
+      routesAfterFotIntermediaryFilter,
+    };
+  }
+
   private enforceForceMixed(
     ctx: Context,
     request: QuoteRequest,
@@ -2460,113 +2876,35 @@ export class UniRouteBL implements IUniRoutedBL {
     gasPrice: bigint | undefined,
     resolvedStateOverrides: ResolvedStateOverride[] | undefined,
     priorityFeePerGasWei: bigint | undefined,
+    underDeliveryCheckBlock: number | undefined,
+    // Epoch ms the caller stops waiting, undefined off the request path
+    routingDeadlineMs: number | undefined,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>
   ): Promise<{
     bestQuoteCandidates: QuoteSplit[];
     bestQuote: QuoteSplit | undefined;
     unviableRouteStrings: string[];
+    underDeliveredRoutePoolPathKeys: string[];
+    underDeliveryRejected: boolean;
     incompleteSearch: boolean;
     searchAbandoned: boolean;
     droppedRoutes: number;
     droppedRoutePoolPathKeys: string[];
     quotedRoutePoolPathKeys: string[];
   }> {
-    let bestQuoteCandidates: QuoteSplit[];
-    let incompleteSearch = false;
     const fetchReport: QuoteFetchReport = {droppedRoutes: 0, batchErrors: []};
-    try {
-      bestQuoteCandidates = await this.quoteStrategy.findBestQuoteCandidates(
-        ctx,
-        chain,
-        tokenInCurrencyInfo,
-        tokenOutCurrencyInfo,
-        amountIn,
-        tradeType,
-        protocols,
-        effectiveConfig,
-        routes,
-        tokensInfo,
-        metricTags,
-        requestBlockNumber,
-        options?.testAggHooks,
-        supplementalHookCodeOverrides,
-        priorityFeePerGasWei,
-        fetchReport,
-        options?.abortSignal
-      );
-    } catch (error) {
-      if (
-        !(error instanceof OnChainQuoteFetchError) ||
-        (error.kind !== 'incomplete' && error.kind !== 'caller_aborted')
-      ) {
-        throw error;
-      }
-      // The quote fetch dropped routes (or the caller stopped waiting before
-      // any came back) and no split came out of the rest. Served as no route,
-      // since the caller's contract is a 200 no-route and the dropped routes
-      // are gone for this request, but not cached as one: the next request
-      // searches them again.
-      incompleteSearch = true;
-      bestQuoteCandidates = [];
-      await ctx.metrics.count(buildMetricKey('IncompleteSearch'), 1, {
-        tags: [
-          ...metricTags,
-          TAG_STATUS_FAILURE,
-          error.kind === 'caller_aborted'
-            ? `reason:${MetricFailureReason.CALLER_ABORTED}`
-            : 'reason:dropped_routes',
-        ],
-      });
-      ctx.logger.warn(
-        'Quote search was incomplete, serving no route without caching it',
-        {
-          chainId: chain.chainId,
-          routes: routes.length,
-          ...error.toLogFields(),
-        }
-      );
-    }
-
-    // Only the quote fetch drops routes when the caller stops waiting, and it
-    // has finished by now: a search that completed before an abort is whole.
-    const searchAbandoned = options?.abortSignal?.aborted === true;
-
-    ctx.logger.debug(`Best Quote Candidates (${bestQuoteCandidates.length}):`, {
-      candidates: bestQuoteCandidates.map(candidate => ({
-        route: candidate.quotes.map(q => ({
-          routeString: q.route.toString(),
-          amount: q.amount.toString(),
-        })),
-      })),
-    });
-
-    if (this.serviceConfig.GasEstimation.Enabled) {
-      const startGasUpdateTime = Date.now();
-      await this.gasConverter.updateQuotesGasDetails(
-        chain.chainId,
-        tradeType === TradeType.ExactIn
-          ? tokenOutCurrencyInfo.wrappedAddress.toString()
-          : tokenInCurrencyInfo.wrappedAddress.toString(),
-        tokensInfo,
-        bestQuoteCandidates,
-        ctx,
-        requestBlockNumber
-      );
-      await logElapsedTime(
-        'UpdateQuotesGasDetails',
-        startGasUpdateTime,
-        ctx,
-        metricTags
-      );
-    }
-
-    let topNQuotes: QuoteSplit[] = [];
-    if (bestQuoteCandidates.length > 0) {
+    // The quotes and the simulation read one block, so the under-delivery
+    // check compares a candidate's simulated output with its own quote.
+    const quoteBlockNumber = underDeliveryCheckBlock ?? requestBlockNumber;
+    const rankCandidates = async (
+      candidates: QuoteSplit[],
+      topN: number
+    ): Promise<QuoteSplit[]> => {
       const getBestQuotesStartTime = Date.now();
-      topNQuotes = await this.quoteSelector.getBestQuotes(
-        bestQuoteCandidates,
+      const rankedCandidates = await this.quoteSelector.getBestQuotes(
+        candidates,
         tradeType,
-        this.serviceConfig.Simulation.TopNQuotes,
+        topN,
         metricTags,
         ctx,
         {
@@ -2578,7 +2916,7 @@ export class UniRouteBL implements IUniRoutedBL {
               tokenInCurrencyInfo,
               tokenOutCurrencyInfo,
               amountIn,
-              bestQuoteCandidates,
+              candidates,
               tokensInfo
             ),
         }
@@ -2589,16 +2927,126 @@ export class UniRouteBL implements IUniRoutedBL {
         ctx,
         metricTags
       );
-    }
+      return rankedCandidates;
+    };
+    const searchCandidates = async (
+      searchRoutes: RouteBasic<Pool>[],
+      report: QuoteFetchReport
+    ): Promise<{
+      candidates: QuoteSplit[];
+      topNQuotes: QuoteSplit[];
+      incomplete: boolean;
+      abandoned: boolean;
+    }> => {
+      let candidates: QuoteSplit[];
+      let incomplete = false;
+      try {
+        candidates = await this.quoteStrategy.findBestQuoteCandidates(
+          ctx,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          amountIn,
+          tradeType,
+          protocols,
+          effectiveConfig,
+          searchRoutes,
+          tokensInfo,
+          metricTags,
+          quoteBlockNumber,
+          options?.testAggHooks,
+          supplementalHookCodeOverrides,
+          priorityFeePerGasWei,
+          report,
+          options?.abortSignal,
+          requestBlockNumber
+        );
+      } catch (error) {
+        if (
+          !(error instanceof OnChainQuoteFetchError) ||
+          (error.kind !== 'incomplete' && error.kind !== 'caller_aborted')
+        ) {
+          throw error;
+        }
+        // The quote fetch dropped routes (or the caller stopped waiting before
+        // any came back) and no split came out of the rest. Served as no route,
+        // since the caller's contract is a 200 no-route and the dropped routes
+        // are gone for this request, but not cached as one: the next request
+        // searches them again.
+        incomplete = true;
+        candidates = [];
+        await ctx.metrics.count(buildMetricKey('IncompleteSearch'), 1, {
+          tags: [
+            ...metricTags,
+            TAG_STATUS_FAILURE,
+            error.kind === 'caller_aborted'
+              ? `reason:${MetricFailureReason.CALLER_ABORTED}`
+              : 'reason:dropped_routes',
+          ],
+        });
+        ctx.logger.warn(
+          'Quote search was incomplete, serving no route without caching it',
+          {
+            chainId: chain.chainId,
+            routes: searchRoutes.length,
+            ...error.toLogFields(),
+          }
+        );
+      }
 
-    // Pass requestBlockNumber (not the resolved blockNumber) to simulation.
-    // When the user doesn't provide a block number, requestBlockNumber is
-    // undefined, which causes simulation backends (eth_simulateV1,
-    // eth_estimateGas)
-    // to use 'latest'. The resolved blockNumber is only used for the response
-    // and for pool/quote fetching.
-    const {bestQuote, unviableRouteStrings} =
-      await this.simulateAndPopulateBestQuote(
+      // Only the quote fetch drops routes when the caller stops waiting, and
+      // it has finished by now: a search that completed before an abort is
+      // whole.
+      const abandoned = options?.abortSignal?.aborted === true;
+
+      ctx.logger.debug(`Best Quote Candidates (${candidates.length}):`, {
+        candidates: candidates.map(candidate => ({
+          route: candidate.quotes.map(q => ({
+            routeString: q.route.toString(),
+            amount: q.amount.toString(),
+          })),
+        })),
+      });
+
+      if (this.serviceConfig.GasEstimation.Enabled) {
+        const startGasUpdateTime = Date.now();
+        await this.gasConverter.updateQuotesGasDetails(
+          chain.chainId,
+          tradeType === TradeType.ExactIn
+            ? tokenOutCurrencyInfo.wrappedAddress.toString()
+            : tokenInCurrencyInfo.wrappedAddress.toString(),
+          tokensInfo,
+          candidates,
+          ctx,
+          quoteBlockNumber
+        );
+        await logElapsedTime(
+          'UpdateQuotesGasDetails',
+          startGasUpdateTime,
+          ctx,
+          metricTags
+        );
+      }
+
+      const topNQuotes =
+        candidates.length > 0
+          ? await rankCandidates(
+              candidates,
+              this.serviceConfig.Simulation.TopNQuotes
+            )
+          : [];
+      return {candidates, topNQuotes, incomplete, abandoned};
+    };
+    // Ids of the candidates a simulation rejected for under-delivery, kept
+    // across searches: a split re-found by a later search is neither
+    // simulated again nor kept as that search's fallback.
+    const rejectedCandidateIds = new Set<string>();
+    // Ids of the candidates a search already handed to simulation, which the
+    // leg probe does not simulate again.
+    const triedCandidateIds = new Set<string>();
+    let legProbeSimsQueued = 0;
+    const simulate = (topNQuotes: QuoteSplit[]) =>
+      this.simulateAndPopulateBestQuote(
         chain,
         tokenInCurrencyInfo,
         tokenOutCurrencyInfo,
@@ -2610,17 +3058,253 @@ export class UniRouteBL implements IUniRoutedBL {
         ctx,
         metricTags,
         gasPrice,
-        requestBlockNumber,
+        quoteBlockNumber,
         options?.permit2Disabled ?? false,
         options?.universalRouterVersion,
         options?.universalRouterSwapsteps === true,
-        resolvedStateOverrides
+        resolvedStateOverrides,
+        underDeliveryCheckBlock === undefined
+          ? undefined
+          : this.serviceConfig.Simulation.UnderDeliveryToleranceBps,
+        rejectedCandidateIds
+      ).then(simulated => {
+        for (const candidateId of simulated.underDeliveredCandidateIds) {
+          rejectedCandidateIds.add(candidateId);
+        }
+        return simulated;
+      });
+    // A rejected split blames none of its legs, so a search whose rejections
+    // are all splits leaves a re-search nothing to drop, and a healthy single
+    // path ranked below the shortlist would never run. Each rejected split's
+    // legs are simulated as their own 100% candidates instead, best-ranked
+    // first, within UNDER_DELIVERY_LEG_PROBE_MAX_SIMS for the request: a leg
+    // that under-delivers alone is blamed like any single path, and the first
+    // that passes is served.
+    const probeRejectedSplitLegs = async (
+      searchSimulation: SimulatedCandidates,
+      topNQuotes: QuoteSplit[],
+      candidates: QuoteSplit[]
+    ): Promise<SimulatedCandidates> => {
+      const splitIdsRejected = new Set(
+        searchSimulation.underDeliveredCandidateIds
       );
+      const legPoolPathKeys = new Set(
+        topNQuotes
+          .filter(candidate =>
+            splitIdsRejected.has(routeStringForQuoteSplit(candidate))
+          )
+          .flatMap(split =>
+            split.quotes.map(quote => quote.route.poolPathKey())
+          )
+      );
+      const legCandidates = candidates.filter(
+        candidate =>
+          candidate.quotes.length === 1 &&
+          candidate.quotes[0].route.percentage === 100 &&
+          legPoolPathKeys.has(candidate.quotes[0].route.poolPathKey()) &&
+          !triedCandidateIds.has(routeStringForQuoteSplit(candidate))
+      );
+      const remainingSims =
+        UNDER_DELIVERY_LEG_PROBE_MAX_SIMS - legProbeSimsQueued;
+      const skipReason =
+        options?.abortSignal?.aborted === true
+          ? `reason:${MetricFailureReason.CALLER_ABORTED}`
+          : legCandidates.length === 0
+            ? 'reason:no_single_path'
+            : remainingSims <= 0
+              ? 'reason:budget_exhausted'
+              : undefined;
+      if (skipReason !== undefined) {
+        this.countUnderDeliveryLegProbe(
+          ctx,
+          chain.chainId,
+          0,
+          TAG_STATUS_FAILURE,
+          skipReason
+        );
+        return searchSimulation;
+      }
+      const rankedLegCandidates = await rankCandidates(
+        legCandidates,
+        remainingSims
+      );
+      legProbeSimsQueued += rankedLegCandidates.length;
+      for (const candidate of rankedLegCandidates) {
+        triedCandidateIds.add(routeStringForQuoteSplit(candidate));
+      }
+      const legSimulation = await simulate(rankedLegCandidates);
+      this.countUnderDeliveryLegProbe(
+        ctx,
+        chain.chainId,
+        legSimulation.simulationAttempts,
+        ...(legSimulation.simulationPassed
+          ? [TAG_STATUS_SUCCESS]
+          : [TAG_STATUS_FAILURE, 'reason:no_passing_leg'])
+      );
+      const blamedLegKeys = new Set(legSimulation.underDeliveredPoolPathKeys);
+      const searchFallback = searchSimulation.bestQuote?.quotes.some(quote =>
+        blamedLegKeys.has(quote.route.poolPathKey())
+      )
+        ? undefined
+        : searchSimulation.bestQuote;
+      return {
+        bestQuote: legSimulation.simulationPassed
+          ? legSimulation.bestQuote
+          : (searchFallback ?? legSimulation.bestQuote),
+        simulationPassed: legSimulation.simulationPassed,
+        unviableRouteStrings: [
+          ...searchSimulation.unviableRouteStrings,
+          ...legSimulation.unviableRouteStrings,
+        ],
+        underDeliveredPoolPathKeys: legSimulation.underDeliveredPoolPathKeys,
+        underDeliveredCandidateIds: [
+          ...searchSimulation.underDeliveredCandidateIds,
+          ...legSimulation.underDeliveredCandidateIds,
+        ],
+        underDeliveryRejected: true,
+        simulationAttempts:
+          searchSimulation.simulationAttempts +
+          legSimulation.simulationAttempts,
+      };
+    };
+    const simulateSearch = async (
+      topNQuotes: QuoteSplit[],
+      candidates: QuoteSplit[]
+    ): Promise<SimulatedCandidates> => {
+      for (const candidate of topNQuotes) {
+        triedCandidateIds.add(routeStringForQuoteSplit(candidate));
+      }
+      const searchSimulation = await simulate(topNQuotes);
+      const rejectedOnlySplits =
+        !searchSimulation.simulationPassed &&
+        searchSimulation.underDeliveredPoolPathKeys.length === 0 &&
+        searchSimulation.underDeliveredCandidateIds.length > 0;
+      return rejectedOnlySplits
+        ? probeRejectedSplitLegs(searchSimulation, topNQuotes, candidates)
+        : searchSimulation;
+    };
+
+    const firstSearchStartMs = Date.now();
+    const search = await searchCandidates(routes, fetchReport);
+    let bestQuoteCandidates = search.candidates;
+    const incompleteSearch = search.incomplete;
+    const searchAbandoned = search.abandoned;
+
+    let simulation = await simulateSearch(search.topNQuotes, search.candidates);
+    // What a re-search costs: another quote fetch, split search and
+    // simulations, measured on the first one.
+    const searchRoundMs = Date.now() - firstSearchStartMs;
+    const unviableRouteStrings = [...simulation.unviableRouteStrings];
+    const underDeliveredPoolPathKeys = new Set(
+      simulation.underDeliveredPoolPathKeys
+    );
+    let {underDeliveryRejected} = simulation;
+    // A fallback kept from an earlier search is dropped once a later one
+    // blames one of its legs as a single path, or rejects the candidate
+    // itself.
+    const isRejectedFallback = (candidate: QuoteSplit | undefined) =>
+      candidate !== undefined &&
+      (rejectedCandidateIds.has(routeStringForQuoteSplit(candidate)) ||
+        candidate.quotes.some(quote =>
+          underDeliveredPoolPathKeys.has(quote.route.poolPathKey())
+        ));
+    // Every candidate of a round can carry the same failing path (split
+    // variants of one route), so the split search runs again without it
+    // rather than only moving on to the next candidate.
+    let pendingPoolPathKeys = simulation.underDeliveredPoolPathKeys;
+    for (
+      let round = 0;
+      round < UNDER_DELIVERY_RESEARCH_ROUNDS &&
+      !simulation.simulationPassed &&
+      pendingPoolPathKeys.length > 0 &&
+      options?.abortSignal?.aborted !== true;
+      round++
+    ) {
+      if (
+        routingDeadlineMs !== undefined &&
+        Date.now() + searchRoundMs >= routingDeadlineMs
+      ) {
+        this.countUnderDeliveryResearch(
+          ctx,
+          chain.chainId,
+          TAG_STATUS_FAILURE,
+          'reason:insufficient_time'
+        );
+        ctx.logger.warn(
+          'Skipping an under-delivery re-search: less than one search is left',
+          {chainId: chain.chainId, searchRoundMs, round}
+        );
+        break;
+      }
+      const remainingRoutes = routes.filter(
+        route => !underDeliveredPoolPathKeys.has(route.poolPathKey())
+      );
+      if (remainingRoutes.length === 0) {
+        this.countUnderDeliveryResearch(
+          ctx,
+          chain.chainId,
+          TAG_STATUS_FAILURE,
+          'reason:no_routes'
+        );
+        break;
+      }
+      const research = await searchCandidates(remainingRoutes, {
+        droppedRoutes: 0,
+        batchErrors: [],
+      });
+      if (research.topNQuotes.length === 0) {
+        this.countUnderDeliveryResearch(
+          ctx,
+          chain.chainId,
+          TAG_STATUS_FAILURE,
+          research.incomplete ? 'reason:incomplete_search' : 'reason:no_quote'
+        );
+        break;
+      }
+      const resimulation = await simulateSearch(
+        research.topNQuotes,
+        research.candidates
+      );
+      unviableRouteStrings.push(...resimulation.unviableRouteStrings);
+      underDeliveryRejected ||= resimulation.underDeliveryRejected;
+      pendingPoolPathKeys = resimulation.underDeliveredPoolPathKeys.filter(
+        poolPathKey => !underDeliveredPoolPathKeys.has(poolPathKey)
+      );
+      for (const poolPathKey of pendingPoolPathKeys) {
+        underDeliveredPoolPathKeys.add(poolPathKey);
+      }
+      this.countUnderDeliveryResearch(
+        ctx,
+        chain.chainId,
+        ...(resimulation.simulationPassed
+          ? [TAG_STATUS_SUCCESS]
+          : [TAG_STATUS_FAILURE, 'reason:no_passing_candidate'])
+      );
+      const keptFallbackRejected = isRejectedFallback(simulation.bestQuote);
+      if (
+        resimulation.simulationPassed ||
+        (resimulation.bestQuote !== undefined &&
+          (simulation.bestQuote === undefined || keptFallbackRejected))
+      ) {
+        simulation = resimulation;
+        bestQuoteCandidates = research.candidates;
+      } else if (keptFallbackRejected) {
+        simulation = {...simulation, bestQuote: undefined};
+      }
+    }
+    const {bestQuote} = simulation;
+    const servedPoolPathKeys = new Set(
+      bestQuote?.quotes.map(quote => quote.route.poolPathKey()) ?? []
+    );
 
     return {
       bestQuoteCandidates,
       bestQuote,
       unviableRouteStrings,
+      underDeliveredRoutePoolPathKeys: [...underDeliveredPoolPathKeys].filter(
+        poolPathKey => !servedPoolPathKeys.has(poolPathKey)
+      ),
+      underDeliveryRejected,
       incompleteSearch,
       searchAbandoned,
       droppedRoutes: fetchReport.droppedRoutes,
@@ -2793,6 +3477,8 @@ export class UniRouteBL implements IUniRoutedBL {
     incompleteSearch: boolean,
     searchAbandoned: boolean,
     degradedDiscovery: boolean,
+    underDeliveryRejected: boolean,
+    underDeliveryChecked: boolean,
     options: QuoteOptions | undefined,
     metricTags: string[]
   ): Promise<void> {
@@ -2827,6 +3513,7 @@ export class UniRouteBL implements IUniRoutedBL {
         shouldCheckCache,
         incompleteSearch,
         degradedDiscovery,
+        underDeliveryRejected,
         metricTags
       );
     } else {
@@ -2845,6 +3532,7 @@ export class UniRouteBL implements IUniRoutedBL {
         nsCtx,
         namespaceLogFields,
         usedCachedRoutes,
+        underDeliveryChecked,
         options,
         bestQuote
       );
@@ -2878,18 +3566,23 @@ export class UniRouteBL implements IUniRoutedBL {
     shouldCheckCache: boolean,
     incompleteSearch: boolean,
     degradedDiscovery: boolean,
+    underDeliveryRejected: boolean,
     metricTags: string[]
   ): Promise<void> {
     if (usedCachedRoutes || !shouldCheckCache) {
       return;
     }
-    if (incompleteSearch || degradedDiscovery) {
+    // Candidates rejected for under-delivery prove the pair has routes, just
+    // none that deliver at this block.
+    if (incompleteSearch || degradedDiscovery || underDeliveryRejected) {
       await ctx.metrics.count(buildMetricKey('NoRouteCache.WriteSkipped'), 1, {
         tags: [
           ...metricTags,
           degradedDiscovery
             ? 'reason:degraded_discovery'
-            : 'reason:incomplete_search',
+            : incompleteSearch
+              ? 'reason:incomplete_search'
+              : 'reason:under_delivery',
         ],
       });
       return;
@@ -2968,6 +3661,7 @@ export class UniRouteBL implements IUniRoutedBL {
     nsCtx: RouteNamespaceContext,
     namespaceLogFields: ReturnType<typeof namespaceFieldsForLogging>,
     usedCachedRoutes: boolean,
+    underDeliveryChecked: boolean,
     options: QuoteOptions | undefined,
     bestQuote: QuoteSplit | undefined
   ): Promise<void> {
@@ -2984,6 +3678,26 @@ export class UniRouteBL implements IUniRoutedBL {
         !this.serviceConfig.CachedRoutes.Erc4626WrapperHooksWriteEnabled) ||
       !this.serviceConfig.CachedRoutes.Enabled
     ) {
+      return;
+    }
+    // A checked request's winner passed the check only if its simulation ran
+    // the swap. One whose simulation did not (a refused seed, an unfunded
+    // sender, the backend down) is unchecked, and the cache feeds callers
+    // that never run the check.
+    if (underDeliveryChecked && !swapExecuted(bestQuote?.simulationResult)) {
+      void ctx.metrics
+        .count(buildMetricKey('CachedRoutes.WriteSkipped'), 1, {
+          tags: [
+            `chain:${ChainId[chain.chainId]}`,
+            TAG_STATUS_FAILURE,
+            'reason:unchecked_winner',
+          ],
+        })
+        .catch(() => undefined);
+      ctx.logger.warn('Skipping the route-cache write of an unchecked winner', {
+        chainId: chain.chainId,
+        simulationStatus: bestQuote?.simulationResult?.status,
+      });
       return;
     }
     const bestQuoteRouteCount = bestQuote!.quotes.length;
@@ -4046,6 +4760,86 @@ export class UniRouteBL implements IUniRoutedBL {
     });
   }
 
+  /**
+   * The calldata a candidate is simulated with: the encodeSwaps calldata in
+   * swapsteps mode, falling back to the legacy encoder when that build fails,
+   * and the legacy calldata otherwise.
+   */
+  private async buildSimulationMethodParameters(
+    ctx: Context,
+    swapOptions: SwapOptionsUniversalRouter,
+    trade: Trade<Currency, Currency, SdkTradeType>,
+    quoteSplit: QuoteSplit,
+    tradeType: TradeType,
+    amountIn: bigint,
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    chainId: ChainId,
+    metricTags: string[],
+    universalRouterVersion: UniversalRouterVersion | undefined,
+    universalRouterSwapsteps: boolean
+  ): Promise<SDKMethodParameters> {
+    if (!universalRouterSwapsteps) {
+      return buildSwapMethodParameters(ctx, swapOptions, chainId, trade);
+    }
+    try {
+      // Simulate the encodeSwaps calldata, but opt out of the
+      // 0-slippage minHopPriceX36 floor — it reverts on normal
+      // quote→sim price drift (spurious sim failures). The response
+      // steps keep the floor; Trading re-derives it with slippage.
+      const swapSteps = buildSwapSteps(
+        quoteSplit,
+        tradeType,
+        amountIn,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        universalRouterVersion,
+        false // opt out of minHopPriceX36 for simulation
+      );
+      // The spec's routing.amount funds the router (Permit2 pull /
+      // msg.value) and must equal Σ leg amounts: buildSwapSteps
+      // allocates the raw amountIn, while trade.inputAmount floors
+      // each split route independently (up to nRoutes-1 wei short).
+      const spec = buildSwapSpecification({
+        swapOptions,
+        inputAmount:
+          tradeType === TradeType.ExactIn
+            ? CurrencyAmount.fromRawAmount(
+                trade.inputAmount.currency,
+                amountIn.toString()
+              )
+            : trade.inputAmount,
+        outputAmount: trade.outputAmount,
+        tradeType:
+          tradeType === TradeType.ExactIn
+            ? SdkTradeType.EXACT_INPUT
+            : SdkTradeType.EXACT_OUTPUT,
+        chainId,
+      });
+      return buildSwapStepsMethodParameters(swapSteps, spec, chainId);
+    } catch (swapStepsError) {
+      // Factory/encoder error (e.g. MIXED EXACT_OUT): simulate the legacy
+      // calldata so the request still yields a quote. Response swapSteps
+      // are handled independently in populateQuoteResponse.
+      await ctx.metrics.count(
+        buildMetricKey('buildSwapStepsCalldataFailed'),
+        1,
+        {tags: metricTags}
+      );
+      ctx.logger.warn(
+        'swapSteps calldata build failed; simulating legacy calldata instead',
+        {
+          error:
+            swapStepsError instanceof Error
+              ? swapStepsError.message
+              : String(swapStepsError),
+          chain: chainId,
+        }
+      );
+      return buildSwapMethodParameters(ctx, swapOptions, chainId, trade);
+    }
+  }
+
   private async simulateAndPopulateBestQuote(
     chain: Chain,
     tokenInCurrencyInfo: CurrencyInfo,
@@ -4062,13 +4856,22 @@ export class UniRouteBL implements IUniRoutedBL {
     permit2Disabled = false,
     universalRouterVersion?: UniversalRouterVersion,
     universalRouterSwapsteps: boolean = false,
-    resolvedStateOverrides?: ResolvedStateOverride[]
-  ): Promise<{
-    bestQuote: QuoteSplit | undefined;
-    unviableRouteStrings: string[];
-  }> {
+    resolvedStateOverrides?: ResolvedStateOverride[],
+    underDeliveryToleranceBps?: number,
+    // `routeStringForQuoteSplit` ids an earlier search of this request
+    // rejected for under-delivery: never simulated again or used as fallback.
+    rejectedCandidateIds: ReadonlySet<string> = new Set()
+  ): Promise<SimulatedCandidates> {
     if (topNQuotes.length === 0) {
-      return {bestQuote: undefined, unviableRouteStrings: []};
+      return {
+        bestQuote: undefined,
+        simulationPassed: false,
+        unviableRouteStrings: [],
+        underDeliveredPoolPathKeys: [],
+        underDeliveredCandidateIds: [],
+        underDeliveryRejected: false,
+        simulationAttempts: 0,
+      };
     }
 
     // Simulation metrics carry a bounded swapSteps tag so swapsteps-mode
@@ -4079,6 +4882,7 @@ export class UniRouteBL implements IUniRoutedBL {
     ];
 
     let bestQuote: QuoteSplit | undefined;
+    let simulationPassed = false;
     let simulationAttempts = 0;
     let simulationSuccesses = 0;
     let simulationFailures = 0;
@@ -4088,7 +4892,17 @@ export class UniRouteBL implements IUniRoutedBL {
     // the failure site) — tracked separately from simulation failures so the
     // sim-failure warn log keeps its exact signature.
     const buildFailedRoutes: string[] = [];
-    let firstSwapInfo: SwapInfo | undefined = undefined; // Store swapInfo from first successful trade build
+    // The swapInfo each built candidate is served with
+    const swapInfoByCandidate = new Map<QuoteSplit, SwapInfo>();
+    // A split's shortfall cannot be pinned on one leg (a healthy majority leg
+    // fails beside a trap minority one), so only single-path rejections
+    // exclude a path; a rejected split excludes only itself.
+    const underDeliveredPoolPathKeys = new Set<string>();
+    const underDeliveredCandidates = new Set<QuoteSplit>();
+    const containsUnderDeliveredPath = (candidate: QuoteSplit) =>
+      candidate.quotes.some(quote =>
+        underDeliveredPoolPathKeys.has(quote.route.poolPathKey())
+      );
 
     let swapOptions: SwapOptionsUniversalRouter | undefined;
 
@@ -4152,11 +4966,65 @@ export class UniRouteBL implements IUniRoutedBL {
       );
     }
 
+    // Simulated beside or in place of the served calldata, this puts the
+    // swap's amount limit at the tolerance instead of the caller's slippage,
+    // so the swap reverts on it when the route misses its quote by more than
+    // the tolerance. With an exact-in portion fee the SDK checks the gross
+    // minimum against the router's balance after PAY_PORTION and after the
+    // output token's buy tax, so both are added.
+    const tokenOutBuyFeeBps =
+      tokensInfo.get(tokenOutCurrencyInfo.wrappedAddress.toString())
+        ?.feeOnTransfer?.buyFeeBps ?? 0;
+    const underDeliveryProbeSwapOptions:
+      | SwapOptionsUniversalRouter
+      | undefined =
+      swapOptions !== undefined && underDeliveryToleranceBps !== undefined
+        ? {
+            ...swapOptions,
+            slippageTolerance: (swapOptions.fee === undefined
+              ? []
+              : [
+                  ...[swapOptions.fee].flat().map(({fee}) => fee),
+                  new Percent(tokenOutBuyFeeBps, BPS_PER_UNIT),
+                ]
+            ).reduce(
+              (tolerance, fee) => tolerance.add(fee),
+              new Percent(underDeliveryToleranceBps, BPS_PER_UNIT)
+            ),
+          }
+        : undefined;
+    // A caller limit tighter than the probe's can revert where the probe
+    // passes, so their own calldata is simulated too and its result reported.
+    const simulatesServedCalldata =
+      swapOptions !== undefined &&
+      underDeliveryProbeSwapOptions !== undefined &&
+      swapOptions.slippageTolerance.lessThan(
+        underDeliveryProbeSwapOptions.slippageTolerance
+      );
+
     if (
       this.serviceConfig.Simulation.Enabled &&
       swapOptions?.simulate?.fromAddress
     ) {
       for (const quoteSplit of topNQuotes) {
+        if (containsUnderDeliveredPath(quoteSplit)) {
+          this.countUnderDeliveryCheck(
+            ctx,
+            chain.chainId,
+            TAG_STATUS_FAILURE,
+            'reason:blamed_path'
+          );
+          continue;
+        }
+        if (rejectedCandidateIds.has(routeStringForQuoteSplit(quoteSplit))) {
+          this.countUnderDeliveryCheck(
+            ctx,
+            chain.chainId,
+            TAG_STATUS_FAILURE,
+            'reason:rejected_candidate'
+          );
+          continue;
+        }
         const simulationStartTime = Date.now();
         const allTokensInfo = await fetchAllInvolvedTokens(
           quoteSplit.quotes,
@@ -4226,81 +5094,28 @@ export class UniRouteBL implements IUniRoutedBL {
 
         // Get our method parameters
         let methodParameters: SDKMethodParameters;
+        let probeMethodParameters: SDKMethodParameters | undefined;
         try {
-          if (universalRouterSwapsteps) {
-            try {
-              // Simulate the encodeSwaps calldata, but opt out of the
-              // 0-slippage minHopPriceX36 floor — it reverts on normal
-              // quote→sim price drift (spurious sim failures). The response
-              // steps keep the floor; Trading re-derives it with slippage.
-              const swapSteps = buildSwapSteps(
-                quoteSplit,
-                tradeType,
-                amountIn,
-                tokenInCurrencyInfo,
-                tokenOutCurrencyInfo,
-                universalRouterVersion,
-                false // opt out of minHopPriceX36 for simulation
-              );
-              // The spec's routing.amount funds the router (Permit2 pull /
-              // msg.value) and must equal Σ leg amounts: buildSwapSteps
-              // allocates the raw amountIn, while trade.inputAmount floors
-              // each split route independently (up to nRoutes-1 wei short).
-              const spec = buildSwapSpecification({
-                swapOptions: swapOptions!,
-                inputAmount:
-                  tradeType === TradeType.ExactIn
-                    ? CurrencyAmount.fromRawAmount(
-                        trade.inputAmount.currency,
-                        amountIn.toString()
-                      )
-                    : trade.inputAmount,
-                outputAmount: trade.outputAmount,
-                tradeType:
-                  tradeType === TradeType.ExactIn
-                    ? SdkTradeType.EXACT_INPUT
-                    : SdkTradeType.EXACT_OUTPUT,
-                chainId: chain.chainId,
-              });
-              methodParameters = buildSwapStepsMethodParameters(
-                swapSteps,
-                spec,
-                chain.chainId
-              );
-            } catch (swapStepsError) {
-              // Factory/encoder error (e.g. MIXED EXACT_OUT): simulate the legacy
-              // calldata so the request still yields a quote. Response swapSteps
-              // are handled independently in populateQuoteResponse.
-              await ctx.metrics.count(
-                buildMetricKey('buildSwapStepsCalldataFailed'),
-                1,
-                {tags: metricTags}
-              );
-              ctx.logger.warn(
-                'swapSteps calldata build failed; simulating legacy calldata instead',
-                {
-                  error:
-                    swapStepsError instanceof Error
-                      ? swapStepsError.message
-                      : String(swapStepsError),
-                  chain: chain.chainId,
-                }
-              );
-              methodParameters = buildSwapMethodParameters(
-                ctx,
-                swapOptions!,
-                chain.chainId,
-                trade
-              );
-            }
-          } else {
-            methodParameters = buildSwapMethodParameters(
+          const encode = (options: SwapOptionsUniversalRouter) =>
+            this.buildSimulationMethodParameters(
               ctx,
-              swapOptions!,
+              options,
+              trade,
+              quoteSplit,
+              tradeType,
+              amountIn,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
               chain.chainId,
-              trade
+              metricTags,
+              universalRouterVersion,
+              universalRouterSwapsteps
             );
-          }
+          methodParameters = await encode(swapOptions);
+          probeMethodParameters =
+            underDeliveryProbeSwapOptions === undefined
+              ? undefined
+              : await encode(underDeliveryProbeSwapOptions);
         } catch (error) {
           // Call to UR might fail if not enough reserves in v2 - continue to next quote
           await ctx.metrics.count(
@@ -4381,32 +5196,71 @@ export class UniRouteBL implements IUniRoutedBL {
           methodParameters
         );
 
-        // Store swapInfo from first attempt for potential fallback use in case all simulations fail
-        if (firstSwapInfo === undefined) {
-          firstSwapInfo = swapInfo;
-        }
+        swapInfoByCandidate.set(quoteSplit, swapInfo);
 
         const simulationQuote: QuoteSplit = {
           ...quoteSplit,
-          swapInfo: swapInfo,
+          swapInfo:
+            probeMethodParameters === undefined
+              ? swapInfo
+              : new SwapInfo(
+                  swapInfo.tokenInWrappedAddress,
+                  swapInfo.tokenOutWrappedAddress,
+                  swapInfo.tokenInIsNative,
+                  swapInfo.tokenOutIsNative,
+                  swapInfo.inputAmount,
+                  swapInfo.tradeType,
+                  swapInfo.priceImpact,
+                  probeMethodParameters
+                ),
           tokensInfo: allTokensInfo,
         };
 
         // And let's simulate!
         simulationAttempts++;
-        const simulatedQuote = await this.simulator.simulate(
-          chain.chainId,
-          swapOptions,
-          simulationQuote,
-          tokenInCurrencyInfo,
-          tokenOutCurrencyInfo,
-          amountIn,
-          totalQuoteAmountForQuoteSplit(simulationQuote),
-          ctx,
-          gasPrice,
-          blockNumber,
-          resolvedStateOverrides
-        );
+        const simulate = (candidate: QuoteSplit, measureDelivery: boolean) =>
+          this.simulator.simulate(
+            chain.chainId,
+            {...swapOptions, measureDelivery},
+            candidate,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            amountIn,
+            totalQuoteAmountForQuoteSplit(candidate),
+            ctx,
+            gasPrice,
+            blockNumber,
+            resolvedStateOverrides
+          );
+        const servedQuote: QuoteSplit = {
+          ...quoteSplit,
+          swapInfo,
+          tokensInfo: allTokensInfo,
+        };
+        // Delivery is measured on the simulation whose result is reported
+        // for a passing candidate: the served calldata's when it is simulated
+        // beside the probe, the probe's otherwise.
+        const measuresDelivery = underDeliveryToleranceBps !== undefined;
+        const simulatesServedBesideProbe =
+          probeMethodParameters !== undefined && simulatesServedCalldata;
+        const [simulated, servedSimulated] = await Promise.all([
+          simulate(
+            simulationQuote,
+            measuresDelivery && !simulatesServedBesideProbe
+          ),
+          simulatesServedBesideProbe
+            ? simulate(servedQuote, measuresDelivery)
+            : Promise.resolve(undefined),
+        ]);
+        const underDelivered =
+          underDeliveryToleranceBps !== undefined &&
+          revertedOnAmountLimit(simulated.simulationResult);
+        const simulatedQuote: QuoteSplit = {
+          ...(underDelivered || servedSimulated === undefined
+            ? simulated
+            : servedSimulated),
+          swapInfo,
+        };
 
         // Log simulation latency and status
         const simulationLatency = Date.now() - simulationStartTime;
@@ -4426,24 +5280,58 @@ export class UniRouteBL implements IUniRoutedBL {
 
         // TODO: Check what other SimulationStatus values we want to handle/try more quotes
         if (
+          underDelivered ||
           simulatedQuote.simulationResult?.status === SimulationStatus.FAILED
         ) {
           simulationFailures++;
           failedRoutes.push(routeStringForQuoteSplit(quoteSplit));
-          // Per-quote sim failure during multi-route pass; other routes still try — diagnostic, not server error.
-          ctx.logger.warn('Simulation failed for quote:', {
-            error: simulatedQuote.simulationResult?.description,
-            quoteSplit: simulatedQuote.quotes.map(q => q.route.toString()),
-            methodParameters: simulatedQuote.swapInfo?.methodParameters,
-            tokenInCurrency,
-            tokenOutCurrency,
-            tokenInCurrencyInfo,
-            tokenOutCurrencyInfo,
-            chain: chain.chainId,
-            swapSteps: universalRouterSwapsteps,
-          });
-          // Each seeded attempt is a full bundle for a wallet that cannot trade yet, so FAILED seeded runs stop the search at the cap
-          if (simulatedQuote.simulationResult?.seeded === true) {
+          if (underDelivered) {
+            underDeliveredCandidates.add(quoteSplit);
+            if (quoteSplit.quotes.length === 1) {
+              underDeliveredPoolPathKeys.add(
+                quoteSplit.quotes[0].route.poolPathKey()
+              );
+            }
+            this.countUnderDeliveryCheck(
+              ctx,
+              chain.chainId,
+              TAG_STATUS_FAILURE,
+              'reason:under_delivery'
+            );
+            ctx.logger.warn(
+              'Simulated candidate delivers less than its quote; trying the next candidate',
+              {
+                simulationStatus: simulatedQuote.simulationResult?.status,
+                toleranceBps: underDeliveryToleranceBps,
+                quoteBlock: blockNumber,
+                quoteSplit: simulatedQuote.quotes.map(q => q.route.toString()),
+                quoteAmount:
+                  totalQuoteAmountForQuoteSplit(simulatedQuote).toString(),
+                chain: chain.chainId,
+              }
+            );
+          } else {
+            // Per-quote sim failure during multi-route pass; other routes still try — diagnostic, not server error.
+            ctx.logger.warn('Simulation failed for quote:', {
+              error: simulatedQuote.simulationResult?.description,
+              quoteSplit: simulatedQuote.quotes.map(q => q.route.toString()),
+              methodParameters: simulatedQuote.swapInfo?.methodParameters,
+              tokenInCurrency,
+              tokenOutCurrency,
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo,
+              chain: chain.chainId,
+              swapSteps: universalRouterSwapsteps,
+            });
+          }
+          // Each seeded attempt is a full bundle for a wallet that cannot trade
+          // yet, so FAILED seeded runs stop the search at the cap. An
+          // under-delivery says the route is bad, not the wallet, so it is not
+          // counted.
+          if (
+            !underDelivered &&
+            simulatedQuote.simulationResult?.seeded === true
+          ) {
             seededFailures++;
             if (
               seededFailures >= this.serviceConfig.Simulation.MaxSeededAttempts
@@ -4456,6 +5344,27 @@ export class UniRouteBL implements IUniRoutedBL {
             }
           }
         } else {
+          if (underDeliveryToleranceBps !== undefined) {
+            this.countUnderDeliveryCheck(
+              ctx,
+              chain.chainId,
+              ...(swapExecuted(simulated.simulationResult)
+                ? [TAG_STATUS_SUCCESS]
+                : [TAG_STATUS_FAILURE, 'reason:not_executed'])
+            );
+            if (swapExecuted(simulatedQuote.simulationResult)) {
+              this.reportSimulatedDelivery(
+                ctx,
+                chain.chainId,
+                tradeType,
+                simulatedQuote,
+                tokenInCurrencyInfo,
+                tokenOutCurrencyInfo,
+                allTokensInfo,
+                blockNumber
+              );
+            }
+          }
           // SYSTEM_DOWN counts as a failure but still ends the loop: further
           // candidates would hit the same unavailable backend.
           if (simulationStatus === SimulationStatus.SYSTEM_DOWN) {
@@ -4468,10 +5377,22 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       }
 
-      // If all simulations failed, return the first quote (best by amount) with Failed status
-      if (!bestQuote && topNQuotes.length > 0 && firstSwapInfo) {
+      // If all simulations failed, return the best-priced built candidate
+      // with Failed status, never one that under-delivered its quote.
+      simulationPassed = bestQuote !== undefined;
+      const fallbackCandidate = bestQuote
+        ? undefined
+        : topNQuotes.find(
+            candidate =>
+              swapInfoByCandidate.has(candidate) &&
+              !underDeliveredCandidates.has(candidate) &&
+              !containsUnderDeliveredPath(candidate)
+          );
+      const fallbackSwapInfo =
+        fallbackCandidate && swapInfoByCandidate.get(fallbackCandidate);
+      if (fallbackCandidate && fallbackSwapInfo) {
         const allTokensInfo = await fetchAllInvolvedTokens(
-          topNQuotes[0].quotes,
+          fallbackCandidate.quotes,
           this.tokenHandler,
           chain,
           ctx,
@@ -4479,7 +5400,7 @@ export class UniRouteBL implements IUniRoutedBL {
         );
 
         bestQuote = {
-          ...topNQuotes[0],
+          ...fallbackCandidate,
           simulationResult: {
             estimatedGasUsed: 0n,
             estimatedGasUsedInQuoteToken: 0n,
@@ -4487,7 +5408,7 @@ export class UniRouteBL implements IUniRoutedBL {
             status: SimulationStatus.FAILED,
             description: 'All simulation attempts failed',
           },
-          swapInfo: firstSwapInfo, // Use the swapInfo from the first attempt
+          swapInfo: fallbackSwapInfo,
           tokensInfo: allTokensInfo,
         };
 
@@ -4566,6 +5487,13 @@ export class UniRouteBL implements IUniRoutedBL {
     return {
       bestQuote,
       unviableRouteStrings: [...failedRoutes, ...buildFailedRoutes],
+      simulationPassed,
+      underDeliveredPoolPathKeys: [...underDeliveredPoolPathKeys],
+      underDeliveredCandidateIds: [...underDeliveredCandidates].map(
+        routeStringForQuoteSplit
+      ),
+      underDeliveryRejected: underDeliveredCandidates.size > 0,
+      simulationAttempts,
     };
   }
 

@@ -200,6 +200,24 @@ const getBlockNumberCacheTtlMs = () =>
 const getBlockNumberCacheTtlMsByChain = () =>
   parsePositiveIntRecordEnvOrEmpty('BLOCK_NUMBER_CACHE_TTL_MS_BY_CHAIN');
 
+// Bps a simulated candidate's output may fall short of its quote, at the
+// quote block, before the candidate is rejected as under-delivering.
+const DEFAULT_SIMULATION_UNDER_DELIVERY_TOLERANCE_BPS = __PLACEHOLDER__;
+const SIMULATION_UNDER_DELIVERY_TOLERANCE_BPS_BOUNDS = {min: __PLACEHOLDER__, max: 5_000};
+const getSimulationUnderDeliveryToleranceBps = () =>
+  parseBoundedIntEnvOrThrow(
+    'SIMULATION_UNDER_DELIVERY_TOLERANCE_BPS',
+    DEFAULT_SIMULATION_UNDER_DELIVERY_TOLERANCE_BPS,
+    SIMULATION_UNDER_DELIVERY_TOLERANCE_BPS_BOUNDS
+  );
+
+const getSimulationUnderDeliveryChains = () =>
+  parseChainListStrictOrAll(
+    'SIMULATION_UNDER_DELIVERY_CHAINS',
+    process.env.SIMULATION_UNDER_DELIVERY_CHAINS,
+    SUPPORTED_CHAIN_IDS
+  );
+
 // TODO: use this ChainId enum for now
 // Once all monorepo projects switch to PartialChainIdMap<T> from @uniswap/lib-sharedconfig/chainConfig
 // we can switch to using ChainId from there.
@@ -424,6 +442,13 @@ export interface IUniRouteServiceConfig {
     Enabled: boolean;
     /** Seeded runs ending FAILED allowed per request before the candidate search stops */
     MaxSeededAttempts: number;
+    /**
+     * Shortfall, in bps of the quoted amount, a candidate may show when it is
+     * simulated at its quote block; a larger one rejects the candidate.
+     */
+    UnderDeliveryToleranceBps: number;
+    /** Chains whose simulated candidates are checked for under-delivery */
+    UnderDeliveryChains: TokenMetadataChainSelection;
   };
   TopPoolsSelector: {
     PoolSelectionConfig: Record<ChainId, IPoolSelectionConfig>;
@@ -604,6 +629,8 @@ export const getUniRouteSyncConfig = (
       TopNQuotes: __PLACEHOLDER__,
       Enabled: true,
       MaxSeededAttempts: __PLACEHOLDER__,
+      UnderDeliveryToleranceBps: getSimulationUnderDeliveryToleranceBps(),
+      UnderDeliveryChains: getSimulationUnderDeliveryChains(),
     },
     TopPoolsSelector: {
       PoolSelectionConfig: poolSelectionConfig,
@@ -752,6 +779,8 @@ export const getQuickRouteSyncConfig = (
       TopNQuotes: __PLACEHOLDER__,
       Enabled: false,
       MaxSeededAttempts: __PLACEHOLDER__,
+      UnderDeliveryToleranceBps: getSimulationUnderDeliveryToleranceBps(),
+      UnderDeliveryChains: getSimulationUnderDeliveryChains(),
     },
     TopPoolsSelector: {
       PoolSelectionConfig: poolSelectionConfig,

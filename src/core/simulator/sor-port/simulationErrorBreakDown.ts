@@ -19,6 +19,15 @@ const SLIPPAGE_ERROR_SELECTORS = new Set([
 ]);
 
 const INSUFFICIENT_TOKEN_SELECTOR = '0x675cae38'; // InsufficientToken()
+const INSUFFICIENT_ETH_SELECTOR = '0x6a12f104'; // InsufficientETH()
+
+// The minimums SWEEP and UNWRAP_WETH enforce on the router's balance. The
+// calldata carries the output floor there instead of on the swap whenever the
+// router custodies the output (a portion fee, a native output).
+const ROUTER_BALANCE_FLOOR_SELECTORS = new Set([
+  INSUFFICIENT_TOKEN_SELECTOR,
+  INSUFFICIENT_ETH_SELECTOR,
+]);
 
 const ERROR_STRING_SELECTOR = '0x08c379a0';
 
@@ -83,6 +92,14 @@ export function breakDownSimulationError(
 
   // we don't know why onchain execution reverted, just return generic failed.
   return SimulationStatus.FAILED;
+}
+
+/** True when the revert is a SWEEP or UNWRAP_WETH minimum on the router's balance */
+export function isRouterBalanceFloorRevert(data?: string): boolean {
+  return (
+    data !== undefined &&
+    ROUTER_BALANCE_FLOOR_SELECTORS.has(data.slice(0, 10).toLowerCase())
+  );
 }
 
 const MAX_REVERT_DATA_SEARCH_DEPTH = 5;

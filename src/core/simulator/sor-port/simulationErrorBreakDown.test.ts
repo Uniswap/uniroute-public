@@ -8,6 +8,8 @@ import {
   breakDownSimulationError,
   classifySimulationException,
   describeSimulationException,
+  extractRevertData,
+  isRouterBalanceFloorRevert,
   isSimulationBackendUnavailable,
 } from './simulationErrorBreakDown';
 import {
@@ -437,5 +439,46 @@ describe('describeSimulationException log fields', () => {
     expect(
       describeSimulationException(error, USDC_ADDRESS, WETH_ADDRESS)
     ).toEqual({status: SimulationStatus.FAILED, logFields: {e: error}});
+  });
+});
+
+describe('isRouterBalanceFloorRevert', () => {
+  const universalRouterErrors = new utils.Interface([
+    'error InsufficientToken()',
+    'error InsufficientETH()',
+    'error V3TooLittleReceived()',
+    'error V4TooLittleReceived(uint256 minAmountOutReceived, uint256 amountReceived)',
+  ]);
+
+  it.each([
+    ['InsufficientToken', [], true],
+    ['InsufficientETH', [], true],
+    ['V3TooLittleReceived', [], false],
+    ['V4TooLittleReceived', [1_000_000, 999_999], false],
+  ])('%s → %s', (errorName, args, expected) => {
+    expect(
+      isRouterBalanceFloorRevert(
+        universalRouterErrors.encodeErrorResult(errorName, args)
+      )
+    ).toBe(expected);
+  });
+
+  it('matches upper-case hex and rejects absent or unrelated data', () => {
+    expect(isRouterBalanceFloorRevert('0x675CAE38')).toBe(true);
+    expect(isRouterBalanceFloorRevert(undefined)).toBe(false);
+    expect(isRouterBalanceFloorRevert('0x08c379a0')).toBe(false);
+  });
+
+  it('recognizes the revert data of an eth_estimateGas error thrown by ethers', async () => {
+    const error = await captureEthersRpcError(
+      {
+        httpStatus: 200,
+        code: 3,
+        message: 'execution reverted',
+        data: universalRouterErrors.encodeErrorResult('InsufficientETH'),
+      },
+      estimateGasCall
+    );
+    expect(isRouterBalanceFloorRevert(extractRevertData(error))).toBe(true);
   });
 });

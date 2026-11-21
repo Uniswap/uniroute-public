@@ -39,6 +39,12 @@ import {
   SeededProviderFactory,
 } from './balanceOverride';
 
+import {buildTestContext} from '@uniswap/lib-testhelpers';
+import {Pool} from '../../../models/pool/Pool';
+import {QuoteBasic} from '../../../models/quote/QuoteBasic';
+import {SwapInfo} from '../../../models/quote/SwapInfo';
+import {IPoolsRepository} from '../../../stores/pool/IPoolsRepository';
+import fixture from './deliveryProbe.fixtures.json';
 // Mock the ERC20 and Permit2 factories
 vi.mock('../../../../abis/src/generated/contracts', () => ({
   ERC20__factory: {
@@ -54,6 +60,12 @@ vi.mock('../../../../abis/src/generated/contracts', () => ({
     })),
   },
 }));
+
+const UNIVERSAL_ROUTER_ERRORS = new utils.Interface([
+  'error InsufficientToken()',
+  'error InsufficientETH()',
+  'error V3TooLittleReceived()',
+]);
 
 describe('eth-simulateV1-provider', () => {
   describe('EthSimulateV1Simulator', () => {
@@ -520,6 +532,69 @@ describe('eth-simulateV1-provider', () => {
             ],
           }
         );
+      });
+
+      it.each([
+        ['InsufficientToken', SimulationStatus.FAILED, true],
+        ['InsufficientETH', SimulationStatus.FAILED, true],
+        ['V3TooLittleReceived', SimulationStatus.SLIPPAGE_TOO_LOW, undefined],
+      ])(
+        'reports a %s swap revert as %s with routerBalanceFloorReverted %s',
+        async (errorName, status, flagged) => {
+          vi.mocked(provider.send).mockResolvedValue([
+            {
+              calls: [
+                {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+                {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+                {
+                  error: {
+                    code: -32000,
+                    message: 'execution reverted',
+                    data: UNIVERSAL_ROUTER_ERRORS.encodeErrorResult(errorName),
+                  },
+                },
+              ],
+            },
+          ]);
+
+          const result = await simulator.ethSimulateV1(
+            USER_ADDRESS,
+            swapOptions,
+            createQuoteSplit(),
+            ctx
+          );
+
+          expect(result.simulationResult?.status).toBe(status);
+          expect(result.simulationResult?.routerBalanceFloorReverted).toBe(
+            flagged
+          );
+        }
+      );
+
+      it('flags a thrown SWEEP-minimum revert as a router balance floor', async () => {
+        vi.mocked(provider.send).mockRejectedValue(
+          await captureEthersRpcError(
+            {
+              httpStatus: 200,
+              code: 3,
+              message: 'execution reverted',
+              data: UNIVERSAL_ROUTER_ERRORS.encodeErrorResult(
+                'InsufficientToken'
+              ),
+            },
+            rpc => rpc.send('eth_simulateV1', [{}])
+          )
+        );
+
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(result.simulationResult?.routerBalanceFloorReverted).toBe(true);
       });
 
       it('should return FAILED status when result is empty', async () => {
@@ -1394,6 +1469,249 @@ describe('eth-simulateV1-provider', () => {
 
         expect(sim).toBeInstanceOf(EthSimulateV1Simulator);
       });
+    });
+  });
+});
+
+// The recorded bundle: [Permit2 approve, router approve, balanceOf, swap, balanceOf]
+const RECORDED_CALLS = fixture.blockStateCalls[0].calls;
+const RECORDED_RESULT = fixture.response[0];
+const SWAP_INDEX = 3;
+// The WETH balance the recording funded the sender with. Any override also
+// keeps the simulation off the eth_estimateGas fast path, which reads no
+// balances, so the bundle runs as it did in the recording.
+const [[RECORDED_WETH_TOKEN, RECORDED_WETH_DIFF]] = Object.entries(
+  fixture.blockStateCalls[0].stateOverrides
+);
+const RECORDED_WETH_FUNDING: ResolvedStateOverride = {
+  contractAddress: RECORDED_WETH_TOKEN,
+  stateDiff: new Map(Object.entries(RECORDED_WETH_DIFF.stateDiff)),
+};
+const BALANCE_READ_INDEXES = [2, 4];
+
+/** Answers eth_simulateV1 with a recorded response and keeps what it was sent */
+class RecordedSimulateProvider extends JsonRpcProvider {
+  readonly sent: {method: string; params: unknown[]}[] = [];
+
+  constructor(private readonly response: unknown) {
+    super();
+  }
+
+  override async send(method: string, params: unknown[]): Promise<unknown> {
+    this.sent.push({method, params});
+    if (method === 'eth_simulateV1') return this.response;
+    throw new Error(`RecordedSimulateProvider got unexpected ${method}`);
+  }
+}
+
+class EmptyPoolsRepository<
+  TPool extends Pool,
+> implements IPoolsRepository<TPool> {
+  async probePools() {
+    return {pools: [], failedProbeCount: 0};
+  }
+  async getPools() {
+    return [];
+  }
+}
+
+/** Prices gas at zero so the test exercises the simulation, not gas pricing */
+class ZeroGasConverter extends GasConverter {
+  constructor() {
+    super(
+      new EmptyPoolsRepository(),
+      new EmptyPoolsRepository(),
+      new EmptyPoolsRepository()
+    );
+  }
+  override async getGasCostInQuoteTokenBasedOnGasCostInWei(): Promise<bigint> {
+    return 0n;
+  }
+  override getGasCostInUSDBasedOnGasCostInWei(): number {
+    return 0;
+  }
+}
+
+const buildSimulator = (provider: JsonRpcProvider) => {
+  const gasConverter = new ZeroGasConverter();
+  return new EthSimulateV1Simulator(
+    ChainId.ROBINHOOD,
+    provider,
+    gasConverter,
+    new EthEstimateGasSimulator(ChainId.ROBINHOOD, provider, gasConverter),
+    [ChainId.ROBINHOOD],
+    () => provider,
+    false
+  );
+};
+
+const quoteSplit = new QuoteSplit(
+  [
+    new QuoteBasic(
+      new RouteBasic(Protocol.V3, [], 100),
+      BigInt(fixture.quotedAmountOut),
+      undefined,
+      new GasDetails(1n, 0n, 0, 0n)
+    ),
+  ],
+  new SwapInfo(
+    fixture.tokenIn,
+    fixture.tokenOut,
+    false,
+    false,
+    BigInt(fixture.amountIn),
+    TradeType.ExactIn,
+    0,
+    {
+      calldata: RECORDED_CALLS[SWAP_INDEX].data,
+      value: '0x0',
+      to: RECORDED_CALLS[SWAP_INDEX].to,
+    }
+  ),
+  undefined,
+  new Map([
+    [
+      fixture.tokenOut,
+      new Erc20Token(new Address(fixture.tokenOut), 18, 'ORBIO', 'ORBIO'),
+    ],
+  ])
+);
+
+const swapOptions: SwapOptionsUniversalRouter = {
+  type: SwapType.UNIVERSAL_ROUTER,
+  urVersion: UniversalRouterVersion.V2_1_2,
+  simulate: {fromAddress: fixture.sender},
+  recipient: fixture.sender,
+  slippageTolerance: new Percent(5, 100),
+  tokenTransferMode: TokenTransferMode.Permit2,
+};
+
+interface SentCall {
+  to: string;
+  data: string;
+}
+
+function isSentCall(value: unknown): value is SentCall {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'to' in value &&
+    typeof value.to === 'string' &&
+    'data' in value &&
+    typeof value.data === 'string'
+  );
+}
+
+/** The calls of the first eth_simulateV1 block the provider was sent */
+function sentCalls(provider: RecordedSimulateProvider): SentCall[] {
+  const request = provider.sent.find(({method}) => method === 'eth_simulateV1');
+  const [payload] = request?.params ?? [];
+  const firstBlock =
+    typeof payload === 'object' &&
+    payload !== null &&
+    'blockStateCalls' in payload &&
+    Array.isArray(payload.blockStateCalls)
+      ? payload.blockStateCalls[0]
+      : undefined;
+  const calls: unknown =
+    typeof firstBlock === 'object' &&
+    firstBlock !== null &&
+    'calls' in firstBlock
+      ? firstBlock.calls
+      : undefined;
+  if (!Array.isArray(calls) || !calls.every(isSentCall)) {
+    throw new Error('no eth_simulateV1 block of calls was sent');
+  }
+  return calls;
+}
+
+describe('EthSimulateV1Simulator delivery measurement', () => {
+  it('brackets the swap with balance reads and reports the recorded KGDS shortfall', async () => {
+    const provider = new RecordedSimulateProvider(fixture.response);
+    const simulator = buildSimulator(provider);
+
+    const result = await simulator.simulateTransaction(
+      fixture.sender,
+      {...swapOptions, measureDelivery: true},
+      quoteSplit,
+      buildTestContext(),
+      undefined,
+      undefined,
+      [RECORDED_WETH_FUNDING]
+    );
+
+    expect(provider.sent.map(({method}) => method)).toEqual(['eth_simulateV1']);
+    const calls = sentCalls(provider);
+    expect(calls.map(call => call.to.toLowerCase())).toEqual(
+      RECORDED_CALLS.map(call => call.to.toLowerCase())
+    );
+    for (const index of BALANCE_READ_INDEXES) {
+      expect(calls[index].data).toBe(RECORDED_CALLS[index].data);
+    }
+    expect(result.simulationResult).toMatchObject({
+      status: SimulationStatus.SUCCESS,
+      estimatedGasUsed: BigInt(RECORDED_RESULT.calls[SWAP_INDEX].gasUsed),
+      delivery: {
+        kind: 'measured',
+        amount: 7746655602286305109580n,
+      },
+    });
+  });
+
+  it('sends the plain bundle and reports no delivery when the call does not ask to measure', async () => {
+    const withoutReads = [
+      {
+        ...RECORDED_RESULT,
+        calls: RECORDED_RESULT.calls.filter(
+          (_, index) => !BALANCE_READ_INDEXES.includes(index)
+        ),
+      },
+    ];
+    const provider = new RecordedSimulateProvider(withoutReads);
+    const simulator = buildSimulator(provider);
+
+    const result = await simulator.simulateTransaction(
+      fixture.sender,
+      {...swapOptions, measureDelivery: false},
+      quoteSplit,
+      buildTestContext(),
+      undefined,
+      undefined,
+      [RECORDED_WETH_FUNDING]
+    );
+
+    expect(sentCalls(provider)).toHaveLength(3);
+    expect(result.simulationResult?.status).toBe(SimulationStatus.SUCCESS);
+    expect(result.simulationResult?.delivery).toBeUndefined();
+  });
+
+  it('reports an unmeasured delivery when a balance read errors, and keeps the swap result', async () => {
+    const readFailed = [
+      {
+        ...RECORDED_RESULT,
+        calls: RECORDED_RESULT.calls.map((call, index) =>
+          index === BALANCE_READ_INDEXES[1]
+            ? {error: {code: 3, message: 'execution reverted'}}
+            : call
+        ),
+      },
+    ];
+    const provider = new RecordedSimulateProvider(readFailed);
+    const simulator = buildSimulator(provider);
+
+    const result = await simulator.simulateTransaction(
+      fixture.sender,
+      {...swapOptions, measureDelivery: true},
+      quoteSplit,
+      buildTestContext(),
+      undefined,
+      undefined,
+      [RECORDED_WETH_FUNDING]
+    );
+
+    expect(result.simulationResult).toMatchObject({
+      status: SimulationStatus.SUCCESS,
+      delivery: {kind: 'unmeasured', reason: 'balance_read_failed'},
     });
   });
 });

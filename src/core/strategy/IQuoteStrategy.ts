@@ -23,12 +23,15 @@ export interface IQuoteStrategy {
     routes: RouteBasic<Pool>[],
     tokensInfo: Map<string, Erc20Token | null>,
     metricTags: string[],
+    // Pins the quotes and pool reads; the routing gas price reads
+    // gasPriceBlockNumber instead, latest when it is undefined.
     blockNumber?: number,
     testAggHooks?: boolean,
     supplementalHookCodeOverrides?: Readonly<Record<string, string>>,
     priorityFeePerGasWei?: bigint,
     fetchReport?: QuoteFetchReport,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    gasPriceBlockNumber?: number
   ): Promise<QuoteSplit[]>;
 
   name(): string;
