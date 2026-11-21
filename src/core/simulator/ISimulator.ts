@@ -50,6 +50,14 @@ export type SimulatedDelivery =
   | {kind: 'measured'; amount: bigint}
   | {kind: 'unmeasured'; reason: DeliveryUnmeasuredReason};
 
+/** An amount-limit revert decoded from the swap's revert data */
+export interface AmountLimitRevert {
+  /** The Universal Router custom error, e.g. `V4TooLittleReceived` */
+  errorName: string;
+  /** Its uint256 arguments by ABI name, as decimal strings; empty when it has none */
+  args: Record<string, string>;
+}
+
 export interface SimulationResult {
   estimatedGasUsed: bigint;
   estimatedGasUsedInQuoteToken: bigint;
@@ -63,6 +71,8 @@ export interface SimulationResult {
    * status reports as FAILED
    */
   routerBalanceFloorReverted?: boolean;
+  /** Set when the swap reverted on an amount limit whose revert data decoded */
+  amountLimitRevert?: AmountLimitRevert;
   /** Set when the swap executed on a chain whose simulator measures delivery */
   delivery?: SimulatedDelivery;
 }

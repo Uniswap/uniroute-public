@@ -65,6 +65,7 @@ const UNIVERSAL_ROUTER_ERRORS = new utils.Interface([
   'error InsufficientToken()',
   'error InsufficientETH()',
   'error V3TooLittleReceived()',
+  'error V4TooLittleReceived(uint256 minAmountOutReceived, uint256 amountReceived)',
 ]);
 
 describe('eth-simulateV1-provider', () => {
@@ -571,6 +572,70 @@ describe('eth-simulateV1-provider', () => {
         }
       );
 
+      it('decodes a V4TooLittleReceived swap revert onto the result', async () => {
+        vi.mocked(provider.send).mockResolvedValue([
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                  data: UNIVERSAL_ROUTER_ERRORS.encodeErrorResult(
+                    'V4TooLittleReceived',
+                    [975_000n, 951_000n]
+                  ),
+                },
+              },
+            ],
+          },
+        ]);
+
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(
+          SimulationStatus.SLIPPAGE_TOO_LOW
+        );
+        expect(result.simulationResult?.amountLimitRevert).toEqual({
+          errorName: 'V4TooLittleReceived',
+          args: {minAmountOutReceived: '975000', amountReceived: '951000'},
+        });
+      });
+
+      it('leaves amountLimitRevert unset for a revert that is not an amount limit', async () => {
+        vi.mocked(provider.send).mockResolvedValue([
+          {
+            calls: [
+              {returnData: '0x', logs: [], gasUsed: '50000', status: '0x1'},
+              {returnData: '0x', logs: [], gasUsed: '60000', status: '0x1'},
+              {
+                error: {
+                  code: -32000,
+                  message: 'execution reverted',
+                  data: '0xdeadbeef',
+                },
+              },
+            ],
+          },
+        ]);
+
+        const result = await simulator.ethSimulateV1(
+          USER_ADDRESS,
+          swapOptions,
+          createQuoteSplit(),
+          ctx
+        );
+
+        expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
+        expect(result.simulationResult?.amountLimitRevert).toBeUndefined();
+      });
+
       it('flags a thrown SWEEP-minimum revert as a router balance floor', async () => {
         vi.mocked(provider.send).mockRejectedValue(
           await captureEthersRpcError(
@@ -595,6 +660,10 @@ describe('eth-simulateV1-provider', () => {
 
         expect(result.simulationResult?.status).toBe(SimulationStatus.FAILED);
         expect(result.simulationResult?.routerBalanceFloorReverted).toBe(true);
+        expect(result.simulationResult?.amountLimitRevert).toEqual({
+          errorName: 'InsufficientToken',
+          args: {},
+        });
       });
 
       it('should return FAILED status when result is empty', async () => {

@@ -107,6 +107,9 @@ import {SwapInfo} from '../models/quote/SwapInfo';
 import {IRouteQuoteAllocator} from './route/RouteQuoteAllocator';
 import {IGasConverter} from './gas/converter/IGasConverter';
 import {getGasToken} from '../lib/tokenUtils';
+import {routesHaveUncommonIntermediate} from '../lib/routeIntermediates';
+import {uncountedOutputBuyTax} from '../lib/fotQuoteAdjustment';
+import {routerCustodiesExactInOutput} from '../lib/routerOutputCustody';
 import {usdGasTokensByChain} from './gas/gas-helpers';
 import {ADDRESS_ZERO} from '@uniswap/v3-sdk';
 import {IQuoteStrategy} from './strategy/IQuoteStrategy';
@@ -291,6 +294,28 @@ function routeStringForQuoteSplit(quoteSplit: QuoteSplit): string {
 // routeCandidates so the four never diverge.
 function totalQuoteAmountForQuoteSplit(quoteSplit: QuoteSplit): bigint {
   return quoteSplit.quotes.reduce((sum, quote) => sum + quote.amount, 0n);
+}
+
+/**
+ * The trade's amount limit at the under-delivery probe's tolerance, for the
+ * reject log: the minimum output for exact-in, the maximum input for
+ * exact-out.
+ */
+function probeAmountLimitOf(
+  trade: Trade<Currency, Currency, SdkTradeType>,
+  tradeType: TradeType,
+  tolerance: Percent | undefined
+): {probeAmountLimit?: string} {
+  if (tolerance === undefined) return {};
+  try {
+    const limit =
+      tradeType === TradeType.ExactIn
+        ? trade.minimumAmountOut(tolerance)
+        : trade.maximumAmountIn(tolerance);
+    return {probeAmountLimit: limit.quotient.toString()};
+  } catch {
+    return {probeAmountLimit: 'unavailable'};
+  }
 }
 
 /** Whether the simulation ran the swap through, a seeded run included */
@@ -4969,38 +4994,42 @@ export class UniRouteBL implements IUniRoutedBL {
     // Simulated beside or in place of the served calldata, this puts the
     // swap's amount limit at the tolerance instead of the caller's slippage,
     // so the swap reverts on it when the route misses its quote by more than
-    // the tolerance. With an exact-in portion fee the SDK checks the gross
-    // minimum against the router's balance after PAY_PORTION and after the
-    // output token's buy tax, so both are added.
-    const tokenOutBuyFeeBps =
-      tokensInfo.get(tokenOutCurrencyInfo.wrappedAddress.toString())
-        ?.feeOnTransfer?.buyFeeBps ?? 0;
-    const underDeliveryProbeSwapOptions:
-      | SwapOptionsUniversalRouter
-      | undefined =
+    // the tolerance. A balance-checked minimum (a V2 swap's, or the SWEEP
+    // floor when the router holds the output) is checked after the output
+    // token's buy tax, so the tax is added for the share of the quote that
+    // does not already have it taken off (`isQuoteNetOfEndpointFees`). With
+    // an exact-in portion fee the SDK checks the gross minimum against the
+    // router's balance after PAY_PORTION, so the fee is added too.
+    const tokenOutInfo = tokensInfo.get(
+      tokenOutCurrencyInfo.wrappedAddress.toString()
+    );
+    const tokenOutBuyFeeBps = tokenOutInfo?.feeOnTransfer?.buyFeeBps ?? 0;
+    const tokenOutTransferFeeUnmeasurable =
+      tokenOutInfo?.transferFeeUnmeasurable === true;
+    const underDeliveryProbeSwapOptionsFor = (
+      candidate: QuoteSplit,
+      routerCustodiesOutput: boolean
+    ): SwapOptionsUniversalRouter | undefined =>
       swapOptions !== undefined && underDeliveryToleranceBps !== undefined
         ? {
             ...swapOptions,
-            slippageTolerance: (swapOptions.fee === undefined
-              ? []
-              : [
-                  ...[swapOptions.fee].flat().map(({fee}) => fee),
-                  new Percent(tokenOutBuyFeeBps, BPS_PER_UNIT),
-                ]
-            ).reduce(
+            slippageTolerance: [
+              ...(swapOptions.fee === undefined
+                ? []
+                : [swapOptions.fee].flat().map(({fee}) => fee)),
+              uncountedOutputBuyTax(
+                this.serviceConfig,
+                candidate.quotes,
+                tradeType,
+                routerCustodiesOutput,
+                tokenOutBuyFeeBps
+              ),
+            ].reduce(
               (tolerance, fee) => tolerance.add(fee),
               new Percent(underDeliveryToleranceBps, BPS_PER_UNIT)
             ),
           }
         : undefined;
-    // A caller limit tighter than the probe's can revert where the probe
-    // passes, so their own calldata is simulated too and its result reported.
-    const simulatesServedCalldata =
-      swapOptions !== undefined &&
-      underDeliveryProbeSwapOptions !== undefined &&
-      swapOptions.slippageTolerance.lessThan(
-        underDeliveryProbeSwapOptions.slippageTolerance
-      );
 
     if (
       this.serviceConfig.Simulation.Enabled &&
@@ -5095,7 +5124,32 @@ export class UniRouteBL implements IUniRoutedBL {
         // Get our method parameters
         let methodParameters: SDKMethodParameters;
         let probeMethodParameters: SDKMethodParameters | undefined;
+        let routerCustodiesOutput = false;
+        let underDeliveryProbeSwapOptions:
+          | SwapOptionsUniversalRouter
+          | undefined;
+        let simulatesServedCalldata = false;
         try {
+          // Only asked when a probe would add a buy tax. Inside the try: the
+          // SDK validates the options here as it does when encoding, and a
+          // candidate it refuses fails like an unencodable one.
+          routerCustodiesOutput =
+            underDeliveryToleranceBps !== undefined &&
+            tokenOutBuyFeeBps > 0 &&
+            tradeType === TradeType.ExactIn &&
+            routerCustodiesExactInOutput(trade, swapOptions);
+          underDeliveryProbeSwapOptions = underDeliveryProbeSwapOptionsFor(
+            quoteSplit,
+            routerCustodiesOutput
+          );
+          // A caller limit tighter than the probe's can revert where the
+          // probe passes, so their own calldata is simulated too and its
+          // result reported.
+          simulatesServedCalldata =
+            underDeliveryProbeSwapOptions !== undefined &&
+            swapOptions.slippageTolerance.lessThan(
+              underDeliveryProbeSwapOptions.slippageTolerance
+            );
           const encode = (options: SwapOptionsUniversalRouter) =>
             this.buildSimulationMethodParameters(
               ctx,
@@ -5243,7 +5297,7 @@ export class UniRouteBL implements IUniRoutedBL {
         const measuresDelivery = underDeliveryToleranceBps !== undefined;
         const simulatesServedBesideProbe =
           probeMethodParameters !== undefined && simulatesServedCalldata;
-        const [simulated, servedSimulated] = await Promise.all([
+        const [simulated, besideProbeSimulated] = await Promise.all([
           simulate(
             simulationQuote,
             measuresDelivery && !simulatesServedBesideProbe
@@ -5252,9 +5306,39 @@ export class UniRouteBL implements IUniRoutedBL {
             ? simulate(servedQuote, measuresDelivery)
             : Promise.resolve(undefined),
         ]);
-        const underDelivered =
+        const probeReverted =
           underDeliveryToleranceBps !== undefined &&
           revertedOnAmountLimit(simulated.simulationResult);
+        // An output token whose tax the detector could not measure may be
+        // taxed, so its probe floor carries no tax and a taxed route reverts
+        // on it. The reject is skipped for such a token, unless the route
+        // passes through an uncommon intermediate, where a wrapper trap
+        // would sit: that shortfall is the one this check exists for.
+        const skipsForUnknownTax =
+          probeReverted &&
+          tokenOutTransferFeeUnmeasurable &&
+          !routesHaveUncommonIntermediate(
+            chain.chainId,
+            quoteSplit.quotes.map(quote => quote.route),
+            tokenInCurrencyInfo.wrappedAddress,
+            tokenOutCurrencyInfo.wrappedAddress
+          );
+        const underDelivered = probeReverted && !skipsForUnknownTax;
+        if (skipsForUnknownTax) {
+          this.countUnderDeliveryCheck(
+            ctx,
+            chain.chainId,
+            TAG_STATUS_FAILURE,
+            'reason:unknown_token_tax'
+          );
+        }
+        // A skipped probe answers nothing for the candidate, so the served
+        // calldata is simulated (unless it already was) and its result
+        // reported, as without the check.
+        const servedSimulated =
+          skipsForUnknownTax && besideProbeSimulated === undefined
+            ? await simulate(servedQuote, false)
+            : besideProbeSimulated;
         const simulatedQuote: QuoteSplit = {
           ...(underDelivered || servedSimulated === undefined
             ? simulated
@@ -5303,6 +5387,25 @@ export class UniRouteBL implements IUniRoutedBL {
               {
                 simulationStatus: simulatedQuote.simulationResult?.status,
                 toleranceBps: underDeliveryToleranceBps,
+                // The probe's whole tolerance: the check's, the output
+                // token's buy tax and any portion fee.
+                probeTolerancePercent:
+                  underDeliveryProbeSwapOptions?.slippageTolerance.toFixed(4),
+                tokenOutBuyFeeBps,
+                routerCustodiesOutput,
+                tokenOutTransferFeeUnmeasurable,
+                ...probeAmountLimitOf(
+                  trade,
+                  tradeType,
+                  underDeliveryProbeSwapOptions?.slippageTolerance
+                ),
+                revertError:
+                  simulatedQuote.simulationResult?.amountLimitRevert?.errorName,
+                revertArgs:
+                  simulatedQuote.simulationResult?.amountLimitRevert?.args,
+                routerBalanceFloorReverted:
+                  simulatedQuote.simulationResult
+                    ?.routerBalanceFloorReverted === true,
                 quoteBlock: blockNumber,
                 quoteSplit: simulatedQuote.quotes.map(q => q.route.toString()),
                 quoteAmount:
@@ -5344,7 +5447,7 @@ export class UniRouteBL implements IUniRoutedBL {
             }
           }
         } else {
-          if (underDeliveryToleranceBps !== undefined) {
+          if (underDeliveryToleranceBps !== undefined && !skipsForUnknownTax) {
             this.countUnderDeliveryCheck(
               ctx,
               chain.chainId,

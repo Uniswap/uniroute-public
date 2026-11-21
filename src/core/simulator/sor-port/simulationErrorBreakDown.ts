@@ -1,5 +1,5 @@
 import {utils} from 'ethers';
-import {SimulationStatus} from '../ISimulator';
+import {AmountLimitRevert, SimulationStatus} from '../ISimulator';
 import {VIRTUAL_BASE} from '../../../lib/tokenUtils';
 
 // Universal Router slippage-check custom errors across V2/V3/V4, matched on
@@ -92,6 +92,85 @@ export function breakDownSimulationError(
 
   // we don't know why onchain execution reverted, just return generic failed.
   return SimulationStatus.FAILED;
+}
+
+// The amount-limit reverts a swap can end on, by selector, with their
+// uint256 arguments' ABI names in order (none for the argument-less ones).
+const AMOUNT_LIMIT_ERRORS: ReadonlyMap<
+  string,
+  {errorName: string; argNames: readonly string[]}
+> = new Map([
+  ['0x849eaf98', {errorName: 'V2TooLittleReceived', argNames: []}],
+  ['0x8ab0bc16', {errorName: 'V2TooMuchRequested', argNames: []}],
+  [
+    '0x65d564a5',
+    {
+      errorName: 'V2TooLittleReceivedPerHop',
+      argNames: ['hopIndex', 'minPrice', 'price'],
+    },
+  ],
+  ['0x39d35496', {errorName: 'V3TooLittleReceived', argNames: []}],
+  ['0x739dbe52', {errorName: 'V3TooMuchRequested', argNames: []}],
+  [
+    '0x8b063d73',
+    {
+      errorName: 'V4TooLittleReceived',
+      argNames: ['minAmountOutReceived', 'amountReceived'],
+    },
+  ],
+  [
+    '0x12bacdd3',
+    {
+      errorName: 'V4TooMuchRequested',
+      argNames: ['maxAmountInRequested', 'amountRequested'],
+    },
+  ],
+  [
+    '0x4713c18b',
+    {
+      errorName: 'V4TooLittleReceivedPerHopSingle',
+      argNames: ['minPrice', 'price'],
+    },
+  ],
+  [
+    '0xefc8d8eb',
+    {
+      errorName: 'V4TooMuchRequestedPerHopSingle',
+      argNames: ['minPrice', 'price'],
+    },
+  ],
+  [INSUFFICIENT_TOKEN_SELECTOR, {errorName: 'InsufficientToken', argNames: []}],
+  [INSUFFICIENT_ETH_SELECTOR, {errorName: 'InsufficientETH', argNames: []}],
+]);
+
+/**
+ * The amount-limit error a swap reverted on and its decoded arguments, for
+ * the under-delivery reject log. Undefined for any other revert, and for a
+ * known selector whose arguments do not decode.
+ */
+export function decodeAmountLimitRevert(
+  data?: string
+): AmountLimitRevert | undefined {
+  if (data === undefined) return undefined;
+  const revertData = data.toLowerCase();
+  const known = AMOUNT_LIMIT_ERRORS.get(revertData.slice(0, 10));
+  if (known === undefined) return undefined;
+  if (known.argNames.length === 0) {
+    return {errorName: known.errorName, args: {}};
+  }
+  try {
+    const values = utils.defaultAbiCoder.decode(
+      known.argNames.map(() => 'uint256'),
+      `0x${revertData.slice(10)}`
+    );
+    const args: Record<string, string> = {};
+    known.argNames.forEach((argName, index) => {
+      args[argName] = values[index].toString();
+    });
+    return {errorName: known.errorName, args};
+  } catch {
+    return undefined;
+  }
 }
 
 /** True when the revert is a SWEEP or UNWRAP_WETH minimum on the router's balance */

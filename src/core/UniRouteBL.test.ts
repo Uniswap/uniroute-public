@@ -94,6 +94,7 @@ import {SwapInfo} from '../models/quote/SwapInfo';
 import {BaseQuoteStrategy} from './strategy/BaseQuoteStrategy';
 import {DummySimulator} from './simulator/DummySimulator';
 import {
+  AmountLimitRevert,
   DeliveryUnmeasuredReason,
   ISimulator,
   SimulatedDelivery,
@@ -5507,7 +5508,7 @@ describe('UniRouteBL', () => {
     ]);
     // The cache stores pools without their price state, which the quote
     // path refreshes on chain; candidates carry the full pools instead.
-    const routesByPoolPathKey = new Map(
+    const routesByPoolPathKey = new Map<string, RouteBasic>(
       [
         trapRoute,
         directRoute,
@@ -5542,6 +5543,7 @@ describe('UniRouteBL', () => {
     type ScriptedOutcome = {
       status: SimulationStatus;
       routerBalanceFloorReverted?: boolean;
+      amountLimitRevert?: AmountLimitRevert;
       seeded?: boolean;
       delivery?: SimulatedDelivery;
     };
@@ -5598,7 +5600,11 @@ describe('UniRouteBL', () => {
       }
     }
 
-    type SplitVariant = {legs: [RouteBasic, number][]; amount: bigint};
+    // A leg's quote is its share of `amount` unless the leg names its own.
+    type SplitVariant = {
+      legs: [RouteBasic, number, bigint?][];
+      amount: bigint;
+    };
     const gasDetails = {
       gasUse: BigInt('150000'),
       gasPriceInWei: BigInt('30000000000'),
@@ -5658,10 +5664,10 @@ describe('UniRouteBL', () => {
             ({legs, amount}) =>
               new QuoteSplit(
                 legs.map(
-                  ([route, percentage]) =>
+                  ([route, percentage, legAmount]) =>
                     new QuoteBasic(
                       new RouteBasic(route.protocol, route.path, percentage),
-                      (amount * BigInt(percentage)) / 100n,
+                      legAmount ?? (amount * BigInt(percentage)) / 100n,
                       undefined,
                       gasDetails
                     )
@@ -5762,7 +5768,7 @@ describe('UniRouteBL', () => {
         universalRouterVersion: UniversalRouterVersion.V2_0,
         abortSignal: params.abortSignal,
       });
-      return {response, metrics};
+      return {response, metrics, ctx: testCtx};
     };
 
     const slippageTooLow = {status: SimulationStatus.SLIPPAGE_TOO_LOW};
@@ -6190,6 +6196,471 @@ describe('UniRouteBL', () => {
         ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
         ['chain:MAINNET', 'status:success'],
       ]);
+    });
+
+    describe('a taxed output token', () => {
+      // Serves each listed address with its fee state, every other one
+      // fee-free and measured.
+      class TaxedTokenHandler implements ITokenHandler {
+        constructor(
+          private readonly taxed: Map<
+            string,
+            {fee?: FeeOnTransfer; unmeasurable?: true}
+          >
+        ) {}
+
+        async getToken(
+          _chain: Chain,
+          address: Address
+        ): Promise<Erc20Token | null> {
+          const taxed = this.taxed.get(address.lowerCased);
+          return new Erc20Token(
+            address,
+            18,
+            'TEST',
+            'TestToken',
+            taxed?.fee,
+            1.0,
+            taxed?.unmeasurable
+          );
+        }
+
+        async getTokens(
+          chain: Chain,
+          addresses: Address[]
+        ): Promise<Map<string, Erc20Token | null>> {
+          const tokens = new Map<string, Erc20Token | null>();
+          for (const address of addresses) {
+            tokens.set(address.toString(), await this.getToken(chain, address));
+          }
+          return tokens;
+        }
+      }
+
+      const portionFee = {
+        portionBips: 25,
+        portionRecipient: '0x7FFC3DBF3B2b50Ff3A1D5523bc24Bb5043837B14',
+      };
+      // A SWEEP floor revert: the router holds a portion-fee swap's output,
+      // and the tax is taken on its way in.
+      const sweepFloorRevert: ScriptedOutcome = {
+        status: SimulationStatus.FAILED,
+        routerBalanceFloorReverted: true,
+      };
+
+      describe('with a known 3% buy tax', () => {
+        // The harness's output, WETH, served with a 3% buy tax.
+        const taxedWethHandler = new TaxedTokenHandler(
+          new Map([[wrappedEth.lowerCased, {fee: new FeeOnTransfer(300, 0)}]])
+        );
+
+        it('adds the buy tax and the portion fee to the simulated floor', async () => {
+          const simulator = new ScriptedSimulator(new Map());
+
+          const {response} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directRoute],
+            tokenHandler: taxedWethHandler,
+            request: create(QuoteRequestSchema, {...request, ...portionFee}),
+          });
+
+          // Hand-computed: 0.99e18 × (1 − 150 − 25 − 300 bps).
+          expect(simulator.calls).toHaveLength(1);
+          expect(simulator.calls[0].calldata).toContain(
+            942975000000000000n.toString(16)
+          );
+          expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+        });
+
+        it('adds no buy tax without a portion fee, when the V3 leg checks its own output before the tax', async () => {
+          const simulator = new ScriptedSimulator(new Map());
+
+          await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directRoute],
+            tokenHandler: taxedWethHandler,
+          });
+
+          // Hand-computed: 0.99e18 × (1 − 150 bps). One V3 route and no
+          // fee: the SDK has the pool pay the recipient and checks the
+          // pool's output, before the tax, so taxing the floor
+          // (0.99e18 × (1 − 450 bps)) would only widen the probe.
+          expect(simulator.calls[0].calldata).toContain(
+            975150000000000000n.toString(16)
+          );
+          expect(simulator.calls[0].calldata).not.toContain(
+            945450000000000000n.toString(16)
+          );
+        });
+
+        // A V2 route's quote comes out of OnChainQuoteFetcher with the
+        // output's buy tax already taken off; it is produced here by that
+        // adjustment from the gross getAmountsOut quote. Reserves are set so
+        // the pair's constant-product output for the leg's input is exact
+        // (997·in·R_out / (1000·R_in + 997·in) = R_out / 2), which is what
+        // the SDK's V2 trade (it prices from reserves, and takes the buy tax
+        // itself) also produces.
+        const v2RouteFor = (reserveIn: bigint, reserveOut: bigint) =>
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              usdc,
+              wrappedEth,
+              new Address(
+                `0x${reserveIn.toString(16).padStart(40, '8').slice(-40)}`
+              ),
+              reserveIn,
+              reserveOut
+            ),
+          ]);
+        // 1e18 in → 1e18 out gross
+        const v2Route = v2RouteFor(997n * 10n ** 15n, 2n * 10n ** 18n);
+        // 0.5e18 in (a 50% leg) → 0.5e18 out gross
+        const v2HalfRoute = v2RouteFor(4985n * 10n ** 14n, 10n ** 18n);
+        const v2QuoteNetOfTax = (route: RouteBasic, grossQuote: bigint) =>
+          new OnChainQuoteFetcher(
+            new Map(),
+            serviceConfigAsync,
+            new NoPermissionedQuoteOverrides()
+          )['adjustV2QuotesForFOT'](
+            [new QuoteBasic(route, grossQuote)],
+            usdc,
+            TradeType.ExactIn,
+            new Map([
+              [usdc.address, new Erc20Token(usdc, 6, 'USDC', 'USD Coin')],
+              [
+                wrappedEth.address,
+                new Erc20Token(
+                  wrappedEth,
+                  18,
+                  'WETH',
+                  'Wrapped Ether',
+                  new FeeOnTransfer(300, 0)
+                ),
+              ],
+            ]),
+            buildTestContext()
+          )[0].amount;
+
+        it('adds no tax on a V2 route, whose quote already has it taken off', async () => {
+          const v2Quote = v2QuoteNetOfTax(v2Route, 10n ** 18n);
+          quoteAmounts.set(v2Route.poolPathKey(), v2Quote);
+          routesByPoolPathKey.set(v2Route.poolPathKey(), v2Route);
+          const simulator = new ScriptedSimulator(new Map());
+
+          const {response} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [v2Route],
+            tokenHandler: taxedWethHandler,
+          });
+
+          expect(v2Quote).toBe(970_000_000_000_000_000n);
+          expect(response.quoteAmount).toBe(v2Quote.toString());
+          // Hand-computed: 0.97e18 × (1 − 150 bps), not 0.97e18 × (1 − 150
+          // − 300 bps) = 926350000000000000, which counts the tax twice.
+          expect(simulator.calls[0].calldata).toContain(
+            955450000000000000n.toString(16)
+          );
+          expect(simulator.calls[0].calldata).not.toContain(
+            926350000000000000n.toString(16)
+          );
+        });
+
+        it('adds the tax for the non-V2 share of a mixed split only', async () => {
+          // A V2 half quoted net of the tax, a V3 half quoted gross.
+          const v2LegQuote = v2QuoteNetOfTax(v2HalfRoute, 5n * 10n ** 17n);
+          const v3LegQuote = 520_000_000_000_000_000n;
+          const simulator = new ScriptedSimulator(new Map());
+
+          const {response} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy([
+              {
+                legs: [
+                  [v2HalfRoute, 50, v2LegQuote],
+                  [directRoute, 50, v3LegQuote],
+                ],
+                amount: v2LegQuote + v3LegQuote,
+              },
+            ]),
+            routes: [v2HalfRoute, directRoute],
+            tokenHandler: taxedWethHandler,
+            request: create(QuoteRequestSchema, {...request, ...portionFee}),
+          });
+
+          expect(v2LegQuote).toBe(485_000_000_000_000_000n);
+          expect(response.quoteAmount).toBe('1005000000000000000');
+          expect(simulator.calls[0].poolPathKeys).toEqual([
+            v2HalfRoute.poolPathKey(),
+            directRoute.poolPathKey(),
+          ]);
+          // Hand-computed on the 1.005e18 total: − 150 bps and the 25 bps
+          // portion (0.0175875e18), − 3% of the V3 leg's 0.52e18 (0.0156e18)
+          // = 0.9718125e18. Taxing the whole split would give 0.9572625e18.
+          expect(simulator.calls[0].calldata).toContain(
+            971812500000000000n.toString(16)
+          );
+          expect(simulator.calls[0].calldata).not.toContain(
+            957262500000000000n.toString(16)
+          );
+        });
+
+        it('still rejects a candidate that misses the taxed floor', async () => {
+          const simulator = new ScriptedSimulator(
+            new Map([[directRoute.poolPathKey(), sweepFloorRevert]])
+          );
+
+          const {response, metrics} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directRoute],
+            tokenHandler: taxedWethHandler,
+            request: create(QuoteRequestSchema, {...request, ...portionFee}),
+          });
+
+          expect(response.error?.code).toBe(404);
+          expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+            ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+          ]);
+        });
+      });
+
+      describe('whose tax the detector could not measure', () => {
+        // A v4-only token: no V2 pair against WETH for the detector.
+        const v4OnlyToken = new Address(
+          '0x72d5000000000000000000000000000000000001'
+        );
+        // Not a mainnet base token.
+        const uncommonToken = new Address(
+          '0x5555555555555555555555555555555555555555'
+        );
+        const v4Pool = (tokenA: Address, tokenB: Address) =>
+          new V4Pool(
+            tokenA,
+            tokenB,
+            3000,
+            60,
+            ADDRESS_ZERO,
+            1_000_000_000_000n,
+            V4Pool.computePoolId(tokenA, tokenB, 3000, 60, ADDRESS_ZERO),
+            79228162514264337593543950336n,
+            0n
+          );
+        const directV4Route = new RouteBasic(Protocol.V4, [
+          v4Pool(v4OnlyToken, wrappedEth),
+        ]);
+        // Quotes above the direct pool, as a wrapper trap does.
+        const viaUncommonRoute = new RouteBasic(Protocol.V4, [
+          v4Pool(uncommonToken, wrappedEth),
+          v4Pool(uncommonToken, v4OnlyToken),
+        ]);
+        for (const [route, amount] of [
+          [directV4Route, 990000000000000000n],
+          [viaUncommonRoute, 1010000000000000000n],
+        ] as const) {
+          quoteAmounts.set(route.poolPathKey(), amount);
+          routesByPoolPathKey.set(route.poolPathKey(), route);
+        }
+        const wethToV4Only = create(QuoteRequestSchema, {
+          ...request,
+          tokenInAddress: wrappedEth.toString(),
+          tokenOutAddress: v4OnlyToken.toString(),
+        });
+        const unmeasurableHandler = new TaxedTokenHandler(
+          new Map([[v4OnlyToken.lowerCased, {unmeasurable: true}]])
+        );
+
+        it('skips the reject on a direct route, counts it, and serves the swap at the caller slippage', async () => {
+          // The probe reverts on its floor, the served calldata clears.
+          const simulator = new ScriptedSimulator(
+            new Map(),
+            undefined,
+            new Map([
+              [
+                directV4Route.poolPathKey(),
+                [sweepFloorRevert, {status: SimulationStatus.SUCCESS}],
+              ],
+            ])
+          );
+
+          const {response, metrics} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directV4Route],
+            tokenHandler: unmeasurableHandler,
+            request: create(QuoteRequestSchema, {
+              ...wethToV4Only,
+              ...portionFee,
+            }),
+          });
+
+          expect(response.error).toBeUndefined();
+          expect(response.quoteAmount).toBe('990000000000000000');
+          expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+          // The probe, then the served calldata.
+          expect(simulator.calls).toHaveLength(2);
+          expect(simulator.calls[1].calldata).toBe(
+            response.methodParameters?.calldata
+          );
+          expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+            ['chain:MAINNET', 'status:failure', 'reason:unknown_token_tax'],
+          ]);
+          expect(metrics.tagsFor('Simulation.UnderDeliveryHeadroom')).toEqual(
+            []
+          );
+        });
+
+        it('counts no skip when the probe clears without a portion fee', async () => {
+          const simulator = new ScriptedSimulator(new Map());
+
+          const {response, metrics} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directV4Route],
+            tokenHandler: unmeasurableHandler,
+            request: wethToV4Only,
+          });
+
+          expect(response.simulationStatus).toBe(SimulationStatus.SUCCESS);
+          expect(simulator.calls).toHaveLength(1);
+          expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+            ['chain:MAINNET', 'status:success'],
+          ]);
+        });
+
+        it('rejects the same direct route when the token was measured fee-free', async () => {
+          const simulator = new ScriptedSimulator(
+            new Map([[directV4Route.poolPathKey(), sweepFloorRevert]])
+          );
+
+          const {response, metrics} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [directV4Route],
+            tokenHandler: new TaxedTokenHandler(new Map()),
+            request: create(QuoteRequestSchema, {
+              ...wethToV4Only,
+              ...portionFee,
+            }),
+          });
+
+          expect(response.error?.code).toBe(404);
+          expect(simulator.calls).toHaveLength(1);
+          expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+            ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+          ]);
+        });
+
+        it('keeps the reject on a route through an uncommon intermediate, logging the floor and the decoded revert', async () => {
+          const simulator = new ScriptedSimulator(
+            new Map([
+              [
+                viaUncommonRoute.poolPathKey(),
+                {
+                  status: SimulationStatus.SLIPPAGE_TOO_LOW,
+                  amountLimitRevert: {
+                    errorName: 'V4TooLittleReceived',
+                    args: {
+                      minAmountOutReceived: '992325000000000000',
+                      amountReceived: '951000000000000000',
+                    },
+                  },
+                },
+              ],
+            ]),
+            undefined,
+            new Map([
+              [
+                directV4Route.poolPathKey(),
+                [sweepFloorRevert, {status: SimulationStatus.SUCCESS}],
+              ],
+            ])
+          );
+
+          const {response, metrics, ctx} = await quoteWith({
+            config: checkedConfig(
+              serviceConfigAsync,
+              new Set([ChainId.MAINNET])
+            ),
+            simulator,
+            strategy: new FakeCandidateStrategy(),
+            routes: [viaUncommonRoute, directV4Route],
+            tokenHandler: unmeasurableHandler,
+            request: create(QuoteRequestSchema, {
+              ...wethToV4Only,
+              ...portionFee,
+            }),
+          });
+
+          // The route through the uncommon token is rejected; the direct
+          // one is skipped and served.
+          expect(response.quoteAmount).toBe('990000000000000000');
+          expect(simulator.calls.map(call => call.poolPathKeys)).toEqual([
+            [viaUncommonRoute.poolPathKey()],
+            [directV4Route.poolPathKey()],
+            [directV4Route.poolPathKey()],
+          ]);
+          expect(metrics.tagsFor('Simulation.UnderDeliveryCheck')).toEqual([
+            ['chain:MAINNET', 'status:failure', 'reason:under_delivery'],
+            ['chain:MAINNET', 'status:failure', 'reason:unknown_token_tax'],
+          ]);
+          const rejectLogs = ctx.logger.outputs.filter(
+            output =>
+              output.msg ===
+              'Simulated candidate delivers less than its quote; trying the next candidate'
+          );
+          expect(rejectLogs).toHaveLength(1);
+          // Hand-computed: 1.01e18 × (1 − 150 − 25 bps). The output has
+          // no measured tax, so none is added.
+          expect(rejectLogs[0].extra).toMatchObject({
+            toleranceBps: 150,
+            probeTolerancePercent: '1.7500',
+            probeAmountLimit: '992325000000000000',
+            tokenOutBuyFeeBps: 0,
+            tokenOutTransferFeeUnmeasurable: true,
+            revertError: 'V4TooLittleReceived',
+            revertArgs: {
+              minAmountOutReceived: '992325000000000000',
+              amountReceived: '951000000000000000',
+            },
+            routerBalanceFloorReverted: false,
+          });
+        });
+      });
     });
 
     it('never falls back to a split that under-delivered', async () => {

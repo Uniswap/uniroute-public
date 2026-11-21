@@ -27,6 +27,7 @@ import {
 } from '../../../../abis/src/generated/contracts';
 
 import {
+  amountLimitRevertField,
   countInBackground,
   Simulator,
   SwapOptionsUniversalRouter,
@@ -410,6 +411,7 @@ export class EthSimulateV1Simulator extends Simulator {
               ...(isRouterBalanceFloorRevert(swapCallError?.data) && {
                 routerBalanceFloorReverted: true,
               }),
+              ...amountLimitRevertField(swapCallError?.data),
             },
           };
         }

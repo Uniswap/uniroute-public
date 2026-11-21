@@ -19,9 +19,10 @@ import {
   TAG_STATUS_SUCCESS,
 } from '../../../lib/config';
 import {CurrencyInfo} from '../../../models/currency/CurrencyInfo';
-import {SimulationStatus} from '../ISimulator';
+import {AmountLimitRevert, SimulationStatus} from '../ISimulator';
 import {
   classifySimulationException,
+  decodeAmountLimitRevert,
   describeSimulationException,
   extractRevertData,
   isRouterBalanceFloorRevert,
@@ -122,8 +123,17 @@ export function withZeroGasSimulationResult(
       ...(isRouterBalanceFloorRevert(revertData) && {
         routerBalanceFloorReverted: true,
       }),
+      ...amountLimitRevertField(revertData),
     },
   };
+}
+
+/** The decoded amount-limit revert as a SimulationResult field, or nothing */
+export function amountLimitRevertField(revertData?: string): {
+  amountLimitRevert?: AmountLimitRevert;
+} {
+  const amountLimitRevert = decodeAmountLimitRevert(revertData);
+  return amountLimitRevert === undefined ? {} : {amountLimitRevert};
 }
 
 /** Counts without awaiting so a metrics failure can never change a simulation answer */

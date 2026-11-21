@@ -7,6 +7,7 @@ import {JsonRpcProvider} from '@ethersproject/providers';
 import {
   breakDownSimulationError,
   classifySimulationException,
+  decodeAmountLimitRevert,
   describeSimulationException,
   extractRevertData,
   isRouterBalanceFloorRevert,
@@ -480,5 +481,91 @@ describe('isRouterBalanceFloorRevert', () => {
       estimateGasCall
     );
     expect(isRouterBalanceFloorRevert(extractRevertData(error))).toBe(true);
+  });
+});
+
+describe('decodeAmountLimitRevert', () => {
+  // Encoded from the Universal Router / v4-periphery error signatures, not
+  // from the decoder's own table, so a wrong selector or argument order fails.
+  const routerErrors = new utils.Interface([
+    'error V2TooLittleReceived()',
+    'error V2TooLittleReceivedPerHop(uint256 hopIndex, uint256 minPrice, uint256 price)',
+    'error V3TooLittleReceived()',
+    'error V3TooMuchRequested()',
+    'error V4TooLittleReceived(uint256 minAmountOutReceived, uint256 amountReceived)',
+    'error V4TooMuchRequested(uint256 maxAmountInRequested, uint256 amountRequested)',
+    'error V4TooLittleReceivedPerHopSingle(uint256 minPrice, uint256 price)',
+    'error InsufficientToken()',
+    'error InsufficientETH()',
+  ]);
+
+  it('decodes the V4 minimum and the amount the swap received', () => {
+    expect(
+      decodeAmountLimitRevert(
+        routerErrors.encodeErrorResult('V4TooLittleReceived', [
+          975_150_000_000_000_000n,
+          951_000_000_000_000_000n,
+        ])
+      )
+    ).toEqual({
+      errorName: 'V4TooLittleReceived',
+      args: {
+        minAmountOutReceived: '975150000000000000',
+        amountReceived: '951000000000000000',
+      },
+    });
+    expect(
+      decodeAmountLimitRevert(
+        routerErrors.encodeErrorResult('V4TooMuchRequested', [10n, 12n])
+      )
+    ).toEqual({
+      errorName: 'V4TooMuchRequested',
+      args: {maxAmountInRequested: '10', amountRequested: '12'},
+    });
+    expect(
+      decodeAmountLimitRevert(
+        routerErrors.encodeErrorResult('V4TooLittleReceivedPerHopSingle', [
+          5n,
+          4n,
+        ])
+      )
+    ).toEqual({
+      errorName: 'V4TooLittleReceivedPerHopSingle',
+      args: {minPrice: '5', price: '4'},
+    });
+    expect(
+      decodeAmountLimitRevert(
+        routerErrors.encodeErrorResult('V2TooLittleReceivedPerHop', [
+          1n,
+          5n,
+          4n,
+        ])
+      )
+    ).toEqual({
+      errorName: 'V2TooLittleReceivedPerHop',
+      args: {hopIndex: '1', minPrice: '5', price: '4'},
+    });
+  });
+
+  it.each([
+    'V2TooLittleReceived',
+    'V3TooLittleReceived',
+    'V3TooMuchRequested',
+    'InsufficientToken',
+    'InsufficientETH',
+  ])('names the argument-less %s', errorName => {
+    expect(
+      decodeAmountLimitRevert(routerErrors.encodeErrorResult(errorName))
+    ).toEqual({errorName, args: {}});
+  });
+
+  it('returns undefined for no data, another revert, or arguments that do not decode', () => {
+    expect(decodeAmountLimitRevert(undefined)).toBeUndefined();
+    expect(decodeAmountLimitRevert('0xdeadbeef')).toBeUndefined();
+    // V4TooLittleReceived's selector with one word instead of two
+    const truncated = routerErrors
+      .encodeErrorResult('V4TooLittleReceived', [1n, 2n])
+      .slice(0, 10 + 64);
+    expect(decodeAmountLimitRevert(truncated)).toBeUndefined();
   });
 });
