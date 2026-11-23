@@ -211,6 +211,15 @@ const getSimulationUnderDeliveryToleranceBps = () =>
     SIMULATION_UNDER_DELIVERY_TOLERANCE_BPS_BOUNDS
   );
 
+// Chains whose routes may not pass through a Blockaid Malicious or Spam token
+// between their two ends. Unset or `*` = every chain; "" = none.
+const getBlockaidFlaggedIntermediaryChains = () =>
+  parseChainListStrictOrAll(
+    'BLOCKAID_FLAGGED_INTERMEDIARY_CHAINS',
+    process.env.BLOCKAID_FLAGGED_INTERMEDIARY_CHAINS,
+    SUPPORTED_CHAIN_IDS
+  );
+
 const getSimulationUnderDeliveryChains = () =>
   parseChainListStrictOrAll(
     'SIMULATION_UNDER_DELIVERY_CHAINS',
@@ -518,6 +527,10 @@ export interface IUniRouteServiceConfig {
     // Whether to adjust V2 quote amounts for fee-on-transfer tokens (buyFeeBps/sellFeeBps)
     V2AdjustmentEnabled: boolean;
   };
+  IntermediaryTokens: {
+    /** Chains whose routes drop any route through a Blockaid Malicious or Spam intermediary */
+    BlockaidFlaggedChains: TokenMetadataChainSelection;
+  };
 }
 
 // Returns the configuration object for uniroute sync service.
@@ -671,6 +684,9 @@ export const getUniRouteSyncConfig = (
     FeeOnTransfer: {
       V2AdjustmentEnabled: true,
     },
+    IntermediaryTokens: {
+      BlockaidFlaggedChains: getBlockaidFlaggedIntermediaryChains(),
+    },
   };
 };
 
@@ -820,6 +836,9 @@ export const getQuickRouteSyncConfig = (
     },
     FeeOnTransfer: {
       V2AdjustmentEnabled: true,
+    },
+    IntermediaryTokens: {
+      BlockaidFlaggedChains: getBlockaidFlaggedIntermediaryChains(),
     },
   };
 };

@@ -96,7 +96,10 @@ import {QuoteStatus} from '../models/quote/QuoteStatus';
 import {IPoolDiscoverer, UniPoolInfo} from './pool-discovery/interface';
 import {IFreshPoolDetailsWrapper} from '../stores/pool/FreshPoolDetailsWrapper';
 import {IRedisCache} from '@uniswap/lib-cache';
-import {ICachedRoutesRepository} from '../stores/route/uniroutes/ICachedRoutesRepository';
+import {
+  CachedRouteEvictionCause,
+  ICachedRoutesRepository,
+} from '../stores/route/uniroutes/ICachedRoutesRepository';
 import {INoRouteCacheRepository} from '../stores/route/uniroutes/NoRouteCacheRepository';
 import {QuoteType} from '../models/quote/QuoteType';
 import {RouteBasic} from '../models/route/RouteBasic';
@@ -163,6 +166,12 @@ import {
   filterRoutesWithFotIntermediaryTokens,
   isValidRoute,
 } from '../lib/poolUtils';
+import {
+  dropRoutesThroughBarredIntermediaries,
+  UnverifiedIntermediaryReason,
+} from '../lib/blockaidIntermediaries';
+import {PerChainLogBudget} from '../stores/token/storage/PerChainLogBudget';
+import {RecentKeySet} from '../stores/token/storage/RecentKeySet';
 import {
   dropRoutesThroughRefusedPools,
   intermediaryTransfersOfRoute,
@@ -326,6 +335,23 @@ function swapExecuted(result?: SimulationResult): boolean {
       result.seeded === true)
   );
 }
+
+// The Blockaid-barred intermediary log names each (chain, token) once per
+// process per dedupe window, so a popular pair through the same trap copies
+// does not repeat it on every quote; the per-chain cap is a storm guard for a
+// burst of new copies. Module-global so every BL instance shares them.
+const BLOCKAID_BARRED_LOG_LINES_PER_MINUTE = 40;
+const BLOCKAID_BARRED_LOG_WINDOW_MS = 60_000;
+const BLOCKAID_BARRED_DEDUPE_TTL_MS = 10 * 60_000;
+const BLOCKAID_BARRED_DEDUPE_MAX_KEYS = 10_000;
+const BLOCKAID_BARRED_LOG_BUDGET = new PerChainLogBudget(
+  BLOCKAID_BARRED_LOG_LINES_PER_MINUTE,
+  BLOCKAID_BARRED_LOG_WINDOW_MS
+);
+const RECENT_BLOCKAID_BARRED_TOKENS = new RecentKeySet(
+  BLOCKAID_BARRED_DEDUPE_TTL_MS,
+  BLOCKAID_BARRED_DEDUPE_MAX_KEYS
+);
 
 const BPS_PER_UNIT = 10_000;
 // Split searches re-run without the paths that under-delivered, before the
@@ -1022,6 +1048,85 @@ export class UniRouteBL implements IUniRoutedBL {
       routes = shapeFiltered.routes;
       const {routesAfterErc4626Filter, routesAfterFotIntermediaryFilter} =
         shapeFiltered;
+
+      // A cached route through a Blockaid-flagged intermediary would be
+      // dropped again on every read and hold a slot a clean route could take,
+      // so it leaves the cache now rather than at the key's next rewrite.
+      if (
+        usedCachedRoutes &&
+        shouldCheckCache &&
+        shapeFiltered.blockaidFlaggedRoutes.length > 0
+      ) {
+        // Not awaited: the quote does not need the cache cleaned first, and
+        // evictCachedRoutes counts and logs its own failures, never throws.
+        void this.cachedRoutesRepository
+          .evictCachedRoutes(
+            nsCtx,
+            chain.chainId,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            tradeType,
+            amountIn,
+            usdBucket,
+            protocols,
+            new Set(
+              shapeFiltered.blockaidFlaggedRoutes.map(route =>
+                route.poolPathKey()
+              )
+            ),
+            CachedRouteEvictionCause.BlockaidFlaggedIntermediary,
+            ctx
+          )
+          .catch(() => undefined);
+      }
+
+      // The all-invalid fallback above runs before these request-shape
+      // filters, so a cached-only read whose every route they drop (each
+      // through a Blockaid-flagged or fee-on-transfer intermediary, say) would
+      // 404 a pair fresh discovery can route. Re-run discovery through both
+      // filter stages and treat the request as a cache miss downstream.
+      if (
+        !hitDiscoveryEnabled &&
+        usedCachedRoutes &&
+        routes.length === 0 &&
+        routesAfterValidityFilters > 0
+      ) {
+        usedCachedRoutes = false;
+        void ctx.metrics
+          .count(
+            buildMetricKey('CachedRoutes.AllShapeFilteredFreshFallback'),
+            1,
+            {
+              tags: [chainTag],
+            }
+          )
+          .catch(() => undefined);
+        const fresh = await fetchFresh();
+        degradedDiscovery = fresh.degradedReasons.length > 0;
+        const validFreshRoutes = await this.filterInvalidRoutes(
+          ctx,
+          fresh.routes,
+          chain,
+          tokenInCurrencyInfo,
+          tokenOutCurrencyInfo,
+          tradeType,
+          metricTags
+        );
+        settleBeforeSwapRoutesDropped +=
+          validFreshRoutes.settleBeforeSwapDropped;
+        routes = (
+          await this.applyRequestShapeRouteFilters(
+            ctx,
+            chain,
+            validFreshRoutes.routes,
+            tokenInCurrencyInfo,
+            tokenOutCurrencyInfo,
+            tradeType,
+            tokensInfo,
+            erc4626Snapshot
+          )
+        ).routes;
+      }
       const routesAfterExactOutWrapperHookFilter = routes.length;
 
       if (forceMixed) {
@@ -1213,6 +1318,7 @@ export class UniRouteBL implements IUniRoutedBL {
           usdBucket,
           protocols,
           new Set(underDeliveredRoutePoolPathKeys),
+          CachedRouteEvictionCause.UnderDelivery,
           ctx
         );
       }
@@ -1333,6 +1439,7 @@ export class UniRouteBL implements IUniRoutedBL {
               usdBucket,
               protocols,
               new Set(freshPipelineResult.underDeliveredRoutePoolPathKeys),
+              CachedRouteEvictionCause.UnderDelivery,
               ctx
             );
           }
@@ -2599,9 +2706,11 @@ export class UniRouteBL implements IUniRoutedBL {
    * types. EXACT_OUT cannot guarantee output through any FOT hop, and EXACT_IN
    * quotes only price the fees of tokenIn/tokenOut (see adjustV2QuotesForFOT),
    * so an intermediary fee would make the served minimum unreachable on-chain.
-   * Direct-swap FOT tokens are handled upstream.
+   * Direct-swap FOT tokens are handled upstream. Then drops routes through a
+   * Blockaid Malicious or Spam intermediary, and last, routes through a pool
+   * that taxes or refuses an intermediary's transfer.
    */
-  private async filterFotIntermediaryRoutes(
+  private async filterUnsafeIntermediaryRoutes(
     ctx: Context,
     chain: Chain,
     routes: RouteBasic<Pool>[],
@@ -2609,7 +2718,10 @@ export class UniRouteBL implements IUniRoutedBL {
     tokenOutCurrencyInfo: CurrencyInfo,
     tradeType: TradeType,
     tokensInfo: Map<string, Erc20Token | null>
-  ): Promise<RouteBasic<Pool>[]> {
+  ): Promise<{
+    routes: RouteBasic<Pool>[];
+    blockaidFlaggedRoutes: RouteBasic<Pool>[];
+  }> {
     const preFilterCount = routes.length;
     const {filteredRoutes, fotIntermediaryTokens} =
       await filterRoutesWithFotIntermediaryTokens(
@@ -2640,14 +2752,121 @@ export class UniRouteBL implements IUniRoutedBL {
         }
       );
     }
-    return this.dropRoutesThroughRefusedFotPools(
-      ctx,
-      chain,
-      filteredRoutes,
-      tokenInCurrencyInfo,
-      tokenOutCurrencyInfo,
-      tradeType
+    const blockaidFiltered =
+      this.dropRoutesThroughBlockaidFlaggedIntermediaries(
+        ctx,
+        chain,
+        filteredRoutes,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType,
+        tokensInfo
+      );
+    return {
+      routes: await this.dropRoutesThroughRefusedFotPools(
+        ctx,
+        chain,
+        blockaidFiltered.routes,
+        tokenInCurrencyInfo,
+        tokenOutCurrencyInfo,
+        tradeType
+      ),
+      blockaidFlaggedRoutes: blockaidFiltered.droppedRoutes,
+    };
+  }
+
+  /**
+   * Drops routes that pass through a token Blockaid labels Malicious or Spam
+   * anywhere but their two ends: wrapper traps that reprice the next pool for
+   * every caller but a trusted quoter are relaunched faster than a static
+   * blocklist can follow, and Blockaid labels them at launch. An intermediary
+   * that cannot be judged is kept and counted (see
+   * `dropRoutesThroughBarredIntermediaries` for why it fails open).
+   */
+  private dropRoutesThroughBlockaidFlaggedIntermediaries(
+    ctx: Context,
+    chain: Chain,
+    routes: RouteBasic<Pool>[],
+    tokenInCurrencyInfo: CurrencyInfo,
+    tokenOutCurrencyInfo: CurrencyInfo,
+    tradeType: TradeType,
+    tokensInfo: ReadonlyMap<string, Erc20Token | null>
+  ): {routes: RouteBasic<Pool>[]; droppedRoutes: RouteBasic<Pool>[]} {
+    if (
+      routes.length === 0 ||
+      !isChainSelected(
+        this.serviceConfig.IntermediaryTokens.BlockaidFlaggedChains,
+        chain.chainId
+      )
+    ) {
+      return {routes, droppedRoutes: []};
+    }
+    const chainTag = `chain:${ChainId[chain.chainId]}`;
+    const {
+      routes: kept,
+      droppedRoutes,
+      barredTokens,
+      unverifiedTokens,
+    } = dropRoutesThroughBarredIntermediaries(
+      chain.chainId,
+      routes,
+      tokenInCurrencyInfo.wrappedAddress.toString(),
+      tokenOutCurrencyInfo.wrappedAddress.toString(),
+      tokensInfo
     );
+    const unverifiedByReason = new Map<UnverifiedIntermediaryReason, number>();
+    for (const reason of unverifiedTokens.values()) {
+      unverifiedByReason.set(reason, (unverifiedByReason.get(reason) ?? 0) + 1);
+    }
+    for (const [reason, tokenCount] of unverifiedByReason) {
+      // Fire-and-forget, like the counter below.
+      void ctx.metrics
+        .count(
+          buildMetricKey('BlockaidFlaggedIntermediary.Unverified'),
+          tokenCount,
+          {tags: [chainTag, TAG_STATUS_FAILURE, `reason:${reason}`]}
+        )
+        .catch(() => undefined);
+    }
+    if (droppedRoutes.length === 0) return {routes, droppedRoutes};
+
+    // One per request, so `outcome:no_route_left` counts requests the filter
+    // left without a route; the route counts are in the log.
+    void ctx.metrics
+      .count(buildMetricKey('BlockaidFlaggedIntermediaryRoutesFiltered'), 1, {
+        tags: [
+          chainTag,
+          `tradeType:${tradeType}`,
+          `outcome:${kept.length === 0 ? 'no_route_left' : 'routes_left'}`,
+          TAG_STATUS_SUCCESS,
+        ],
+      })
+      .catch(() => undefined);
+    const newlyBarredTokens = Array.from(barredTokens).filter(
+      addr => !RECENT_BLOCKAID_BARRED_TOKENS.has(`${chain.chainId}:${addr}`)
+    );
+    if (
+      newlyBarredTokens.length > 0 &&
+      BLOCKAID_BARRED_LOG_BUDGET.take(chain.chainId)
+    ) {
+      for (const addr of newlyBarredTokens) {
+        RECENT_BLOCKAID_BARRED_TOKENS.add(`${chain.chainId}:${addr}`);
+      }
+      ctx.logger.info(
+        'Dropped routes through Blockaid-flagged intermediaries',
+        {
+          chainId: chain.chainId,
+          tradeType,
+          routesBefore: routes.length,
+          routesAfter: kept.length,
+          barredTokens: newlyBarredTokens.map(addr => ({
+            address: addr,
+            safetyVerdict: tokensInfo.get(addr)?.safetyVerdict,
+          })),
+        }
+      );
+    }
+    return {routes: kept, droppedRoutes};
   }
 
   /**
@@ -2741,6 +2960,8 @@ export class UniRouteBL implements IUniRoutedBL {
     routes: RouteBasic<Pool>[];
     routesAfterErc4626Filter: number;
     routesAfterFotIntermediaryFilter: number;
+    /** Routes dropped for a Blockaid Malicious or Spam intermediary */
+    blockaidFlaggedRoutes: RouteBasic<Pool>[];
   }> {
     let filteredRoutes = routes;
     if (erc4626Snapshot?.assets.length) {
@@ -2758,8 +2979,9 @@ export class UniRouteBL implements IUniRoutedBL {
     }
     const routesAfterErc4626Filter = filteredRoutes.length;
 
+    let blockaidFlaggedRoutes: RouteBasic<Pool>[] = [];
     if (filteredRoutes.length > 0) {
-      filteredRoutes = await this.filterFotIntermediaryRoutes(
+      const intermediaryFiltered = await this.filterUnsafeIntermediaryRoutes(
         ctx,
         chain,
         filteredRoutes,
@@ -2768,6 +2990,8 @@ export class UniRouteBL implements IUniRoutedBL {
         tradeType,
         tokensInfo
       );
+      filteredRoutes = intermediaryFiltered.routes;
+      blockaidFlaggedRoutes = intermediaryFiltered.blockaidFlaggedRoutes;
     }
     const routesAfterFotIntermediaryFilter = filteredRoutes.length;
 
@@ -2785,6 +3009,7 @@ export class UniRouteBL implements IUniRoutedBL {
       routes: filteredRoutes,
       routesAfterErc4626Filter,
       routesAfterFotIntermediaryFilter,
+      blockaidFlaggedRoutes,
     };
   }
 

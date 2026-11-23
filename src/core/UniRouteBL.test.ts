@@ -57,6 +57,7 @@ import {IQuoteFetcher, QuoteFetchReport} from '../stores/quote/IQuoteFetcher';
 import {QuoteBasic} from '../models/quote/QuoteBasic';
 import {RouteBasic} from '../models/route/RouteBasic';
 import {TradeType} from '../models/quote/TradeType';
+import {SafetyVerdict} from '@uniswap/lib-data-ingestion-aurora';
 import {SimpleQuoteSelector} from './quote/selector/SimpleQuoteSelector';
 import {
   IRoutesRepository,
@@ -252,6 +253,39 @@ class FotTokenHandler implements ITokenHandler {
     const tokens = new Map<string, Erc20Token | null>();
     for (const address of addresses) {
       tokens.set(address.toString(), await this.getToken(chain, address, ctx));
+    }
+    return tokens;
+  }
+}
+
+// Serves every address as a plain token carrying the Blockaid verdict mapped
+// to its lowercased address, if any.
+class VerdictTokenHandler implements ITokenHandler {
+  constructor(private readonly verdicts: ReadonlyMap<string, SafetyVerdict>) {}
+
+  public async getToken(
+    _chain: Chain,
+    address: Address
+  ): Promise<Erc20Token | null> {
+    return new Erc20Token(
+      address,
+      18,
+      'TEST',
+      'TestToken',
+      undefined,
+      1.0,
+      undefined,
+      this.verdicts.get(address.toString().toLowerCase())
+    );
+  }
+
+  public async getTokens(
+    chain: Chain,
+    addresses: Address[]
+  ): Promise<Map<string, Erc20Token | null>> {
+    const tokens = new Map<string, Erc20Token | null>();
+    for (const address of addresses) {
+      tokens.set(address.toString(), await this.getToken(chain, address));
     }
     return tokens;
   }
@@ -2356,6 +2390,109 @@ describe('UniRouteBL', () => {
       expect(countingRepository.getRoutesCalls).toBe(0);
       expect(response.error).toBeUndefined();
       expect(response.hitsCachedRoutes).toBe(true);
+    });
+
+    describe('cached routes through a Blockaid-flagged intermediary', () => {
+      // ELEVATE on mainnet, Blockaid Malicious.
+      const elevate = new Address('0x888888888887715FB9D9F84175Af9e6cCE46807e');
+      const flaggedCachedRoute = new RouteBasic(Protocol.V2, [
+        new V2Pool(
+          wrappedEth,
+          elevate,
+          new Address('0x4444444444444444444444444444444444444444'),
+          BigInt('1000000000000'),
+          BigInt('1000000000000')
+        ),
+        new V2Pool(
+          elevate,
+          usdc,
+          new Address('0x5555555555555555555555555555555555555555'),
+          BigInt('1000000000000'),
+          BigInt('1000000000000')
+        ),
+      ]);
+      const shapeFallbackMetric = buildMetricKey(
+        'CachedRoutes.AllShapeFilteredFreshFallback'
+      );
+      const evictMetric = buildMetricKey(
+        'CachedRoutes.UnderDeliveredRouteEvict'
+      );
+      const flaggedHandler = new VerdictTokenHandler(
+        new Map([[elevate.lowerCased, SafetyVerdict.Malicious]])
+      );
+
+      const buildFlaggedBL = (routesRepository: IRoutesRepository) =>
+        new UniRouteBL(
+          legacyConfig,
+          redisCache,
+          chainRepository,
+          poolDiscoverer,
+          freshPoolDetailsWrapper,
+          flaggedHandler,
+          quoteFetcher,
+          quoteSelector,
+          routeQuoteAllocator,
+          gasEstimateProvider,
+          noGasConverter,
+          routesRepository,
+          cachedRoutesRepository,
+          noRouteCacheRepository,
+          new RoutesAwareQuoteStrategy(),
+          dummySimulator,
+          quoteRequestValidator,
+          tokenProvider,
+          mockedRpcProviderMap,
+          stateOverrideResolver
+        );
+
+      const quoteExactIn = (routesRepository: IRoutesRepository) => {
+        const testCtx = buildTestContext();
+        return buildFlaggedBL(routesRepository)
+          .quote(
+            testCtx,
+            create(QuoteRequestSchema, {...baseRequest, tradeType: 'EXACT_IN'})
+          )
+          .then(response => ({response, testCtx}));
+      };
+
+      it('searches fresh routes instead of 404ing when the filter drops every cached route, and evicts them', async () => {
+        await seedCachedRoute(flaggedCachedRoute);
+        const countingRepository = new CountingRoutesRepository();
+
+        const {response, testCtx} = await quoteExactIn(countingRepository);
+
+        expect(testCtx.metrics.countStore[shapeFallbackMetric]).toBe(1);
+        expect(testCtx.metrics.countStore[evictMetric]).toBeGreaterThan(0);
+        expect(countingRepository.getRoutesCalls).toBe(1);
+        expect(response.error).toBeUndefined();
+        expect(response.hitsCachedRoutes).toBe(false);
+
+        // Evicted, so the next read is a plain miss rather than another hit
+        // the filter has to empty.
+        const next = await quoteExactIn(new CountingRoutesRepository());
+        expect(next.testCtx.metrics.countStore[shapeFallbackMetric]).toBe(
+          undefined
+        );
+        expect(next.response.hitsCachedRoutes).toBe(false);
+      });
+
+      it('serves the surviving cached route without fresh discovery and evicts only the flagged one', async () => {
+        await seedCachedRoute(validCachedRoute);
+        await seedCachedRoute(flaggedCachedRoute);
+        const countingRepository = new CountingRoutesRepository();
+
+        const {response, testCtx} = await quoteExactIn(countingRepository);
+
+        expect(testCtx.metrics.countStore[shapeFallbackMetric]).toBe(undefined);
+        expect(countingRepository.getRoutesCalls).toBe(0);
+        expect(response.error).toBeUndefined();
+        expect(response.hitsCachedRoutes).toBe(true);
+        expect(testCtx.metrics.countStore[evictMetric]).toBeGreaterThan(0);
+
+        const next = await quoteExactIn(new CountingRoutesRepository());
+        expect(next.response.hitsCachedRoutes).toBe(true);
+        expect(next.testCtx.metrics.countStore[evictMetric]).toBe(undefined);
+      });
     });
   });
 
@@ -7199,7 +7336,14 @@ describe('UniRouteBL', () => {
         ).toHaveLength(1);
         expect(
           metrics.tagsFor('CachedRoutes.UnderDeliveredRouteEvict')
-        ).toEqual([['chain:MAINNET', 'status:success', 'outcome:evicted']]);
+        ).toEqual([
+          [
+            'chain:MAINNET',
+            'cause:under_delivery',
+            'status:success',
+            'outcome:evicted',
+          ],
+        ]);
       });
 
       it('evicts only the failing path when a rejected split shares a leg with the served route', async () => {
@@ -7230,7 +7374,14 @@ describe('UniRouteBL', () => {
         expect(await cachedPoolPathKeys()).toEqual([directRoute.poolPathKey()]);
         expect(
           metrics.tagsFor('CachedRoutes.UnderDeliveredRouteEvict')
-        ).toEqual([['chain:MAINNET', 'status:success', 'outcome:evicted']]);
+        ).toEqual([
+          [
+            'chain:MAINNET',
+            'cause:under_delivery',
+            'status:success',
+            'outcome:evicted',
+          ],
+        ]);
       });
 
       it('drops a kept fallback once a later search rejects its leg, and evicts that leg', async () => {
@@ -11610,6 +11761,231 @@ describe('UniRouteBL', () => {
 
           expect(probe.requests).toEqual([]);
           expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+        });
+      });
+      describe('intermediary tokens Blockaid labels Malicious or Spam', () => {
+        // ELEVATE on mainnet: Blockaid Malicious (rugpull, known_malicious),
+        // and an intermediary uniroute served on USDT -> GROW quotes.
+        // Checksummed here while the handler keys on lowercase, so a casing
+        // mismatch in the filter fails these tests.
+        const flaggedToken = '0x888888888887715FB9D9F84175Af9e6cCE46807e';
+        const usdc = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
+        const filteredMetric = 'BlockaidFlaggedIntermediaryRoutesFiltered';
+
+        const flaggedIntermediaryRoute = (
+          tokenInCurrencyInfo: CurrencyInfo,
+          tokenOutCurrencyInfo: CurrencyInfo
+        ): RouteBasic =>
+          new RouteBasic(Protocol.V2, [
+            new V2Pool(
+              tokenInCurrencyInfo.wrappedAddress,
+              new Address(flaggedToken),
+              new Address('0x4444444444444444444444444444444444444444'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+            new V2Pool(
+              new Address(flaggedToken),
+              tokenOutCurrencyInfo.wrappedAddress,
+              new Address('0x5555555555555555555555555555555555555555'),
+              BigInt('1000000000000'),
+              BigInt('1000000000000')
+            ),
+          ]);
+
+        class FlaggedIntermediaryRoutesRepository extends TestRoutesRepository {
+          constructor(private readonly includeDirectRoute: boolean) {
+            super();
+          }
+          public async getRoutes(
+            chain: Chain,
+            tokenInCurrencyInfo: CurrencyInfo,
+            tokenOutCurrencyInfo: CurrencyInfo
+          ): Promise<RouteDiscoveryResult> {
+            const flaggedRoute = flaggedIntermediaryRoute(
+              tokenInCurrencyInfo,
+              tokenOutCurrencyInfo
+            );
+            return {
+              routes: this.includeDirectRoute
+                ? [
+                    directRoute(tokenInCurrencyInfo, tokenOutCurrencyInfo),
+                    flaggedRoute,
+                  ]
+                : [flaggedRoute],
+              degradedReasons: [],
+            };
+          }
+        }
+
+        class RecordingCounts extends TestMetric {
+          readonly calls: {name: string; tags: string[]}[] = [];
+          override async count(
+            name: string,
+            value: number,
+            options?: MetricOptions
+          ): Promise<void> {
+            this.calls.push({name, tags: options?.tags ?? []});
+            await super.count(name, value, options);
+          }
+          tagsFor(name: string): string[][] {
+            return this.calls
+              .filter(call => call.name === buildMetricKey(name))
+              .map(call => call.tags);
+          }
+        }
+
+        const quoteWith = async (params: {
+          verdicts: ReadonlyMap<string, SafetyVerdict>;
+          includeDirectRoute: boolean;
+          tradeType: string;
+          blockaidFlaggedChains?: IUniRouteServiceConfig['IntermediaryTokens']['BlockaidFlaggedChains'];
+          tokenOutAddress?: string;
+        }) => {
+          const quoteStrategy = new RecordingQuoteStrategy();
+          const testCtx = buildTestContext();
+          const metrics = new RecordingCounts();
+          testCtx.metrics = metrics;
+          const config: IUniRouteServiceConfig = {
+            ...serviceConfig,
+            IntermediaryTokens: {
+              BlockaidFlaggedChains: params.blockaidFlaggedChains ?? 'all',
+            },
+          };
+          const response = await new UniRouteBL(
+            config,
+            redisCache,
+            chainRepository,
+            poolDiscoverer,
+            freshPoolDetailsWrapper,
+            new VerdictTokenHandler(params.verdicts),
+            quoteFetcher,
+            quoteSelector,
+            routeQuoteAllocator,
+            gasEstimateProvider,
+            noGasConverter,
+            new FlaggedIntermediaryRoutesRepository(params.includeDirectRoute),
+            cachedRoutesRepository,
+            noRouteCacheRepository,
+            quoteStrategy,
+            dummySimulator,
+            quoteRequestValidator,
+            tokenProvider,
+            mockedRpcProviderMap,
+            stateOverrideResolver
+          ).quote(
+            testCtx,
+            create(QuoteRequestSchema, {
+              ...baseRequest,
+              tradeType: params.tradeType,
+              ...(params.tokenOutAddress
+                ? {tokenOutAddress: params.tokenOutAddress}
+                : {}),
+            })
+          );
+          return {response, quoteStrategy, metrics};
+        };
+
+        const servedPoolPaths = (routes: RouteBasic<Pool>[]): string[][] =>
+          routes.map(route => route.path.map(pool => pool.address.toString()));
+
+        it.each([
+          ['EXACT_IN', SafetyVerdict.Malicious],
+          ['EXACT_OUT', SafetyVerdict.Malicious],
+          ['EXACT_IN', SafetyVerdict.Spam],
+        ])(
+          'drops a %s route through a %s intermediary and keeps the direct route',
+          async (tradeType, verdict) => {
+            const {response, quoteStrategy, metrics} = await quoteWith({
+              verdicts: new Map([[flaggedToken.toLowerCase(), verdict]]),
+              includeDirectRoute: true,
+              tradeType,
+            });
+
+            expect(response.error).toBeUndefined();
+            expect(servedPoolPaths(quoteStrategy.receivedRoutes[0])).toEqual([
+              [directPoolAddress],
+            ]);
+            expect(metrics.tagsFor(filteredMetric)).toEqual([
+              [
+                'chain:MAINNET',
+                `tradeType:${tradeType === 'EXACT_IN' ? TradeType.ExactIn : TradeType.ExactOut}`,
+                'outcome:routes_left',
+                'status:success',
+              ],
+            ]);
+          }
+        );
+
+        it.each([SafetyVerdict.Warning, SafetyVerdict.Benign, undefined])(
+          'keeps a route through an intermediary whose verdict is %s',
+          async verdict => {
+            const {quoteStrategy, metrics} = await quoteWith({
+              verdicts: verdict
+                ? new Map([[flaggedToken.toLowerCase(), verdict]])
+                : new Map(),
+              includeDirectRoute: true,
+              tradeType: 'EXACT_IN',
+            });
+
+            expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+            expect(metrics.tagsFor(filteredMetric)).toEqual([]);
+            expect(
+              metrics.tagsFor('BlockaidFlaggedIntermediary.Unverified')
+            ).toEqual(
+              verdict === undefined
+                ? [['chain:MAINNET', 'status:failure', 'reason:no_verdict']]
+                : []
+            );
+          }
+        );
+
+        it('hands the quote strategy no routes when every route passes through a Malicious intermediary', async () => {
+          const {quoteStrategy, metrics} = await quoteWith({
+            verdicts: new Map([
+              [flaggedToken.toLowerCase(), SafetyVerdict.Malicious],
+            ]),
+            includeDirectRoute: false,
+            tradeType: 'EXACT_IN',
+          });
+
+          expect(quoteStrategy.receivedRoutes).toEqual([[]]);
+          expect(metrics.tagsFor(filteredMetric)).toEqual([
+            [
+              'chain:MAINNET',
+              `tradeType:${TradeType.ExactIn}`,
+              'outcome:no_route_left',
+              'status:success',
+            ],
+          ]);
+        });
+
+        it('keeps every route on a chain outside the selection', async () => {
+          const {quoteStrategy, metrics} = await quoteWith({
+            verdicts: new Map([
+              [flaggedToken.toLowerCase(), SafetyVerdict.Malicious],
+            ]),
+            includeDirectRoute: true,
+            tradeType: 'EXACT_IN',
+            blockaidFlaggedChains: new Set([ChainId.ROBINHOOD]),
+          });
+
+          expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+          expect(metrics.tagsFor(filteredMetric)).toEqual([]);
+        });
+
+        it('keeps routes when the flagged token is the tokenOut the caller asked for', async () => {
+          // The caller named the token, so only its use as a hop is barred;
+          // the direct pool and the route ending in it both stay.
+          const {quoteStrategy, metrics} = await quoteWith({
+            verdicts: new Map([[usdc.toLowerCase(), SafetyVerdict.Malicious]]),
+            includeDirectRoute: true,
+            tradeType: 'EXACT_IN',
+            tokenOutAddress: usdc,
+          });
+
+          expect(quoteStrategy.receivedRoutes[0]).toHaveLength(2);
+          expect(metrics.tagsFor(filteredMetric)).toEqual([]);
         });
       });
     });
