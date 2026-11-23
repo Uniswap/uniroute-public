@@ -644,17 +644,51 @@ export const FOUNTAIN_URM_HOOK_ON_BASE =
 // WOOFi aggregator
 export const WOOFI_AGGREGATOR_ON_BASE =
   '0x77132a6b5760651447da262b1180430ae84e2888';
+export const WOO_PPV2_AGGREGATOR_ON_POLYGON =
+  '0xf6e170d6ea82c005e90c101e65a57784be072888';
+export const WOO_PPV2_AGGREGATOR_ON_ARBITRUM =
+  '0x3336b2bfc1fc2edd5d0c34abeaafab379c742888';
+export const WOO_PPV2_AGGREGATOR_ON_OPTIMISM =
+  '0x41ef917128875f75da696a31654440d05d322888';
+export const WOO_PPV2_AGGREGATOR_ON_AVALANCHE =
+  '0x2725ffb0695a5aebaf7330e8bc9442f8eed52888';
 // PropAMM aggregator
 export const PROPAMM_AGGREGATOR_ON_BASE =
   '0x5159b939db93df3a9cce73a2449c8727b4daa888';
 // Aero Slipstream aggregator
 export const AERO_SLIPSTREAM_AGGREGATOR_ON_OPTIMISM =
   '0xdcb0c5ed62e12e5a39acbf710fdf6dcd75ec2888';
+export const AERO_SLIPSTREAM_AGGREGATOR_ON_BASE =
+  '0xa83a79b6f22868f440d33a011c21bd5e0c2f2888';
+export const AERO_SLIPSTREAM_AGGREGATOR_V2_ON_BASE =
+  '0x146745d9bb065a93a5428def98da247e942d2888';
+export const AERO_SLIPSTREAM_AGGREGATOR_ON_ARC =
+  '0x0bf6bd200bb39df2d85578d1725e3f40d6682888';
+export const AERO_SLIPSTREAM_ELYSIUM_AGGREGATOR_ON_ELYSIUM =
+  '0x5b3ab7cbc759effecc75c1387ba980d278382888';
+// Fluid DEX T1 aggregator
+export const FLUID_DEX_T1_AGGREGATOR_ON_BASE =
+  '0x765cf0d0b8f523dbbab8b00a4d66e45fca842888';
+// Ramses aggregator
+export const RAMSES_V3_ELYSIUM_AGGREGATOR_ON_ELYSIUM =
+  '0x97c8022eba8b1d5b3441248979a0d79601fe2888';
 // Pharaoh aggregators
 export const PHARAOH_V3_AGGREGATOR_ON_AVALANCHE =
   '0xdb0172e3745ea7c8448534533dcb4ac0ab822888';
 export const PHARAOH_LB_AGGREGATOR_ON_AVALANCHE =
   '0xbcbd509992a140ec5380d6ecbe960c8197a52888';
+// DODO V2 aggregators
+export const DODO_V2_AGGREGATOR_WBTC_USDC_ON_POLYGON =
+  '0x2fd2d6c11c678b64b3fd3a6acb49818b24452888';
+export const DODO_V2_AGGREGATOR_USDCE_WETH_ON_POLYGON =
+  '0xbab3ae70f7de795d3f658bd5cc226bab3b5f2888';
+export const DODO_V2_AGGREGATOR_BTCB_USDC_ON_AVALANCHE =
+  '0xd340727bc278cc5f32d4433eff19ec2a6bce2888';
+export const DODO_V2_AGGREGATOR_WETHE_USDC_ON_AVALANCHE =
+  '0x143d81826bd4cc07ced69c910e5f8888e1782888';
+// PancakeSwap V3 aggregator
+export const PANCAKE_V3_AGGREGATOR_ON_BNB =
+  '0xda546ccfe17c5f825e26b9797b4a02177d6d2888';
 
 // Zero-liquidity external-fill adapters. Declared above ZLCA_HOOKS_PER_CHAIN,
 // which references them at module load.
@@ -847,6 +881,24 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     },
   },
   [ChainId.BASE]: {
+    [FLUID_DEX_T1_AGGREGATOR_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0xc1cba3fcea344f92d9239c08c0568f6f2f0ee452': 1n,
+        '0x04c0599ae5a44757c0af6f9ec3b93da8976c150a':
+          0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00n,
+      },
+    },
+    [AERO_SLIPSTREAM_AGGREGATOR_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
+    [AERO_SLIPSTREAM_AGGREGATOR_V2_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+    },
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
@@ -903,8 +955,29 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.ARBITRUM_ONE]: {
     [FLETH_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 500_000n},
     [GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM]: {gasOverheadPerHop: 50_000n},
+    [WOO_PPV2_AGGREGATOR_ON_ARBITRUM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x912ce59144191c1204e64559fe8253a0e49e6548': 51n,
+        '0xaf88d065e77c8cc2239327c5edb3a432268e5831': 9n,
+      },
+    },
   },
   [ChainId.OPTIMISM]: {
+    [WOO_PPV2_AGGREGATOR_ON_OPTIMISM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x4200000000000000000000000000000000000006': 3n,
+        '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': 0n,
+        '0x0b2c639c533813f4aa9d7837caf62653d097ff85': 9n,
+        '0x68f180fcce6836688e9084f035309e29bf0a2095': 0n,
+        '0x4200000000000000000000000000000000000042': 0n,
+      },
+    },
     [AERO_SLIPSTREAM_AGGREGATOR_ON_OPTIMISM]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
@@ -939,11 +1012,81 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
       },
     },
+    [WOO_PPV2_AGGREGATOR_ON_AVALANCHE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab': 0n,
+        '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
+        '0x152b9d0fdc40c096757f570a51e494bd4b943e50': 0n,
+        '0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7': 3n,
+      },
+    },
+    [DODO_V2_AGGREGATOR_BTCB_USDC_ON_AVALANCHE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x152b9d0fdc40c096757f570a51e494bd4b943e50': 0n,
+        '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
+      },
+    },
+    [DODO_V2_AGGREGATOR_WETHE_USDC_ON_AVALANCHE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab': 0n,
+        '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
+      },
+    },
   },
   [ChainId.BNB]: {
     [USDD_PSM_HOOK_ON_BNB]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
+    },
+    [PANCAKE_V3_AGGREGATOR_ON_BNB]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x55d398326f99059ff775485246999027b3197955': 1n,
+        '0xaa036928c9c0df07d525b55ea8ee690bb5a628c1': 0n,
+      },
+    },
+  },
+  [ChainId.POLYGON]: {
+    [WOO_PPV2_AGGREGATOR_ON_POLYGON]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': 0n,
+        '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': 0n,
+        '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': 9n,
+        '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': 0n,
+        '0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6': 0n,
+      },
+    },
+    [DODO_V2_AGGREGATOR_WBTC_USDC_ON_POLYGON]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6': 0n,
+        '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': 9n,
+      },
+    },
+    [DODO_V2_AGGREGATOR_USDCE_WETH_ON_POLYGON]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': 0n,
+        '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': 0n,
+      },
     },
   },
   [ChainId.XLAYER]: {
@@ -959,10 +1102,44 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
   [ChainId.INK]: {
     [FLETH_HOOK_ON_INK]: {gasOverheadPerHop: 500_000n},
   },
+  [UniRouteChainId.ELYSIUM]: {
+    [AERO_SLIPSTREAM_ELYSIUM_AGGREGATOR_ON_ELYSIUM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65': 51n,
+        '0xba876237b0f021a6c6d852d6c26e107997cc5e81': 51n,
+        '0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0': 51n,
+        '0x248888d396a546a69a188f3deb476964e581e9d0': 51n,
+      },
+    },
+    [RAMSES_V3_ELYSIUM_AGGREGATOR_ON_ELYSIUM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0xb47c4c8f73f009cc0c0d3f92b388d13e293f0b65': 51n,
+        '0xba876237b0f021a6c6d852d6c26e107997cc5e81': 51n,
+        '0xe45a355d9e9cad2ad85f2d03e3ee3102a036acf0': 51n,
+      },
+    },
+  },
   [ChainId.ARC]: {
     // Pool initialized at the exact 1e12 raw ratio (2^96 / 1e6), so slot0 is
     // already right — no sqrtPriceFromQuoter (see the constant's doc).
     [NATIVE_USDC_CONVERTER_HOOK_ON_ARC]: {gasOverheadPerHop: 250_000n},
+    [AERO_SLIPSTREAM_AGGREGATOR_ON_ARC]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x128cc466b61f542da60c70e3aa11c10e19b84edb':
+          0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00n,
+        '0xbef5f6d51cb62b58e6a8f77868681825c6fe21c1': 9n,
+        '0x171a4217b86a807a64eb94757db6849fb4bdbaa0': 9n,
+      },
+    },
   },
   [ChainId.SEPOLIA]: {
     // The hook's `maxGas()` reports 100000. Its pool sits at a 1:1 raw
@@ -1337,6 +1514,7 @@ export const NFTX_FLEX_HOOK_ON_MAINNET =
 export const NFTX_V4_HOOK_ON_ARBITRUM =
   '0xaa49adadd33c5e953b645567afb10cbbba63afc4';
 export const NFTX_V4_HOOK_ON_INK = '0xaa49adadd33c5e953b645567afb10cbbba63afc4';
+export const NFTX_HOOK_ON_INK = '0xc1595f4277c94fa15c397ecad787fc0072862fc4';
 export const NFTX_V4_HOOK_ON_BASE =
   '0xaa49adadd33c5e953b645567afb10cbbba63afc4';
 export const NFTX_V4_HOOK_ON_MAINNET_2 =
@@ -1518,6 +1696,9 @@ export const HOOKR_MODULAR_HOOK_V6_ON_ROBINHOOD =
   '0xb3ca29cf721380cee8b8e4755f3865ebc68fe8cc';
 export const HOOKR_ROOT_ON_ROBINHOOD =
   '0x89c9fb50d1f03192230ffb1c279bb6e7d3fe6acc';
+// Bankr launch hook: same address on Base, Arbitrum, Mainnet, BNB, Robinhood
+// and Arc. Declared above HOOK_MIN_GAS_PER_CHAIN, which references it.
+export const BANKR_LAUNCH_HOOK = '0xf8df392d399af9c1235b02e5df8c56fedb7978cc';
 export const HOODSALE_V4_HOOK_ON_ROBINHOOD =
   '0xd996bb10ee4c780bd619bc9f3fb22d62c4bda0cc';
 export const LAUNCHX_V4_TAX_HOOK_ON_ROBINHOOD =
@@ -1652,6 +1833,12 @@ type HookMinGas = Readonly<{
   swapGasLimit: number;
 }>;
 
+// 960k of per-pool headroom on top of a plain swap.
+const BANKR_LAUNCH_HOOK_MIN_GAS: HookMinGas = {
+  quoteGasPerCall: 1_200_000,
+  swapGasLimit: 1_300_000,
+};
+
 /**
  * Gas minimums for hooks whose swap callback reverts below a `gasleft()`
  * floor. `OnChainQuoteFetcher` raises the per-call quote gas of a route
@@ -1666,7 +1853,23 @@ export const HOOK_MIN_GAS_PER_CHAIN: Partial<
   Record<ChainId, Readonly<Record<string, HookMinGas>>>
 > &
   Record<number, Readonly<Record<string, HookMinGas>>> = {
+  [ChainId.MAINNET]: {
+    [BANKR_LAUNCH_HOOK]: BANKR_LAUNCH_HOOK_MIN_GAS,
+  },
+  [ChainId.BASE]: {
+    [BANKR_LAUNCH_HOOK]: BANKR_LAUNCH_HOOK_MIN_GAS,
+  },
+  [ChainId.ARBITRUM_ONE]: {
+    [BANKR_LAUNCH_HOOK]: BANKR_LAUNCH_HOOK_MIN_GAS,
+  },
+  [ChainId.BNB]: {
+    [BANKR_LAUNCH_HOOK]: BANKR_LAUNCH_HOOK_MIN_GAS,
+  },
+  [ChainId.ARC]: {
+    [BANKR_LAUNCH_HOOK]: BANKR_LAUNCH_HOOK_MIN_GAS,
+  },
   [ChainId.ROBINHOOD]: {
+    [BANKR_LAUNCH_HOOK]: BANKR_LAUNCH_HOOK_MIN_GAS,
     // beforeSwap reverts 0x897f2822 below ~6.8M gasleft; a quote through it
     // uses ~1.5M. A Universal Router swap through it estimates at ~7.5M
     // (eth_estimateGas) and reverts at 7M; 10M is that estimate with trading's
@@ -1919,8 +2122,6 @@ export const STOCK_HOOK_ON_ROBINHOOD =
   '0x1c3794f44430fd5bbcde988d8a636df6699068cc';
 export const KERB_FEE_HOOK_V1_ON_ROBINHOOD =
   '0x6cdfb1f3dec216b16b206ea2387c119b3a34a080';
-export const BELLSWAP_HOOK_ON_ROBINHOOD =
-  '0xe136bc1a37fa63cbd7051d0545572a69f815a080';
 export const OURSMEME_HOOK_ON_ROBINHOOD =
   '0x52ff89461872e17d5861dc769897c71a8065e044';
 export const RUNNER_HOOK_ON_ROBINHOOD =
@@ -2141,6 +2342,17 @@ export const SWAP_FEE_HOOK_ON_BASE =
 // EMA dynamic fee
 export const EMA_DYNAMIC_FEE_HOOK_ON_MAINNET =
   '0x0070a9c7ae1e77288797f951fe0eb3000d64c0c0';
+export const EMA_DYNAMIC_FEE_HOOK_ON_BNB =
+  '0x0a00b53df3053cdacb33805c59ec62fe77ffc0c0';
+// zETH
+export const ZETH_HOOK_ON_MAINNET =
+  '0x347d15a81cd331cc7e92faf8b1431140f304b0c4';
+// BurnRise
+export const BURN_RISE_HOOK_ON_ROBINHOOD =
+  '0x1e9a5ed566669fde4d7d5fd48a2f077b41cea8cc';
+// Ether Share
+export const DIRECT_LAUNCH_HOOK_ON_ROBINHOOD =
+  '0x41bf10238f14d0d244c3e520ed8a7d2540e6a044';
 // POOLZ
 export const POOLZ_FEE_HOOK_ON_ROBINHOOD =
   '0x4d51f3c2be02329c3270ce32ce1b38bd7fc620cc';
@@ -2189,6 +2401,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.MAINNET]: [
     UNI_HOOKS_SHARED_ON_MAINNET,
     EMA_DYNAMIC_FEE_HOOK_ON_MAINNET,
+    ZETH_HOOK_ON_MAINNET,
     IMDO_HOOK_ON_MAINNET,
     PANGEA_FEE_HOOK_V2_ON_MAINNET,
     STANDARD_LAUNCH_HOOK_ON_MAINNET,
@@ -2320,6 +2533,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ASTRA_HOOK_ON_MAINNET,
     VOLATILITY_GUARD_HOOK_V8_ON_MAINNET,
     STUUS_MIN_BUY_HOOK_ON_MAINNET,
+    BANKR_LAUNCH_HOOK,
     ...(AGG_HOOKS_REVERSE_LOOKUP.get(ChainId.MAINNET)?.keys() ?? []),
   ],
   [ChainId.GOERLI]: [ADDRESS_ZERO],
@@ -2327,6 +2541,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
   [ChainId.OPTIMISM]: [
     ADDRESS_ZERO,
     AERO_SLIPSTREAM_AGGREGATOR_ON_OPTIMISM,
+    WOO_PPV2_AGGREGATOR_ON_OPTIMISM,
     ARRAKIS_PRIVATE_HOOK_V2,
     WETH_HOOKS_ADDRESS_ON_OP_MAINNET,
     FINDEX_HOOK_ON_OPTIMISM,
@@ -2359,6 +2574,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FLAUNCH_ANYPOSM_VESTED_ON_ARBITRUM,
     FLAUNCH_POSITION_MANAGER_V1_6_ON_ARBITRUM,
     GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM,
+    BANKR_LAUNCH_HOOK,
+    WOO_PPV2_AGGREGATOR_ON_ARBITRUM,
     POOL_AGL_HOOK,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
@@ -2369,6 +2586,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AEGIS_V1_1_ON_POLYGON,
     AEGIS_DFM_ON_POLYGON,
     FINDEX_HOOK_V2_ON_POLYGON,
+    DODO_V2_AGGREGATOR_WBTC_USDC_ON_POLYGON,
+    DODO_V2_AGGREGATOR_USDCE_WETH_ON_POLYGON,
+    WOO_PPV2_AGGREGATOR_ON_POLYGON,
     POOL_AGL_HOOK,
   ],
   [ChainId.POLYGON_MUMBAI]: [ADDRESS_ZERO],
@@ -2398,6 +2618,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     CLANKER_HOOK_DYNAMIC_FEE_V2_ON_BNB,
     SINGLETON_FLOOR_HOOK_ON_BNB,
     PANGEA_MULTICHAIN_HOOK_ON_BNB,
+    EMA_DYNAMIC_FEE_HOOK_ON_BNB,
+    BANKR_LAUNCH_HOOK,
+    PANCAKE_V3_AGGREGATOR_ON_BNB,
     POOL_AGL_HOOK,
   ],
   [ChainId.AVALANCHE]: [
@@ -2406,6 +2629,9 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     LOOPER_LFJ_HOOK_ON_AVALANCHE,
     PHARAOH_V3_AGGREGATOR_ON_AVALANCHE,
     PHARAOH_LB_AGGREGATOR_ON_AVALANCHE,
+    DODO_V2_AGGREGATOR_BTCB_USDC_ON_AVALANCHE,
+    DODO_V2_AGGREGATOR_WETHE_USDC_ON_AVALANCHE,
+    WOO_PPV2_AGGREGATOR_ON_AVALANCHE,
     POOL_AGL_HOOK,
   ],
   [ChainId.BASE_GOERLI]: [ADDRESS_ZERO],
@@ -2419,6 +2645,10 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     POOL_AGL_HOOK,
     MEMESTOCK_HOOK_ON_BASE,
     BANKR_INDEX_HOOK_ON_BASE,
+    AERO_SLIPSTREAM_AGGREGATOR_ON_BASE,
+    AERO_SLIPSTREAM_AGGREGATOR_V2_ON_BASE,
+    FLUID_DEX_T1_AGGREGATOR_ON_BASE,
+    BANKR_LAUNCH_HOOK,
     FEE_HOOK_ON_BASE,
     MYSPHERE_LAUNCH_HOOK_ON_BASE,
     GRO_PERMISSIONED_HOOK_ON_BASE,
@@ -2637,6 +2867,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BIN_HOOK_V2_ON_ROBINHOOD,
     SINJOH_PREFERRED_HOOK_ON_ROBINHOOD,
     CETH_FEE_HOOK_ON_ROBINHOOD,
+    BURN_RISE_HOOK_ON_ROBINHOOD,
+    DIRECT_LAUNCH_HOOK_ON_ROBINHOOD,
     INCOME_MARKET_HOOK_1000_ON_ROBINHOOD,
     SOVRN_HOOK_ON_ROBINHOOD,
     UP_ONLY_HOOK_ON_ROBINHOOD,
@@ -2927,7 +3159,6 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     RUNITUP_TAX_HOOK_ON_ROBINHOOD,
     STOCK_HOOK_ON_ROBINHOOD,
     KERB_FEE_HOOK_V1_ON_ROBINHOOD,
-    BELLSWAP_HOOK_ON_ROBINHOOD,
     OURSMEME_HOOK_ON_ROBINHOOD,
     RUNNER_HOOK_ON_ROBINHOOD,
     BLOCK_HOOK_ON_ROBINHOOD,
@@ -2948,6 +3179,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     FRANK_UNIV4_HOOK_ON_ROBINHOOD,
     PONS_V2_MEME_HOOK_ON_ROBINHOOD_5,
     BANKR_INDEX_HOOK_ON_ROBINHOOD,
+    BANKR_LAUNCH_HOOK,
     RYFT_POOL_HOOK_ON_ROBINHOOD,
     LAUNCH_POOL_HOOK_ON_ROBINHOOD,
     OFIN_HOOK_ON_ROBINHOOD,
@@ -2961,6 +3193,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AEGIS_ENGINE_ON_INK,
     LAUNCHER_RELAY_POOL_HOOK_ON_INK,
     NFTX_V4_HOOK_ON_INK,
+    NFTX_HOOK_ON_INK,
     FLETH_HOOK_ON_INK,
     SENTRY_INK_WETH_XSTOCK_HOOK_ON_INK,
     SENTRY_STOCK_FEE_HOOK_V3_ON_INK,
@@ -2972,6 +3205,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     NEST_AVR_HOOK_ON_ELYSIUM,
     KLEOS_V5_HOOK_ON_ELYSIUM,
     KLEOS_V5_HOOK_V2_ON_ELYSIUM,
+    AERO_SLIPSTREAM_ELYSIUM_AGGREGATOR_ON_ELYSIUM,
+    RAMSES_V3_ELYSIUM_AGGREGATOR_ON_ELYSIUM,
   ],
   [ChainId.ARC]: [
     APEFUN_LAUNCH_FEE_HOOK_ON_ARC,
@@ -2991,6 +3226,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     NATIVE_USDC_CONVERTER_HOOK_ON_ARC,
     TRIPLFUN_FEE_HOOK_ON_ARC,
     ARCHEMIST_HOOK_ON_ARC,
+    BANKR_LAUNCH_HOOK,
     UBI_FUN_POSITION_MANAGER_ON_ARC,
     BASEDBID_HOOK_ON_ARC,
     CTRL_NATIVE_LAUNCH_HOOK_ON_ARC,
@@ -3001,5 +3237,6 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     SINGLETON_FLOOR_HOOK_ON_ARC,
     UBI_FUN_POSITION_MANAGER_V3_ON_ARC,
     FLOOR_HOOK_CL_2_ON_ARC,
+    AERO_SLIPSTREAM_AGGREGATOR_ON_ARC,
   ],
 };

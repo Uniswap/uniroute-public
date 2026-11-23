@@ -499,7 +499,7 @@ describe('TVL-bypass registries stay consistent with HOOKS_ADDRESSES_ALLOWLIST',
     for (const hook of ZERO_MEASURED_TVL_HOOKS_PER_CHAIN[4663] ?? []) {
       expect(robinhood?.has(hook.toLowerCase())).toBe(true);
     }
-    expect(getTvlBypassHookAddresses(ChainId.POLYGON)).toBeUndefined();
+    expect(getTvlBypassHookAddresses(ChainId.CELO)).toBeUndefined();
   });
 
   it('bypasses the TVL floor for every WETH wrapper hook', () => {
@@ -538,9 +538,9 @@ describe('getTvlBypassHookAddresses dynamic ZLCA overlay', () => {
   });
 
   it('returns dynamic-only hooks on chains with no static registry entries', () => {
-    expect(getTvlBypassHookAddresses(ChainId.POLYGON)).toBeUndefined();
-    setDynamicZlcaHooks(ChainId.POLYGON, new Map([[DYNAMIC_HOOK, 500_000n]]));
-    expect(getTvlBypassHookAddresses(ChainId.POLYGON)?.has(DYNAMIC_HOOK)).toBe(
+    expect(getTvlBypassHookAddresses(ChainId.CELO)).toBeUndefined();
+    setDynamicZlcaHooks(ChainId.CELO, new Map([[DYNAMIC_HOOK, 500_000n]]));
+    expect(getTvlBypassHookAddresses(ChainId.CELO)?.has(DYNAMIC_HOOK)).toBe(
       true
     );
   });
