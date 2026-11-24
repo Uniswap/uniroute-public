@@ -2062,6 +2062,110 @@ describe('permissioned-hook pools listed by pool id', () => {
       );
     });
   });
+
+  // N3XT's v4NDD adapters sit on the shared Sepolia PermissionedHooks. The QA
+  // pool's fee 100 / tickSpacing 10 is off the canonical grid, so the
+  // registry lists it; the dev pool's 3000 / 60 is admitted by rule.
+  describe('N3XT NDD Sepolia pools', () => {
+    const SEPOLIA_USDC = '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238';
+    const NDD_DEV_ADAPTER = '0xb368543e62c1bcc34732f52c0fecd48423eb6914';
+    const NDD_QA_ADAPTER = '0xe0fe6792dfa4e38b73f7a7ecc6b7873f7d509728';
+    // Pool ids from the PoolManager's Initialize events.
+    const NDD_DEV_POOL_ID =
+      '0xd228da2d1886531e1fc63137bb9b2bb1ad2b466b5175cbfb555c91fa22d5a454';
+    const NDD_QA_POOL_ID =
+      '0xc798944e1d654ebde15719e6bb07638cf2fadc43da0ec55331bd79e6f53462e0';
+    const createNddPool = (overrides: Partial<V4SubgraphPool> = {}) =>
+      createPool({
+        id: NDD_QA_POOL_ID,
+        hooks: SEPOLIA_PERMISSIONED_HOOK,
+        feeTier: '100',
+        tickSpacing: '10',
+        tvlETH: 0,
+        tvlUSD: 0,
+        token0: {id: SEPOLIA_USDC, symbol: 'USDC', name: 'USDC', decimals: '6'},
+        token1: {
+          id: NDD_QA_ADAPTER,
+          symbol: 'v4NDD',
+          name: 'Uniswap v4 N3XT Digital Dollar',
+          decimals: '2',
+        },
+        ...overrides,
+      });
+    const filterSepolia = (pools: V4SubgraphPool[]) =>
+      v4HooksPoolsFiltering(ChainId.SEPOLIA, pools, mockLogger, mockMetric).map(
+        p => p.id.toLowerCase()
+      );
+
+    it('the listed QA id is the keccak of the USDC/v4NDD fee-100 PoolKey', () => {
+      expect(
+        computeV4PoolId(
+          SEPOLIA_USDC,
+          NDD_QA_ADAPTER,
+          100,
+          10,
+          SEPOLIA_PERMISSIONED_HOOK
+        )
+      ).toBe(NDD_QA_POOL_ID);
+    });
+
+    it('the dev id is the keccak of the USDC/v4NDD fee-3000 PoolKey', () => {
+      expect(
+        computeV4PoolId(
+          SEPOLIA_USDC,
+          NDD_DEV_ADAPTER,
+          3000,
+          60,
+          SEPOLIA_PERMISSIONED_HOOK
+        )
+      ).toBe(NDD_DEV_POOL_ID);
+    });
+
+    const tests: {
+      name: string;
+      pool: V4SubgraphPool;
+      admitted: boolean;
+    }[] = [
+      {
+        name: 'admits the listed off-grid QA pool from the shared registry',
+        pool: createNddPool(),
+        admitted: true,
+      },
+      {
+        name: 'admits the canonical dev pool by rule',
+        pool: createNddPool({
+          id: NDD_DEV_POOL_ID,
+          feeTier: '3000',
+          tickSpacing: '60',
+          token1: {
+            id: NDD_DEV_ADAPTER,
+            symbol: 'v4NDD',
+            name: 'Uniswap v4 N3XT Digital Dollar',
+            decimals: '2',
+          },
+        }),
+        admitted: true,
+      },
+      {
+        name: 'drops an unlisted off-grid pool on the same adapter',
+        pool: createNddPool({id: '0x' + '3'.repeat(64)}),
+        admitted: false,
+      },
+      {
+        name: 'drops the listed QA id on a hook that does not own the adapter',
+        pool: createNddPool({hooks: GROMA_HOOK}),
+        admitted: false,
+      },
+    ];
+
+    for (const test of tests) {
+      it(test.name, () => {
+        expect(filterSepolia([test.pool]).includes(test.pool.id)).toBe(
+          test.admitted
+        );
+      });
+    }
+  });
 });
 
 describe('v4HooksPoolsFiltering dynamic ZLCA hooks', () => {
