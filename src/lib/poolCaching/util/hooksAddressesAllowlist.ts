@@ -638,6 +638,8 @@ export const SLIPSTREAM_AGG_HOOK_ON_BASE =
 // Aerodrome Classic aggregator
 export const AERODROME_CLASSIC_AGGREGATOR_ON_BASE =
   '0xa27c837fff49db0089f639a5ae2362c17f7b2888';
+export const AERODROME_CLASSIC_AGGREGATOR_V2_ON_BASE =
+  '0xeb9b1163b1eb51b00f53a6b2133430bd42832888';
 // FountainUrm ERC-4626 wrapper
 export const FOUNTAIN_URM_HOOK_ON_BASE =
   '0xe55a5e3d35ad2b0bbe3a0bf9ad13de2599d2e888';
@@ -662,6 +664,8 @@ export const AERO_SLIPSTREAM_AGGREGATOR_ON_BASE =
   '0xa83a79b6f22868f440d33a011c21bd5e0c2f2888';
 export const AERO_SLIPSTREAM_AGGREGATOR_V2_ON_BASE =
   '0x146745d9bb065a93a5428def98da247e942d2888';
+export const AERO_SLIPSTREAM_AGGREGATOR_V3_ON_BASE =
+  '0x3d6389e9f02afe379763b83ab619585c83582888';
 export const AERO_SLIPSTREAM_AGGREGATOR_ON_ARC =
   '0x0bf6bd200bb39df2d85578d1725e3f40d6682888';
 export const AERO_SLIPSTREAM_ELYSIUM_AGGREGATOR_ON_ELYSIUM =
@@ -689,6 +693,13 @@ export const DODO_V2_AGGREGATOR_WETHE_USDC_ON_AVALANCHE =
 // PancakeSwap V3 aggregator
 export const PANCAKE_V3_AGGREGATOR_ON_BNB =
   '0xda546ccfe17c5f825e26b9797b4a02177d6d2888';
+export const PANCAKE_V3_AGGREGATOR_BSTOCKS_ON_BNB =
+  '0x37cd72fabf04d02879392b1293da26ab548d2888';
+export const PANCAKE_V3_AGGREGATOR_W3_ON_BNB =
+  '0xb807c6b295a8d548f49419a75292218f4e8a2888';
+// Curve StableSwap-NG aggregator
+export const CURVE_STABLE_NG_AGGREGATOR_ON_MAINNET =
+  '0x1a0156236e898a1efa7625c72b0f1e2d150b2888';
 
 // Zero-liquidity external-fill adapters. Declared above ZLCA_HOOKS_PER_CHAIN,
 // which references them at module load.
@@ -829,6 +840,11 @@ const XSTOCK_WRAP_HOOKS_ZLCA_ON_MONAD: Record<string, ZlcaHookConfig> =
     )
   );
 
+// The BNB "bstock" equity tokens are OpenZeppelin ERC-7201 ERC20s: balances
+// live in the namespaced `openzeppelin.storage.ERC20` struct.
+const BSTOCK_BALANCE_SLOT =
+  0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00n;
+
 // Intersected with Record<number, ...> (matching HOOKS_ADDRESSES_ALLOWLIST's
 // shape) so this can be indexed by both this file's @uniswap/sdk-core ChainId
 // and the separate, numerically-overlapping ChainId enum in lib/config.ts.
@@ -879,6 +895,27 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0': 0n,
       },
     },
+    // crvUSD is a Vyper token (balances keyed keccak(slot, owner)), which
+    // balanceStorageKey cannot express, so crvUSD sells quote against the
+    // PoolManager's real crvUSD balance and revert above it.
+    [CURVE_STABLE_NG_AGGREGATOR_ON_MAINNET]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x085780639cc2cacd35e474e71f4d000e2405d8f6': 151n,
+        '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': 9n,
+        '0xdac17f958d2ee523a2206206994597c13d831ec7': 2n,
+        '0x6c3ea9036406852006290770bedfcaba0e23a0e8': 1n,
+        '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': 3n,
+        '0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee': 101n,
+        '0x18084fba666a33d37592fa2633fd49a74dd93a88': 1n,
+        '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf': 9n,
+        '0x99cd4ec3f88a45940936f469e4bb72a2a701eeb9': 2n,
+        '0xdc035d45d973e3ec169d2276ddab16f1e407384f': 2n,
+        '0x7c135549504245b5eae64fc0e99fa5ebabb8e35d': 351n,
+      },
+    },
   },
   [ChainId.BASE]: {
     [FLUID_DEX_T1_AGGREGATOR_ON_BASE]: {
@@ -899,6 +936,11 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
     },
+    // Simulated swaps through the tokenized-equity pools used 455k-682k gas.
+    [AERO_SLIPSTREAM_AGGREGATOR_V3_ON_BASE]: {
+      gasOverheadPerHop: 700_000n,
+      sqrtPriceFromQuoter: true,
+    },
     [SLIPSTREAM_AGG_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
@@ -906,6 +948,23 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     [AERODROME_CLASSIC_AGGREGATOR_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
+    },
+    [AERODROME_CLASSIC_AGGREGATOR_V2_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x4200000000000000000000000000000000000006': 3n,
+        '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf': 3n,
+        '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': 9n,
+        '0x940181a94a35a4569e4529a3cdfb74e38fd98631': 0n,
+        '0x9b5e262cf9bb04869ab40b19af91d2dc85761722': 0n,
+        '0xe014d2a4da6e450f21b5050120d291e63c8940fd': 0n,
+        '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2': 0n,
+        '0x8c0d3adcf8ce094e1ae437557ec90a6374dc9bdd': 0n,
+        '0xf4d97f2da56e8c3098f3a8d538db630a2606a024': 0n,
+        '0xc0634090f2fe6c6d75e61be2b949464abb498973': 0n,
+      },
     },
     [FOUNTAIN_URM_HOOK_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
@@ -1054,6 +1113,43 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
       poolManagerBalanceSlots: {
         '0x55d398326f99059ff775485246999027b3197955': 1n,
         '0xaa036928c9c0df07d525b55ea8ee690bb5a628c1': 0n,
+      },
+    },
+    [PANCAKE_V3_AGGREGATOR_BSTOCKS_ON_BNB]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x55d398326f99059ff775485246999027b3197955': 1n,
+        '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 3n,
+        '0x02fca66c1d1afb4e2a7884261eb00f63598a7436': BSTOCK_BALANCE_SLOT,
+        '0x38dd26788cf2d901e3abf04efe3007d459d0fc53': BSTOCK_BALANCE_SLOT,
+        '0x205812cdbed920aff76c6580abd681a46d11efc7': BSTOCK_BALANCE_SLOT,
+        '0x5b1910eaad6450e50f816082aa078c41f10c292f': BSTOCK_BALANCE_SLOT,
+        '0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1': BSTOCK_BALANCE_SLOT,
+        '0xca750ef65f295bbecd685abf54e82caf297bdb61': BSTOCK_BALANCE_SLOT,
+        '0x7138b48df7d98d7e3cc221bfe7192d0a178182d8': BSTOCK_BALANCE_SLOT,
+        '0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a': BSTOCK_BALANCE_SLOT,
+        '0x80f3d493ebce97e343c53d29a137942416b4ffc0': BSTOCK_BALANCE_SLOT,
+      },
+    },
+    [PANCAKE_V3_AGGREGATOR_W3_ON_BNB]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x55d398326f99059ff775485246999027b3197955': 1n,
+        '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 3n,
+        '0x10d4183389e99233db3cc981c43443ebd28ebd5e': 1n,
+        '0x02fca66c1d1afb4e2a7884261eb00f63598a7436': BSTOCK_BALANCE_SLOT,
+        '0x5d3a12c42e5372b2cc3264ab3cdcf660a1555238': 0n,
+        '0x0e4f6209ed984b21edea43ace6e09559ed051d48': 0n,
+        '0x2170ed0880ac9a755fd29b2688956bd959f933f8': 1n,
+        '0x55ad16bd573b3365f43a9daeb0cc66a73821b4a5': 0n,
+        '0x3b4de3c7855c03bb9f50ea252cd2c9fa1125ab07': 0n,
+        '0x7c8217517ed4711fe2deccdfeffe8d906b9ae11f': 151n,
+        '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': 1n,
+        '0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c': 1n,
       },
     },
   },
@@ -2353,6 +2449,9 @@ export const BURN_RISE_HOOK_ON_ROBINHOOD =
 // Ether Share
 export const DIRECT_LAUNCH_HOOK_ON_ROBINHOOD =
   '0x41bf10238f14d0d244c3e520ed8a7d2540e6a044';
+// HookPot
+export const HOOK_POT_ON_ROBINHOOD =
+  '0x2b90d9d9be5279ca20ccf89ed537be26a805a0cc';
 // POOLZ
 export const POOLZ_FEE_HOOK_ON_ROBINHOOD =
   '0x4d51f3c2be02329c3270ce32ce1b38bd7fc620cc';
@@ -2402,6 +2501,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     UNI_HOOKS_SHARED_ON_MAINNET,
     EMA_DYNAMIC_FEE_HOOK_ON_MAINNET,
     ZETH_HOOK_ON_MAINNET,
+    CURVE_STABLE_NG_AGGREGATOR_ON_MAINNET,
     IMDO_HOOK_ON_MAINNET,
     PANGEA_FEE_HOOK_V2_ON_MAINNET,
     STANDARD_LAUNCH_HOOK_ON_MAINNET,
@@ -2621,6 +2721,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     EMA_DYNAMIC_FEE_HOOK_ON_BNB,
     BANKR_LAUNCH_HOOK,
     PANCAKE_V3_AGGREGATOR_ON_BNB,
+    PANCAKE_V3_AGGREGATOR_BSTOCKS_ON_BNB,
+    PANCAKE_V3_AGGREGATOR_W3_ON_BNB,
     POOL_AGL_HOOK,
   ],
   [ChainId.AVALANCHE]: [
@@ -2647,6 +2749,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     BANKR_INDEX_HOOK_ON_BASE,
     AERO_SLIPSTREAM_AGGREGATOR_ON_BASE,
     AERO_SLIPSTREAM_AGGREGATOR_V2_ON_BASE,
+    AERO_SLIPSTREAM_AGGREGATOR_V3_ON_BASE,
     FLUID_DEX_T1_AGGREGATOR_ON_BASE,
     BANKR_LAUNCH_HOOK,
     FEE_HOOK_ON_BASE,
@@ -2788,6 +2891,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     STONK_HOOK_ON_BASE,
     SLIPSTREAM_AGG_HOOK_ON_BASE,
     AERODROME_CLASSIC_AGGREGATOR_ON_BASE,
+    AERODROME_CLASSIC_AGGREGATOR_V2_ON_BASE,
     FOUNTAIN_URM_HOOK_ON_BASE,
     WOOFI_AGGREGATOR_ON_BASE,
     PROPAMM_AGGREGATOR_ON_BASE,
@@ -2869,6 +2973,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     CETH_FEE_HOOK_ON_ROBINHOOD,
     BURN_RISE_HOOK_ON_ROBINHOOD,
     DIRECT_LAUNCH_HOOK_ON_ROBINHOOD,
+    HOOK_POT_ON_ROBINHOOD,
     INCOME_MARKET_HOOK_1000_ON_ROBINHOOD,
     SOVRN_HOOK_ON_ROBINHOOD,
     UP_ONLY_HOOK_ON_ROBINHOOD,
