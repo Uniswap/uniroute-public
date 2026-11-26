@@ -654,6 +654,20 @@ export const WOO_PPV2_AGGREGATOR_ON_OPTIMISM =
   '0x41ef917128875f75da696a31654440d05d322888';
 export const WOO_PPV2_AGGREGATOR_ON_AVALANCHE =
   '0x2725ffb0695a5aebaf7330e8bc9442f8eed52888';
+export const WOOFI_AGGREGATOR_ON_ARBITRUM =
+  '0x772d41ff3325b5457be90cd79f0dd5c56be12888';
+export const WOOFI_AGGREGATOR_ON_AVALANCHE =
+  '0x77ce1bcb2bcca5fb6677fcd9deb68a7b64c72888';
+export const WOOFI_AGGREGATOR_ON_BNB =
+  '0x774791c6557d3ce1fcddc8f29d8a8f5f945c2888';
+export const WOO_PPV2_AGGREGATOR_ON_BASE =
+  '0x75340154bf95f1c9f7c57cf71aad9e8d42002888';
+export const WOO_PPV2_AGGREGATOR_V2_ON_OPTIMISM =
+  '0x0cb1c425aba82507adb89c067e7646c52fa02888';
+export const WOO_PPV2_AGGREGATOR_V2_ON_ARBITRUM =
+  '0x08f1f30bc37ce96ef8370d0cc7f550e3cafc2888';
+export const WOO_PPV2_AGGREGATOR_V2_ON_POLYGON =
+  '0x007dfd3aa3c72ea427dfe6c655f247a9f9e72888';
 // PropAMM aggregator
 export const PROPAMM_AGGREGATOR_ON_BASE =
   '0x5159b939db93df3a9cce73a2449c8727b4daa888';
@@ -974,6 +988,16 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
     },
+    [WOO_PPV2_AGGREGATOR_ON_BASE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x4200000000000000000000000000000000000006': 3n,
+        '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913': 9n,
+        '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf': 9n,
+      },
+    },
     [PROPAMM_AGGREGATOR_ON_BASE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
@@ -1023,6 +1047,30 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0xaf88d065e77c8cc2239327c5edb3a432268e5831': 9n,
       },
     },
+    [WOO_PPV2_AGGREGATOR_V2_ON_ARBITRUM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0xaf88d065e77c8cc2239327c5edb3a432268e5831': 9n,
+        '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': 51n,
+        '0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f': 51n,
+        '0x912ce59144191c1204e64559fe8253a0e49e6548': 51n,
+        '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': 51n,
+      },
+    },
+    [WOOFI_AGGREGATOR_ON_ARBITRUM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0xaf88d065e77c8cc2239327c5edb3a432268e5831': 9n,
+        '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9': 51n,
+        '0x82af49447d8a07e3bd95bd0d56f35241523fbab1': 51n,
+        '0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f': 51n,
+        '0x912ce59144191c1204e64559fe8253a0e49e6548': 51n,
+      },
+    },
   },
   [ChainId.OPTIMISM]: {
     [WOO_PPV2_AGGREGATOR_ON_OPTIMISM]: {
@@ -1035,6 +1083,19 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0x0b2c639c533813f4aa9d7837caf62653d097ff85': 9n,
         '0x68f180fcce6836688e9084f035309e29bf0a2095': 0n,
         '0x4200000000000000000000000000000000000042': 0n,
+      },
+    },
+    [WOO_PPV2_AGGREGATOR_V2_ON_OPTIMISM]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x4200000000000000000000000000000000000006': 3n,
+        '0x68f180fcce6836688e9084f035309e29bf0a2095': 0n,
+        '0x94b008aa00579c1307b0ef2c499ad98a8ce58e58': 0n,
+        '0x7f5c764cbc14f9669b88837ca1490cca17c31607': 0n,
+        '0x4200000000000000000000000000000000000042': 0n,
+        '0x0b2c639c533813f4aa9d7837caf62653d097ff85': 9n,
       },
     },
     [AERO_SLIPSTREAM_AGGREGATOR_ON_OPTIMISM]: {
@@ -1082,6 +1143,18 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7': 3n,
       },
     },
+    [WOOFI_AGGREGATOR_ON_AVALANCHE]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7': 51n,
+        '0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e': 9n,
+        '0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab': 0n,
+        '0x152b9d0fdc40c096757f570a51e494bd4b943e50': 0n,
+        '0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7': 3n,
+      },
+    },
     [DODO_V2_AGGREGATOR_BTCB_USDC_ON_AVALANCHE]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
@@ -1102,6 +1175,18 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
     },
   },
   [ChainId.BNB]: {
+    [WOOFI_AGGREGATOR_ON_BNB]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x55d398326f99059ff775485246999027b3197955': 1n,
+        '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': 1n,
+        '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 3n,
+        '0x2170ed0880ac9a755fd29b2688956bd959f933f8': 1n,
+        '0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c': 1n,
+      },
+    },
     [USDD_PSM_HOOK_ON_BNB]: {
       gasOverheadPerHop: 500_000n,
       sqrtPriceFromQuoter: true,
@@ -1164,6 +1249,19 @@ export const ZLCA_HOOKS_PER_CHAIN: Partial<
         '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': 9n,
         '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': 0n,
         '0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6': 0n,
+      },
+    },
+    [WOO_PPV2_AGGREGATOR_V2_ON_POLYGON]: {
+      gasOverheadPerHop: 500_000n,
+      sqrtPriceFromQuoter: true,
+      settleBeforeSwap: true,
+      poolManagerBalanceSlots: {
+        '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': 0n,
+        '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': 0n,
+        '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': 9n,
+        '0x1bfd67037b42cf73acf2047067bd4f2c47d9bfd6': 0n,
+        '0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270': 3n,
+        '0x7ceb23fd6bc0add59e62ac25578270cff1b9f619': 0n,
       },
     },
     [DODO_V2_AGGREGATOR_WBTC_USDC_ON_POLYGON]: {
@@ -2280,6 +2378,11 @@ export const FRANK_UNIV4_HOOK_ON_ROBINHOOD =
 // MAX_HOOK_FEE_BPS=1000, total<=MAX_TOTAL_TRADE_FEE_BPS=2000; frozen per pool.
 export const PONS_V2_MEME_HOOK_ON_ROBINHOOD_5 =
   '0xe6da98faca06d7db50a42f93ca79fd6d1ffba044';
+// PonsV2MemeHook gen3 (ROUTE-2884): fee-on-top frozen per pool, total capped by
+// MAX_TOTAL_TRADE_FEE_BPS=2000. Anti-snipe buy tax (<=99%, <=3s) can be armed only
+// once per pool, at launch.
+export const PONS_V2_MEME_HOOK_GEN3_ON_ROBINHOOD =
+  '0xb496109611aafb4f4b3792fff19f7bc80e5d65cc';
 // BankrIndexHook (ROUTE-2457): operator override. Index engine — beforeSwap
 // executes the basket on each component's own Uniswap v3/v4 pools (LP + protocol
 // fees paid downstream); external-liquidity / mutable-composition accepted.
@@ -2642,6 +2745,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ADDRESS_ZERO,
     AERO_SLIPSTREAM_AGGREGATOR_ON_OPTIMISM,
     WOO_PPV2_AGGREGATOR_ON_OPTIMISM,
+    WOO_PPV2_AGGREGATOR_V2_ON_OPTIMISM,
     ARRAKIS_PRIVATE_HOOK_V2,
     WETH_HOOKS_ADDRESS_ON_OP_MAINNET,
     FINDEX_HOOK_ON_OPTIMISM,
@@ -2676,6 +2780,8 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     GUIDESTAR_STABLE_STABLE_HOOK_ON_ARBITRUM,
     BANKR_LAUNCH_HOOK,
     WOO_PPV2_AGGREGATOR_ON_ARBITRUM,
+    WOO_PPV2_AGGREGATOR_V2_ON_ARBITRUM,
+    WOOFI_AGGREGATOR_ON_ARBITRUM,
     POOL_AGL_HOOK,
   ],
   [ChainId.ARBITRUM_GOERLI]: [ADDRESS_ZERO],
@@ -2689,6 +2795,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     DODO_V2_AGGREGATOR_WBTC_USDC_ON_POLYGON,
     DODO_V2_AGGREGATOR_USDCE_WETH_ON_POLYGON,
     WOO_PPV2_AGGREGATOR_ON_POLYGON,
+    WOO_PPV2_AGGREGATOR_V2_ON_POLYGON,
     POOL_AGL_HOOK,
   ],
   [ChainId.POLYGON_MUMBAI]: [ADDRESS_ZERO],
@@ -2723,6 +2830,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     PANCAKE_V3_AGGREGATOR_ON_BNB,
     PANCAKE_V3_AGGREGATOR_BSTOCKS_ON_BNB,
     PANCAKE_V3_AGGREGATOR_W3_ON_BNB,
+    WOOFI_AGGREGATOR_ON_BNB,
     POOL_AGL_HOOK,
   ],
   [ChainId.AVALANCHE]: [
@@ -2734,6 +2842,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     DODO_V2_AGGREGATOR_BTCB_USDC_ON_AVALANCHE,
     DODO_V2_AGGREGATOR_WETHE_USDC_ON_AVALANCHE,
     WOO_PPV2_AGGREGATOR_ON_AVALANCHE,
+    WOOFI_AGGREGATOR_ON_AVALANCHE,
     POOL_AGL_HOOK,
   ],
   [ChainId.BASE_GOERLI]: [ADDRESS_ZERO],
@@ -2894,6 +3003,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     AERODROME_CLASSIC_AGGREGATOR_V2_ON_BASE,
     FOUNTAIN_URM_HOOK_ON_BASE,
     WOOFI_AGGREGATOR_ON_BASE,
+    WOO_PPV2_AGGREGATOR_ON_BASE,
     PROPAMM_AGGREGATOR_ON_BASE,
     B20_HOOK_ON_BASE,
     LAUNCH_HOOK_4_ON_BASE,
@@ -3283,6 +3393,7 @@ export const HOOKS_ADDRESSES_ALLOWLIST: Partial<
     ADAPTIVE_DYNAMIC_FEE_HOOK_V4_ON_ROBINHOOD,
     FRANK_UNIV4_HOOK_ON_ROBINHOOD,
     PONS_V2_MEME_HOOK_ON_ROBINHOOD_5,
+    PONS_V2_MEME_HOOK_GEN3_ON_ROBINHOOD,
     BANKR_INDEX_HOOK_ON_ROBINHOOD,
     BANKR_LAUNCH_HOOK,
     RYFT_POOL_HOOK_ON_ROBINHOOD,
