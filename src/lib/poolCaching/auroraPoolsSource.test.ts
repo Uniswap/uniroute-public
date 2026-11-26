@@ -10,9 +10,11 @@ import {
   AuroraV3PoolsProvider,
   AuroraV4PoolsProvider,
   IMPLIED_PRICE_SOURCE_TOKENS_BY_CHAIN,
+  MAINNET_ETH_PRICE_FALLBACK_CHAINS,
   TVL_GUARD_EXTRA_ANCHOR_TOKENS_BY_CHAIN,
   WRAPPED_NATIVE_BY_CHAIN,
   applyAuroraPoolSources,
+  fetchNativeUsdPrice,
   auroraContext,
   auroraPoolsSourceConfigFromEnv,
   guardPricedTvlUsd,
@@ -53,8 +55,19 @@ import {IMetric, MetricLoggerUnit} from './sor-providers/util/metric';
 import {
   POOL_STATS_V3_UNPRICED_INDEX,
   PoolStatsIndexMissingError,
+  canonicalTokenKey,
+  type CurrentTokenPrice,
+  type CurrentTokenPricesService,
   type RoutablePoolsService,
 } from '@uniswap/lib-data-ingestion-aurora';
+import {
+  createAddress,
+  toExtendedChainId,
+  type ExtendedChainId,
+  type IBlockchainAddress,
+} from '@uniswap/lib-data-types';
+import {MEGAETH} from '../../stores/chain/hardcoded/chains/MegaEth';
+import {NativeCurrency} from '../../models/chain/NativeCurrency';
 
 const noopLogger: Logger = {
   info: () => {},
@@ -5862,6 +5875,243 @@ describe('pre-filtered V3 that reads its unpriced liquid pools', () => {
     expect(metric.byKey('CachePools.aurora.rejected')).toEqual([
       expect.objectContaining({
         tags: expect.objectContaining({reason: 'error'}),
+      }),
+    ]);
+  });
+});
+
+describe('fetchNativeUsdPrice', () => {
+  const MAINNET_ID = 1;
+  const MEGAETH_ID = 4326;
+  const BASE_ID = 8453;
+  const POLYGON_ID = 137;
+  const HOUR_MS = 60 * 60 * 1000;
+  const INVALID_DATE = new Date(Number.NaN);
+
+  type PriceRow = {
+    chainId: number;
+    priceUsd: number;
+    ageMs: number;
+    timestamp?: Date;
+  };
+
+  // Answers only the tokens it is asked for, keyed the way the Aurora
+  // implementation keys its result (chain id + lowercased address), from rows
+  // stored under their checksummed address as current_token_prices holds them.
+  class FakeCurrentTokenPrices implements CurrentTokenPricesService {
+    readonly requests: string[][] = [];
+    private readonly rows = new Map<string, CurrentTokenPrice>();
+
+    constructor(rows: PriceRow[]) {
+      for (const row of rows) {
+        const wrapped = WRAPPED_NATIVE_BY_CHAIN.get(row.chainId);
+        if (!wrapped) throw new Error(`no wrapped native for ${row.chainId}`);
+        const chainId = toExtendedChainId(row.chainId);
+        const tokenAddress = createAddress(
+          createAddress(wrapped, chainId).checksummed,
+          chainId
+        );
+        const timestamp = row.timestamp ?? new Date(Date.now() - row.ageMs);
+        this.rows.set(canonicalTokenKey(row.chainId, wrapped), {
+          chainId,
+          tokenAddress,
+          priceUsd: row.priceUsd,
+          timestamp,
+          updatedAt: timestamp,
+        });
+      }
+    }
+
+    async batchGet(
+      _ctx: Context,
+      tokens: {chainId: ExtendedChainId; address: IBlockchainAddress}[]
+    ): Promise<Map<string, CurrentTokenPrice>> {
+      this.requests.push(
+        tokens.map(token => `${token.chainId}_${token.address.lowerCased}`)
+      );
+      const found = new Map<string, CurrentTokenPrice>();
+      for (const token of tokens) {
+        const key = canonicalTokenKey(
+          Number(token.chainId),
+          token.address.lowerCased
+        );
+        const row = this.rows.get(key);
+        if (row) found.set(key, row);
+      }
+      return found;
+    }
+  }
+
+  class RecordingLogger implements Logger {
+    readonly warnings: string[] = [];
+    info(): void {}
+    warn(message: string): void {
+      this.warnings.push(message);
+    }
+    error(): void {}
+    debug(): void {}
+    fatal(): void {}
+  }
+
+  function run(chainId: number, rows: PriceRow[]) {
+    const prices = new FakeCurrentTokenPrices(rows);
+    const metric = new FakeMetric();
+    const logger = new RecordingLogger();
+    const result = fetchNativeUsdPrice(prices, chainId, auroraContext(metric), {
+      logger,
+      metric,
+    });
+    return {result, prices, metric, logger};
+  }
+
+  const fallbackMetric = 'CachePools.aurora.native_price_mainnet_fallback';
+  const STALE_MEGAETH_ROW = {
+    chainId: MEGAETH_ID,
+    priceUsd: 4100,
+    ageMs: 38 * HOUR_MS,
+  };
+
+  it('falls back only on MegaETH, whose native token is ETH', () => {
+    expect([...MAINNET_ETH_PRICE_FALLBACK_CHAINS]).toEqual([MEGAETH_ID]);
+    expect(MEGAETH.nativeCurrency).toBe(NativeCurrency.ETH);
+  });
+
+  it('serves a fresh chain price without consulting the fallback', async () => {
+    const {result, metric, logger} = run(MEGAETH_ID, [
+      {chainId: MEGAETH_ID, priceUsd: 3010, ageMs: HOUR_MS},
+      {chainId: MAINNET_ID, priceUsd: 3000, ageMs: 0},
+    ]);
+    await expect(result).resolves.toBe(3010);
+    expect(metric.byKey(fallbackMetric)).toEqual([]);
+    expect(logger.warnings).toEqual([]);
+  });
+
+  it('reads the chain WETH and mainnet WETH rows in one batch', async () => {
+    const {result, prices} = run(MEGAETH_ID, [
+      {chainId: MEGAETH_ID, priceUsd: 3010, ageMs: HOUR_MS},
+    ]);
+    await result;
+    expect(prices.requests).toEqual([
+      [
+        `${MEGAETH_ID}_0x4200000000000000000000000000000000000006`,
+        `${MAINNET_ID}_0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2`,
+      ],
+    ]);
+  });
+
+  it('falls back to mainnet WETH when the MegaETH price is stale', async () => {
+    const {result, metric, logger} = run(MEGAETH_ID, [
+      STALE_MEGAETH_ROW,
+      {chainId: MAINNET_ID, priceUsd: 3000, ageMs: 60_000},
+    ]);
+    await expect(result).resolves.toBe(3000);
+    expect(metric.byKey(fallbackMetric)).toEqual([
+      expect.objectContaining({
+        value: 1,
+        tags: {chainId: String(MEGAETH_ID), status: 'success'},
+      }),
+    ]);
+    expect(logger.warnings).toEqual([
+      expect.stringContaining('using mainnet WETH price'),
+    ]);
+  });
+
+  it.each([
+    [
+      'stale',
+      [{chainId: MAINNET_ID, priceUsd: 3000, ageMs: 25 * HOUR_MS}],
+      'mainnet_price_stale',
+    ],
+    ['missing', [], 'mainnet_price_missing'],
+    [
+      'unreadable',
+      [
+        {
+          chainId: MAINNET_ID,
+          priceUsd: 3000,
+          ageMs: 0,
+          timestamp: INVALID_DATE,
+        },
+      ],
+      'mainnet_price_missing',
+    ],
+  ])(
+    'still rejects when the mainnet row is %s',
+    async (_label, mainnetRows, reason) => {
+      const {result, metric} = run(MEGAETH_ID, [
+        STALE_MEGAETH_ROW,
+        ...mainnetRows,
+      ]);
+      await expect(result).rejects.toThrow(
+        /Stale native token price for chain 4326/
+      );
+      expect(metric.byKey(fallbackMetric)).toEqual([
+        expect.objectContaining({
+          tags: {chainId: String(MEGAETH_ID), status: 'failure', reason},
+        }),
+      ]);
+    }
+  );
+
+  it.each([
+    ['missing', []],
+    [
+      'unreadable',
+      [
+        {
+          chainId: MEGAETH_ID,
+          priceUsd: 3010,
+          ageMs: 0,
+          timestamp: INVALID_DATE,
+        },
+      ],
+    ],
+  ])(
+    'does not fall back when the chain row is %s',
+    async (_label, chainRows) => {
+      const {result, metric} = run(MEGAETH_ID, [
+        ...chainRows,
+        {chainId: MAINNET_ID, priceUsd: 3000, ageMs: 0},
+      ]);
+      await expect(result).rejects.toThrow(/No current native token price/);
+      expect(metric.byKey(fallbackMetric)).toEqual([]);
+    }
+  );
+
+  it.each([
+    ['an ETH-native chain not listed', BASE_ID],
+    ['a non-ETH native chain', POLYGON_ID],
+    ['mainnet itself', MAINNET_ID],
+  ])('keeps the stale gate on %s', async (_label, chainId) => {
+    const {result, prices, metric} = run(chainId, [
+      {chainId, priceUsd: 3000, ageMs: 38 * HOUR_MS},
+      ...(chainId === MAINNET_ID
+        ? []
+        : [{chainId: MAINNET_ID, priceUsd: 3000, ageMs: 0}]),
+    ]);
+    await expect(result).rejects.toThrow(/Stale native/);
+    expect(prices.requests[0]).toHaveLength(1);
+    expect(metric.byKey(fallbackMetric)).toEqual([]);
+  });
+
+  it('serves the fallback through a V3 provider read', async () => {
+    const metric = new FakeMetric();
+    const provider = new AuroraV3PoolsProvider(MEGAETH_ID, 0.01, {
+      routablePools: {
+        batchGetPoolVolumeUsd30d: async () => new Map<string, number>(),
+        listAllV3RoutablePools: async () => [],
+      },
+      prices: new FakeCurrentTokenPrices([
+        STALE_MEGAETH_ROW,
+        {chainId: MAINNET_ID, priceUsd: 3000, ageMs: 0},
+      ]),
+      logger: noopLogger,
+      metric,
+    });
+    await expect(provider.getPools()).resolves.toEqual([]);
+    expect(metric.byKey(fallbackMetric)).toEqual([
+      expect.objectContaining({
+        tags: expect.objectContaining({status: 'success'}),
       }),
     ]);
   });

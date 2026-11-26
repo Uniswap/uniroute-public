@@ -142,6 +142,16 @@ export const WRAPPED_NATIVE_BY_CHAIN: ReadonlyMap<number, string> = new Map(
   ])
 );
 
+// Chains whose ETH trades in native-ETH v4 pools rather than WETH pools, so
+// their WETH price row goes stale on any day without a WETH swap while nothing
+// is wrong. There a stale row falls back to mainnet's WETH price (every chain
+// listed must use ETH as its native token). On a busy chain a stale WETH row
+// means its pricing is broken, and rejecting the read keeps the last good
+// snapshot, so chains are listed one by one instead of by native currency.
+export const MAINNET_ETH_PRICE_FALLBACK_CHAINS: ReadonlySet<number> = new Set([
+  MEGAETH.chainId,
+]);
+
 // USDG (Global Dollar) on Robinhood — the chain's dominant stable quote asset.
 const USDG_ON_ROBINHOOD = '0x5fc5360d0400a0fd4f2af552add042d716f1d168';
 
@@ -959,16 +969,30 @@ function volumeCreditedTvlUsd(
   );
 }
 
+export interface NativePriceFallbackReporter {
+  logger: Logger;
+  metric: IMetric;
+}
+
+const NATIVE_PRICE_MAINNET_FALLBACK_METRIC =
+  'CachePools.aurora.native_price_mainnet_fallback';
+
 // Fresh USD price of the chain's wrapped-native token, or a throw (no known
-// wrapped native, no price row, or a row older than
+// wrapped native, no usable price row, or a row older than
 // NATIVE_PRICE_MAX_STALENESS_MS). batchGet returns whatever row exists
 // regardless of age; a frozen price would silently skew every TVL floor and
 // tvlETH, so stale is treated as missing (a throw rejects the read and the
 // previous snapshot keeps serving).
+//
+// One exception: on a chain in MAINNET_ETH_PRICE_FALLBACK_CHAINS a stale row is
+// replaced by mainnet's WETH price when that one is fresh. A missing row still
+// throws: that points at a wrong wrapped-native address or an uncovered chain,
+// not a quiet one.
 export async function fetchNativeUsdPrice(
   prices: CurrentTokenPricesService,
   chainId: number,
-  ctx: Context
+  ctx: Context,
+  reporter: NativePriceFallbackReporter
 ): Promise<number> {
   const wrappedNative = WRAPPED_NATIVE_BY_CHAIN.get(chainId);
   if (!wrappedNative) {
@@ -976,24 +1000,88 @@ export async function fetchNativeUsdPrice(
       `No wrapped-native address known for chain ${chainId} — cannot derive tvlETH`
     );
   }
-  const extendedChainId = toExtendedChainId(chainId);
-  const address = createAddress(wrappedNative, extendedChainId);
-  const priceMap = await prices.batchGet(ctx, [
-    {chainId: extendedChainId, address},
-  ]);
-  const entry = priceMap.get(canonicalTokenKey(chainId, wrappedNative));
-  const price = entry?.priceUsd;
-  if (!entry || !price || !Number.isFinite(price) || price <= 0) {
+  const mainnetWrappedNative = MAINNET_ETH_PRICE_FALLBACK_CHAINS.has(chainId)
+    ? WRAPPED_NATIVE_BY_CHAIN.get(MAINNET.chainId)
+    : undefined;
+  const lookups = [{chainId, address: wrappedNative}];
+  if (mainnetWrappedNative) {
+    lookups.push({chainId: MAINNET.chainId, address: mainnetWrappedNative});
+  }
+  const priceMap = await prices.batchGet(
+    ctx,
+    lookups.map(lookup => {
+      const extendedChainId = toExtendedChainId(lookup.chainId);
+      return {
+        chainId: extendedChainId,
+        address: createAddress(lookup.address, extendedChainId),
+      };
+    })
+  );
+
+  const own = usableNativePrice(
+    priceMap.get(canonicalTokenKey(chainId, wrappedNative))
+  );
+  if (!own) {
     throw new Error(
       `No current native token price for chain ${chainId} (${wrappedNative}) — cannot derive tvlETH`
     );
   }
-  if (Date.now() - entry.timestamp.getTime() > NATIVE_PRICE_MAX_STALENESS_MS) {
-    throw new Error(
-      `Stale native token price for chain ${chainId} (${wrappedNative}, ${entry.timestamp.toISOString()}) — cannot derive tvlETH`
-    );
+  if (isFreshNativePrice(own.timestamp)) return own.priceUsd;
+
+  const staleError = new Error(
+    `Stale native token price for chain ${chainId} (${wrappedNative}, ${own.timestamp.toISOString()}) — cannot derive tvlETH`
+  );
+  if (!mainnetWrappedNative) throw staleError;
+
+  const mainnet = usableNativePrice(
+    priceMap.get(canonicalTokenKey(MAINNET.chainId, mainnetWrappedNative))
+  );
+  if (!mainnet || !isFreshNativePrice(mainnet.timestamp)) {
+    reportMainnetFallback(reporter, chainId, {
+      status: 'failure',
+      reason: mainnet ? 'mainnet_price_stale' : 'mainnet_price_missing',
+    });
+    throw staleError;
   }
-  return price;
+  reportMainnetFallback(reporter, chainId, {status: 'success'});
+  reporter.logger.warn(
+    `Stale native token price for chain ${chainId} (${own.timestamp.toISOString()}) — using mainnet WETH price (${mainnet.timestamp.toISOString()})`
+  );
+  return mainnet.priceUsd;
+}
+
+function reportMainnetFallback(
+  reporter: NativePriceFallbackReporter,
+  chainId: number,
+  outcome:
+    | {status: 'success'}
+    | {
+        status: 'failure';
+        reason: 'mainnet_price_missing' | 'mainnet_price_stale';
+      }
+): void {
+  reporter.metric.putMetric(
+    NATIVE_PRICE_MAINNET_FALLBACK_METRIC,
+    1,
+    MetricLoggerUnit.Count,
+    {chainId: String(chainId), ...outcome}
+  );
+}
+
+// A row is usable when its price is a positive finite number and its
+// timestamp is a real date; anything else counts as no row at all.
+function usableNativePrice(
+  entry: {priceUsd: number; timestamp: Date} | undefined
+): {priceUsd: number; timestamp: Date} | undefined {
+  if (!entry) return undefined;
+  const {priceUsd, timestamp} = entry;
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) return undefined;
+  if (!Number.isFinite(timestamp.getTime())) return undefined;
+  return {priceUsd, timestamp};
+}
+
+function isFreshNativePrice(timestamp: Date): boolean {
+  return Date.now() - timestamp.getTime() <= NATIVE_PRICE_MAX_STALENESS_MS;
 }
 
 abstract class BaseAuroraPoolsProvider<
@@ -1036,7 +1124,7 @@ abstract class BaseAuroraPoolsProvider<
   // TVL floors into USD and Aurora's USD TVL back into tvlETH, so the
   // serve-side TrackedEthThreshold filters keep working unchanged.
   protected nativeUsdPrice(ctx: Context): Promise<number> {
-    return fetchNativeUsdPrice(this.deps.prices, this.chainId, ctx);
+    return fetchNativeUsdPrice(this.deps.prices, this.chainId, ctx, this.deps);
   }
 
   // The guard's cap for this fetch: at least the USD constant, and always
@@ -2676,7 +2764,7 @@ export function applyAuroraPoolSources<
       {
         routablePools: extraSourceRoutablePools,
         nativeUsdPrice: (ctx: Context, chainId: number) =>
-          fetchNativeUsdPrice(prices, chainId, ctx),
+          fetchNativeUsdPrice(prices, chainId, ctx, {logger, metric}),
         newContext: () => auroraContext(metric),
         logger,
         metric,
